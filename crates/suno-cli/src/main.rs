@@ -1,6 +1,9 @@
 //! The `suno` command line tool.
 
+mod clock;
 mod download;
+mod ffmpeg;
+mod fs;
 mod http;
 mod transcode;
 
@@ -9,8 +12,13 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use suno_core::{ClerkAuth, Clip, SunoClient, TrackMetadata, tag_flac, tag_mp3};
+use suno_core::{
+    ClerkAuth, Clip, Clock, Ffmpeg, Filesystem, SunoClient, TrackMetadata, tag_flac, tag_mp3,
+};
 
+use crate::clock::TokioClock;
+use crate::ffmpeg::FfmpegAdapter;
+use crate::fs::FsAdapter;
 use crate::http::ReqwestHttp;
 
 /// How long to wait for a server-side WAV render before giving up.
@@ -129,35 +137,36 @@ async fn fetch(args: FetchArgs) -> anyhow::Result<()> {
     let meta = TrackMetadata::from_clip(&clip);
     let cover = download::cover(&http, &clip).await;
 
-    let dir = Path::new("downloads");
-    std::fs::create_dir_all(dir).context("could not create the downloads directory")?;
+    let fs = FsAdapter::new("downloads");
+    let ffmpeg = FfmpegAdapter::new("downloads");
 
-    let path = match args.format {
+    let rel = match args.format {
         Format::Mp3 => {
             let url = mp3_source_url(&clip);
             let audio = download::get_bytes(&http, &url)
                 .await
                 .context("could not download the MP3")?;
             let tagged = tag_mp3(&audio, &meta, cover.as_deref())?;
-            let path = dir.join(format!("{id}.mp3"));
-            download::write_atomic(&path, &tagged)?;
-            path
+            let rel = format!("{id}.mp3");
+            fs.write_atomic(&rel, &tagged)?;
+            rel
         }
         Format::Flac => {
-            let wav_url = ensure_wav_url(&mut client, &http, &id).await?;
+            let clock = TokioClock;
+            let wav_url = ensure_wav_url(&mut client, &http, &clock, &id).await?;
             let wav = download::get_bytes(&http, &wav_url)
                 .await
                 .context("could not download the WAV")?;
-            let flac = transcode::wav_to_flac(&wav, dir)?;
+            let flac = ffmpeg.wav_to_flac(&wav).await?;
             let tagged = tag_flac(&flac, &meta, cover.as_deref())?;
-            let path = dir.join(format!("{id}.flac"));
-            download::write_atomic(&path, &tagged)?;
-            path
+            let rel = format!("{id}.flac");
+            fs.write_atomic(&rel, &tagged)?;
+            rel
         }
     };
 
     eprintln!("{} ({id})", clip.title);
-    println!("{}", path.display());
+    println!("{}", Path::new("downloads").join(&rel).display());
     Ok(())
 }
 
@@ -165,6 +174,7 @@ async fn fetch(args: FetchArgs) -> anyhow::Result<()> {
 async fn ensure_wav_url(
     client: &mut SunoClient,
     http: &ReqwestHttp,
+    clock: &impl Clock,
     id: &str,
 ) -> anyhow::Result<String> {
     if let Some(url) = client.wav_url(http, id).await? {
@@ -175,7 +185,7 @@ async fn ensure_wav_url(
         .await
         .context("could not request a WAV render")?;
     for _ in 0..WAV_POLL_ATTEMPTS {
-        tokio::time::sleep(WAV_POLL_INTERVAL).await;
+        clock.sleep(WAV_POLL_INTERVAL).await;
         if let Some(url) = client.wav_url(http, id).await? {
             return Ok(url);
         }

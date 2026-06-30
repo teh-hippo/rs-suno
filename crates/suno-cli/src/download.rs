@@ -64,7 +64,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// `std::fs::rename` overwrites atomically on Unix but fails on Windows when the
 /// destination exists, so fall back to removing it and renaming again. The first
 /// attempt keeps the Unix path atomic.
-fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(_) if to.exists() => {
