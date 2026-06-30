@@ -336,7 +336,10 @@ where
             Action::Retag { clip, path } => self.retag(manifest, clip, path).await,
             Action::Rename { from, to } => self.rename(manifest, from, to),
             Action::Delete { path, clip_id } => self.delete(manifest, path, clip_id),
-            Action::Skip { clip_id: _ } => Ok(Effect::Skipped),
+            Action::Skip { clip_id } => {
+                self.refresh_preserve(manifest, clip_id);
+                Ok(Effect::Skipped)
+            }
         }
     }
 
@@ -504,28 +507,64 @@ where
         client: &mut SunoClient,
         id: &str,
     ) -> Result<Option<String>, Fail> {
-        if let Some(url) = client
-            .wav_url(self.http, id)
-            .await
-            .map_err(|err| classify_core(id, err))?
-        {
+        if let Some(url) = self.wav_url_retrying(client, id).await? {
             return Ok(Some(url));
         }
-        client
-            .request_wav(self.http, id)
-            .await
-            .map_err(|err| classify_core(id, err))?;
+        self.request_wav_retrying(client, id).await?;
         for _ in 0..self.opts.wav_poll_attempts {
             self.clock.sleep(self.opts.wav_poll_interval).await;
-            if let Some(url) = client
-                .wav_url(self.http, id)
-                .await
-                .map_err(|err| classify_core(id, err))?
-            {
+            if let Some(url) = self.wav_url_retrying(client, id).await? {
                 return Ok(Some(url));
             }
         }
         Ok(None)
+    }
+
+    /// Read the rendered WAV URL, retrying transient API failures with backoff
+    /// (SYNC-16/17), so the default FLAC path is as resilient as the CDN path.
+    async fn wav_url_retrying(
+        &self,
+        client: &mut SunoClient,
+        id: &str,
+    ) -> Result<Option<String>, Fail> {
+        let mut attempt: u32 = 0;
+        loop {
+            match client.wav_url(self.http, id).await {
+                Ok(url) => return Ok(url),
+                Err(err) => match self.retry_core(id, err, &mut attempt).await {
+                    Some(fail) => return Err(fail),
+                    None => continue,
+                },
+            }
+        }
+    }
+
+    /// Ask Suno to render a WAV, retrying transient API failures with backoff.
+    async fn request_wav_retrying(&self, client: &mut SunoClient, id: &str) -> Result<(), Fail> {
+        let mut attempt: u32 = 0;
+        loop {
+            match client.request_wav(self.http, id).await {
+                Ok(()) => return Ok(()),
+                Err(err) => match self.retry_core(id, err, &mut attempt).await {
+                    Some(fail) => return Err(fail),
+                    None => continue,
+                },
+            }
+        }
+    }
+
+    /// Classify a core error from the authenticated WAV flow. On a transient
+    /// class within budget, back off through the [`Clock`] and return `None` to
+    /// retry; otherwise return the terminal [`Fail`].
+    async fn retry_core(&self, id: &str, err: Error, attempt: &mut u32) -> Option<Fail> {
+        let fail = classify_core(id, err);
+        if matches!(fail.class, Class::Transient) && *attempt < self.opts.max_retries {
+            self.clock.sleep(backoff_delay(*attempt, None)).await;
+            *attempt += 1;
+            None
+        } else {
+            Some(fail)
+        }
     }
 
     /// GET `url`, retrying transient failures with backoff, verifying size.
@@ -601,6 +640,20 @@ where
             if let Some(size) = size {
                 entry.size = size;
             }
+        }
+    }
+
+    /// Refresh only an entry's preserve marker from the current desired state.
+    ///
+    /// A clip can gain or lose copy/private protection with no file change, which
+    /// reconcile emits as a [`Skip`](Action::Skip). Refreshing here keeps the
+    /// persisted marker a faithful image of live protection, so the cross-run
+    /// delete guard (SYNC-8) never reads it stale.
+    fn refresh_preserve(&self, manifest: &mut Manifest, clip_id: &str) {
+        if let Some(d) = self.by_id.get(clip_id).copied()
+            && let Some(entry) = manifest.entries.get_mut(clip_id)
+        {
+            entry.preserve = preserve_for(d);
         }
     }
 }
@@ -1684,5 +1737,113 @@ mod tests {
 
     fn fs_new() -> MemFs {
         MemFs::new()
+    }
+
+    // ── Skip refreshes the preserve marker (SYNC-8 cross-run) ────────
+
+    #[test]
+    fn skip_sets_preserve_when_a_clip_becomes_copy_held() {
+        let c = clip("s1");
+        let mut d = desired(c.clone(), AudioFormat::Mp3);
+        d.modes = vec![SourceMode::Copy];
+        let plan = Plan {
+            actions: vec![Action::Skip {
+                clip_id: "s1".to_owned(),
+            }],
+        };
+        let mut manifest = Manifest::new();
+        manifest.insert("s1".to_owned(), entry("s1.mp3", AudioFormat::Mp3));
+        assert!(!manifest.get("s1").unwrap().preserve);
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d],
+            &ScriptedHttp::new(),
+            &fs_new(),
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.skipped, 1);
+        assert!(
+            manifest.get("s1").unwrap().preserve,
+            "a copy-held skip must mark the entry preserved"
+        );
+    }
+
+    #[test]
+    fn skip_clears_stale_preserve_when_a_clip_returns_to_mirror_only() {
+        let c = clip("s2");
+        let d = desired(c.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![Action::Skip {
+                clip_id: "s2".to_owned(),
+            }],
+        };
+        let mut manifest = Manifest::new();
+        let mut stale = entry("s2.mp3", AudioFormat::Mp3);
+        stale.preserve = true;
+        manifest.insert("s2".to_owned(), stale);
+
+        run(
+            &plan,
+            &mut manifest,
+            &[d],
+            &ScriptedHttp::new(),
+            &fs_new(),
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert!(
+            !manifest.get("s2").unwrap().preserve,
+            "a mirror-only skip must clear a stale preserve marker"
+        );
+    }
+
+    #[test]
+    fn flac_render_retries_a_rate_limited_wav_lookup() {
+        let c = clip("rl");
+        let d = desired(c.clone(), AudioFormat::Flac);
+        let plan = Plan {
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                path: d.path.clone(),
+                format: AudioFormat::Flac,
+            }],
+        };
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route_seq(
+                "/wav_file/",
+                vec![
+                    Reply::status(429),
+                    Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/rl.wav"}"#),
+                ],
+            )
+            .route("rl.wav", Reply::ok(b"wav".to_vec()));
+        let clock = RecordingClock::new();
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d],
+            &http,
+            &fs_new(),
+            &StubFfmpeg::flac(),
+            &clock,
+            &small_poll(),
+        );
+
+        assert_eq!(outcome.downloaded, 1);
+        assert_eq!(outcome.failed(), 0);
+        // The render was ready on retry, so no fresh convert_wav was needed.
+        assert_eq!(http.count("/convert_wav/"), 0);
+        // One transient backoff (1s base), not the 5s poll interval.
+        assert_eq!(clock.sleeps(), vec![Duration::from_secs(1)]);
     }
 }

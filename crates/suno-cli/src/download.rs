@@ -59,17 +59,35 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Rename `from` onto `to`, replacing any existing destination.
+/// Rename `from` onto `to`, replacing any existing destination without ever
+/// leaving `to` missing.
 ///
 /// `std::fs::rename` overwrites atomically on Unix but fails on Windows when the
-/// destination exists, so fall back to removing it and renaming again. The first
-/// attempt keeps the Unix path atomic.
+/// destination exists. The fallback first stashes the current destination aside,
+/// swaps in the new file, and only drops the stash once the swap succeeds; a
+/// failed swap restores the stash, so a valid file always sits at `to`.
 pub(crate) fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(_) if to.exists() => {
-            std::fs::remove_file(to)?;
-            std::fs::rename(from, to)
+            let backup = to.with_file_name(format!(
+                ".{}.{}.bak",
+                to.file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default(),
+                unique_stamp()
+            ));
+            std::fs::rename(to, &backup)?;
+            match std::fs::rename(from, to) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&backup);
+                    Ok(())
+                }
+                Err(err) => {
+                    let _ = std::fs::rename(&backup, to);
+                    Err(err)
+                }
+            }
         }
         Err(err) => Err(err),
     }
@@ -157,6 +175,28 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["clip.bin".to_owned()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replace_overwrites_existing_and_leaves_no_backup() {
+        let dir = Path::new("target").join(format!("replace-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let to = dir.join("dest.bin");
+        let from = dir.join("src.bin");
+        std::fs::write(&to, b"old").unwrap();
+        std::fs::write(&from, b"new").unwrap();
+
+        replace(&from, &to).unwrap();
+
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["dest.bin".to_owned()]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
