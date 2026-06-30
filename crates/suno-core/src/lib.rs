@@ -11,6 +11,7 @@ mod consts;
 mod error;
 mod http;
 mod model;
+mod naming;
 pub mod select;
 mod tag;
 
@@ -25,4 +26,8 @@ pub use config::{
 pub use error::{Error, Result};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use model::Clip;
+pub use naming::{
+    AlbumMode, CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName,
+    derive_album, render_clip_name, render_clip_names,
+};
 pub use tag::{TrackMetadata, tag_flac, tag_mp3};
