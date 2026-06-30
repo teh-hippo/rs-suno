@@ -95,7 +95,23 @@ impl Config {
     /// inside one another. Duplicate account labels are rejected by the TOML
     /// parser itself.
     pub fn from_toml(toml_str: &str) -> Result<Self> {
-        let config: Self = toml::from_str(toml_str).map_err(|e| Error::Config(e.to_string()))?;
+        let config: Self = toml::from_str(toml_str).map_err(|e| {
+            // Strip source-context lines (those containing " | ") to prevent
+            // token values from being echoed in error messages.
+            let raw = e.to_string();
+            let msg = raw
+                .lines()
+                .filter(|l| !l.contains(" | "))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_owned();
+            Error::Config(if msg.is_empty() {
+                "parse error".into()
+            } else {
+                msg
+            })
+        })?;
         config.validate()?;
         Ok(config)
     }
@@ -118,6 +134,18 @@ impl Config {
                 }
             }
         }
+
+        let mut prefix_seen: HashMap<String, &str> = HashMap::new();
+        for label in self.accounts.keys() {
+            let prefix = label_to_env(label);
+            if let Some(other) = prefix_seen.get(&prefix) {
+                return Err(Error::Config(format!(
+                    "accounts '{label}' and '{other}' share env prefix '{prefix}'"
+                )));
+            }
+            prefix_seen.insert(prefix, label.as_str());
+        }
+
         Ok(())
     }
 
@@ -586,6 +614,37 @@ mod tests {
     #[test]
     fn invalid_toml_errors() {
         assert!(Config::from_toml("not valid toml ][").is_err());
+    }
+
+    #[test]
+    fn duplicate_account_label_errors() {
+        // The TOML spec prohibits duplicate keys; the parser must reject this.
+        let toml = "
+            [accounts.alice]
+            token = \"tok1\"
+
+            [accounts.alice]
+            token = \"tok2\"
+        ";
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn parse_error_does_not_echo_token() {
+        // A malformed token line must not include the raw value in the error.
+        let toml = "[accounts.alice]\ntoken = \"unterminated\n";
+        let err = Config::from_toml(toml).unwrap_err().to_string();
+        assert!(!err.contains("unterminated"), "error leaked token: {err}");
+    }
+
+    #[test]
+    fn validation_env_prefix_collision_errors() {
+        // 'my-lib' and 'my_lib' both map to SUNO_MY_LIB_* and must be rejected.
+        let toml = "
+            [accounts.my-lib]
+            [accounts.my_lib]
+        ";
+        assert!(Config::from_toml(toml).is_err());
     }
 
     #[test]
