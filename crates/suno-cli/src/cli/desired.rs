@@ -1,0 +1,425 @@
+//! Pure decision logic for the sync/copy/check engine.
+//!
+//! Everything here is a pure function of its inputs: building the desired target
+//! state from selected clips, the deletion-safety abort, the destructive-sync
+//! confirmation gate, and the mapping from an [`ExecOutcome`] to a process exit
+//! code. Keeping these out of the IO orchestration lets the safety-critical
+//! rules be unit-tested directly, which is where the risk lives.
+
+use std::path::{Component, Path};
+
+use suno_core::{
+    AlbumMode, AudioFormat, Clip, Desired, ExecOutcome, NamingConfig, NamingRequest, RunStatus,
+    SourceMode, art_hash, meta_hash, render_clip_names,
+};
+
+/// Below this manifest size the mass-deletion fraction rule does not fire; a
+/// small library legitimately churns its whole contents, and the empty-listing
+/// rule still covers the catastrophic case.
+const MASS_DELETE_FLOOR: usize = 8;
+
+/// Process exit codes, mirroring `docs/cli-ux.md` §5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitCode {
+    Ok = 0,
+    General = 1,
+    /// Reserved for argument-parsing failures, which clap emits itself; kept so
+    /// the enum mirrors the full exit-code table in `docs/cli-ux.md` §5.
+    #[allow(dead_code)]
+    Usage = 2,
+    Config = 3,
+    Auth = 4,
+    Partial = 5,
+    Transient = 6,
+    Safety = 7,
+    Interrupted = 8,
+}
+
+impl ExitCode {
+    /// The numeric code passed to [`std::process::exit`].
+    pub fn code(self) -> i32 {
+        self as i32
+    }
+}
+
+/// Build the desired target state for one source's selected clips.
+///
+/// Naming is rendered as a batch so collisions are disambiguated, then the
+/// target format's extension is appended. `mode` is the source kind: a `sync`
+/// verb yields [`SourceMode::Mirror`], a `copy` verb [`SourceMode::Copy`].
+pub fn build_desired(
+    clips: &[&Clip],
+    format: AudioFormat,
+    playlists_as_albums: bool,
+    mode: SourceMode,
+) -> Vec<Desired> {
+    let config = NamingConfig {
+        album_mode: if playlists_as_albums {
+            AlbumMode::Playlist
+        } else {
+            AlbumMode::Lineage
+        },
+        ..NamingConfig::default()
+    };
+    let requests: Vec<NamingRequest<'_>> = clips
+        .iter()
+        .map(|clip| NamingRequest {
+            clip,
+            playlist_title: None,
+        })
+        .collect();
+    let names = render_clip_names(&requests, &config);
+
+    clips
+        .iter()
+        .zip(names)
+        .map(|(clip, name)| {
+            let path = format!("{}.{format}", rel_to_string(&name.relative_path));
+            Desired {
+                clip: (*clip).clone(),
+                path,
+                format,
+                meta_hash: meta_hash(clip),
+                art_hash: art_hash(clip),
+                modes: vec![mode],
+                trashed: false,
+                private: false,
+            }
+        })
+        .collect()
+}
+
+/// Render a relative path as a forward-slash string, dropping any non-normal
+/// component so the stored path is portable and never escapes the root.
+fn rel_to_string(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Whether a source counts as fully enumerated for deletion safety.
+///
+/// A source is only authoritative for deletion when its listing completed
+/// without error *and* no narrowing filter (`--limit` / `--since`) was applied:
+/// a filtered listing omits clips that may still exist upstream, so a missing
+/// clip cannot be read as a deletion. The reconcile engine refuses every delete
+/// unless all sources report `true`.
+pub fn fully_enumerated(listing_ok: bool, narrowed: bool) -> bool {
+    listing_ok && !narrowed
+}
+
+/// Whether a `--limit` or `--since` filter narrows a listing.
+pub fn is_narrowed(limit: Option<usize>, since: Option<&str>) -> bool {
+    limit.is_some() || since.is_some()
+}
+
+/// The belt-and-suspenders empty-listing / mass-deletion abort (exit 7).
+///
+/// Even though reconcile only emits deletes when every source was fully
+/// enumerated, an empty or near-empty listing of a fully-enumerated source
+/// would still wipe the library. This refuses that unless the user explicitly
+/// confirmed an intentional mass deletion with `--min-newest 0 --yes`.
+pub fn mass_delete_abort(
+    desired_count: usize,
+    manifest_len: usize,
+    delete_count: usize,
+    min_newest: u32,
+    yes: bool,
+) -> bool {
+    if delete_count == 0 || manifest_len == 0 {
+        return false;
+    }
+    if min_newest == 0 && yes {
+        return false;
+    }
+    desired_count == 0 || is_large_fraction(delete_count, manifest_len)
+}
+
+/// True when `delete_count` is at least half of a non-trivial manifest.
+fn is_large_fraction(delete_count: usize, manifest_len: usize) -> bool {
+    manifest_len >= MASS_DELETE_FLOOR && delete_count.saturating_mul(2) >= manifest_len
+}
+
+/// The outcome of the destructive-sync confirmation gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confirm {
+    /// No deletions, `copy`, or `--yes`: run without prompting.
+    Proceed,
+    /// Deletions pending on an interactive terminal: ask `[y/N]`.
+    Prompt,
+    /// Deletions pending without a TTY and without `--yes`: refuse.
+    RefuseNonInteractive,
+}
+
+/// Decide how to gate a run that may delete files.
+///
+/// `copy` never deletes and never prompts. A `sync` with pending deletions
+/// prompts on a TTY, and refuses in a non-interactive context unless `--yes`
+/// was passed.
+pub fn confirm_decision(
+    is_sync: bool,
+    delete_count: usize,
+    yes: bool,
+    stdin_is_tty: bool,
+) -> Confirm {
+    if !is_sync || delete_count == 0 || yes {
+        return Confirm::Proceed;
+    }
+    if stdin_is_tty {
+        Confirm::Prompt
+    } else {
+        Confirm::RefuseNonInteractive
+    }
+}
+
+/// Whether a typed confirmation response means "go ahead".
+pub fn confirmed(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Map an [`ExecOutcome`] to a process exit code (`docs/cli-ux.md` §5).
+///
+/// An auth abort is 4. A clean run is 0. With failures, the run is "transient
+/// exhausted" (6) when nothing at all progressed, otherwise "partial" (5).
+pub fn run_exit_code(outcome: &ExecOutcome) -> ExitCode {
+    if outcome.status == RunStatus::AuthAborted {
+        return ExitCode::Auth;
+    }
+    if outcome.failures.is_empty() {
+        return ExitCode::Ok;
+    }
+    let progressed = outcome.downloaded
+        + outcome.reformatted
+        + outcome.retagged
+        + outcome.renamed
+        + outcome.deleted
+        + outcome.skipped;
+    if progressed == 0 {
+        ExitCode::Transient
+    } else {
+        ExitCode::Partial
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use suno_core::Failure;
+
+    fn clip(id: &str, title: &str, handle: &str) -> Clip {
+        Clip {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            handle: handle.to_owned(),
+            display_name: handle.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn build_desired_appends_extension_and_mode() {
+        let a = clip("id-a", "Song A", "alice");
+        let clips = [&a];
+        let desired = build_desired(&clips, AudioFormat::Flac, false, SourceMode::Mirror);
+        assert_eq!(desired.len(), 1);
+        assert!(
+            desired[0].path.ends_with(".flac"),
+            "path: {}",
+            desired[0].path
+        );
+        assert_eq!(desired[0].format, AudioFormat::Flac);
+        assert_eq!(desired[0].modes, vec![SourceMode::Mirror]);
+        assert!(!desired[0].trashed);
+        assert!(!desired[0].private);
+        assert_eq!(desired[0].meta_hash, meta_hash(&a));
+        assert_eq!(desired[0].art_hash, art_hash(&a));
+    }
+
+    #[test]
+    fn build_desired_disambiguates_collisions() {
+        // Two clips with identical naming inputs must not share a path.
+        let a = clip("id-a", "Same", "alice");
+        let b = clip("id-b", "Same", "alice");
+        let clips = [&a, &b];
+        let desired = build_desired(&clips, AudioFormat::Mp3, false, SourceMode::Copy);
+        assert_ne!(desired[0].path, desired[1].path);
+        assert!(desired.iter().all(|d| d.path.ends_with(".mp3")));
+        assert!(desired.iter().all(|d| d.modes == vec![SourceMode::Copy]));
+    }
+
+    #[test]
+    fn build_desired_uses_forward_slashes() {
+        let a = clip("id-a", "Song A", "alice");
+        let clips = [&a];
+        let desired = build_desired(&clips, AudioFormat::Flac, false, SourceMode::Mirror);
+        assert!(!desired[0].path.contains('\\'));
+        assert!(desired[0].path.contains('/'));
+    }
+
+    #[test]
+    fn fully_enumerated_requires_ok_and_unnarrowed() {
+        assert!(fully_enumerated(true, false));
+        assert!(!fully_enumerated(false, false));
+        assert!(!fully_enumerated(true, true));
+        assert!(!fully_enumerated(false, true));
+    }
+
+    #[test]
+    fn is_narrowed_tracks_limit_and_since() {
+        assert!(!is_narrowed(None, None));
+        assert!(is_narrowed(Some(5), None));
+        assert!(is_narrowed(None, Some("7d")));
+        assert!(is_narrowed(Some(5), Some("7d")));
+    }
+
+    #[test]
+    fn mass_delete_abort_fires_on_empty_listing() {
+        // Desired empty but deletions pending against a non-empty manifest.
+        assert!(mass_delete_abort(0, 147, 147, 1, false));
+    }
+
+    #[test]
+    fn mass_delete_abort_skips_when_nothing_deleted() {
+        assert!(!mass_delete_abort(0, 147, 0, 1, false));
+    }
+
+    #[test]
+    fn mass_delete_abort_skips_empty_manifest() {
+        assert!(!mass_delete_abort(0, 0, 0, 1, false));
+    }
+
+    #[test]
+    fn mass_delete_abort_override_requires_min_newest_zero_and_yes() {
+        // Only --min-newest 0 --yes together waive the abort.
+        assert!(!mass_delete_abort(0, 147, 147, 0, true));
+        assert!(mass_delete_abort(0, 147, 147, 0, false));
+        assert!(mass_delete_abort(0, 147, 147, 1, true));
+    }
+
+    #[test]
+    fn mass_delete_abort_large_fraction() {
+        // Deleting half or more of a non-trivial manifest, even with some desired.
+        assert!(mass_delete_abort(2, 10, 5, 1, false));
+        assert!(mass_delete_abort(3, 10, 6, 1, false));
+    }
+
+    #[test]
+    fn mass_delete_abort_small_fraction_ok() {
+        // A couple of deletions out of many is normal churn, not a wipe.
+        assert!(!mass_delete_abort(98, 100, 2, 1, false));
+    }
+
+    #[test]
+    fn mass_delete_abort_small_library_below_floor() {
+        // Below the floor only the empty-listing rule applies, not the fraction.
+        assert!(!mass_delete_abort(2, 4, 2, 1, false));
+        assert!(mass_delete_abort(0, 4, 4, 1, false));
+    }
+
+    #[test]
+    fn confirm_copy_never_prompts() {
+        assert_eq!(confirm_decision(false, 9, false, true), Confirm::Proceed);
+        assert_eq!(confirm_decision(false, 9, false, false), Confirm::Proceed);
+    }
+
+    #[test]
+    fn confirm_sync_no_deletes_proceeds() {
+        assert_eq!(confirm_decision(true, 0, false, false), Confirm::Proceed);
+    }
+
+    #[test]
+    fn confirm_sync_yes_proceeds() {
+        assert_eq!(confirm_decision(true, 3, true, false), Confirm::Proceed);
+    }
+
+    #[test]
+    fn confirm_sync_tty_prompts() {
+        assert_eq!(confirm_decision(true, 3, false, true), Confirm::Prompt);
+    }
+
+    #[test]
+    fn confirm_sync_non_tty_refuses() {
+        assert_eq!(
+            confirm_decision(true, 3, false, false),
+            Confirm::RefuseNonInteractive
+        );
+    }
+
+    #[test]
+    fn confirmed_accepts_y_and_yes() {
+        assert!(confirmed("y"));
+        assert!(confirmed("Y"));
+        assert!(confirmed(" yes "));
+        assert!(confirmed("YES"));
+        assert!(!confirmed("n"));
+        assert!(!confirmed(""));
+        assert!(!confirmed("yeah"));
+    }
+
+    fn outcome(
+        downloaded: usize,
+        skipped: usize,
+        failures: usize,
+        status: RunStatus,
+    ) -> ExecOutcome {
+        ExecOutcome {
+            downloaded,
+            skipped,
+            failures: (0..failures)
+                .map(|i| Failure {
+                    clip_id: format!("c{i}"),
+                    reason: "boom".to_owned(),
+                })
+                .collect(),
+            status,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exit_code_auth_abort() {
+        let o = outcome(3, 0, 1, RunStatus::AuthAborted);
+        assert_eq!(run_exit_code(&o), ExitCode::Auth);
+    }
+
+    #[test]
+    fn exit_code_clean_run() {
+        let o = outcome(12, 100, 0, RunStatus::Completed);
+        assert_eq!(run_exit_code(&o), ExitCode::Ok);
+    }
+
+    #[test]
+    fn exit_code_partial_when_some_progress() {
+        let o = outcome(10, 0, 2, RunStatus::Completed);
+        assert_eq!(run_exit_code(&o), ExitCode::Partial);
+    }
+
+    #[test]
+    fn exit_code_partial_counts_skips_as_progress() {
+        let o = outcome(0, 5, 2, RunStatus::Completed);
+        assert_eq!(run_exit_code(&o), ExitCode::Partial);
+    }
+
+    #[test]
+    fn exit_code_transient_when_nothing_progressed() {
+        let o = outcome(0, 0, 5, RunStatus::Completed);
+        assert_eq!(run_exit_code(&o), ExitCode::Transient);
+    }
+
+    #[test]
+    fn exit_code_values_match_spec() {
+        assert_eq!(ExitCode::Ok.code(), 0);
+        assert_eq!(ExitCode::General.code(), 1);
+        assert_eq!(ExitCode::Usage.code(), 2);
+        assert_eq!(ExitCode::Config.code(), 3);
+        assert_eq!(ExitCode::Auth.code(), 4);
+        assert_eq!(ExitCode::Partial.code(), 5);
+        assert_eq!(ExitCode::Transient.code(), 6);
+        assert_eq!(ExitCode::Safety.code(), 7);
+        assert_eq!(ExitCode::Interrupted.code(), 8);
+    }
+}
