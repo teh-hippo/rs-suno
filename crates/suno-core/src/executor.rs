@@ -34,7 +34,6 @@ use std::time::Duration;
 use crate::client::SunoClient;
 use crate::clock::Clock;
 use crate::config::AudioFormat;
-use crate::consts::CDN_BASE_URL;
 use crate::error::Error;
 use crate::ffmpeg::Ffmpeg;
 use crate::fs::Filesystem;
@@ -464,7 +463,7 @@ where
         let meta = TrackMetadata::from_clip(clip);
         match format {
             AudioFormat::Mp3 => {
-                let url = mp3_url(clip);
+                let url = clip.mp3_url();
                 let audio = self
                     .fetch_bytes(&url)
                     .await
@@ -589,7 +588,7 @@ where
 
     /// Download cover art, trying each candidate URL in order; `None` is fine.
     async fn fetch_cover(&self, clip: &Clip) -> Option<Vec<u8>> {
-        for url in cover_urls(clip) {
+        for url in clip.cover_candidates() {
             if let Ok(response) = self.http.send(get(url)).await
                 && (200..=299).contains(&response.status)
                 && !response.body.is_empty()
@@ -674,28 +673,6 @@ fn manifest_entry(d: &Desired, size: u64) -> ManifestEntry {
 /// source, or private. The reconcile delete guard reads this marker later.
 fn preserve_for(d: &Desired) -> bool {
     d.private || d.modes.contains(&SourceMode::Copy)
-}
-
-/// The MP3 source URL: the clip's `audio_url`, or the deterministic CDN URL
-/// when it is empty (mirrors the reference integration).
-fn mp3_url(clip: &Clip) -> String {
-    if clip.audio_url.is_empty() {
-        format!("{CDN_BASE_URL}/{}.mp3", clip.id)
-    } else {
-        clip.audio_url.clone()
-    }
-}
-
-/// Cover-art candidates in preference order: large image, image, video cover.
-fn cover_urls(clip: &Clip) -> Vec<&str> {
-    [
-        clip.image_large_url.as_str(),
-        clip.image_url.as_str(),
-        clip.video_cover_url.as_str(),
-    ]
-    .into_iter()
-    .filter(|url| !url.is_empty())
-    .collect()
 }
 
 /// A bare GET for a public (unauthenticated) URL.
@@ -1669,26 +1646,6 @@ mod tests {
     }
 
     // ── Pure helpers ────────────────────────────────────────────────
-
-    #[test]
-    fn mp3_url_uses_audio_url_or_cdn_fallback() {
-        let mut c = clip("z");
-        c.audio_url = "https://x/real.mp3".to_owned();
-        assert_eq!(mp3_url(&c), "https://x/real.mp3");
-        c.audio_url = String::new();
-        assert_eq!(mp3_url(&c), "https://cdn1.suno.ai/z.mp3");
-    }
-
-    #[test]
-    fn cover_urls_are_ordered_and_filtered() {
-        let c = Clip {
-            image_large_url: "L".to_owned(),
-            image_url: String::new(),
-            video_cover_url: "V".to_owned(),
-            ..Default::default()
-        };
-        assert_eq!(cover_urls(&c), vec!["L", "V"]);
-    }
 
     #[test]
     fn backoff_honours_retry_after_and_cap() {

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use suno_core::{
-    AudioFormat, ClerkAuth, Clip, Clock, Ffmpeg, Filesystem, FlagOverrides, SunoClient,
-    TrackMetadata, tag_flac, tag_mp3,
+    AudioFormat, ClerkAuth, Clock, Ffmpeg, Filesystem, FlagOverrides, SunoClient, TrackMetadata,
+    tag_flac, tag_mp3,
 };
 
 use crate::cli::args::{FetchArgs, GlobalArgs};
@@ -75,7 +75,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
 
     match settings.format {
         AudioFormat::Mp3 => {
-            let url = mp3_source_url(&clip);
+            let url = clip.mp3_url();
             let audio = download::get_bytes(&http, &url)
                 .await
                 .context("could not download the MP3")?;
@@ -188,16 +188,6 @@ async fn ensure_wav_url(
     );
 }
 
-/// The MP3 source URL for `clip`, falling back to the deterministic CDN URL
-/// when the clip carries no `audio_url` (mirrors ha-suno).
-fn mp3_source_url(clip: &Clip) -> String {
-    if clip.audio_url.is_empty() {
-        format!("https://cdn1.suno.ai/{}.mp3", clip.id)
-    } else {
-        clip.audio_url.clone()
-    }
-}
-
 /// Extract a clip ID from a bare ID or a Suno URL.
 fn parse_clip_id(input: &str) -> String {
     let trimmed = input.trim();
@@ -232,26 +222,6 @@ mod tests {
             parse_clip_id("https://cdn1.suno.ai/abc-123.mp3?token=x"),
             "abc-123"
         );
-    }
-
-    #[test]
-    fn mp3_source_url_prefers_the_clip_audio_url() {
-        let clip = Clip {
-            id: "abc-123".to_owned(),
-            audio_url: "https://cdn1.suno.ai/real.mp3".to_owned(),
-            ..Default::default()
-        };
-        assert_eq!(mp3_source_url(&clip), "https://cdn1.suno.ai/real.mp3");
-    }
-
-    #[test]
-    fn mp3_source_url_synthesises_the_cdn_url_when_empty() {
-        let clip = Clip {
-            id: "abc-123".to_owned(),
-            audio_url: String::new(),
-            ..Default::default()
-        };
-        assert_eq!(mp3_source_url(&clip), "https://cdn1.suno.ai/abc-123.mp3");
     }
 
     #[test]

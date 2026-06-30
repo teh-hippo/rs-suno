@@ -31,20 +31,8 @@ pub async fn get_bytes(http: &impl Http, url: &str) -> Result<Vec<u8>> {
 
 /// Download the clip's cover art, returning `None` if unavailable (non-fatal).
 pub async fn cover(http: &impl Http, clip: &Clip) -> Option<Vec<u8>> {
-    let url = cover_url(clip)?;
+    let url = clip.selected_image_url()?;
     get_bytes(http, url).await.ok()
-}
-
-/// The preferred cover-art URL: the large image, then the standard image, then
-/// the video cover (mirrors ha-suno's `selected_image_url` order).
-fn cover_url(clip: &Clip) -> Option<&str> {
-    [
-        clip.image_large_url.as_str(),
-        clip.image_url.as_str(),
-        clip.video_cover_url.as_str(),
-    ]
-    .into_iter()
-    .find(|url| !url.is_empty())
 }
 
 /// Write `bytes` to `path` atomically via a temporary file and rename.
@@ -124,39 +112,6 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn art_clip(image_large: &str, image: &str, video_cover: &str) -> Clip {
-        Clip {
-            image_large_url: image_large.to_owned(),
-            image_url: image.to_owned(),
-            video_cover_url: video_cover.to_owned(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn cover_url_prefers_the_large_image() {
-        let clip = art_clip("large", "standard", "video");
-        assert_eq!(cover_url(&clip), Some("large"));
-    }
-
-    #[test]
-    fn cover_url_falls_back_to_the_standard_image() {
-        let clip = art_clip("", "standard", "video");
-        assert_eq!(cover_url(&clip), Some("standard"));
-    }
-
-    #[test]
-    fn cover_url_falls_back_to_the_video_cover() {
-        let clip = art_clip("", "", "video");
-        assert_eq!(cover_url(&clip), Some("video"));
-    }
-
-    #[test]
-    fn cover_url_is_none_without_any_art() {
-        let clip = art_clip("", "", "");
-        assert_eq!(cover_url(&clip), None);
-    }
 
     #[test]
     fn write_atomic_replaces_and_leaves_no_temp() {

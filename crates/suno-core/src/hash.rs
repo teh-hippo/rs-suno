@@ -14,20 +14,6 @@ use std::hash::Hasher;
 
 use crate::model::Clip;
 
-/// The selected cover-art URL: large image, then image, then video cover. This
-/// matches the executor's cover-fetch preference order, so the sentinel tracks
-/// exactly the art the file is tagged with.
-fn selected_image_url(clip: &Clip) -> &str {
-    [
-        clip.image_large_url.as_str(),
-        clip.image_url.as_str(),
-        clip.video_cover_url.as_str(),
-    ]
-    .into_iter()
-    .find(|url| !url.is_empty())
-    .unwrap_or("")
-}
-
 /// A short, stable hex digest of `bytes` (FNV-1a, 64-bit).
 fn digest(bytes: &[u8]) -> String {
     let mut hasher = fnv::FnvHasher::default();
@@ -49,7 +35,7 @@ pub fn meta_hash(clip: &Clip) -> String {
         "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         clip.title,
         clip.tags,
-        selected_image_url(clip),
+        clip.selected_image_url().unwrap_or(""),
         clip.video_cover_url,
         clip.root_ancestor_id,
         clip.lineage_status,
@@ -65,7 +51,7 @@ pub fn meta_hash(clip: &Clip) -> String {
 /// the empty string when the clip carries no art. A mismatch against the
 /// manifest means the file on disk holds stale art even if its tags are current.
 pub fn art_hash(clip: &Clip) -> String {
-    let url = selected_image_url(clip);
+    let url = clip.selected_image_url().unwrap_or("");
     if url.is_empty() {
         String::new()
     } else {
