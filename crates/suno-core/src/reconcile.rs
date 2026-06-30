@@ -915,3 +915,253 @@ mod tests {
         assert_eq!(plan.skips(), 1);
     }
 }
+
+/// Property-based tests that lock the mass-delete guard against random inputs.
+///
+/// These complement the deterministic unit tests above. The generators are
+/// bounded (a small clip-id space, short paths and hashes) so the cases stay
+/// cheap and CI stays stable, and failure persistence is disabled so a run
+/// never leaves regression files behind.
+///
+/// Scope note: the safety invariants INV1 to INV3 concern the orphan-delete
+/// pass, which is the only place a single run can delete many files. A trashed
+/// clip is a bounded, explicit, per-clip removal (covered by the unit tests),
+/// so the INV1 to INV3 generators hold `trashed` false to keep those
+/// invariants exact; the determinism invariant INV4 generates `trashed` freely.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::collection::{btree_map, hash_map, vec};
+    use proptest::prelude::*;
+    use proptest::strategy::BoxedStrategy;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    type DesiredFields = (
+        String,
+        AudioFormat,
+        String,
+        String,
+        Vec<SourceMode>,
+        bool,
+        bool,
+    );
+
+    fn audio_format() -> impl Strategy<Value = AudioFormat> {
+        prop_oneof![
+            Just(AudioFormat::Mp3),
+            Just(AudioFormat::Flac),
+            Just(AudioFormat::Wav),
+        ]
+    }
+
+    fn source_mode() -> impl Strategy<Value = SourceMode> {
+        prop_oneof![Just(SourceMode::Mirror), Just(SourceMode::Copy)]
+    }
+
+    // A small id space forces overlap between the manifest and the desired set,
+    // so deletes, renames, retags, and downloads all get exercised.
+    fn clip_id() -> impl Strategy<Value = String> {
+        (0u8..8).prop_map(|n| format!("c{n}"))
+    }
+
+    fn small_path() -> impl Strategy<Value = String> {
+        (0u8..6).prop_map(|n| format!("path{n}"))
+    }
+
+    fn small_hash() -> impl Strategy<Value = String> {
+        (0u8..4).prop_map(|n| format!("h{n}"))
+    }
+
+    fn manifest_entry() -> impl Strategy<Value = ManifestEntry> {
+        (
+            small_path(),
+            audio_format(),
+            small_hash(),
+            small_hash(),
+            0u64..4,
+        )
+            .prop_map(|(path, format, meta_hash, art_hash, size)| ManifestEntry {
+                path,
+                format,
+                meta_hash,
+                art_hash,
+                size,
+            })
+    }
+
+    fn manifest_strategy() -> impl Strategy<Value = Manifest> {
+        btree_map(clip_id(), manifest_entry(), 0..8).prop_map(|entries| Manifest { entries })
+    }
+
+    fn local_file() -> impl Strategy<Value = LocalFile> {
+        (any::<bool>(), 0u64..4).prop_map(|(exists, size)| LocalFile { exists, size })
+    }
+
+    fn local_strategy() -> impl Strategy<Value = HashMap<String, LocalFile>> {
+        hash_map(clip_id(), local_file(), 0..8)
+    }
+
+    fn source_status() -> impl Strategy<Value = SourceStatus> {
+        (source_mode(), any::<bool>()).prop_map(|(mode, fully_enumerated)| SourceStatus {
+            mode,
+            fully_enumerated,
+        })
+    }
+
+    fn sources_strategy() -> impl Strategy<Value = Vec<SourceStatus>> {
+        vec(source_status(), 0..5)
+    }
+
+    fn copy_sources_strategy() -> impl Strategy<Value = Vec<SourceStatus>> {
+        vec(
+            any::<bool>().prop_map(|fully_enumerated| SourceStatus {
+                mode: SourceMode::Copy,
+                fully_enumerated,
+            }),
+            1..5,
+        )
+    }
+
+    fn desired_fields(trashed: BoxedStrategy<bool>) -> impl Strategy<Value = DesiredFields> {
+        (
+            small_path(),
+            audio_format(),
+            small_hash(),
+            small_hash(),
+            vec(source_mode(), 1..3),
+            trashed,
+            any::<bool>(),
+        )
+    }
+
+    fn build_desired(id: String, fields: DesiredFields) -> Desired {
+        let (path, format, meta_hash, art_hash, modes, trashed, private) = fields;
+        Desired {
+            clip: Clip {
+                id,
+                title: "t".to_string(),
+                ..Default::default()
+            },
+            path,
+            format,
+            meta_hash,
+            art_hash,
+            modes,
+            trashed,
+            private,
+        }
+    }
+
+    fn to_desired_vec(map: BTreeMap<String, DesiredFields>) -> Vec<Desired> {
+        map.into_iter()
+            .map(|(id, f)| build_desired(id, f))
+            .collect()
+    }
+
+    // Desired clips with `trashed` fixed false, for the delete-safety invariants.
+    fn desired_strategy() -> impl Strategy<Value = Vec<Desired>> {
+        btree_map(clip_id(), desired_fields(Just(false).boxed()), 0..8).prop_map(to_desired_vec)
+    }
+
+    // Desired clips with `trashed` random, for the determinism invariant.
+    fn desired_any_strategy() -> impl Strategy<Value = Vec<Desired>> {
+        btree_map(clip_id(), desired_fields(any::<bool>().boxed()), 0..8).prop_map(to_desired_vec)
+    }
+
+    fn desired_ids(desired: &[Desired]) -> BTreeSet<&str> {
+        desired.iter().map(|d| d.clip.id.as_str()).collect()
+    }
+
+    fn copy_held_ids(desired: &[Desired]) -> BTreeSet<&str> {
+        desired
+            .iter()
+            .filter(|d| d.modes.contains(&SourceMode::Copy))
+            .map(|d| d.clip.id.as_str())
+            .collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
+        // INVARIANT 1: never delete a clip that is still desired, and never
+        // delete a copy-held clip.
+        #[test]
+        fn inv1_never_deletes_desired_or_copy_held(
+            manifest in manifest_strategy(),
+            desired in desired_strategy(),
+            local in local_strategy(),
+            sources in sources_strategy(),
+        ) {
+            let plan = reconcile(&manifest, &desired, &local, &sources);
+            let present = desired_ids(&desired);
+            let copy_held = copy_held_ids(&desired);
+            for action in &plan.actions {
+                if let Action::Delete { clip_id, .. } = action {
+                    prop_assert!(
+                        !present.contains(clip_id.as_str()),
+                        "deleted a desired clip: {clip_id}"
+                    );
+                    prop_assert!(
+                        !copy_held.contains(clip_id.as_str()),
+                        "deleted a copy-held clip: {clip_id}"
+                    );
+                }
+            }
+        }
+
+        // INVARIANT 2: a single not-fully-enumerated mirror source (truncated,
+        // partial, empty, or failed listing) suppresses every deletion.
+        #[test]
+        fn inv2_no_delete_when_any_mirror_unenumerated(
+            manifest in manifest_strategy(),
+            desired in desired_strategy(),
+            local in local_strategy(),
+            mut sources in sources_strategy(),
+        ) {
+            sources.push(SourceStatus {
+                mode: SourceMode::Mirror,
+                fully_enumerated: false,
+            });
+            let plan = reconcile(&manifest, &desired, &local, &sources);
+            prop_assert_eq!(plan.deletes(), 0);
+        }
+
+        // INVARIANT 3: a copy-only run is additive and never deletes.
+        #[test]
+        fn inv3_all_copy_sources_means_no_deletes(
+            manifest in manifest_strategy(),
+            desired in desired_strategy(),
+            local in local_strategy(),
+            sources in copy_sources_strategy(),
+        ) {
+            let plan = reconcile(&manifest, &desired, &local, &sources);
+            prop_assert_eq!(plan.deletes(), 0);
+        }
+
+        // INVARIANT 4: identical inputs always yield an identical plan, and the
+        // plan does not depend on the order of the desired or source lists.
+        #[test]
+        fn inv4_plan_is_deterministic(
+            manifest in manifest_strategy(),
+            desired in desired_any_strategy(),
+            local in local_strategy(),
+            sources in sources_strategy(),
+        ) {
+            let plan = reconcile(&manifest, &desired, &local, &sources);
+
+            let again = reconcile(&manifest, &desired, &local, &sources);
+            prop_assert_eq!(&plan, &again);
+
+            let mut desired_rev = desired.clone();
+            desired_rev.reverse();
+            let mut sources_rev = sources.clone();
+            sources_rev.reverse();
+            let shuffled = reconcile(&manifest, &desired_rev, &local, &sources_rev);
+            prop_assert_eq!(&plan, &shuffled);
+        }
+    }
+}
