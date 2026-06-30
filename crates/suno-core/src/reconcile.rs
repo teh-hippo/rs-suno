@@ -1403,13 +1403,22 @@ mod proptests {
         (0u8..6).prop_map(|n| format!("path{n}"))
     }
 
+    // The manifest entry path is the source of every `Delete.path`, so it must
+    // occasionally be empty for INV9 to actually exercise the empty-path guard.
+    fn manifest_path() -> impl Strategy<Value = String> {
+        prop_oneof![
+            1 => Just(String::new()),
+            6 => small_path(),
+        ]
+    }
+
     fn small_hash() -> impl Strategy<Value = String> {
         (0u8..4).prop_map(|n| format!("h{n}"))
     }
 
     fn manifest_entry() -> impl Strategy<Value = ManifestEntry> {
         (
-            small_path(),
+            manifest_path(),
             audio_format(),
             small_hash(),
             small_hash(),
