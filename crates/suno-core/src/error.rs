@@ -15,6 +15,9 @@ pub enum Error {
     /// The Suno API rate-limited the request.
     #[error("rate limited")]
     RateLimited,
+    /// The config file could not be parsed or failed validation.
+    #[error("config error: {0}")]
+    Config(String),
 }
 
 /// A `Result` whose error is the engine [`Error`].
