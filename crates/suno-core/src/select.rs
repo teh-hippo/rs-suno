@@ -27,8 +27,13 @@ impl RecencySpec {
             .parse()
             .map_err(|_| format!("invalid recency spec: {spec}"))?;
         let secs = match unit {
-            "d" => n * 86_400,
-            "w" => n * 7 * 86_400,
+            "d" => n
+                .checked_mul(86_400)
+                .ok_or_else(|| format!("recency spec overflows: {spec}"))?,
+            "w" => n
+                .checked_mul(7)
+                .and_then(|v| v.checked_mul(86_400))
+                .ok_or_else(|| format!("recency spec overflows: {spec}"))?,
             _ => return Err(format!("unknown unit in recency spec: {spec}")),
         };
         Ok(RecencySpec::Relative(secs))
@@ -87,11 +92,12 @@ pub fn select<'a>(clips: &'a [Clip], params: &SelectParams) -> Vec<&'a Clip> {
         idx
     };
 
-    // Apply recency filter.
+    // Apply recency filter. Clips with an unparseable timestamp are kept;
+    // they are not given an epoch timestamp that would make them a deletion candidate.
     let mut keep: HashSet<&str> = match threshold {
         Some(t) => deduped
             .iter()
-            .filter(|c| clip_ts(c) > t)
+            .filter(|c| parse_timestamp(&c.created_at).is_none_or(|ts| ts > t))
             .map(|c| c.id.as_str())
             .collect(),
         None => deduped.iter().map(|c| c.id.as_str()).collect(),
@@ -106,8 +112,16 @@ pub fn select<'a>(clips: &'a [Clip], params: &SelectParams) -> Vec<&'a Clip> {
         }
     }
 
-    // Limit: keep only the N most recent.
-    if let Some(n) = params.limit
+    // Limit: keep only the N most recent. When a recency threshold is active the
+    // floor is authoritative, so the effective limit cannot drop below min_newest.
+    let effective_limit = params.limit.map(|n| {
+        if threshold.is_some() {
+            n.max(params.min_newest)
+        } else {
+            n
+        }
+    });
+    if let Some(n) = effective_limit
         && keep.len() > n
     {
         keep = recency_order
@@ -238,6 +252,12 @@ mod tests {
     #[test]
     fn parse_recency_invalid_number() {
         assert!(RecencySpec::parse("wd").is_err());
+    }
+
+    #[test]
+    fn parse_recency_overflow_returns_error() {
+        assert!(RecencySpec::parse(&format!("{}d", u64::MAX)).is_err());
+        assert!(RecencySpec::parse(&format!("{}w", u64::MAX)).is_err());
     }
 
     // --- select: deduplication ---
@@ -420,24 +440,61 @@ mod tests {
     // --- select: combined limit + recency + min-newest ---
 
     #[test]
-    fn limit_applied_after_min_newest_floor() {
+    fn limit_trims_when_above_min_newest() {
+        let now = parse_timestamp("2024-01-10T00:00:00Z").unwrap();
+        let clips = vec![
+            clip("a", "2024-01-04T00:00:00Z"),
+            clip("b", "2024-01-05T00:00:00Z"),
+            clip("c", "2024-01-06T00:00:00Z"),
+            clip("d", "2024-01-07T00:00:00Z"),
+            clip("e", "2024-01-08T00:00:00Z"),
+        ];
+        // All 5 pass the 7-day threshold; min_newest=2, limit=3;
+        // effective_limit=max(3,2)=3 → e, d, c kept in original order.
+        let params = SelectParams {
+            since: Some(RecencySpec::Relative(7 * 86_400)),
+            min_newest: 2,
+            limit: Some(3),
+            now,
+            ..Default::default()
+        };
+        let result = select(&clips, &params);
+        assert_eq!(result.len(), 3);
+        let ids: Vec<&str> = result.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["c", "d", "e"]);
+    }
+
+    #[test]
+    fn limit_below_min_newest_is_clamped_to_floor() {
         let now = parse_timestamp("2024-01-10T00:00:00Z").unwrap();
         let clips = vec![
             clip("a", "2024-01-01T00:00:00Z"),
             clip("b", "2024-01-02T00:00:00Z"),
             clip("c", "2024-01-03T00:00:00Z"),
         ];
-        // All fail recency; floor raises to 3; limit trims to 2 most recent -> b, c.
+        // All fail recency; min_newest=3 but limit=1; floor must win -> all 3 kept.
         let params = SelectParams {
             since: Some(RecencySpec::Relative(86_400)),
             min_newest: 3,
-            limit: Some(2),
+            limit: Some(1),
+            now,
+            ..Default::default()
+        };
+        let result = select(&clips, &params);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn unparseable_timestamp_is_kept_through_recency_filter() {
+        let now = parse_timestamp("2024-01-10T00:00:00Z").unwrap();
+        let clips = vec![clip("good", "2024-01-09T00:00:00Z"), clip("bad_ts", "")];
+        let params = SelectParams {
+            since: Some(RecencySpec::Relative(7 * 86_400)),
+            min_newest: 0,
             now,
             ..Default::default()
         };
         let result = select(&clips, &params);
         assert_eq!(result.len(), 2);
-        let ids: Vec<&str> = result.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["b", "c"]);
     }
 }
