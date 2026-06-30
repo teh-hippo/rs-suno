@@ -11,16 +11,26 @@
 //! Deletion safety is paramount. The guards encoded here are:
 //!
 //! - SYNC-8: a clip held by any `Copy` source is never deleted; copy and
-//!   archive always win.
+//!   archive always win. This holds both for the clip's current selection
+//!   (`Desired::modes`) and across runs through the persisted
+//!   [`ManifestEntry::preserve`] marker, so a copy-held or private clip whose
+//!   source is later deselected, or whose copy listing fails, is still kept.
 //! - SYNC-9: never delete on an empty, failed, partial, or truncated listing.
-//!   Deletion of an absent clip is allowed only when every selected `Mirror`
-//!   source was fully enumerated, and only when at least one mirror source was
-//!   selected at all.
+//!   Deletion is allowed only when every selected source (mirror and copy) was
+//!   fully enumerated, and only when at least one mirror source was selected.
 //! - SYNC-10: a manifest path that is missing or zero length on disk is treated
 //!   as missing and re-downloaded, even when its hashes still match.
 //! - SYNC-12: a clip trashed in Suno is removed from the source and its local
-//!   file is deleted; a private clip is always kept.
+//!   file is deleted under the same enumeration guard; a private or copy-held
+//!   clip is kept.
+//!
+//! Every `Delete`, whether for a trashed clip or an absent orphan, flows through
+//! one guard ([`delete_action`]): a manifest entry must exist with a non-empty,
+//! non-preserved path, deletion must be allowed for the run, and the clip must
+//! not be copy-held or private in the current selection. A final pass suppresses
+//! any `Delete` whose path collides with a file another action writes this run.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
@@ -92,9 +102,14 @@ pub enum Action {
         format: AudioFormat,
     },
     /// Render the clip to `path` in `to`, replacing the prior `from` rendering.
+    ///
+    /// A format change always changes the file extension, so the prior file at
+    /// `from_path` is a different path that must be removed once the new file is
+    /// written; carrying it keeps the plan a full account of disk mutations.
     Reformat {
         clip: Clip,
         path: String,
+        from_path: String,
         from: AudioFormat,
         to: AudioFormat,
     },
@@ -168,7 +183,12 @@ impl Plan {
 ///
 /// `local` maps a clip id to the probe of that clip's manifest path; entries
 /// are expected for clips present in `manifest`. `sources` lists every selected
-/// source with its enumeration status, which gates deletion of absent clips.
+/// source with its enumeration status, which gates every deletion this run.
+///
+/// Duplicate `desired` entries for one clip id (the same clip held by a mirror
+/// and a copy source, say) are aggregated first: the result is private if any
+/// is, copy-held if any is, and trashed only if all are, so a stray trashed
+/// duplicate can never defeat a sibling's protection.
 ///
 /// The output order is stable: desired clips are processed in clip-id order,
 /// then absent manifest entries in clip-id order. No output depends on hash-map
@@ -181,55 +201,159 @@ pub fn reconcile(
 ) -> Plan {
     let mut actions: Vec<Action> = Vec::new();
 
-    // Desired clips, processed in clip-id order for determinism.
-    let mut ordered: Vec<&Desired> = desired.iter().collect();
-    ordered.sort_by(|a, b| a.clip.id.cmp(&b.clip.id));
+    // Aggregate duplicate ids, then process in clip-id order for determinism.
+    let desired = aggregate_desired(desired);
+    let desired_ids: BTreeSet<&str> = desired.iter().map(|d| d.clip.id.as_str()).collect();
 
-    let desired_ids: BTreeSet<&str> = ordered.iter().map(|d| d.clip.id.as_str()).collect();
+    let can_delete = deletion_allowed(sources);
 
-    for d in &ordered {
-        plan_desired(d, manifest, local, &mut actions);
+    for d in &desired {
+        plan_desired(d, manifest, local, can_delete, &mut actions);
     }
 
     // Absent manifest entries, processed in clip-id order (BTreeMap is sorted).
-    let deletion_allowed = deletion_allowed(sources);
-    for (clip_id, entry) in manifest.iter() {
+    for (clip_id, _entry) in manifest.iter() {
         if desired_ids.contains(clip_id.as_str()) {
             continue;
         }
-        if deletion_allowed {
-            actions.push(Action::Delete {
-                path: entry.path.clone(),
+        match delete_action(clip_id, manifest, can_delete) {
+            Some(action) => actions.push(action),
+            // SYNC-9 / preserve / empty-path: absence is unreliable or the entry
+            // is protected, so keep the file rather than delete it.
+            None => actions.push(Action::Skip {
                 clip_id: clip_id.clone(),
-            });
-        } else {
-            // SYNC-9: absence is unreliable when any mirror listing was
-            // incomplete, so keep the file rather than delete it.
-            actions.push(Action::Skip {
-                clip_id: clip_id.clone(),
-            });
+            }),
         }
     }
 
+    suppress_path_aliasing(&mut actions);
     Plan { actions }
 }
 
-/// Whether absent clips may be deleted this run.
+/// Whether clips may be deleted this run.
 ///
 /// SYNC-9: deletion requires at least one selected `Mirror` source and every
-/// selected mirror source fully enumerated. With no mirror source there is no
-/// authoritative listing to delete against, and copy-only runs are additive.
+/// selected source (mirror and copy alike) fully enumerated. A failed or partial
+/// copy listing is just as unreliable as a mirror one, so it suppresses deletes
+/// too. With no mirror source there is no authoritative listing to delete
+/// against, and copy-only runs are additive.
 fn deletion_allowed(sources: &[SourceStatus]) -> bool {
     let mut saw_mirror = false;
     for status in sources {
+        if !status.fully_enumerated {
+            return false;
+        }
         if status.mode == SourceMode::Mirror {
             saw_mirror = true;
-            if !status.fully_enumerated {
-                return false;
-            }
         }
     }
     saw_mirror
+}
+
+/// The single gate every `Delete` passes through.
+///
+/// Returns a [`Action::Delete`] only when deletion is allowed for the run, a
+/// manifest entry exists for the clip, its path is non-empty, and the entry is
+/// not preserve-marked. A `None` result means the caller must keep the file.
+fn delete_action(clip_id: &str, manifest: &Manifest, can_delete: bool) -> Option<Action> {
+    if !can_delete {
+        return None;
+    }
+    let entry = manifest.get(clip_id)?;
+    if entry.path.is_empty() || entry.preserve {
+        return None;
+    }
+    Some(Action::Delete {
+        path: entry.path.clone(),
+        clip_id: clip_id.to_string(),
+    })
+}
+
+/// Collapse duplicate desired entries for one clip id into a single record.
+///
+/// Safety folds are order-independent: `private` and copy-held are unions, and
+/// `trashed` is an intersection. The non-safety fields (clip, path, format,
+/// hashes) are taken from a deterministic representative so the result never
+/// depends on input order.
+fn aggregate_desired(desired: &[Desired]) -> Vec<Desired> {
+    let mut by_id: BTreeMap<&str, Desired> = BTreeMap::new();
+    for d in desired {
+        match by_id.get_mut(d.clip.id.as_str()) {
+            None => {
+                by_id.insert(d.clip.id.as_str(), d.clone());
+            }
+            Some(acc) => {
+                let take = rep_key(d) < rep_key(acc);
+                acc.private = acc.private || d.private;
+                acc.trashed = acc.trashed && d.trashed;
+                for mode in &d.modes {
+                    if !acc.modes.contains(mode) {
+                        acc.modes.push(*mode);
+                    }
+                }
+                if take {
+                    acc.clip = d.clip.clone();
+                    acc.path = d.path.clone();
+                    acc.format = d.format;
+                    acc.meta_hash = d.meta_hash.clone();
+                    acc.art_hash = d.art_hash.clone();
+                }
+            }
+        }
+    }
+    let mut out: Vec<Desired> = by_id.into_values().collect();
+    for d in &mut out {
+        // Normalise modes to a canonical order so aggregation is deterministic.
+        let has_mirror = d.modes.contains(&SourceMode::Mirror);
+        let has_copy = d.modes.contains(&SourceMode::Copy);
+        d.modes.clear();
+        if has_mirror {
+            d.modes.push(SourceMode::Mirror);
+        }
+        if has_copy {
+            d.modes.push(SourceMode::Copy);
+        }
+    }
+    out
+}
+
+/// A deterministic, order-independent sort key for choosing the representative
+/// non-safety fields when aggregating duplicate desired entries.
+fn rep_key(d: &Desired) -> (&str, &str, &str, u8) {
+    let format = match d.format {
+        AudioFormat::Mp3 => 0,
+        AudioFormat::Flac => 1,
+        AudioFormat::Wav => 2,
+    };
+    (
+        d.path.as_str(),
+        d.meta_hash.as_str(),
+        d.art_hash.as_str(),
+        format,
+    )
+}
+
+/// Downgrade any `Delete` whose path is also written by a `Download`,
+/// `Reformat`, or `Rename` this run, so a deletion can never clobber a file the
+/// same plan just produced.
+fn suppress_path_aliasing(actions: &mut [Action]) {
+    let targets: BTreeSet<String> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Download { path, .. } | Action::Reformat { path, .. } => Some(path.clone()),
+            Action::Rename { to, .. } => Some(to.clone()),
+            _ => None,
+        })
+        .collect();
+    for a in actions.iter_mut() {
+        if let Action::Delete { path, clip_id } = a
+            && targets.contains(path.as_str())
+        {
+            *a = Action::Skip {
+                clip_id: clip_id.clone(),
+            };
+        }
+    }
 }
 
 /// Append the action(s) for one desired clip.
@@ -237,29 +361,20 @@ fn plan_desired(
     d: &Desired,
     manifest: &Manifest,
     local: &HashMap<String, LocalFile>,
+    can_delete: bool,
     out: &mut Vec<Action>,
 ) {
     let clip_id = d.clip.id.as_str();
     let copy_held = d.modes.contains(&SourceMode::Copy);
 
-    // SYNC-12 / SYNC-8: protection beats removal. A private clip is always
-    // kept, and a copy-held clip is never deleted, so neither is ever turned
-    // into a delete even when trashed.
-    if d.private {
-        out.push(Action::Skip {
-            clip_id: clip_id.to_string(),
-        });
-        return;
-    }
-
-    if d.trashed && !copy_held {
-        // Trashed in Suno means removed from the source: delete the local file
-        // when we have one, otherwise there is nothing on disk to remove.
-        match manifest.get(clip_id) {
-            Some(entry) => out.push(Action::Delete {
-                path: entry.path.clone(),
-                clip_id: clip_id.to_string(),
-            }),
+    // SYNC-12: a trashed clip is removed from the source, so its local file is
+    // deleted, but only when neither private nor copy-held (protection beats
+    // removal) and only through the shared delete guard. If the guard refuses
+    // (deletion not allowed, no entry, empty path, or preserve-marked), keep the
+    // file rather than fall through to a re-download of a clip that is gone.
+    if d.trashed && !d.private && !copy_held {
+        match delete_action(clip_id, manifest, can_delete) {
+            Some(action) => out.push(action),
             None => out.push(Action::Skip {
                 clip_id: clip_id.to_string(),
             }),
@@ -290,10 +405,12 @@ fn plan_desired(
     }
 
     if d.format != entry.format {
-        // Replace via re-encode; never pre-delete the existing file.
+        // Replace via re-encode; never pre-delete the existing file. The old
+        // file lives at a different extension, so carry it for cleanup.
         out.push(Action::Reformat {
             clip: d.clip.clone(),
             path: d.path.clone(),
+            from_path: entry.path.clone(),
             from: entry.format,
             to: d.format,
         });
@@ -352,6 +469,14 @@ mod tests {
             meta_hash: meta.to_string(),
             art_hash: art.to_string(),
             size: 100,
+            preserve: false,
+        }
+    }
+
+    fn preserved_entry(path: &str, format: AudioFormat, meta: &str, art: &str) -> ManifestEntry {
+        ManifestEntry {
+            preserve: true,
+            ..entry(path, format, meta, art)
         }
     }
 
@@ -501,6 +626,7 @@ mod tests {
             vec![Action::Reformat {
                 clip: clip("a"),
                 path: "a.mp3".to_string(),
+                from_path: "a.flac".to_string(),
                 from: AudioFormat::Flac,
                 to: AudioFormat::Mp3,
             }]
@@ -803,6 +929,316 @@ mod tests {
         );
     }
 
+    // ── Item 1: persisted preserve marker ───────────────────────────
+
+    #[test]
+    fn orphan_with_preserve_marker_is_kept() {
+        // A copy-held or private clip whose source was deselected is absent from
+        // desired, but the persisted marker still protects it from deletion.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "gone",
+            preserved_entry("gone.flac", AudioFormat::Flac, "m", "art"),
+        );
+        let plan = reconcile(&manifest, &[], &HashMap::new(), &mirror_ok());
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(
+            plan.actions,
+            vec![Action::Skip {
+                clip_id: "gone".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn trashed_clip_with_preserve_marker_is_kept() {
+        // The marker also defends the trashed path: a preserved entry is never
+        // deleted even when the clip is trashed and fully enumerated.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            preserved_entry("a.flac", AudioFormat::Flac, "m", "art"),
+        );
+        let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        d.trashed = true;
+        let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.skips(), 1);
+    }
+
+    // ── Item 2: unified, enumeration-gated delete guard ─────────────
+
+    #[test]
+    fn trashed_clip_kept_when_a_mirror_is_not_enumerated() {
+        // The trashed path now obeys the same enumeration guard as orphans.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        d.trashed = true;
+        let sources = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: false,
+        }];
+        let plan = reconcile(&manifest, &[d], &local_present("a"), &sources);
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.skips(), 1);
+    }
+
+    #[test]
+    fn trashed_clip_kept_when_sources_empty() {
+        // With no sources there is no authoritative listing, so even a trashed
+        // clip is kept rather than deleted.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        d.trashed = true;
+        let plan = reconcile(&manifest, &[d], &local_present("a"), &[]);
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.skips(), 1);
+    }
+
+    #[test]
+    fn failed_copy_listing_suppresses_orphan_deletion() {
+        // A partial or failed copy listing is as unreliable as a mirror one and
+        // must suppress deletes, even with a fully enumerated mirror present.
+        let mut manifest = Manifest::new();
+        manifest.insert("gone", entry("gone.flac", AudioFormat::Flac, "m", "art"));
+        let sources = vec![
+            SourceStatus {
+                mode: SourceMode::Mirror,
+                fully_enumerated: true,
+            },
+            SourceStatus {
+                mode: SourceMode::Copy,
+                fully_enumerated: false,
+            },
+        ];
+        let plan = reconcile(&manifest, &[], &HashMap::new(), &sources);
+        assert_eq!(plan.deletes(), 0);
+    }
+
+    #[test]
+    fn failed_copy_listing_suppresses_trashed_deletion() {
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        d.trashed = true;
+        let sources = vec![
+            SourceStatus {
+                mode: SourceMode::Mirror,
+                fully_enumerated: true,
+            },
+            SourceStatus {
+                mode: SourceMode::Copy,
+                fully_enumerated: false,
+            },
+        ];
+        let plan = reconcile(&manifest, &[d], &local_present("a"), &sources);
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.skips(), 1);
+    }
+
+    #[test]
+    fn empty_path_entry_never_deletes() {
+        // A default or partially written manifest entry can have an empty path;
+        // that must never become a Delete of the account root.
+        let mut manifest = Manifest::new();
+        manifest.insert("gone", entry("", AudioFormat::Flac, "m", "art"));
+        let plan = reconcile(&manifest, &[], &HashMap::new(), &mirror_ok());
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(
+            plan.actions,
+            vec![Action::Skip {
+                clip_id: "gone".to_string()
+            }]
+        );
+    }
+
+    // ── Item 3: path aliasing suppression ───────────────────────────
+
+    #[test]
+    fn delete_suppressed_when_path_aliases_rename_target() {
+        // Clip "a" renames into the path that absent clip "b" recorded; deleting
+        // "b" would clobber the file "a" was just moved to, so it is suppressed.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("old/a.flac", AudioFormat::Flac, "m", "art"));
+        manifest.insert("b", entry("new/a.flac", AudioFormat::Flac, "m", "art"));
+        let d = vec![desired("a", "new/a.flac", AudioFormat::Flac, "m", "art")];
+        let local: HashMap<String, LocalFile> = [
+            ("a".to_string(), present(100)),
+            ("b".to_string(), present(100)),
+        ]
+        .into_iter()
+        .collect();
+        let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+        assert!(plan.actions.contains(&Action::Rename {
+            from: "old/a.flac".to_string(),
+            to: "new/a.flac".to_string(),
+        }));
+        // No delete targets the renamed-to path.
+        assert!(
+            !plan
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::Delete { path, .. } if path == "new/a.flac"))
+        );
+        assert!(plan.actions.contains(&Action::Skip {
+            clip_id: "b".to_string()
+        }));
+    }
+
+    #[test]
+    fn delete_suppressed_when_path_aliases_download_target() {
+        // A new clip downloads to the path an absent clip recorded.
+        let mut manifest = Manifest::new();
+        manifest.insert("b", entry("shared.flac", AudioFormat::Flac, "m", "art"));
+        let d = vec![desired("a", "shared.flac", AudioFormat::Flac, "m", "art")];
+        let plan = reconcile(&manifest, &d, &HashMap::new(), &mirror_ok());
+        assert!(
+            !plan
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::Delete { .. }))
+        );
+        assert_eq!(plan.downloads(), 1);
+    }
+
+    // ── Item 5: aggregation of duplicate desired ids ────────────────
+
+    #[test]
+    fn duplicate_trashed_does_not_defeat_copy_sibling() {
+        // The same clip held by a copy source and reported trashed by a mirror:
+        // copy wins, so it is kept, not deleted.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let mut copy_entry = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        copy_entry.modes = vec![SourceMode::Copy];
+        let mut trashed_entry = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        trashed_entry.modes = vec![SourceMode::Mirror];
+        trashed_entry.trashed = true;
+        let plan = reconcile(
+            &manifest,
+            &[copy_entry, trashed_entry],
+            &local_present("a"),
+            &mirror_ok(),
+        );
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.skips(), 1);
+    }
+
+    #[test]
+    fn duplicate_trashed_does_not_defeat_private_sibling() {
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let mut private_entry = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        private_entry.private = true;
+        let mut trashed_entry = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        trashed_entry.trashed = true;
+        let plan = reconcile(
+            &manifest,
+            &[private_entry, trashed_entry],
+            &local_present("a"),
+            &mirror_ok(),
+        );
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.skips(), 1);
+    }
+
+    #[test]
+    fn duplicate_trashed_deletes_only_when_all_trashed() {
+        // Every duplicate trashed and unprotected: a single delete results.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let mut first = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        first.trashed = true;
+        let mut second = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        second.trashed = true;
+        let plan = reconcile(
+            &manifest,
+            &[first, second],
+            &local_present("a"),
+            &mirror_ok(),
+        );
+        assert_eq!(plan.deletes(), 1);
+    }
+
+    #[test]
+    fn duplicate_desired_unions_modes() {
+        // Mirror and copy entries for one id aggregate to a copy-held clip.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let mut mirror_entry = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        mirror_entry.modes = vec![SourceMode::Mirror];
+        mirror_entry.trashed = true;
+        let mut copy_entry = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        copy_entry.modes = vec![SourceMode::Copy];
+        let plan = reconcile(
+            &manifest,
+            &[mirror_entry, copy_entry],
+            &local_present("a"),
+            &mirror_ok(),
+        );
+        // Copy-held wins over the trashed mirror entry, so no delete.
+        assert_eq!(plan.deletes(), 0);
+    }
+
+    // ── Item 6: private is deletion-exempt only ─────────────────────
+
+    #[test]
+    fn private_new_clip_downloads() {
+        // Private no longer short-circuits to Skip: a missing private clip is
+        // downloaded like any other.
+        let manifest = Manifest::new();
+        let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        d.private = true;
+        let plan = reconcile(&manifest, &[d], &HashMap::new(), &mirror_ok());
+        assert_eq!(plan.downloads(), 1);
+    }
+
+    #[test]
+    fn private_zero_length_file_redownloads() {
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let local: HashMap<String, LocalFile> = [(
+            "a".to_string(),
+            LocalFile {
+                exists: true,
+                size: 0,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        d.private = true;
+        let plan = reconcile(&manifest, &[d], &local, &mirror_ok());
+        assert_eq!(plan.downloads(), 1);
+    }
+
+    #[test]
+    fn private_meta_change_retags() {
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "old", "art"));
+        let mut d = desired("a", "a.flac", AudioFormat::Flac, "new", "art");
+        d.private = true;
+        let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+        assert_eq!(plan.retags(), 1);
+        assert_eq!(plan.deletes(), 0);
+    }
+
+    #[test]
+    fn absent_private_clip_protected_by_preserve_marker() {
+        // Items 1 and 6 together: a private clip deselected from the run is
+        // absent from desired, but its preserve marker keeps it across runs.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            preserved_entry("a.flac", AudioFormat::Flac, "m", "art"),
+        );
+        let plan = reconcile(&manifest, &[], &HashMap::new(), &mirror_ok());
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.skips(), 1);
+    }
+
     // ── Determinism and robustness ──────────────────────────────────
 
     #[test]
@@ -916,25 +1352,24 @@ mod tests {
     }
 }
 
-/// Property-based tests that lock the mass-delete guard against random inputs.
+/// Property-based tests that lock the delete guard against random inputs.
 ///
 /// These complement the deterministic unit tests above. The generators are
 /// bounded (a small clip-id space, short paths and hashes) so the cases stay
 /// cheap and CI stays stable, and failure persistence is disabled so a run
 /// never leaves regression files behind.
 ///
-/// Scope note: the safety invariants INV1 to INV3 concern the orphan-delete
-/// pass, which is the only place a single run can delete many files. A trashed
-/// clip is a bounded, explicit, per-clip removal (covered by the unit tests),
-/// so the INV1 to INV3 generators hold `trashed` false to keep those
-/// invariants exact; the determinism invariant INV4 generates `trashed` freely.
+/// The generators are fully random: `trashed`, `private`, source `modes`, and
+/// the persisted `preserve` marker are all exercised, and the desired list may
+/// hold duplicate ids so aggregation is covered too. The invariants below are
+/// written to hold for every such input, so the trashed delete path is no
+/// longer a special case hidden from the property tests.
 #[cfg(test)]
 mod proptests {
     use super::*;
     use proptest::collection::{btree_map, hash_map, vec};
     use proptest::prelude::*;
-    use proptest::strategy::BoxedStrategy;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     type DesiredFields = (
         String,
@@ -979,13 +1414,17 @@ mod proptests {
             small_hash(),
             small_hash(),
             0u64..4,
+            any::<bool>(),
         )
-            .prop_map(|(path, format, meta_hash, art_hash, size)| ManifestEntry {
-                path,
-                format,
-                meta_hash,
-                art_hash,
-                size,
+            .prop_map(|(path, format, meta_hash, art_hash, size, preserve)| {
+                ManifestEntry {
+                    path,
+                    format,
+                    meta_hash,
+                    art_hash,
+                    size,
+                    preserve,
+                }
             })
     }
 
@@ -1022,14 +1461,14 @@ mod proptests {
         )
     }
 
-    fn desired_fields(trashed: BoxedStrategy<bool>) -> impl Strategy<Value = DesiredFields> {
+    fn desired_fields() -> impl Strategy<Value = DesiredFields> {
         (
             small_path(),
             audio_format(),
             small_hash(),
             small_hash(),
             vec(source_mode(), 1..3),
-            trashed,
+            any::<bool>(),
             any::<bool>(),
         )
     }
@@ -1052,31 +1491,61 @@ mod proptests {
         }
     }
 
-    fn to_desired_vec(map: BTreeMap<String, DesiredFields>) -> Vec<Desired> {
-        map.into_iter()
-            .map(|(id, f)| build_desired(id, f))
-            .collect()
-    }
-
-    // Desired clips with `trashed` fixed false, for the delete-safety invariants.
+    // A desired list over the shared id space that may hold duplicate ids, so
+    // aggregation and the trashed/private/copy folds are all exercised.
     fn desired_strategy() -> impl Strategy<Value = Vec<Desired>> {
-        btree_map(clip_id(), desired_fields(Just(false).boxed()), 0..8).prop_map(to_desired_vec)
-    }
-
-    // Desired clips with `trashed` random, for the determinism invariant.
-    fn desired_any_strategy() -> impl Strategy<Value = Vec<Desired>> {
-        btree_map(clip_id(), desired_fields(any::<bool>().boxed()), 0..8).prop_map(to_desired_vec)
+        vec((clip_id(), desired_fields()), 0..10).prop_map(|items| {
+            items
+                .into_iter()
+                .map(|(id, fields)| build_desired(id, fields))
+                .collect()
+        })
     }
 
     fn desired_ids(desired: &[Desired]) -> BTreeSet<&str> {
         desired.iter().map(|d| d.clip.id.as_str()).collect()
     }
 
-    fn copy_held_ids(desired: &[Desired]) -> BTreeSet<&str> {
+    // Ids protected from deletion: any duplicate that is private or copy-held
+    // protects the whole id, mirroring the aggregation's union semantics.
+    fn protected_ids(desired: &[Desired]) -> BTreeSet<&str> {
         desired
             .iter()
-            .filter(|d| d.modes.contains(&SourceMode::Copy))
+            .filter(|d| d.private || d.modes.contains(&SourceMode::Copy))
             .map(|d| d.clip.id.as_str())
+            .collect()
+    }
+
+    // Ids with at least one non-trashed duplicate: the trashed fold is an
+    // intersection, so one live duplicate keeps the clip.
+    fn non_trashed_ids(desired: &[Desired]) -> BTreeSet<&str> {
+        desired
+            .iter()
+            .filter(|d| !d.trashed)
+            .map(|d| d.clip.id.as_str())
+            .collect()
+    }
+
+    fn delete_clip_ids(plan: &Plan) -> Vec<&str> {
+        plan.actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Delete { clip_id, .. } => Some(clip_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn write_target_paths(plan: &Plan) -> BTreeSet<&str> {
+        plan.actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Download { path, .. } | Action::Reformat { path, .. } => {
+                    Some(path.as_str())
+                }
+                Action::Rename { to, .. } => Some(to.as_str()),
+                _ => None,
+            })
             .collect()
     }
 
@@ -1087,10 +1556,10 @@ mod proptests {
             ..ProptestConfig::default()
         })]
 
-        // INVARIANT 1: never delete a clip that is still desired, and never
-        // delete a copy-held clip.
+        // INVARIANT 1: a desired clip is deleted only when every one of its
+        // duplicates is trashed; one live (non-trashed) duplicate keeps it.
         #[test]
-        fn inv1_never_deletes_desired_or_copy_held(
+        fn inv1_desired_clip_deleted_only_when_fully_trashed(
             manifest in manifest_strategy(),
             desired in desired_strategy(),
             local in local_strategy(),
@@ -1098,23 +1567,18 @@ mod proptests {
         ) {
             let plan = reconcile(&manifest, &desired, &local, &sources);
             let present = desired_ids(&desired);
-            let copy_held = copy_held_ids(&desired);
-            for action in &plan.actions {
-                if let Action::Delete { clip_id, .. } = action {
-                    prop_assert!(
-                        !present.contains(clip_id.as_str()),
-                        "deleted a desired clip: {clip_id}"
-                    );
-                    prop_assert!(
-                        !copy_held.contains(clip_id.as_str()),
-                        "deleted a copy-held clip: {clip_id}"
-                    );
-                }
+            let live = non_trashed_ids(&desired);
+            for id in delete_clip_ids(&plan) {
+                prop_assert!(
+                    !(present.contains(id) && live.contains(id)),
+                    "deleted a desired clip with a non-trashed duplicate: {id}"
+                );
             }
         }
 
         // INVARIANT 2: a single not-fully-enumerated mirror source (truncated,
-        // partial, empty, or failed listing) suppresses every deletion.
+        // partial, empty, or failed listing) suppresses every deletion, trashed
+        // clips included.
         #[test]
         fn inv2_no_delete_when_any_mirror_unenumerated(
             manifest in manifest_strategy(),
@@ -1147,7 +1611,7 @@ mod proptests {
         #[test]
         fn inv4_plan_is_deterministic(
             manifest in manifest_strategy(),
-            desired in desired_any_strategy(),
+            desired in desired_strategy(),
             local in local_strategy(),
             sources in sources_strategy(),
         ) {
@@ -1162,6 +1626,104 @@ mod proptests {
             sources_rev.reverse();
             let shuffled = reconcile(&manifest, &desired_rev, &local, &sources_rev);
             prop_assert_eq!(&plan, &shuffled);
+        }
+
+        // INVARIANT 5: every Delete names a clip that exists in the manifest.
+        #[test]
+        fn inv5_every_delete_is_in_the_manifest(
+            manifest in manifest_strategy(),
+            desired in desired_strategy(),
+            local in local_strategy(),
+            sources in sources_strategy(),
+        ) {
+            let plan = reconcile(&manifest, &desired, &local, &sources);
+            for id in delete_clip_ids(&plan) {
+                prop_assert!(manifest.contains(id), "deleted a clip absent from the manifest: {id}");
+            }
+        }
+
+        // INVARIANT 6: never delete a copy-held or private clip, whether that
+        // protection is in the current selection or persisted on the manifest.
+        #[test]
+        fn inv6_never_deletes_protected_clip(
+            manifest in manifest_strategy(),
+            desired in desired_strategy(),
+            local in local_strategy(),
+            sources in sources_strategy(),
+        ) {
+            let plan = reconcile(&manifest, &desired, &local, &sources);
+            let protected = protected_ids(&desired);
+            for id in delete_clip_ids(&plan) {
+                prop_assert!(!protected.contains(id), "deleted a copy-held or private clip: {id}");
+                let preserved = manifest.get(id).map(|e| e.preserve).unwrap_or(false);
+                prop_assert!(!preserved, "deleted a preserve-marked clip: {id}");
+            }
+        }
+
+        // INVARIANT 7: every Delete requires deletion to be allowed for the run,
+        // so the trashed path is no longer an exception to the enumeration guard.
+        #[test]
+        fn inv7_no_delete_unless_deletion_allowed(
+            manifest in manifest_strategy(),
+            desired in desired_strategy(),
+            local in local_strategy(),
+            sources in sources_strategy(),
+        ) {
+            let plan = reconcile(&manifest, &desired, &local, &sources);
+            if !deletion_allowed(&sources) {
+                prop_assert_eq!(plan.deletes(), 0);
+            }
+        }
+
+        // INVARIANT 8: at most one Delete per clip id.
+        #[test]
+        fn inv8_at_most_one_delete_per_clip(
+            manifest in manifest_strategy(),
+            desired in desired_strategy(),
+            local in local_strategy(),
+            sources in sources_strategy(),
+        ) {
+            let plan = reconcile(&manifest, &desired, &local, &sources);
+            let ids = delete_clip_ids(&plan);
+            let unique: BTreeSet<&str> = ids.iter().copied().collect();
+            prop_assert_eq!(ids.len(), unique.len());
+        }
+
+        // INVARIANT 9: no Delete carries an empty path.
+        #[test]
+        fn inv9_no_delete_with_empty_path(
+            manifest in manifest_strategy(),
+            desired in desired_strategy(),
+            local in local_strategy(),
+            sources in sources_strategy(),
+        ) {
+            let plan = reconcile(&manifest, &desired, &local, &sources);
+            for action in &plan.actions {
+                if let Action::Delete { path, .. } = action {
+                    prop_assert!(!path.is_empty(), "delete with an empty path");
+                }
+            }
+        }
+
+        // INVARIANT 10: no Delete path equals a file another action writes this
+        // run, so a deletion can never clobber a just-written file.
+        #[test]
+        fn inv10_no_delete_aliases_a_write_target(
+            manifest in manifest_strategy(),
+            desired in desired_strategy(),
+            local in local_strategy(),
+            sources in sources_strategy(),
+        ) {
+            let plan = reconcile(&manifest, &desired, &local, &sources);
+            let targets = write_target_paths(&plan);
+            for action in &plan.actions {
+                if let Action::Delete { path, .. } = action {
+                    prop_assert!(
+                        !targets.contains(path.as_str()),
+                        "delete path {path} aliases a write target"
+                    );
+                }
+            }
         }
     }
 }

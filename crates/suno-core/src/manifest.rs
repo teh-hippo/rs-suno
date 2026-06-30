@@ -27,6 +27,10 @@ pub struct ManifestEntry {
     pub art_hash: String,
     /// Size of the file in bytes when last written.
     pub size: u64,
+    /// When set, this clip is held by a copy or archive source, or is private,
+    /// so it must never be deleted as an orphan no matter the current selection.
+    /// The caller writes this marker; the reconcile engine only reads it.
+    pub preserve: bool,
 }
 
 /// The full prior download state, keyed by clip id.
@@ -97,6 +101,7 @@ mod tests {
             meta_hash: "m".to_string(),
             art_hash: "a".to_string(),
             size: 42,
+            preserve: false,
         }
     }
 
@@ -203,5 +208,27 @@ mod tests {
         let json = r#"{"clip1":{"path":"a.flac","meta_hash":"","art_hash":"","size":0}}"#;
         let m: Manifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.get("clip1").unwrap().format, AudioFormat::default());
+    }
+
+    #[test]
+    fn preserve_defaults_to_false_when_absent() {
+        // Older manifests written before the marker existed must load as not
+        // preserved, so the field is purely additive.
+        let json =
+            r#"{"clip1":{"path":"a.flac","format":"flac","meta_hash":"","art_hash":"","size":1}}"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert!(!m.get("clip1").unwrap().preserve);
+    }
+
+    #[test]
+    fn preserve_roundtrips() {
+        let mut m = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac);
+        e.preserve = true;
+        m.insert("a", e);
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert!(back.get("a").unwrap().preserve);
+        assert_eq!(m, back);
     }
 }
