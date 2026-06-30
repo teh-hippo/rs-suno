@@ -39,12 +39,26 @@ impl Http for ReqwestHttp {
                 .await
                 .map_err(|err| TransportError(err.to_string()))?;
             let status = response.status().as_u16();
+            let headers = response
+                .headers()
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.as_str().to_owned(),
+                        value.to_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect();
             let body = response
                 .bytes()
                 .await
                 .map_err(|err| TransportError(err.to_string()))?
                 .to_vec();
-            Ok(HttpResponse { status, body })
+            Ok(HttpResponse {
+                status,
+                headers,
+                body,
+            })
         }
     }
 }

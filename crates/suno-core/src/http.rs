@@ -25,7 +25,22 @@ pub struct HttpRequest {
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
     pub status: u16,
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    /// Read a header value by case-insensitive name, if present.
+    ///
+    /// The download executor uses this for `Content-Length` (provider-reported
+    /// size) and `Retry-After` (rate-limit backoff), so the lookup must ignore
+    /// header-name casing the way HTTP does.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 /// A failure to complete a request at the transport level.

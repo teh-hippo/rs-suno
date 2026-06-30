@@ -6,10 +6,14 @@
 
 mod auth;
 mod client;
+mod clock;
 pub mod config;
 mod consts;
 mod error;
+mod executor;
 mod extras;
+mod ffmpeg;
+mod fs;
 mod http;
 mod manifest;
 mod model;
@@ -23,11 +27,15 @@ mod testutil;
 
 pub use auth::ClerkAuth;
 pub use client::SunoClient;
+pub use clock::Clock;
 pub use config::{
     AccountConfig, AudioFormat, Config, Defaults, EffectiveSettings, FlagOverrides, SourceConfig,
 };
 pub use error::{Error, Result};
+pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute};
 pub use extras::{IndexEntry, M3u8Entry, render_clip_sidecar, render_library_index, render_m3u8};
+pub use ffmpeg::{Ffmpeg, FfmpegError};
+pub use fs::{FileStat, Filesystem, FsError};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use manifest::{Manifest, ManifestEntry};
 pub use model::Clip;
