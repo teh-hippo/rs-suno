@@ -270,6 +270,42 @@ impl MemFs {
     pub(crate) fn exists(&self, path: &str) -> bool {
         self.files.lock().unwrap().contains_key(path)
     }
+
+    /// A sorted snapshot of every stored path, for whole-disk assertions.
+    pub(crate) fn paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.files.lock().unwrap().keys().cloned().collect();
+        paths.sort();
+        paths
+    }
+
+    /// Number of stored files.
+    pub(crate) fn file_count(&self) -> usize {
+        self.files.lock().unwrap().len()
+    }
+
+    /// Arm a `write_atomic` failure for `path` on a live double (SYNC-13).
+    ///
+    /// The consuming [`fail_write`](Self::fail_write) builder seeds faults at
+    /// construction; this `&self` variant lets a multi-run harness inject and
+    /// clear faults between runs on one persistent disk.
+    pub(crate) fn arm_fail_write(&self, path: &str) {
+        self.fail_writes.lock().unwrap().insert(path.to_owned());
+    }
+
+    /// Clear a previously armed `write_atomic` failure for `path`.
+    pub(crate) fn disarm_fail_write(&self, path: &str) {
+        self.fail_writes.lock().unwrap().remove(path);
+    }
+
+    /// Arm a `remove` failure for `path` on a live double.
+    pub(crate) fn arm_fail_remove(&self, path: &str) {
+        self.fail_removes.lock().unwrap().insert(path.to_owned());
+    }
+
+    /// Clear a previously armed `remove` failure for `path`.
+    pub(crate) fn disarm_fail_remove(&self, path: &str) {
+        self.fail_removes.lock().unwrap().remove(path);
+    }
 }
 
 impl Filesystem for MemFs {
@@ -409,4 +445,150 @@ pub(crate) fn minimal_flac() -> Vec<u8> {
     out.extend_from_slice(&streaminfo);
     out.extend_from_slice(b"\xFF\xF8audio-frame-payload");
     out
+}
+
+/// One programmed outcome for a [`ChaosHttp`] route.
+///
+/// A [`Transport`](Outcome::Transport) models a request that never produces a
+/// response (timeout, reset, DNS failure); the executor classifies it as a
+/// transient transport error. A [`Reply`](Outcome::Reply) is a real HTTP
+/// response, which may itself carry an error status (429, 5xx, 401) or a body
+/// that disagrees with its advertised `Content-Length` (a truncated download).
+#[derive(Clone)]
+pub(crate) enum Outcome {
+    /// The transport fails before any response is produced.
+    Transport(String),
+    /// A real HTTP response is returned.
+    Reply(Reply),
+}
+
+impl Outcome {
+    /// A `200 OK` carrying `body`.
+    pub(crate) fn ok(body: impl Into<Vec<u8>>) -> Self {
+        Outcome::Reply(Reply::ok(body))
+    }
+
+    /// A bodyless reply with just `status`.
+    pub(crate) fn status(status: u16) -> Self {
+        Outcome::Reply(Reply::status(status))
+    }
+
+    /// A transport-level failure carrying `reason`.
+    pub(crate) fn transport(reason: &str) -> Self {
+        Outcome::Transport(reason.to_owned())
+    }
+
+    /// A `200 OK` whose advertised length exceeds its body, i.e. a truncated
+    /// download the executor's size check (SYNC-14) must reject.
+    pub(crate) fn truncated(body: impl Into<Vec<u8>>, advertised: u64) -> Self {
+        Outcome::Reply(Reply::ok(body).with_content_length(advertised))
+    }
+}
+
+/// One [`ChaosHttp`] route: a URL substring and the program of outcomes for it.
+struct ChaosRoute {
+    url_contains: String,
+    program: VecDeque<Outcome>,
+}
+
+/// A fault-injecting [`Http`] double for whole-pipeline chaos tests.
+///
+/// Like [`ScriptedHttp`] it answers from the first route whose substring is a
+/// prefix-free match within the request URL, popping one outcome per call (the
+/// last repeats), and logs every request. Unlike it, a route can fail at the
+/// transport level, and an unmatched URL is a loud `404` rather than a silent
+/// success, so a missing audio route surfaces as a real download failure while
+/// an unregistered cover candidate simply yields no art. Seed a route with a
+/// fault prefix then a good tail (`vec![transport, transport, ok]`) to model a
+/// transient error that recovers, or a single error outcome for a permanent
+/// fault. With no faults registered it behaves as a faithful, deterministic
+/// origin server, so the same double powers the clean full-sync harness.
+pub(crate) struct ChaosHttp {
+    routes: Mutex<Vec<ChaosRoute>>,
+    log: Mutex<Vec<String>>,
+}
+
+impl ChaosHttp {
+    pub(crate) fn new() -> Self {
+        Self {
+            routes: Mutex::new(Vec::new()),
+            log: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Seed the Clerk auth routes so a [`SunoClient`](crate::SunoClient) built
+    /// against this double can mint JWTs. The sessions route is added first so
+    /// it wins over the broader `/v1/client` match.
+    pub(crate) fn with_auth(self) -> Self {
+        let client_body = serde_json::json!({
+            "response": {
+                "last_active_session_id": "s",
+                "sessions": [{"id": "s", "user": {"id": "u", "username": "h"}}]
+            }
+        })
+        .to_string();
+        self.serve("/v1/client/sessions/", br#"{"jwt": "a.b.c"}"#.to_vec())
+            .serve("/v1/client", client_body.into_bytes())
+    }
+
+    /// Register a route that returns a steady `200` carrying `body`.
+    pub(crate) fn serve(self, url_contains: &str, body: impl Into<Vec<u8>>) -> Self {
+        self.program(url_contains, vec![Outcome::ok(body)])
+    }
+
+    /// Register a route that returns `outcomes` in order (the last repeats).
+    pub(crate) fn program(self, url_contains: &str, outcomes: Vec<Outcome>) -> Self {
+        self.routes.lock().unwrap().push(ChaosRoute {
+            url_contains: url_contains.to_owned(),
+            program: outcomes.into(),
+        });
+        self
+    }
+
+    /// How many requested URLs contained `needle`.
+    pub(crate) fn count(&self, needle: &str) -> usize {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|url| url.contains(needle))
+            .count()
+    }
+
+    /// Resolve the next outcome for `url`, advancing the matched route.
+    fn next_outcome(&self, url: &str) -> Outcome {
+        let mut routes = self.routes.lock().unwrap();
+        match routes
+            .iter_mut()
+            .find(|route| url.contains(&route.url_contains))
+        {
+            Some(route) if route.program.len() > 1 => {
+                route.program.pop_front().expect("len checked")
+            }
+            Some(route) => route
+                .program
+                .front()
+                .cloned()
+                .expect("route has at least one outcome"),
+            None => Outcome::status(404),
+        }
+    }
+}
+
+impl Http for ChaosHttp {
+    fn send(
+        &self,
+        request: HttpRequest,
+    ) -> impl Future<Output = Result<HttpResponse, TransportError>> + Send {
+        self.log.lock().unwrap().push(request.url.clone());
+        let out = match self.next_outcome(&request.url) {
+            Outcome::Transport(reason) => Err(TransportError(reason)),
+            Outcome::Reply(reply) => Ok(HttpResponse {
+                status: reply.status,
+                headers: reply.headers,
+                body: reply.body,
+            }),
+        };
+        async move { out }
+    }
 }

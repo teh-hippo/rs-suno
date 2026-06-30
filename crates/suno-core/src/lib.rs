@@ -26,6 +26,9 @@ mod tag;
 #[cfg(test)]
 mod testutil;
 
+#[cfg(test)]
+mod sync_chaos;
+
 pub use auth::ClerkAuth;
 pub use client::SunoClient;
 pub use clock::Clock;
