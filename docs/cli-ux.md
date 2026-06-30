@@ -66,7 +66,7 @@ Report what `sync` or `copy` would do without touching disk. Equivalent to passi
 suno check [OPTIONS] <DEST>
 ```
 
-Accepts all flags accepted by `sync`. Always exits non-zero when changes are pending, zero when the destination is already up to date.
+Accepts all flags accepted by `sync`. By default exits 0. With `--exit-code`, exits 1 when changes are pending and 0 when the destination is already up to date, which is useful in CI.
 
 ### `ls`
 
@@ -321,17 +321,20 @@ These files are not written in `--dry-run` mode.
 | Code | Category | When used |
 |---|---|---|
 | 0 | Success | All requested work completed without error. |
-| 1 | Usage error | Unknown command, invalid flag, or missing required argument. |
-| 2 | Configuration error | Config file missing or invalid, unknown account label, conflicting flags. |
-| 3 | Authentication failure | Token expired and could not be refreshed; Clerk returned an auth error. |
-| 4 | Partial failure | At least one clip failed after all retries; others succeeded. Summary and `.suno-failures.log` written. |
-| 5 | Transient failure (exhausted) | Every clip failed with transient errors (network timeouts, 5xx); nothing was downloaded. |
-| 6 | Safety abort | A deletion safety rule was triggered (e.g. empty listing, truncated listing). No files were deleted. |
-| 7 | Interrupted | SIGINT or SIGTERM received. Partial progress is preserved; resume on next run. |
+| 1 | General error | An unexpected or uncategorised failure. |
+| 2 | Usage error | Unknown command, invalid flag, or missing required argument. |
+| 3 | Configuration error | Config file missing or invalid, unknown account label, conflicting flags. |
+| 4 | Authentication failure | Token expired and could not be refreshed; Clerk returned an auth error. |
+| 5 | Partial failure | At least one clip failed after all retries; others succeeded. Summary and `.suno-failures.log` written. |
+| 6 | Transient failure (exhausted) | Every clip failed with transient errors (network timeouts, 5xx); nothing was downloaded. |
+| 7 | Safety abort | A deletion safety rule was triggered (e.g. empty listing, truncated listing). No files were deleted. |
+| 8 | Interrupted | SIGINT or SIGTERM received. Partial progress is preserved; resume on next run. |
+
+Usage errors use code 2 to align with clap's default argument-parsing exit code. Code 1 is reserved for an unexpected, uncategorised failure.
 
 ### Message shapes
 
-**Usage error (1)**
+**Usage error (2)**
 
 ```
 error: unexpected argument '--frobnicate'
@@ -341,7 +344,7 @@ Usage: suno sync [OPTIONS] <DEST>
 For more information, try 'suno sync --help'.
 ```
 
-**Configuration error (2)**
+**Configuration error (3)**
 
 ```
 error: account 'production' not found in config
@@ -350,7 +353,7 @@ Configured accounts: dev, staging
 Run 'suno config add-account production' to add it.
 ```
 
-**Authentication failure (3)**
+**Authentication failure (4)**
 
 ```
 error: authentication failed for account 'alice'
@@ -369,7 +372,7 @@ warning: token for account 'alice' expires in 5 minutes
   Run 'suno auth refresh alice' before the next sync to avoid interruption.
 ```
 
-**Partial failure (4)**
+**Partial failure (5)**
 
 ```
 warning: 3 clip(s) failed after 3 retries
@@ -381,7 +384,7 @@ Sync complete: alice
   ...
 ```
 
-**Transient failure -- exhausted (5)**
+**Transient failure -- exhausted (6)**
 
 ```
 error: all downloads failed with transient errors
@@ -390,7 +393,7 @@ Network may be unreliable or the Suno CDN may be unavailable.
 No files were written. Re-run when connectivity is restored.
 ```
 
-**Safety abort (6)**
+**Safety abort (7)**
 
 ```
 error: sync aborted -- deletion safety rule triggered
@@ -401,7 +404,7 @@ This is almost certainly a listing error. No files were deleted.
 If you intended to delete everything, pass --min-newest 0 --yes to confirm.
 ```
 
-**Interrupted (7)**
+**Interrupted (8)**
 
 ```
 warning: interrupted (SIGINT) -- partial run saved
@@ -523,4 +526,4 @@ Options:
 
 - **Failure log location.** Is `.suno-failures.log` always placed next to the destination directory, or is its path configurable?
 
-- **`check` exit code.** Should `check` exit 1 when changes are pending (useful in CI), or should it always exit 0? The current proposal uses non-zero when changes are pending, but this may surprise users who run `check` for informational purposes only.
+- **`check` exit code.** Resolved: `check` exits 0 by default; the `--exit-code` flag makes it return 1 when changes are pending (for CI), which avoids colliding with the error codes.
