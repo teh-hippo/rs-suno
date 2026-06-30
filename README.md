@@ -9,6 +9,10 @@ Early development. Not yet usable.
 - `crates/suno-core` -- pure engine: selection, sync reconciliation, and tagging.
 - `crates/suno-cli` -- the `suno` binary: IO adapters and command surface.
 
+## Design
+
+[CLI UX design](docs/cli-ux.md) -- flags, output formats, progress, error experience, and help text.
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
