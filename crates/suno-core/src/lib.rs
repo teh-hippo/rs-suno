@@ -10,6 +10,7 @@ mod consts;
 mod error;
 mod http;
 mod model;
+mod naming;
 
 #[cfg(test)]
 mod testutil;
@@ -19,3 +20,7 @@ pub use client::SunoClient;
 pub use error::{Error, Result};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use model::Clip;
+pub use naming::{
+    AlbumMode, CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName,
+    derive_album, render_clip_name, render_clip_names,
+};
