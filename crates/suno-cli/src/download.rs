@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use suno_core::{Clip, Http, HttpRequest, Method};
+use suno_core::{Clip, Http, HttpRequest};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -16,11 +16,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// the engine's [`Http`] port for a single GET.
 pub async fn get_bytes(http: &impl Http, url: &str) -> Result<Vec<u8>> {
     let response = http
-        .send(HttpRequest {
-            method: Method::Get,
-            url: url.to_owned(),
-            headers: Vec::new(),
-        })
+        .send(HttpRequest::get(url))
         .await
         .map_err(|err| anyhow::anyhow!("request failed: {err}"))?;
     if !(200..=299).contains(&response.status) {

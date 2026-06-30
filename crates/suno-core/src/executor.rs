@@ -37,7 +37,7 @@ use crate::config::AudioFormat;
 use crate::error::Error;
 use crate::ffmpeg::Ffmpeg;
 use crate::fs::Filesystem;
-use crate::http::{Http, HttpRequest, Method};
+use crate::http::{Http, HttpRequest};
 use crate::manifest::{Manifest, ManifestEntry};
 use crate::model::Clip;
 use crate::reconcile::{Action, Desired, Plan, SourceMode};
@@ -570,7 +570,7 @@ where
     async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, FetchError> {
         let mut attempt: u32 = 0;
         loop {
-            let result = self.http.send(get(url)).await;
+            let result = self.http.send(HttpRequest::get(url)).await;
             match classify_response(result) {
                 Ok(body) => return Ok(body),
                 Err(err) => {
@@ -589,7 +589,7 @@ where
     /// Download cover art, trying each candidate URL in order; `None` is fine.
     async fn fetch_cover(&self, clip: &Clip) -> Option<Vec<u8>> {
         for url in clip.cover_candidates() {
-            if let Ok(response) = self.http.send(get(url)).await
+            if let Ok(response) = self.http.send(HttpRequest::get(url)).await
                 && (200..=299).contains(&response.status)
                 && !response.body.is_empty()
             {
@@ -673,15 +673,6 @@ fn manifest_entry(d: &Desired, size: u64) -> ManifestEntry {
 /// source, or private. The reconcile delete guard reads this marker later.
 fn preserve_for(d: &Desired) -> bool {
     d.private || d.modes.contains(&SourceMode::Copy)
-}
-
-/// A bare GET for a public (unauthenticated) URL.
-fn get(url: &str) -> HttpRequest {
-    HttpRequest {
-        method: Method::Get,
-        url: url.to_owned(),
-        headers: Vec::new(),
-    }
 }
 
 /// Classify one HTTP result into bytes or a [`FetchError`] (SYNC-14/17).

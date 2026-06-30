@@ -21,6 +21,17 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
 }
 
+impl HttpRequest {
+    /// A bare GET for a public (unauthenticated) URL: no headers, no token.
+    pub fn get(url: impl Into<String>) -> Self {
+        Self {
+            method: Method::Get,
+            url: url.into(),
+            headers: Vec::new(),
+        }
+    }
+}
+
 /// The response an adapter returns to the engine.
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
