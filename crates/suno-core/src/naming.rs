@@ -12,7 +12,6 @@ use crate::Clip;
 pub const DEFAULT_TEMPLATE: &str = "{creator}/{album}/{title}";
 const DEFAULT_MAX_COMPONENT_LEN: usize = 80;
 
-const SHORT_ID_CHARS: usize = 8;
 const MIN_BASE_CHARS_WITH_SUFFIX: usize = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -98,7 +97,7 @@ pub fn render_clip_names(
 
     for indexes in collisions.into_values().filter(|indexes| indexes.len() > 1) {
         for index in indexes {
-            let suffix = short_id(requests[index].clip);
+            let suffix = disambiguator(requests[index].clip);
             rendered[index] =
                 with_suffix(rendered[index].clone(), suffix, config.max_component_len);
         }
@@ -155,7 +154,7 @@ fn render_single(request: NamingRequest<'_>, config: &NamingConfig) -> RenderedN
     }
 
     let base_name = if needs_untitled_suffix(clip, &title) {
-        append_suffix(&base_name, short_id(clip), config.max_component_len)
+        append_suffix(&base_name, disambiguator(clip), config.max_component_len)
     } else {
         base_name
     };
@@ -205,11 +204,16 @@ fn needs_untitled_suffix(clip: &Clip, rendered_title: &str) -> bool {
 }
 
 fn append_suffix(base: &str, suffix: &str, max_component_len: usize) -> String {
-    let suffix = format!(" [{suffix}]");
-    let max_len = max_component_len.max(suffix.chars().count() + MIN_BASE_CHARS_WITH_SUFFIX);
-    let allowed = max_len.saturating_sub(suffix.chars().count());
+    let existing_suffix = format!(" [{suffix}]");
+    if base.ends_with(&existing_suffix) {
+        return sanitise_component(base, CharacterSet::Unicode, max_component_len);
+    }
+
+    let max_len =
+        max_component_len.max(existing_suffix.chars().count() + MIN_BASE_CHARS_WITH_SUFFIX);
+    let allowed = max_len.saturating_sub(existing_suffix.chars().count());
     let truncated = truncate_chars(base.trim_end(), allowed);
-    let combined = format!("{truncated}{suffix}");
+    let combined = format!("{truncated}{existing_suffix}");
     sanitise_component(&combined, CharacterSet::Unicode, max_len)
 }
 
@@ -236,7 +240,7 @@ fn sanitise_component(
     if result == "." || result == ".." {
         return "item".to_string();
     }
-    if is_reserved_name(&result) {
+    if !result.ends_with('_') && is_reserved_name(&result) {
         result.push('_');
     }
     result
@@ -289,13 +293,8 @@ fn truncate_chars(value: &str, max_len: usize) -> String {
     value.chars().take(max_len).collect()
 }
 
-fn short_id(clip: &Clip) -> &str {
-    let end = clip
-        .id
-        .char_indices()
-        .nth(SHORT_ID_CHARS)
-        .map_or(clip.id.len(), |(index, _)| index);
-    &clip.id[..end]
+fn disambiguator(clip: &Clip) -> &str {
+    &clip.id
 }
 
 fn non_blank(value: &str) -> Option<&str> {
@@ -304,8 +303,9 @@ fn non_blank(value: &str) -> Option<&str> {
 }
 
 fn is_reserved_name(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value);
     matches!(
-        value.to_ascii_uppercase().as_str(),
+        stem.to_ascii_uppercase().as_str(),
         "CON"
             | "PRN"
             | "AUX"
@@ -407,10 +407,10 @@ mod tests {
             },
             &NamingConfig::default(),
         );
-        assert_eq!(rendered.base_name, "Untitled [12345678]");
+        assert_eq!(rendered.base_name, "Untitled [12345678-clip]");
         assert_eq!(
             rendered.relative_path.to_string_lossy(),
-            "München/Untitled [12345678]"
+            "München/Untitled [12345678-clip]"
         );
     }
 
@@ -462,11 +462,11 @@ mod tests {
 
         assert_eq!(
             names[0].relative_path.to_string_lossy(),
-            "München/Shared [11111111]"
+            "München/Shared [11111111-alpha]"
         );
         assert_eq!(
             names[1].relative_path.to_string_lossy(),
-            "München/Shared [22222222]"
+            "München/Shared [22222222-beta]"
         );
 
         let by_id = requests
@@ -540,6 +540,56 @@ mod tests {
         assert_eq!(
             derive_album(&clip, Some("   "), AlbumMode::Playlist).as_deref(),
             Some("Lineage Album")
+        );
+    }
+
+    #[test]
+    fn untitled_clips_sharing_an_eight_char_prefix_stay_distinct() {
+        let first = test_clip("abcd1234-first", "Untitled");
+        let second = test_clip("abcd1234-second", "Untitled");
+        let rendered = render_clip_names(
+            &[
+                NamingRequest {
+                    clip: &first,
+                    playlist_title: None,
+                },
+                NamingRequest {
+                    clip: &second,
+                    playlist_title: None,
+                },
+            ],
+            &NamingConfig::default(),
+        );
+
+        assert_eq!(
+            rendered[0].relative_path.to_string_lossy(),
+            "München/Untitled [abcd1234-first]"
+        );
+        assert_eq!(
+            rendered[1].relative_path.to_string_lossy(),
+            "München/Untitled [abcd1234-second]"
+        );
+    }
+
+    #[test]
+    fn reserved_names_with_extensions_are_suffixed() {
+        let clip = Clip {
+            id: "deadbeef".to_string(),
+            title: "NUL.mp3".to_string(),
+            display_name: "AUX.flac".to_string(),
+            ..Clip::default()
+        };
+
+        let rendered = render_clip_name(
+            NamingRequest {
+                clip: &clip,
+                playlist_title: None,
+            },
+            &NamingConfig::default(),
+        );
+        assert_eq!(
+            rendered.relative_path.to_string_lossy(),
+            "AUX.flac_/NUL.mp3_"
         );
     }
 }
