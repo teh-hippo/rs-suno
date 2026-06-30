@@ -6,14 +6,20 @@
 //! make players report an unknown duration. Tagging is handled separately by
 //! the pure core tagger; this step only re-encodes the audio.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Hard cap on a single ffmpeg transcode before we kill it.
+const FFMPEG_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often to check whether ffmpeg has finished.
+const FFMPEG_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Transcode `wav` to FLAC bytes, staging temporary files in `scratch_dir`.
 pub fn wav_to_flac(wav: &[u8], scratch_dir: &Path) -> Result<Vec<u8>> {
@@ -25,19 +31,43 @@ pub fn wav_to_flac(wav: &[u8], scratch_dir: &Path) -> Result<Vec<u8>> {
     std::fs::write(&wav_path, wav)
         .with_context(|| format!("could not stage WAV at {}", wav_path.display()))?;
 
-    let output = Command::new("ffmpeg")
+    let mut child = Command::new("ffmpeg")
         .arg("-y")
         .arg("-i")
         .arg(&wav_path)
         .args(["-map", "0:a:0", "-c:a", "flac", "-f", "flac"])
         .arg(&flac_path)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("could not run ffmpeg (is it installed?)")?;
 
-    if !output.status.success() {
+    let deadline = Instant::now() + FFMPEG_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().context("could not wait for ffmpeg")? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "ffmpeg timed out after {} seconds",
+                FFMPEG_TIMEOUT.as_secs()
+            );
+        }
+        std::thread::sleep(FFMPEG_POLL_INTERVAL);
+    };
+
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_end(&mut stderr);
+    }
+
+    if !status.success() {
         bail!(
             "ffmpeg failed to transcode WAV to FLAC: {}",
-            stderr_tail(&output.stderr)
+            stderr_tail(&stderr)
         );
     }
 
