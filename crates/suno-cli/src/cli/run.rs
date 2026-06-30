@@ -473,32 +473,14 @@ async fn run_one(
         verb.mode(),
     );
 
-    std::fs::create_dir_all(dest)
-        .with_context(|| format!("could not create {}", dest.display()))?;
-
     let dry_run = global.dry_run || verb == Verb::Check;
-    // Hold the run lock across load -> reconcile -> confirm -> execute so a
-    // concurrent run cannot plan against this manifest and then execute a stale
-    // plan over the other run's writes. Dry-run/check write nothing, so they
-    // take no lock and stay side-effect free.
-    let _lock = if dry_run {
-        None
-    } else {
-        Some(logs::acquire_lock(dest)?)
-    };
 
-    let manifest = logs::load_manifest(dest)?;
-
-    let local = stat_manifest(dest, &manifest);
-    let sources = vec![SourceStatus {
-        mode: verb.mode(),
-        fully_enumerated: enumerated,
-    }];
-    let plan = reconcile(&manifest, &desired, &local, &sources);
-
+    // Dry-run and check report without touching disk: the destination is not
+    // created and no lock is taken. A missing manifest reads as empty.
     if dry_run {
+        let (_manifest, plan) = load_and_reconcile(dest, &desired, enumerated, verb)?;
         if verbosity >= 1 {
-            let no_failures = std::collections::HashSet::new();
+            let no_failures = HashSet::new();
             for line in output::action_lines(&plan, &no_failures, verbosity) {
                 eprintln!("{line}");
             }
@@ -512,6 +494,16 @@ async fn run_one(
         return Ok(ExitCode::Ok);
     }
 
+    // The executing run creates the destination, then takes the lock *before*
+    // loading the manifest so a concurrent run cannot plan against it and then
+    // execute a stale plan over the other run's writes. The lock lives to the
+    // end of the function, covering reconcile, the confirmation prompt, and
+    // execute.
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("could not create {}", dest.display()))?;
+    let _lock = logs::acquire_lock(dest)?;
+    let (manifest, plan) = load_and_reconcile(dest, &desired, enumerated, verb)?;
+
     let is_sync = verb == Verb::Sync;
     if is_sync
         && mass_delete_abort(
@@ -519,6 +511,7 @@ async fn run_one(
             manifest.len(),
             plan.deletes(),
             settings.min_newest,
+            args.min_newest == Some(0),
             global.yes,
         )
     {
@@ -664,6 +657,27 @@ async fn execute_plan(
     }
 
     Ok(run_exit_code(&outcome))
+}
+
+/// Load the manifest beside `dest` and reconcile `desired` against it.
+///
+/// Shared by the dry-run and executing paths. Reading a missing manifest yields
+/// an empty one and statting absent files is harmless, so this never creates the
+/// destination directory.
+fn load_and_reconcile(
+    dest: &Path,
+    desired: &[suno_core::Desired],
+    enumerated: bool,
+    verb: Verb,
+) -> Result<(suno_core::Manifest, suno_core::Plan)> {
+    let manifest = logs::load_manifest(dest)?;
+    let local = stat_manifest(dest, &manifest);
+    let sources = vec![SourceStatus {
+        mode: verb.mode(),
+        fully_enumerated: enumerated,
+    }];
+    let plan = reconcile(&manifest, desired, &local, &sources);
+    Ok((manifest, plan))
 }
 
 /// Stat every manifest path so reconcile can spot missing or empty files.
@@ -828,6 +842,23 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert!(targets[0].implicit);
         assert_eq!(targets[0].dest, dest);
+    }
+
+    #[test]
+    fn load_and_reconcile_does_not_create_the_destination() {
+        // The dry-run / check path reads through a missing destination as an
+        // empty manifest without creating it, so it never touches disk.
+        let dir =
+            Path::new("target").join(format!("run-nodir-{}-{}", std::process::id(), now_secs()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!dir.exists());
+        let (manifest, plan) = load_and_reconcile(&dir, &[], false, Verb::Sync).unwrap();
+        assert!(manifest.is_empty());
+        assert!(plan.actions.is_empty());
+        assert!(
+            !dir.exists(),
+            "dry-run path must not create the destination directory"
+        );
     }
 
     #[test]

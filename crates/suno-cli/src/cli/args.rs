@@ -136,8 +136,8 @@ pub struct SyncArgs {
     /// Download retry attempts per clip.
     #[arg(long, value_name = "N")]
     pub retries: Option<u32>,
-    /// Simultaneous downloads.
-    #[arg(long, value_name = "N")]
+    /// Simultaneous downloads (reserved; downloads are currently sequential).
+    #[arg(long, value_name = "N", hide = true)]
     pub concurrency: Option<u32>,
 }
 

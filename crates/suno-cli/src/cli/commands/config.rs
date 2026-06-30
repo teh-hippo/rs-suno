@@ -146,7 +146,7 @@ fn render_show(config: &Config) -> String {
     {
         out.push_str("[defaults]\n");
         push_opt(&mut out, "format", d.format.map(|f| f.to_string()));
-        push_opt(
+        push_reserved(
             &mut out,
             "concurrency",
             d.concurrency.map(|v| v.to_string()),
@@ -172,7 +172,7 @@ fn render_show(config: &Config) -> String {
         });
         push_opt(&mut out, "root", acc.root.clone());
         push_opt(&mut out, "format", acc.format.map(|f| f.to_string()));
-        push_opt(
+        push_reserved(
             &mut out,
             "concurrency",
             acc.concurrency.map(|v| v.to_string()),
@@ -203,6 +203,16 @@ fn render_show(config: &Config) -> String {
 fn push_opt(out: &mut String, key: &str, value: Option<String>) {
     if let Some(value) = value {
         out.push_str(&format!("  {key} = {value}\n"));
+    }
+}
+
+/// Like [`push_opt`], but marks the value as a reserved knob that has no effect
+/// yet, so `config show` does not advertise an inert setting as active.
+fn push_reserved(out: &mut String, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        out.push_str(&format!(
+            "  {key} = {value}  # reserved; downloads are sequential\n"
+        ));
     }
 }
 
@@ -320,6 +330,15 @@ mod tests {
         assert!(shown.contains("format = mp3"));
         assert!(shown.contains("[accounts.alice.sources.liked]"));
         assert!(shown.contains("format = wav"));
+    }
+
+    #[test]
+    fn show_marks_concurrency_reserved() {
+        let toml = "[defaults]\nconcurrency = 8\n";
+        let config = Config::from_toml(toml).unwrap();
+        let shown = render_show(&config);
+        assert!(shown.contains("concurrency = 8"));
+        assert!(shown.contains("reserved; downloads are sequential"));
     }
 
     #[test]

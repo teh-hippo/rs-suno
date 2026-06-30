@@ -124,20 +124,32 @@ pub fn is_narrowed(limit: Option<usize>, since: Option<&str>) -> bool {
 /// enumerated, an empty or near-empty listing of a fully-enumerated source
 /// would still wipe the library. This refuses that unless the user explicitly
 /// confirmed an intentional mass deletion with `--min-newest 0 --yes`.
+///
+/// The empty-listing case (an `Ok(vec![])` from an auth glitch or API bug) is
+/// the crown-jewel risk, so its waiver is stricter: it accepts only an explicit
+/// per-invocation `--min-newest 0` (`explicit_min_newest_zero`), never a value
+/// resolved from persisted config or the environment. That stops a stored
+/// `min_newest = 0` or a habitual `SUNO_YES`/`--yes` in cron from silently
+/// disarming the guard. The large-fraction case stays waivable by the resolved
+/// `min_newest`.
 pub fn mass_delete_abort(
     desired_count: usize,
     manifest_len: usize,
     delete_count: usize,
     min_newest: u32,
+    explicit_min_newest_zero: bool,
     yes: bool,
 ) -> bool {
     if delete_count == 0 || manifest_len == 0 {
         return false;
     }
+    if desired_count == 0 {
+        return !(explicit_min_newest_zero && yes);
+    }
     if min_newest == 0 && yes {
         return false;
     }
-    desired_count == 0 || is_large_fraction(delete_count, manifest_len)
+    is_large_fraction(delete_count, manifest_len)
 }
 
 /// True when `delete_count` is at least half of a non-trivial manifest.
@@ -288,45 +300,60 @@ mod tests {
     #[test]
     fn mass_delete_abort_fires_on_empty_listing() {
         // Desired empty but deletions pending against a non-empty manifest.
-        assert!(mass_delete_abort(0, 147, 147, 1, false));
+        assert!(mass_delete_abort(0, 147, 147, 1, false, false));
     }
 
     #[test]
     fn mass_delete_abort_skips_when_nothing_deleted() {
-        assert!(!mass_delete_abort(0, 147, 0, 1, false));
+        assert!(!mass_delete_abort(0, 147, 0, 1, false, false));
     }
 
     #[test]
     fn mass_delete_abort_skips_empty_manifest() {
-        assert!(!mass_delete_abort(0, 0, 0, 1, false));
+        assert!(!mass_delete_abort(0, 0, 0, 1, false, false));
     }
 
     #[test]
-    fn mass_delete_abort_override_requires_min_newest_zero_and_yes() {
-        // Only --min-newest 0 --yes together waive the abort.
-        assert!(!mass_delete_abort(0, 147, 147, 0, true));
-        assert!(mass_delete_abort(0, 147, 147, 0, false));
-        assert!(mass_delete_abort(0, 147, 147, 1, true));
+    fn empty_listing_waiver_requires_explicit_cli_min_newest() {
+        // A min_newest=0 resolved from config/env plus --yes must NOT waive an
+        // empty listing: the guard would otherwise be permanently disarmed.
+        assert!(mass_delete_abort(0, 147, 147, 0, false, true));
+        // Only an explicit per-invocation --min-newest 0 together with --yes
+        // waives the empty-listing catastrophe.
+        assert!(!mass_delete_abort(0, 147, 147, 0, true, true));
+        // Explicit --min-newest 0 alone, without --yes, still aborts.
+        assert!(mass_delete_abort(0, 147, 147, 0, true, false));
+    }
+
+    #[test]
+    fn large_fraction_waiver_accepts_resolved_min_newest_zero() {
+        // The large-fraction guard (desired > 0) stays waivable by the resolved
+        // setting, so a configured min_newest=0 plus --yes is enough.
+        assert!(!mass_delete_abort(2, 10, 5, 0, false, true));
+        // Without --yes it still aborts.
+        assert!(mass_delete_abort(2, 10, 5, 0, false, false));
+        // And --yes without min_newest=0 still aborts.
+        assert!(mass_delete_abort(2, 10, 5, 1, false, true));
     }
 
     #[test]
     fn mass_delete_abort_large_fraction() {
         // Deleting half or more of a non-trivial manifest, even with some desired.
-        assert!(mass_delete_abort(2, 10, 5, 1, false));
-        assert!(mass_delete_abort(3, 10, 6, 1, false));
+        assert!(mass_delete_abort(2, 10, 5, 1, false, false));
+        assert!(mass_delete_abort(3, 10, 6, 1, false, false));
     }
 
     #[test]
     fn mass_delete_abort_small_fraction_ok() {
         // A couple of deletions out of many is normal churn, not a wipe.
-        assert!(!mass_delete_abort(98, 100, 2, 1, false));
+        assert!(!mass_delete_abort(98, 100, 2, 1, false, false));
     }
 
     #[test]
     fn mass_delete_abort_small_library_below_floor() {
         // Below the floor only the empty-listing rule applies, not the fraction.
-        assert!(!mass_delete_abort(2, 4, 2, 1, false));
-        assert!(mass_delete_abort(0, 4, 4, 1, false));
+        assert!(!mass_delete_abort(2, 4, 2, 1, false, false));
+        assert!(mass_delete_abort(0, 4, 4, 1, false, false));
     }
 
     #[test]
