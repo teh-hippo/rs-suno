@@ -18,6 +18,9 @@ pub enum Error {
     /// Reading or writing audio metadata tags failed.
     #[error("tagging failed: {0}")]
     Tag(String),
+    /// The config file could not be parsed or failed validation.
+    #[error("config error: {0}")]
+    Config(String),
 }
 
 /// A `Result` whose error is the engine [`Error`].

@@ -6,6 +6,7 @@
 
 mod auth;
 mod client;
+pub mod config;
 mod consts;
 mod error;
 mod http;
@@ -17,6 +18,9 @@ mod testutil;
 
 pub use auth::ClerkAuth;
 pub use client::SunoClient;
+pub use config::{
+    AccountConfig, AudioFormat, Config, Defaults, EffectiveSettings, FlagOverrides, SourceConfig,
+};
 pub use error::{Error, Result};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use model::Clip;
