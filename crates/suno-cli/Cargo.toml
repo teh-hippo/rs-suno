@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "A download-only command-line tool for mirroring your Suno.ai library."
+keywords = ["suno", "music", "download", "cli", "sync"]
+categories = ["command-line-utilities", "multimedia::audio"]
+readme = "../../README.md"
 
 [[bin]]
 name = "suno"

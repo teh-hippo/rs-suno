@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Engine for a download-only Suno.ai library tool: feed selection, sync reconciliation, and audio tagging."
+keywords = ["suno", "music", "download", "sync", "audio"]
+categories = ["multimedia::audio", "api-bindings"]
+readme = "../../README.md"
 
 [dependencies]
 base64 = "0.22.1"
