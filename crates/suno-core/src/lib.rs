@@ -12,6 +12,7 @@ mod error;
 mod http;
 mod model;
 mod tag;
+pub mod select;
 
 #[cfg(test)]
 mod testutil;
