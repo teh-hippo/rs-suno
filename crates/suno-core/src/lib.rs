@@ -11,8 +11,8 @@ mod consts;
 mod error;
 mod http;
 mod model;
-mod tag;
 pub mod select;
+mod tag;
 
 #[cfg(test)]
 mod testutil;
