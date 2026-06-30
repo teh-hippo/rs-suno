@@ -1,0 +1,12 @@
+[package]
+name = "suno-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "suno"
+path = "src/main.rs"
+
+[dependencies]
