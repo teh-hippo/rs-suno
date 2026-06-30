@@ -1352,6 +1352,7 @@ name = "suno-core"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "fnv",
  "id3",
  "metaflac",
  "pollster",

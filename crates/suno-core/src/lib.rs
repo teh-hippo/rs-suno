@@ -14,6 +14,7 @@ mod executor;
 mod extras;
 mod ffmpeg;
 mod fs;
+mod hash;
 mod http;
 mod manifest;
 mod model;
@@ -36,6 +37,7 @@ pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute}
 pub use extras::{IndexEntry, M3u8Entry, render_clip_sidecar, render_library_index, render_m3u8};
 pub use ffmpeg::{Ffmpeg, FfmpegError};
 pub use fs::{FileStat, Filesystem, FsError};
+pub use hash::{art_hash, meta_hash};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use manifest::{Manifest, ManifestEntry};
 pub use model::Clip;
