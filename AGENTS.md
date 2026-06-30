@@ -76,6 +76,15 @@ Ports and adapters. `suno-core` is runtime-agnostic and performs no direct IO; i
 - Hardcode secrets or print the token.
 - Touch code outside the issue's stated scope, or restyle or refactor unrelated files.
 
+## Testing standards
+
+- Tests are deterministic: no wall clock, no network, no disk. Inject the time, and use the in-memory `Http` double in `testutil.rs` or fixtures.
+- Cover failure and edge cases, not just the happy path: empty, missing, and malformed inputs; boundary and overflow values; Unicode and reserved characters.
+- Library code never panics on untrusted input; it returns `Result`. Add a test that feeds bad input and asserts an error rather than a panic.
+- Test every safety and validation rule explicitly, especially deletion safety and the minimum-newest floor.
+- Never let a secret (the `__client` token or a JWT) reach an error, log, or output; where an error can echo user input, add a test asserting it is redacted.
+- Ship new `suno-core` modules with their tests; keep about 80% coverage on `suno-core`.
+
 ## Design and contributing
 
 - The CLI surface, flags, output formats, exit codes, and help text are specified in [docs/cli-ux.md](docs/cli-ux.md). Match it; if you must diverge, say so and update it.
