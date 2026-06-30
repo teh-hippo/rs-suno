@@ -97,7 +97,7 @@ pub fn render_clip_names(
 
     for indexes in collisions.into_values().filter(|indexes| indexes.len() > 1) {
         for index in indexes {
-            let suffix = disambiguator(requests[index].clip);
+            let suffix = &requests[index].clip.id;
             rendered[index] =
                 with_suffix(rendered[index].clone(), suffix, config.max_component_len);
         }
@@ -154,7 +154,7 @@ fn render_single(request: NamingRequest<'_>, config: &NamingConfig) -> RenderedN
     }
 
     let base_name = if needs_untitled_suffix(clip, &title) {
-        append_suffix(&base_name, disambiguator(clip), config.max_component_len)
+        append_suffix(&base_name, &clip.id, config.max_component_len)
     } else {
         base_name
     };
@@ -204,16 +204,16 @@ fn needs_untitled_suffix(clip: &Clip, rendered_title: &str) -> bool {
 }
 
 fn append_suffix(base: &str, suffix: &str, max_component_len: usize) -> String {
-    let existing_suffix = format!(" [{suffix}]");
-    if base.ends_with(&existing_suffix) {
+    let suffix_pattern = format!(" [{suffix}]");
+    if base.ends_with(&suffix_pattern) {
         return sanitise_component(base, CharacterSet::Unicode, max_component_len);
     }
 
     let max_len =
-        max_component_len.max(existing_suffix.chars().count() + MIN_BASE_CHARS_WITH_SUFFIX);
-    let allowed = max_len.saturating_sub(existing_suffix.chars().count());
+        max_component_len.max(suffix_pattern.chars().count() + MIN_BASE_CHARS_WITH_SUFFIX);
+    let allowed = max_len.saturating_sub(suffix_pattern.chars().count());
     let truncated = truncate_chars(base.trim_end(), allowed);
-    let combined = format!("{truncated}{existing_suffix}");
+    let combined = format!("{truncated}{suffix_pattern}");
     sanitise_component(&combined, CharacterSet::Unicode, max_len)
 }
 
@@ -291,10 +291,6 @@ fn ascii_chars(ch: char) -> Vec<char> {
 
 fn truncate_chars(value: &str, max_len: usize) -> String {
     value.chars().take(max_len).collect()
-}
-
-fn disambiguator(clip: &Clip) -> &str {
-    &clip.id
 }
 
 fn non_blank(value: &str) -> Option<&str> {
