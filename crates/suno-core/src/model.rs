@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::consts::CDN_BASE_URL;
 
 /// One finished Suno track, flattened from the API's nested response shape.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Clip {
     pub id: String,
     pub title: String,

@@ -11,8 +11,10 @@ mod consts;
 mod error;
 mod extras;
 mod http;
+mod manifest;
 mod model;
 mod naming;
+pub mod reconcile;
 pub mod select;
 mod tag;
 
@@ -27,9 +29,11 @@ pub use config::{
 pub use error::{Error, Result};
 pub use extras::{IndexEntry, M3u8Entry, render_clip_sidecar, render_library_index, render_m3u8};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
+pub use manifest::{Manifest, ManifestEntry};
 pub use model::Clip;
 pub use naming::{
     AlbumMode, CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName,
     derive_album, render_clip_name, render_clip_names,
 };
+pub use reconcile::{Action, Desired, LocalFile, Plan, SourceMode, SourceStatus, reconcile};
 pub use tag::{TrackMetadata, tag_flac, tag_mp3};
