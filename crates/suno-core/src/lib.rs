@@ -9,6 +9,7 @@ mod client;
 pub mod config;
 mod consts;
 mod error;
+mod extras;
 mod http;
 mod model;
 mod naming;
@@ -24,6 +25,7 @@ pub use config::{
     AccountConfig, AudioFormat, Config, Defaults, EffectiveSettings, FlagOverrides, SourceConfig,
 };
 pub use error::{Error, Result};
+pub use extras::{IndexEntry, M3u8Entry, render_clip_sidecar, render_library_index, render_m3u8};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use model::Clip;
 pub use naming::{
