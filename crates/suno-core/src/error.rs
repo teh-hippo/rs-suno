@@ -15,6 +15,9 @@ pub enum Error {
     /// The Suno API rate-limited the request.
     #[error("rate limited")]
     RateLimited,
+    /// Reading or writing audio metadata tags failed.
+    #[error("tagging failed: {0}")]
+    Tag(String),
 }
 
 /// A `Result` whose error is the engine [`Error`].
