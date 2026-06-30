@@ -10,6 +10,10 @@ use crate::Clip;
 /// Supported placeholders are `{creator}`, `{handle}`, `{album}`, `{title}`,
 /// and `{id}`. Empty path segments are dropped after rendering.
 pub const DEFAULT_TEMPLATE: &str = "{creator}/{album}/{title}";
+const DEFAULT_MAX_COMPONENT_LEN: usize = 80;
+
+const SHORT_ID_CHARS: usize = 8;
+const MIN_BASE_CHARS_WITH_SUFFIX: usize = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CharacterSet {
@@ -39,7 +43,7 @@ impl Default for NamingConfig {
             template: DEFAULT_TEMPLATE.to_string(),
             character_set: CharacterSet::Unicode,
             album_mode: AlbumMode::Lineage,
-            max_component_len: 80,
+            max_component_len: DEFAULT_MAX_COMPONENT_LEN,
         }
     }
 }
@@ -202,7 +206,7 @@ fn needs_untitled_suffix(clip: &Clip, rendered_title: &str) -> bool {
 
 fn append_suffix(base: &str, suffix: &str, max_component_len: usize) -> String {
     let suffix = format!(" [{suffix}]");
-    let max_len = max_component_len.max(suffix.chars().count() + 1);
+    let max_len = max_component_len.max(suffix.chars().count() + MIN_BASE_CHARS_WITH_SUFFIX);
     let allowed = max_len.saturating_sub(suffix.chars().count());
     let truncated = truncate_chars(base.trim_end(), allowed);
     let combined = format!("{truncated}{suffix}");
@@ -277,7 +281,6 @@ fn ascii_chars(ch: char) -> Vec<char> {
         'Œ' => vec!['O', 'E'],
         'œ' => vec!['o', 'e'],
         'ß' => vec!['s', 's'],
-        _ if ch.is_whitespace() => vec![' '],
         _ => vec![' '],
     }
 }
@@ -290,7 +293,7 @@ fn short_id(clip: &Clip) -> &str {
     let end = clip
         .id
         .char_indices()
-        .nth(8)
+        .nth(SHORT_ID_CHARS)
         .map_or(clip.id.len(), |(index, _)| index);
     &clip.id[..end]
 }
@@ -333,7 +336,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn clip(id: &str, title: &str) -> Clip {
+    fn test_clip(id: &str, title: &str) -> Clip {
         Clip {
             id: id.to_string(),
             title: title.to_string(),
@@ -347,7 +350,7 @@ mod tests {
 
     #[test]
     fn unicode_names_are_preserved_and_ascii_falls_back() {
-        let clip = clip("abc12345", "Beyoncé/東京");
+        let clip = test_clip("abc12345", "Beyoncé/東京");
 
         let unicode = render_clip_name(
             NamingRequest {
@@ -395,7 +398,7 @@ mod tests {
 
     #[test]
     fn blank_titles_use_a_stable_suffix() {
-        let clip = clip("12345678-clip", "   ");
+        let clip = test_clip("12345678-clip", "   ");
 
         let rendered = render_clip_name(
             NamingRequest {
@@ -413,7 +416,7 @@ mod tests {
 
     #[test]
     fn very_long_titles_are_trimmed() {
-        let clip = clip("abcdef12", &"a".repeat(120));
+        let clip = test_clip("abcdef12", &"a".repeat(120));
         let rendered = render_clip_name(
             NamingRequest {
                 clip: &clip,
@@ -431,8 +434,8 @@ mod tests {
 
     #[test]
     fn duplicate_titles_get_deterministic_suffixes() {
-        let first = clip("11111111-alpha", "Shared");
-        let second = clip("22222222-beta", "Shared");
+        let first = test_clip("11111111-alpha", "Shared");
+        let second = test_clip("22222222-beta", "Shared");
         let requests = [
             NamingRequest {
                 clip: &first,
