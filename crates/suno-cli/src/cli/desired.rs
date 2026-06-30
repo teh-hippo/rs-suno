@@ -103,13 +103,14 @@ fn rel_to_string(path: &Path) -> String {
 
 /// Whether a source counts as fully enumerated for deletion safety.
 ///
-/// A source is only authoritative for deletion when its listing completed
-/// without error *and* no narrowing filter (`--limit` / `--since`) was applied:
-/// a filtered listing omits clips that may still exist upstream, so a missing
-/// clip cannot be read as a deletion. The reconcile engine refuses every delete
-/// unless all sources report `true`.
-pub fn fully_enumerated(listing_ok: bool, narrowed: bool) -> bool {
-    listing_ok && !narrowed
+/// A source is only authoritative for deletion when its listing fully drained
+/// (`complete` — the feed reported no more pages, with no transport error or
+/// page-cap truncation) *and* no narrowing filter (`--limit` / `--since`) was
+/// applied: a partial or filtered listing omits clips that may still exist
+/// upstream, so a missing clip cannot be read as a deletion. The reconcile
+/// engine refuses every delete unless all sources report `true`.
+pub fn fully_enumerated(complete: bool, narrowed: bool) -> bool {
+    complete && !narrowed
 }
 
 /// Whether a `--limit` or `--since` filter narrows a listing.
@@ -266,6 +267,14 @@ mod tests {
         assert!(!fully_enumerated(false, false));
         assert!(!fully_enumerated(true, true));
         assert!(!fully_enumerated(false, true));
+    }
+
+    #[test]
+    fn truncated_listing_is_never_authoritative_for_deletion() {
+        // A `complete == false` listing (transport error or page-cap
+        // truncation) must never be treated as fully enumerated, even with no
+        // narrowing filter, so reconcile emits no deletes against it.
+        assert!(!fully_enumerated(false, false));
     }
 
     #[test]

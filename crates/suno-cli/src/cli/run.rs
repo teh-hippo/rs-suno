@@ -8,7 +8,7 @@
 //! a signal so an interrupt preserves partial progress), and writing the
 //! manifest, logs, and last-run marker.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -442,14 +442,14 @@ async fn run_one(
     let account = auth.display_name().to_owned();
     let mut client = SunoClient::new(auth);
 
-    let (clips, listing_ok) = match client.list_clips(&http, false, args.limit).await {
-        Ok(clips) => (clips, true),
+    let (clips, complete) = match client.list_clips(&http, false, args.limit).await {
+        Ok(result) => result,
         Err(err) => return Ok(report_listing_failure(&target.label, &err)),
     };
 
     let dest = &target.dest;
     let narrowed = is_narrowed(args.limit, args.since.as_deref());
-    let enumerated = fully_enumerated(listing_ok, narrowed);
+    let enumerated = fully_enumerated(complete, narrowed);
 
     let since = match args.since.as_deref().map(RecencySpec::parse).transpose() {
         Ok(since) => since,
@@ -475,6 +475,18 @@ async fn run_one(
 
     std::fs::create_dir_all(dest)
         .with_context(|| format!("could not create {}", dest.display()))?;
+
+    let dry_run = global.dry_run || verb == Verb::Check;
+    // Hold the run lock across load -> reconcile -> confirm -> execute so a
+    // concurrent run cannot plan against this manifest and then execute a stale
+    // plan over the other run's writes. Dry-run/check write nothing, so they
+    // take no lock and stay side-effect free.
+    let _lock = if dry_run {
+        None
+    } else {
+        Some(logs::acquire_lock(dest)?)
+    };
+
     let manifest = logs::load_manifest(dest)?;
 
     let local = stat_manifest(dest, &manifest);
@@ -484,7 +496,6 @@ async fn run_one(
     }];
     let plan = reconcile(&manifest, &desired, &local, &sources);
 
-    let dry_run = global.dry_run || verb == Verb::Check;
     if dry_run {
         if verbosity >= 1 {
             let no_failures = std::collections::HashSet::new();
@@ -542,7 +553,6 @@ async fn run_one(
         }
     }
 
-    let _lock = logs::acquire_lock(dest)?;
     if verbosity == 0 {
         eprintln!(
             "{}",
@@ -616,16 +626,19 @@ async fn execute_plan(
         .map(|d| (d.clip.id.as_str(), &d.clip))
         .collect();
     logs::append_failures(dest, &outcome.failures, &clips_by_id)?;
-    let failed_ids: Vec<String> = outcome.failures.iter().map(|f| f.clip_id.clone()).collect();
-    logs::append_audit(dest, plan, &failed_ids)?;
+    let failed: HashSet<&str> = outcome
+        .failures
+        .iter()
+        .map(|f| f.clip_id.as_str())
+        .collect();
+    let rename_owner: HashMap<&str, &str> = desired
+        .iter()
+        .map(|d| (d.path.as_str(), d.clip.id.as_str()))
+        .collect();
+    logs::append_audit(dest, plan, &failed, &rename_owner)?;
     write_last_run(dest);
 
     if verbosity >= 1 {
-        let failed: std::collections::HashSet<&str> = outcome
-            .failures
-            .iter()
-            .map(|f| f.clip_id.as_str())
-            .collect();
         for line in output::action_lines(plan, &failed, verbosity) {
             eprintln!("{line}");
         }

@@ -6,7 +6,7 @@
 //! adapter. The manifest is saved atomically (temp sibling then rename) and a
 //! single exclusive lock prevents two runs from corrupting it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -121,17 +121,32 @@ pub fn append_failures(
 
 /// Append every applied deletion and rename to `.suno-audit.log`.
 ///
-/// Actions whose clip is in `failed_ids` are skipped: they did not happen.
-pub fn append_audit(dest: &Path, plan: &Plan, failed_ids: &[String]) -> Result<()> {
+/// An action is skipped when its executor outcome was a failure, so the log
+/// only records changes that actually happened. A delete is keyed by `clip_id`;
+/// a rename carries no clip id, so it is keyed by the clip that owns its
+/// destination path (`rename_owner`, falling back to the path itself, mirroring
+/// how the executor attributes a rename failure).
+pub fn append_audit(
+    dest: &Path,
+    plan: &Plan,
+    failed: &HashSet<&str>,
+    rename_owner: &HashMap<&str, &str>,
+) -> Result<()> {
     let now = iso_utc(unix_now());
     let mut buf = String::new();
     for action in &plan.actions {
         match action {
-            Action::Delete { path, clip_id } if !failed_ids.contains(clip_id) => {
+            Action::Delete { path, clip_id } if !failed.contains(clip_id.as_str()) => {
                 buf.push_str(&format!("{now}\tDELETE\t{clip_id}\t{path}\t\n"));
             }
             Action::Rename { from, to } => {
-                buf.push_str(&format!("{now}\tRENAME\t\t{from}\t{to}\n"));
+                let owner = rename_owner
+                    .get(to.as_str())
+                    .copied()
+                    .unwrap_or(to.as_str());
+                if !failed.contains(owner) {
+                    buf.push_str(&format!("{now}\tRENAME\t\t{from}\t{to}\n"));
+                }
             }
             _ => {}
         }
@@ -259,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn audit_log_records_deletes_and_renames_excluding_failures() {
+    fn audit_log_records_only_successful_deletes_and_renames() {
         let dir = temp_dir("audit");
         let plan = Plan {
             actions: vec![
@@ -275,13 +290,22 @@ mod tests {
                     from: "old.flac".to_owned(),
                     to: "new.flac".to_owned(),
                 },
+                Action::Rename {
+                    from: "bad.flac".to_owned(),
+                    to: "worse.flac".to_owned(),
+                },
             ],
         };
-        append_audit(&dir, &plan, &["k".to_owned()]).unwrap();
+        let failed: HashSet<&str> = ["k", "r2"].into_iter().collect();
+        let rename_owner: HashMap<&str, &str> = [("new.flac", "r1"), ("worse.flac", "r2")]
+            .into_iter()
+            .collect();
+        append_audit(&dir, &plan, &failed, &rename_owner).unwrap();
         let log = std::fs::read_to_string(dir.join(AUDIT_NAME)).unwrap();
         assert!(log.contains("DELETE\tg\tgone.flac"));
         assert!(!log.contains("kept.flac"));
         assert!(log.contains("RENAME\t\told.flac\tnew.flac"));
+        assert!(!log.contains("worse.flac"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

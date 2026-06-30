@@ -55,8 +55,8 @@ pub async fn run_ls(global: &GlobalArgs, args: &LsArgs, force_json: bool) -> Res
     let display_name = auth.display_name().to_owned();
     let mut client = SunoClient::new(auth);
 
-    let clips = match client.list_clips(&http, args.liked, args.limit).await {
-        Ok(clips) => clips,
+    let (clips, _complete) = match client.list_clips(&http, args.liked, args.limit).await {
+        Ok(result) => result,
         Err(err) => return Ok(run::report_listing_failure(&label, &err)),
     };
 

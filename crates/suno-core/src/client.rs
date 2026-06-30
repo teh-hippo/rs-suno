@@ -31,27 +31,38 @@ impl SunoClient {
     ///
     /// Stops early once `limit` clips are collected. Paging is hard-capped at
     /// [`MAX_PAGES`] so a runaway `has_more` can never loop forever.
+    ///
+    /// Returns the clips paired with a `complete` flag that is `true` only when
+    /// paging ended because the server reported `has_more == false` (the feed
+    /// fully drained). A `limit` stop, or exhausting [`MAX_PAGES`] while
+    /// `has_more` is still set, yields `false` so the caller can refuse to treat
+    /// a truncated listing as authoritative for deletion.
     pub async fn list_clips(
         &mut self,
         http: &impl Http,
         liked: bool,
         limit: Option<usize>,
-    ) -> Result<Vec<Clip>> {
+    ) -> Result<(Vec<Clip>, bool)> {
         let mut clips = Vec::new();
         let suffix = if liked { "&is_liked=true" } else { "" };
+        let mut complete = false;
         for page in 0..MAX_PAGES {
             let path = format!("/api/feed/v2/?page={page}{suffix}");
             let body = self.api_get(http, &path).await?;
             let (page_clips, has_more) = parse_feed(&body)?;
             clips.extend(page_clips);
-            if !has_more || limit.is_some_and(|n| clips.len() >= n) {
+            if !has_more {
+                complete = true;
+                break;
+            }
+            if limit.is_some_and(|n| clips.len() >= n) {
                 break;
             }
         }
         if let Some(n) = limit {
             clips.truncate(n);
         }
-        Ok(clips)
+        Ok((clips, complete))
     }
 
     /// Fetch one clip by ID.
@@ -99,7 +110,7 @@ impl SunoClient {
 
     /// Locate a clip by scanning the library feed.
     async fn find_in_feed(&mut self, http: &impl Http, id: &str) -> Result<Clip> {
-        let clips = self.list_clips(http, false, None).await?;
+        let (clips, _complete) = self.list_clips(http, false, None).await?;
         clips
             .into_iter()
             .find(|clip| clip.id == id)
@@ -273,9 +284,33 @@ mod tests {
         let mut auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(&http)).unwrap();
         let mut client = SunoClient::new(auth);
-        let clips = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, "a");
+        assert!(complete);
+    }
+
+    #[test]
+    fn list_clips_reports_incomplete_when_paging_is_capped() {
+        let mut rules = auth_rules();
+        rules.push(Rule::new(
+            "/api/feed/v2",
+            200,
+            serde_json::json!({
+                "has_more": true,
+                "clips": [{
+                    "id": "a", "title": "Song A", "status": "complete",
+                    "audio_url": "https://cdn1.suno.ai/a.mp3",
+                    "metadata": {"type": "gen"}
+                }]
+            })
+            .to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let (_clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert!(!complete);
     }
 
     fn auth_rules() -> Vec<Rule> {
