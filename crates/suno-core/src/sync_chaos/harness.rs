@@ -224,6 +224,25 @@ pub(super) fn clean_mirror() -> Vec<SourceStatus> {
     }]
 }
 
+/// Derive the fully-enumerated source statuses a clean run should present from
+/// the modes the specs actually select: always the library mirror, plus a copy
+/// source whenever any clip is copy-held. This threads real copy-vs-mirror
+/// status through the whole pipeline instead of pretending every run is a lone
+/// mirror, so end-to-end runs exercise the same `deletion_allowed` inputs the
+/// CLI builds. With every source fully enumerated this is behaviourally a
+/// delete-allowed run, exactly like [`clean_mirror`]; the difference shows up
+/// only when a test marks a copy source unreliable.
+pub(super) fn sources_for(specs: &[ClipSpec]) -> Vec<SourceStatus> {
+    let mut sources = clean_mirror();
+    if specs.iter().any(|s| s.modes.contains(&SourceMode::Copy)) {
+        sources.push(SourceStatus {
+            mode: SourceMode::Copy,
+            fully_enumerated: true,
+        });
+    }
+    sources
+}
+
 /// Fast options: the recording clock never really sleeps, so a tiny poll budget
 /// keeps even the FLAC render path instant while still exercising it.
 pub(super) fn fast_opts() -> ExecOptions {
@@ -299,13 +318,22 @@ pub(super) fn run_sync(
 }
 
 /// Run one clean, fully-enumerated sync against a freshly built clean origin.
+/// The source statuses are derived from the specs' modes, so a copy-held set
+/// presents a copy source end to end (see [`sources_for`]).
 pub(super) fn run_clean(
     specs: &[ClipSpec],
     fs: &MemFs,
     manifest: &mut Manifest,
 ) -> (Plan, ExecOutcome) {
     let http = world(specs);
-    run_sync(specs, &clean_mirror(), fs, manifest, &http, &fast_opts())
+    run_sync(
+        specs,
+        &sources_for(specs),
+        fs,
+        manifest,
+        &http,
+        &fast_opts(),
+    )
 }
 
 /// How many of a plan's actions actually mutate the library (everything but a

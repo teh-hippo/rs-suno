@@ -393,3 +393,181 @@ fn reconcile_plan_is_stable_under_input_reordering() {
     let plan_b = reconcile(&manifest, &reversed, &local, &clean_mirror());
     assert_eq!(plan_a, plan_b);
 }
+
+#[test]
+fn a_preserved_copy_orphan_is_immortal_after_losing_protection_and_all_sources() {
+    // Option A, archive-always-wins (reconcile.rs SYNC-8): a clip that was ever
+    // copy-held or private is kept forever once it leaves every source, even if
+    // it also loses that protection in the very same transition. This is the
+    // intended "immortal preserved orphan", NOT a bug: do not "fix" it into a
+    // delete. The keep is asserted by MODEL truth - the clip is gone from the
+    // remote and no longer copy-held - never by reading the manifest preserve
+    // flag, so the test pins the behaviour rather than restating the mechanism.
+    let copy = ClipSpec::mirror("c002", "Archived").copy_held();
+    let specs = [ClipSpec::mirror("c001", "Plain"), copy.clone()];
+    let fs = MemFs::new();
+    let mut manifest = Manifest::new();
+    run_clean(&specs, &fs, &mut manifest);
+    let copy_path = path_of(&copy);
+    assert!(
+        fs.exists(&copy_path),
+        "the copy-held file lands on first sync"
+    );
+
+    // ONE transition: the clip both drops its copy hold and leaves all sources.
+    // By model truth it is now an ordinary, unprotected clip that no longer
+    // exists remotely; only the permanent archive latch may keep it.
+    let remaining = [ClipSpec::mirror("c001", "Plain")];
+
+    // Two clean, fully-enumerated passes - exactly the runs that ARE allowed to
+    // delete. Each must still keep the orphan: a delete is never even planned,
+    // and the file and its manifest entry both remain.
+    for pass in 1..=2 {
+        let (plan, outcome) = run_clean(&remaining, &fs, &mut manifest);
+        assert_eq!(
+            plan.deletes(),
+            0,
+            "pass {pass}: a preserved orphan must never be planned for deletion"
+        );
+        assert_eq!(outcome.deleted, 0, "pass {pass}: nothing may be deleted");
+        assert!(
+            fs.exists(&copy_path),
+            "pass {pass}: the preserved orphan file is intentionally immortal"
+        );
+        assert!(
+            manifest.get("c002").is_some(),
+            "pass {pass}: the preserved orphan manifest entry is retained forever"
+        );
+    }
+}
+
+#[test]
+fn a_preserved_private_orphan_is_immortal_after_losing_protection_and_all_sources() {
+    // The private twin of the copy-orphan immortality test (Option A). A clip
+    // that was private is latched into the archive; dropping privacy AND leaving
+    // every source in one transition still keeps it forever. Asserted by model
+    // truth, not the manifest preserve flag.
+    let private = ClipSpec::mirror("c002", "Secret").private();
+    let specs = [ClipSpec::mirror("c001", "Public"), private.clone()];
+    let fs = MemFs::new();
+    let mut manifest = Manifest::new();
+    run_clean(&specs, &fs, &mut manifest);
+    let private_path = path_of(&private);
+    assert!(
+        fs.exists(&private_path),
+        "the private file lands on first sync"
+    );
+
+    let remaining = [ClipSpec::mirror("c001", "Public")];
+    for pass in 1..=2 {
+        let (plan, outcome) = run_clean(&remaining, &fs, &mut manifest);
+        assert_eq!(
+            plan.deletes(),
+            0,
+            "pass {pass}: a preserved private orphan is never planned for deletion"
+        );
+        assert_eq!(outcome.deleted, 0, "pass {pass}: nothing may be deleted");
+        assert!(
+            fs.exists(&private_path),
+            "pass {pass}: the preserved private orphan is intentionally immortal"
+        );
+        assert!(
+            manifest.get("c002").is_some(),
+            "pass {pass}: the preserved private orphan entry is retained forever"
+        );
+    }
+}
+
+#[test]
+fn partial_copy_source_suppresses_delete_end_to_end() {
+    // End-to-end copy-vs-mirror suppression (SYNC-9). The mirror is fully
+    // enumerated and would normally delete an orphan, but a second selected
+    // source - a copy source - could not be fully enumerated this run. Deletion
+    // is allowed only when EVERY selected source is reliable, so the whole run
+    // must suppress deletes even though the mirror listing itself was complete.
+    let specs = [
+        ClipSpec::mirror("c001", "Keep"),
+        ClipSpec::mirror("c002", "Maybe"),
+    ];
+    let fs = MemFs::new();
+    let mut manifest = Manifest::new();
+    run_clean(&specs, &fs, &mut manifest);
+    let maybe_path = path_of(&specs[1]);
+
+    // The feed now lists only c001, but the copy source is unreliable, so c002
+    // is an orphan that must NOT be deleted.
+    let remaining = [ClipSpec::mirror("c001", "Keep")];
+    let sources = [
+        SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: true,
+        },
+        SourceStatus {
+            mode: SourceMode::Copy,
+            fully_enumerated: false,
+        },
+    ];
+    let http = world(&remaining);
+    let (plan, outcome) = run_sync(
+        &remaining,
+        &sources,
+        &fs,
+        &mut manifest,
+        &http,
+        &fast_opts(),
+    );
+
+    assert_eq!(
+        plan.deletes(),
+        0,
+        "an unreliable copy source must suppress every delete"
+    );
+    assert_eq!(outcome.deleted, 0);
+    assert!(
+        fs.exists(&maybe_path),
+        "the orphan survives the unreliable copy run"
+    );
+    assert!(manifest.get("c002").is_some());
+}
+
+#[test]
+fn copy_held_trashed_clip_survives_end_to_end() {
+    // SYNC-12 versus SYNC-8 across the whole pipeline: trashing a clip normally
+    // deletes its file, but a copy hold outranks the trash. The copy-held source
+    // is threaded end to end via the harness `sources_for`, so the trashed,
+    // copy-held clip is kept while a trashed mirror-only clip beside it is
+    // deleted in the same run.
+    let keep = ClipSpec::mirror("c002", "Trashed but archived").copy_held();
+    let specs = [ClipSpec::mirror("c001", "Doomed"), keep.clone()];
+    let fs = MemFs::new();
+    let mut manifest = Manifest::new();
+    run_clean(&specs, &fs, &mut manifest);
+    let keep_path = path_of(&keep);
+    let doomed_path = path_of(&specs[0]);
+
+    // Both clips are trashed in the same run; only the unprotected one dies.
+    let trashed = [
+        ClipSpec::mirror("c001", "Doomed").trashed(),
+        keep.clone().trashed(),
+    ];
+    let (plan, outcome) = run_clean(&trashed, &fs, &mut manifest);
+
+    assert_eq!(
+        plan.deletes(),
+        1,
+        "only the unprotected trashed clip is deleted"
+    );
+    assert_eq!(outcome.deleted, 1);
+    assert!(
+        !fs.exists(&doomed_path),
+        "the mirror-only trashed clip is deleted"
+    );
+    assert!(
+        fs.exists(&keep_path),
+        "the copy-held trashed clip is kept end to end"
+    );
+    assert!(
+        manifest.get("c002").is_some(),
+        "the copy-held trashed clip's manifest entry is retained"
+    );
+}

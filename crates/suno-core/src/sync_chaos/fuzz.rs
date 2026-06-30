@@ -3,9 +3,10 @@
 //! The reconcile and execute layers trust their inputs; the parsers are the
 //! boundary where untrusted bytes enter. A panic here is a crash, and a bad
 //! path is a corrupt library, so every public parse and naming entry point must
-//! survive arbitrary input: never panic, and either error cleanly or return a
-//! sane value. These properties feed garbage into [`Clip::from_json`], the feed
-//! reader behind [`SunoClient::list_clips`], [`RecencySpec::parse`],
+//! survive arbitrary input without panicking. Where the result shape lets us say
+//! more, we assert more: a rendered name is additionally checked to be a safe
+//! relative path. These properties feed garbage into [`Clip::from_json`], the
+//! feed reader behind [`SunoClient::list_clips`], [`RecencySpec::parse`],
 //! [`Config::from_toml`], and [`render_clip_name`], and assert exactly that.
 
 use std::path::Component;
@@ -93,8 +94,8 @@ proptest! {
         let _ = Clip::from_json(&value);
     }
 
-    /// Reading a feed page of arbitrary bytes never panics; it returns clips or
-    /// a clean error.
+    /// Reading a feed page of arbitrary bytes never panics. The result (clips or
+    /// an error) is not inspected; only the absence of a panic is asserted.
     #[test]
     fn list_clips_survives_arbitrary_feed_bytes(body in any::<Vec<u8>>()) {
         let http = ChaosHttp::new()
@@ -117,13 +118,15 @@ proptest! {
         let _ = pollster::block_on(client.list_clips(&http, true, Some(3)));
     }
 
-    /// Parsing any recency spec never panics; it is `Ok` or a clean `Err`.
+    /// Parsing any recency spec never panics. Its specific value is checked by
+    /// the deterministic test below; here only the absence of a panic matters.
     #[test]
     fn recency_spec_parse_never_panics(spec in any::<String>()) {
         let _ = RecencySpec::parse(&spec);
     }
 
-    /// Parsing any TOML string never panics; it is `Ok` or a clean `Err`.
+    /// Parsing any TOML string never panics. The `Result` is discarded: this
+    /// asserts only that arbitrary input cannot crash the config reader.
     #[test]
     fn config_from_toml_never_panics(text in any::<String>()) {
         let _ = Config::from_toml(&text);

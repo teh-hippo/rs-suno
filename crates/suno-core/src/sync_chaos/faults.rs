@@ -203,6 +203,74 @@ fn a_corrupt_write_is_caught_and_never_advances_the_manifest() {
 }
 
 #[test]
+fn a_corrupt_retag_write_over_an_existing_good_file_is_caught_and_never_trusted() {
+    // The contrast to the fresh-download corrupt test: here the corrupt write
+    // lands ON TOP of an existing good file during a retag. The safety
+    // guarantees that MUST hold are asserted first - the run records a failure
+    // and the manifest never advances past the unverified write.
+    //
+    // REPORTED ENGINE WEAKNESS (do not "fix" in this test): the write-then-
+    // verify ordering means the in-place write replaces the destination BEFORE
+    // the size check runs, so the prior good bytes are already gone when the
+    // failure is detected. Exact sequence in `Executor::retag` /`write_verify`
+    // (executor.rs): read existing -> tag -> `write_atomic(path, tagged)`
+    // overwrites the destination -> `metadata(path)` size check fails -> the
+    // action is a `permanent_fail` and `refresh_hashes` is never reached. The
+    // real CLI adapter has the same shape (temp sibling then `replace()` then
+    // the post-write size check), so a lying disk clobbers the destination in
+    // both. No re-download self-heals it either: reconcile treats a non-empty
+    // file as present, so only a (re-)tagging of the corrupt bytes is planned.
+    // This test PINS that current behaviour; the coordinator owns any fix.
+    let mut spec = ClipSpec::mirror("c114", "Tag Over Rot");
+    let fs = MemFs::new();
+    let mut manifest = Manifest::new();
+    run_clean(std::slice::from_ref(&spec), &fs, &mut manifest);
+    let path = path_of(&spec);
+    let good_bytes = fs.read_file(&path).expect("first sync wrote the file");
+    let good_entry = manifest.get("c114").unwrap().clone();
+
+    // A metadata change asks for an in-place retag, and the disk silently stores
+    // the wrong number of bytes for this path on that write.
+    spec = spec.with_tags("a brand new mood");
+    fs.arm_corrupt_write(&path);
+    let (plan, outcome) = run_clean(std::slice::from_ref(&spec), &fs, &mut manifest);
+
+    assert_eq!(plan.retags(), 1, "the change is planned as a retag");
+    assert_eq!(
+        outcome.retagged, 0,
+        "a corrupt retag must not count as done"
+    );
+    assert_eq!(outcome.failed(), 1, "the size check must record a failure");
+
+    let after = manifest.get("c114").unwrap();
+    assert_eq!(
+        after.meta_hash, good_entry.meta_hash,
+        "a failed retag must not advance the stored meta hash"
+    );
+    assert_eq!(
+        after.size, good_entry.size,
+        "a failed retag must not advance the stored size"
+    );
+
+    // The reported weakness, pinned: the existing good file WAS clobbered before
+    // the verify fired. The bytes on disk are the injected corrupt body (the
+    // double writes all zeros), not the original good audio.
+    let on_disk = fs.read_file(&path).unwrap();
+    assert_ne!(
+        on_disk, good_bytes,
+        "current behaviour: the in-place write replaces the good file before the size check"
+    );
+    assert!(
+        !good_bytes.iter().all(|&b| b == 0),
+        "sanity: the original good audio is not all zeros"
+    );
+    assert!(
+        on_disk.iter().all(|&b| b == 0),
+        "the destination now holds the corrupt body, not the verified original"
+    );
+}
+
+#[test]
 fn a_failed_delete_keeps_the_manifest_entry_and_the_file() {
     let mut spec = ClipSpec::mirror("c104", "Keep Me");
     let fs = MemFs::new();

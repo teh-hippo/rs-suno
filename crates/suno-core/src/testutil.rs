@@ -306,6 +306,15 @@ impl MemFs {
     pub(crate) fn disarm_fail_remove(&self, path: &str) {
         self.fail_removes.lock().unwrap().remove(path);
     }
+
+    /// Arm a silent corrupting `write_atomic` for `path` on a live double: the
+    /// next write stores a wrong-sized body (modelling a lying disk), which the
+    /// post-write size check (SYNC-14) must catch. Unlike the consuming
+    /// [`corrupt_write`](Self::corrupt_write) builder, this lets a harness arm
+    /// the corruption only for a later in-place overwrite of an existing file.
+    pub(crate) fn arm_corrupt_write(&self, path: &str) {
+        self.corrupt_writes.lock().unwrap().insert(path.to_owned());
+    }
 }
 
 impl Filesystem for MemFs {

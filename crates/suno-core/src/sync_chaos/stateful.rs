@@ -8,15 +8,22 @@
 //! listing, or a failed empty listing). After every run it asserts the
 //! library-integrity invariants hold:
 //!
-//! - **I-a** a clip that is genuinely protected (copy-held or private while
-//!   still listed, or an orphan kept by its preserve marker) and present before
-//!   a run is still present after it; protection is never lost to a delete.
+//! - **I-a** a clip that is genuinely protected and present before a run is
+//!   still present after it; protection is never lost to a delete. "Genuinely
+//!   protected" means copy-held or private while still listed, or an orphan kept
+//!   by its preserve marker. That last case is intentional and permanent: under
+//!   the archive-always-wins design (Option A, see `reconcile.rs`), a clip that
+//!   was ever copy-held or private is kept forever once deselected, even after
+//!   it also loses that protection. `full_sync.rs` pins this immortality with a
+//!   model-truth test rather than letting it hide inside the manifest's flag.
 //! - **I-b** a run whose listing is not fully enumerated performs no deletes.
 //! - **I-c** a failed empty listing never shrinks the library.
-//! - **I-d** clean, fully-enumerated runs converge: the preserve latch (SYNC-8)
-//!   may delay a delete by one run, so the engine reaches a fixed point within
-//!   two passes, after which a re-plan is a pure no-op and the on-disk set is
-//!   exactly the tracked set.
+//! - **I-d** clean, fully-enumerated runs converge to a *manifest* fixed point:
+//!   the preserve latch (SYNC-8) may defer a delete by one run, so within two
+//!   passes a re-plan is a pure no-op and the on-disk set is exactly the tracked
+//!   set. This is convergence to what the manifest should hold, not to "source
+//!   truth": preserved orphans are deliberately retained and never deleted to
+//!   match the feed, so I-d makes no claim that the library mirrors the source.
 //! - **I-e** every manifest entry references a file that exists on disk with the
 //!   recorded size (and a clean run never leaves a failed action behind).
 //!
@@ -30,7 +37,7 @@ use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 
 use super::harness::{
-    ClipSpec, clean_mirror, desired_set, fast_opts, mutating_actions, probe_local, run_sync, world,
+    ClipSpec, desired_set, fast_opts, mutating_actions, probe_local, run_sync, sources_for, world,
 };
 use crate::config::AudioFormat;
 use crate::fs::Filesystem;
@@ -266,6 +273,99 @@ fn assert_manifest_disk_consistent(manifest: &Manifest, fs: &MemFs) -> Result<()
     Ok(())
 }
 
+/// Drive one whole script against a single fresh library and assert every
+/// invariant after each run. Factored out of the proptest so the random search
+/// and the deterministic high-value script below share identical checks: the
+/// crafted test then guarantees the delete, protect, and unprotect-then-orphan
+/// transitions are exercised, answering "could the random run pass vacuously?".
+fn check_script(script: &[Step]) -> Result<(), TestCaseError> {
+    let fs = MemFs::new();
+    let mut manifest = Manifest::new();
+    let mut model: Model = BTreeMap::new();
+
+    for step in script {
+        for mutation in &step.mutations {
+            apply(&mut model, mutation);
+        }
+        let specs = specs_of(&model);
+        let protected = protected_present(&manifest, &fs, &specs);
+        let disk_before = fs.paths();
+
+        match step.mode {
+            RunMode::Clean => {
+                // Sources are derived from the specs' modes, so a copy-held set
+                // presents a fully-enumerated copy source alongside the mirror,
+                // exactly as the CLI would build it.
+                let sources = sources_for(&specs);
+                let http = world(&specs);
+                let (_plan, outcome) =
+                    run_sync(&specs, &sources, &fs, &mut manifest, &http, &fast_opts());
+                // A clean origin never fails an action.
+                prop_assert_eq!(outcome.failed(), 0, "clean run had failures");
+                // The preserve latch (SYNC-8) can defer a delete by one run
+                // when a still-listed clip loses copy/private protection, so
+                // the engine is allowed up to two clean passes to settle. A
+                // second pass must then introduce no new failures.
+                let (_p2, o2) = run_sync(&specs, &sources, &fs, &mut manifest, &http, &fast_opts());
+                prop_assert_eq!(o2.failed(), 0, "second clean run had failures");
+                // I-d: the engine has converged to a manifest fixed point. A
+                // further re-plan is inert, and the disk holds exactly the
+                // tracked files (with I-e this is a disk/manifest bijection).
+                // Preserved orphans stay in both sets on purpose (Option A).
+                let local = probe_local(&manifest, &fs);
+                let replan = reconcile(&manifest, &desired_set(&specs), &local, &sources);
+                prop_assert_eq!(
+                    mutating_actions(&replan),
+                    0,
+                    "clean runs did not converge within two passes: {:?}",
+                    replan.actions
+                );
+                let mut tracked: Vec<String> =
+                    manifest.iter().map(|(_, e)| e.path.clone()).collect();
+                tracked.sort();
+                prop_assert_eq!(
+                    fs.paths(),
+                    tracked,
+                    "converged disk is not exactly the tracked set"
+                );
+            }
+            RunMode::PartialListing => {
+                let sources = [SourceStatus {
+                    mode: SourceMode::Mirror,
+                    fully_enumerated: false,
+                }];
+                let http = world(&specs);
+                let (plan, outcome) =
+                    run_sync(&specs, &sources, &fs, &mut manifest, &http, &fast_opts());
+                // I-b: an unreliable listing deletes nothing.
+                prop_assert_eq!(plan.deletes(), 0, "partial listing planned a delete");
+                prop_assert_eq!(outcome.deleted, 0, "partial listing executed a delete");
+            }
+            RunMode::FailedEmptyListing => {
+                let sources = [SourceStatus {
+                    mode: SourceMode::Mirror,
+                    fully_enumerated: false,
+                }];
+                let (plan, outcome) =
+                    run_sync(&[], &sources, &fs, &mut manifest, &world(&[]), &fast_opts());
+                // I-c: a failed empty listing never shrinks the library.
+                prop_assert_eq!(plan.deletes(), 0, "failed empty listing planned a delete");
+                prop_assert_eq!(outcome.deleted, 0, "failed empty listing executed a delete");
+                prop_assert_eq!(
+                    fs.paths(),
+                    disk_before,
+                    "failed empty listing changed the disk"
+                );
+            }
+        }
+
+        // I-a and I-e hold after every run, whatever its mode.
+        assert_protected_survive(&manifest, &fs, &protected)?;
+        assert_manifest_disk_consistent(&manifest, &fs)?;
+    }
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 128,
@@ -275,76 +375,45 @@ proptest! {
 
     #[test]
     fn library_integrity_holds_across_random_runs(script in script()) {
-        let fs = MemFs::new();
-        let mut manifest = Manifest::new();
-        let mut model: Model = BTreeMap::new();
-
-        for step in &script {
-            for mutation in &step.mutations {
-                apply(&mut model, mutation);
-            }
-            let specs = specs_of(&model);
-            let protected = protected_present(&manifest, &fs, &specs);
-            let disk_before = fs.paths();
-
-            match step.mode {
-                RunMode::Clean => {
-                    let http = world(&specs);
-                    let (_plan, outcome) =
-                        run_sync(&specs, &clean_mirror(), &fs, &mut manifest, &http, &fast_opts());
-                    // A clean origin never fails an action.
-                    prop_assert_eq!(outcome.failed(), 0, "clean run had failures");
-                    // The preserve latch (SYNC-8) can defer a delete by one run
-                    // when a still-listed clip loses copy/private protection, so
-                    // the engine is allowed up to two clean passes to settle. A
-                    // second pass must then introduce no new failures.
-                    let (_p2, o2) =
-                        run_sync(&specs, &clean_mirror(), &fs, &mut manifest, &http, &fast_opts());
-                    prop_assert_eq!(o2.failed(), 0, "second clean run had failures");
-                    // I-d: the engine has converged. A further re-plan is inert,
-                    // and the disk holds exactly the tracked files (with I-e this
-                    // is a disk/manifest bijection).
-                    let local = probe_local(&manifest, &fs);
-                    let replan =
-                        reconcile(&manifest, &desired_set(&specs), &local, &clean_mirror());
-                    prop_assert_eq!(
-                        mutating_actions(&replan),
-                        0,
-                        "clean runs did not converge within two passes: {:?}",
-                        replan.actions
-                    );
-                    let mut tracked: Vec<String> =
-                        manifest.iter().map(|(_, e)| e.path.clone()).collect();
-                    tracked.sort();
-                    prop_assert_eq!(
-                        fs.paths(),
-                        tracked,
-                        "converged disk is not exactly the tracked set"
-                    );
-                }
-                RunMode::PartialListing => {
-                    let sources = [SourceStatus { mode: SourceMode::Mirror, fully_enumerated: false }];
-                    let http = world(&specs);
-                    let (plan, outcome) =
-                        run_sync(&specs, &sources, &fs, &mut manifest, &http, &fast_opts());
-                    // I-b: an unreliable listing deletes nothing.
-                    prop_assert_eq!(plan.deletes(), 0, "partial listing planned a delete");
-                    prop_assert_eq!(outcome.deleted, 0, "partial listing executed a delete");
-                }
-                RunMode::FailedEmptyListing => {
-                    let sources = [SourceStatus { mode: SourceMode::Mirror, fully_enumerated: false }];
-                    let (plan, outcome) =
-                        run_sync(&[], &sources, &fs, &mut manifest, &world(&[]), &fast_opts());
-                    // I-c: a failed empty listing never shrinks the library.
-                    prop_assert_eq!(plan.deletes(), 0, "failed empty listing planned a delete");
-                    prop_assert_eq!(outcome.deleted, 0, "failed empty listing executed a delete");
-                    prop_assert_eq!(fs.paths(), disk_before, "failed empty listing changed the disk");
-                }
-            }
-
-            // I-a and I-e hold after every run, whatever its mode.
-            assert_protected_survive(&manifest, &fs, &protected)?;
-            assert_manifest_disk_consistent(&manifest, &fs)?;
-        }
+        check_script(&script)?;
     }
+}
+
+/// A deterministic script that is guaranteed to drive the three highest-value
+/// transitions, so the suite can never pass them vacuously: (1) a plain mirror
+/// clip is deleted once trashed; (2) a copy-held and a private clip are kept
+/// while protected; (3) both then lose protection *and* leave all sources in the
+/// same step and are still kept forever as preserved orphans (Option A). All of
+/// I-a..I-e are asserted after every run by the shared [`check_script`].
+#[test]
+fn library_integrity_holds_for_a_crafted_high_value_script() {
+    let clean = |mutations: Vec<Mutation>| Step {
+        mutations,
+        mode: RunMode::Clean,
+    };
+    let script = vec![
+        // Populate: a plain mirror clip, a copy-held clip, and a private clip.
+        clean(vec![
+            Mutation::Add(0),
+            Mutation::Add(1),
+            Mutation::Add(2),
+            Mutation::ToggleCopy(1),
+            Mutation::TogglePrivate(2),
+        ]),
+        // Trash the plain clip: it loses its only claim and is deleted (the
+        // delete transition).
+        clean(vec![Mutation::ToggleTrashed(0)]),
+        // In one transition, drop the copy hold and privacy *and* remove both
+        // from every source. They became preserved orphans, so they are
+        // intentionally immortal and must survive (the unprotect+orphan path).
+        clean(vec![
+            Mutation::ToggleCopy(1),
+            Mutation::TogglePrivate(2),
+            Mutation::Remove(1),
+            Mutation::Remove(2),
+        ]),
+        // A further clean run still keeps the immortal orphans.
+        clean(vec![]),
+    ];
+    check_script(&script).expect("crafted high-value script holds every invariant");
 }
