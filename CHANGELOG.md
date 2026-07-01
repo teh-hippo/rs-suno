@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/teh-hippo/rs-suno/compare/v0.2.2...v0.3.0) (2026-07-01)
+
+
+### Features
+
+* detect a full disk and abort the run with a clear error ([#39](https://github.com/teh-hippo/rs-suno/issues/39)) ([5bfc8c8](https://github.com/teh-hippo/rs-suno/commit/5bfc8c8323d76bbe98eb12154717e72d93a019dc)), closes [#17](https://github.com/teh-hippo/rs-suno/issues/17)
+
 ## [0.2.2](https://github.com/teh-hippo/rs-suno/compare/v0.2.1...v0.2.2) (2026-07-01)
 
 
