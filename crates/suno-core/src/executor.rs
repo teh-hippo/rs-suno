@@ -307,14 +307,6 @@ struct FetchError {
 }
 
 impl FetchError {
-    fn auth(reason: impl Into<String>) -> Self {
-        Self {
-            class: Class::Auth,
-            reason: reason.into(),
-            retry_after: None,
-        }
-    }
-
     fn transient(reason: impl Into<String>, retry_after: Option<Duration>) -> Self {
         Self {
             class: Class::Transient,
@@ -991,7 +983,10 @@ fn classify_response(
             }
             Ok(response.body)
         }
-        401 | 403 => Err(FetchError::auth("download rejected (auth)")),
+        401 | 403 => Err(FetchError::transient(
+            format!("download rejected: status {}", response.status),
+            None,
+        )),
         408 => Err(FetchError::transient("request timed out", None)),
         429 => Err(FetchError::transient(
             "rate limited",
@@ -1654,6 +1649,54 @@ mod tests {
     fn auth_failure_aborts_the_run() {
         let c1 = clip("k1");
         let c2 = clip("k2");
+        let d1 = desired(c1.clone(), AudioFormat::Flac);
+        let d2 = desired(c2.clone(), AudioFormat::Flac);
+        let plan = Plan {
+            actions: vec![
+                Action::Download {
+                    clip: c1.clone(),
+                    lineage: LineageContext::own_root(&c1),
+                    path: d1.path.clone(),
+                    format: AudioFormat::Flac,
+                },
+                Action::Download {
+                    clip: c2.clone(),
+                    lineage: LineageContext::own_root(&c2),
+                    path: d2.path.clone(),
+                    format: AudioFormat::Flac,
+                },
+            ],
+        };
+        // The authenticated WAV-render endpoint rejects auth even after a JWT
+        // refresh: that is a bad token, so the whole run aborts rather than
+        // hammering every clip. A CDN media rejection, by contrast, does not.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/wav_file/", Reply::status(401));
+        let fs = MemFs::new();
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d1, d2],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &small_poll(),
+        );
+
+        assert_eq!(outcome.status, RunStatus::AuthAborted);
+        assert_eq!(outcome.failed(), 1);
+        assert_eq!(outcome.failures[0].clip_id, "k1");
+        assert_eq!(outcome.downloaded, 0);
+    }
+
+    #[test]
+    fn cdn_download_rejection_skips_the_clip_without_aborting() {
+        let c1 = clip("k1");
+        let c2 = clip("k2");
         let d1 = desired(c1.clone(), AudioFormat::Mp3);
         let d2 = desired(c2.clone(), AudioFormat::Mp3);
         let plan = Plan {
@@ -1672,8 +1715,11 @@ mod tests {
                 },
             ],
         };
+        // A CDN media fetch is unauthenticated, so a 403 is a per-asset
+        // rejection (often transient), not a bad token: the clip is retried
+        // then recorded and skipped, and the run carries on to the rest.
         let http = ScriptedHttp::new()
-            .route("k1.mp3", Reply::status(401))
+            .route("k1.mp3", Reply::status(403))
             .route("k2.mp3", Reply::ok(b"body".to_vec()));
         let fs = MemFs::new();
         let mut manifest = Manifest::new();
@@ -1689,12 +1735,10 @@ mod tests {
             &ExecOptions::default(),
         );
 
-        assert_eq!(outcome.status, RunStatus::AuthAborted);
+        assert_ne!(outcome.status, RunStatus::AuthAborted);
+        assert_eq!(outcome.downloaded, 1);
         assert_eq!(outcome.failed(), 1);
         assert_eq!(outcome.failures[0].clip_id, "k1");
-        assert_eq!(outcome.downloaded, 0);
-        assert_eq!(http.count("k2.mp3"), 0);
-        assert!(!fs.exists("k2.mp3"));
     }
 
     #[test]

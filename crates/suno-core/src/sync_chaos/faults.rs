@@ -356,16 +356,18 @@ fn one_clips_failure_never_aborts_the_others() {
 }
 
 #[test]
-fn an_auth_failure_aborts_the_run_cleanly_and_stops_further_work() {
-    // The first clip's download is rejected for auth; the run must abort before
-    // the second clip is even requested.
-    let first = ClipSpec::mirror("c300", "Gatekeeper");
-    let second = ClipSpec::mirror("c301", "Never Reached");
+fn a_cdn_auth_rejection_is_skipped_not_aborted() {
+    // A CDN media fetch carries no token, so a 401/403 is a per-asset rejection
+    // (often transient), not a bad account token. The clip is retried, recorded
+    // as failed, and skipped; the run carries on to later clips rather than
+    // aborting. A genuine auth abort comes only from the authenticated API.
+    let first = ClipSpec::mirror("c300", "Forbidden Asset");
+    let second = ClipSpec::mirror("c301", "Still Reached");
     let fs = MemFs::new();
     let mut manifest = Manifest::new();
 
     let http = ChaosHttp::new()
-        .program("/c300.mp3", vec![Outcome::status(401)])
+        .program("/c300.mp3", vec![Outcome::status(403)])
         .serve("/c301.mp3", b"audio".to_vec());
 
     let specs = [first.clone(), second.clone()];
@@ -378,15 +380,24 @@ fn an_auth_failure_aborts_the_run_cleanly_and_stops_further_work() {
         &fast_opts(),
     );
 
-    assert_eq!(outcome.status, RunStatus::AuthAborted);
-    assert_eq!(outcome.downloaded, 0);
-    assert_eq!(outcome.failed(), 1);
+    assert_ne!(outcome.status, RunStatus::AuthAborted);
     assert_eq!(
-        http.count("/c301.mp3"),
-        0,
-        "an auth abort must stop the run before later clips are touched",
+        outcome.downloaded, 1,
+        "the healthy later clip still downloads"
     );
-    assert!(manifest.is_empty(), "an aborted run records nothing");
+    assert_eq!(outcome.failed(), 1);
+    assert!(
+        http.count("/c301.mp3") >= 1,
+        "later clips are still reached after a CDN rejection",
+    );
+    assert!(
+        manifest.get("c300").is_none(),
+        "the rejected clip is not recorded"
+    );
+    assert!(
+        manifest.get("c301").is_some(),
+        "the healthy clip is recorded"
+    );
 }
 
 #[test]
