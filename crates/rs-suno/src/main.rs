@@ -3,6 +3,7 @@
 
 mod cli;
 mod clock;
+mod diskspace;
 mod download;
 mod ffmpeg;
 mod fs;
@@ -22,8 +23,13 @@ async fn main() {
     let code = match dispatch(cli).await {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err:#}");
-            ExitCode::General
+            if crate::diskspace::anyhow_is_out_of_space(&err) {
+                eprintln!("error: {}", crate::diskspace::DISK_FULL_HINT);
+                ExitCode::DiskFull
+            } else {
+                eprintln!("error: {err:#}");
+                ExitCode::General
+            }
         }
     };
     std::process::exit(code.code());

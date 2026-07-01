@@ -15,8 +15,9 @@
 //!   provider's `Content-Length` is treated as truncated and retried, and a
 //!   written file whose on-disk size disagrees with the bytes written is a
 //!   failure, never a recorded success;
-//! - classifies errors (SYNC-17): an auth failure stops the account run with an
-//!   auth status and is never retried; transient failures (timeouts, 5xx,
+//! - classifies errors (SYNC-17): an auth failure or a full disk stops the
+//!   account run (with an auth or disk-full status) and is never retried;
+//!   transient failures (timeouts, 5xx,
 //!   transport, 429) are retried a bounded number of times then recorded and
 //!   skipped; permanent failures are recorded and skipped; and a single clip's
 //!   failure never aborts the run;
@@ -76,6 +77,9 @@ pub enum RunStatus {
     Completed,
     /// An auth failure stopped the run early; remaining actions were not tried.
     AuthAborted,
+    /// The disk filled; the run stopped early rather than failing every
+    /// remaining clip. Remaining actions were not tried.
+    DiskFull,
 }
 
 /// One action that could not be applied, for the run summary and failure log.
@@ -99,7 +103,8 @@ pub struct ExecOutcome {
     pub artifacts_written: usize,
     pub artifacts_deleted: usize,
     /// Actions that failed and were skipped (auth, transient-exhausted, or
-    /// permanent). The run continued past each one unless it was an auth abort.
+    /// permanent). The run continued past each one unless it was an auth or
+    /// disk-full abort.
     pub failures: Vec<Failure>,
     /// How the run ended.
     pub status: RunStatus,
@@ -152,8 +157,8 @@ pub struct Ports<'a, H, F, G, C> {
 /// stable root id: folder-art writes and deletes record their state there rather
 /// than on the per-clip `manifest`. `ports` bundles the authenticated client and
 /// the network, disk, transcode, and backoff ports. A single clip's failure
-/// never aborts the run, except an auth failure, which stops it with
-/// [`RunStatus::AuthAborted`].
+/// never aborts the run, except an auth failure or a full disk, which stop it
+/// with [`RunStatus::AuthAborted`] or [`RunStatus::DiskFull`].
 pub async fn execute<H, F, G, C>(
     plan: &Plan,
     manifest: &mut Manifest,
@@ -193,21 +198,21 @@ where
         match ctx.apply(action, client, manifest, albums, playlists).await {
             Ok(effect) => outcome.record(effect),
             Err(fail) => {
-                let aborts = matches!(fail.class, Class::Auth);
+                let abort = abort_status(fail.class);
                 outcome.failures.push(Failure {
                     clip_id: fail.clip_id,
                     reason: fail.reason,
                 });
-                if aborts {
-                    outcome.status = RunStatus::AuthAborted;
+                if let Some(status) = abort {
+                    outcome.status = status;
                     break;
                 }
             }
         }
     }
     // Renames and deletes can leave an album directory empty; prune those ghost
-    // directories bottom-up. This runs on both the completed and the auth-abort
-    // path, and is best-effort: a prune failure is only a missed tidy that the
+    // directories bottom-up. This runs on both the completed and the aborted
+    // paths, and is best-effort: a prune failure is only a missed tidy that the
     // next run repeats, never a reason to fail the run.
     let _ = fs.prune_empty_dirs("");
     outcome
@@ -230,6 +235,10 @@ enum Effect {
 enum Class {
     /// Stop the account run; do not retry.
     Auth,
+    /// Stop the account run: a full disk is systemic, like auth, so aborting
+    /// beats skipping every remaining clip (each of which would first burn a
+    /// server-side WAV-render budget before failing the same way).
+    Disk,
     /// Retry a bounded number of times, then record and skip.
     Transient,
     /// Record and skip immediately.
@@ -241,6 +250,16 @@ struct Fail {
     class: Class,
     clip_id: String,
     reason: String,
+}
+
+/// The run-ending status for a failure class, or `None` when the failure is
+/// per-clip and the run continues.
+fn abort_status(class: Class) -> Option<RunStatus> {
+    match class {
+        Class::Auth => Some(RunStatus::AuthAborted),
+        Class::Disk => Some(RunStatus::DiskFull),
+        Class::Transient | Class::Permanent => None,
+    }
 }
 
 fn auth_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail {
@@ -262,6 +281,14 @@ fn transient_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail
 fn permanent_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail {
     Fail {
         class: Class::Permanent,
+        clip_id: clip_id.into(),
+        reason: reason.into(),
+    }
+}
+
+fn disk_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail {
+    Fail {
+        class: Class::Disk,
         clip_id: clip_id.into(),
         reason: reason.into(),
     }
@@ -509,9 +536,13 @@ where
             .get(to)
             .map(|d| d.clip.id.clone())
             .unwrap_or_else(|| to.to_owned());
-        self.fs
-            .rename(from, to)
-            .map_err(|err| permanent_fail(label, format!("rename failed: {err}")))?;
+        self.fs.rename(from, to).map_err(|err| {
+            if err.is_out_of_space() {
+                disk_fail(label, "disk full: no space left to rename")
+            } else {
+                permanent_fail(label, format!("rename failed: {err}"))
+            }
+        })?;
 
         let clip_id = self.by_path.get(to).map(|d| d.clip.id.clone()).or_else(|| {
             manifest
@@ -547,7 +578,8 @@ where
     /// retries transient failures and verifies `Content-Length`, and
     /// `write_verify` confirms the on-disk size. A failure is attributed to the
     /// owning clip and returned as a per-clip [`Fail`], so a bad sidecar never
-    /// aborts the whole run (only an auth class does, matching audio).
+    /// aborts the whole run (only an auth failure or a full disk does, matching
+    /// audio).
     ///
     /// The bytes written depend on the kind: a static cover is the fetched image
     /// verbatim, while an animated cover is the clip's MP4 preview transcoded to
@@ -670,8 +702,8 @@ where
     /// ffmpeg port; every other kind is the fetched source verbatim (e.g. the
     /// static [`CoverJpg`](ArtifactKind::CoverJpg) or album
     /// [`FolderJpg`](ArtifactKind::FolderJpg) image). A fetch or transcode failure
-    /// is attributed to the owning clip so it is a per-clip [`Fail`], never a run
-    /// abort, matching the audio path.
+    /// is attributed to the owning clip and is a per-clip [`Fail`], except a
+    /// disk-full transcode, which aborts the run like the audio FLAC path.
     async fn artifact_bytes(
         &self,
         kind: ArtifactKind,
@@ -687,7 +719,13 @@ where
                 .ffmpeg
                 .mp4_to_webp(&source, WebpEncodeSettings::default())
                 .await
-                .map_err(|err| permanent_fail(owner_id, format!("cover transcode failed: {err}"))),
+                .map_err(|err| {
+                    if err.is_out_of_space() {
+                        disk_fail(owner_id, "disk full: no space left to transcode")
+                    } else {
+                        permanent_fail(owner_id, format!("cover transcode failed: {err}"))
+                    }
+                }),
             _ => Ok(source),
         }
     }
@@ -755,10 +793,13 @@ where
             }
             AudioFormat::Flac => {
                 let wav = self.fetch_wav(client, clip).await?;
-                let flac =
-                    self.ffmpeg.wav_to_flac(&wav).await.map_err(|err| {
+                let flac = self.ffmpeg.wav_to_flac(&wav).await.map_err(|err| {
+                    if err.is_out_of_space() {
+                        disk_fail(&clip.id, "disk full: no space left to transcode")
+                    } else {
                         permanent_fail(&clip.id, format!("transcode failed: {err}"))
-                    })?;
+                    }
+                })?;
                 let cover = self.fetch_cover(clip).await;
                 tag_flac(&flac, &meta, cover.as_deref())
                     .map_err(|err| permanent_fail(&clip.id, err.to_string()))
@@ -882,9 +923,13 @@ where
 
     /// Write `bytes` atomically, then confirm the on-disk size (SYNC-13/14).
     fn write_verify(&self, clip_id: &str, path: &str, bytes: &[u8]) -> Result<u64, Fail> {
-        self.fs
-            .write_atomic(path, bytes)
-            .map_err(|err| permanent_fail(clip_id, format!("write failed: {err}")))?;
+        self.fs.write_atomic(path, bytes).map_err(|err| {
+            if err.is_out_of_space() {
+                disk_fail(clip_id, format!("disk full: no space left to write {path}"))
+            } else {
+                permanent_fail(clip_id, format!("write failed: {err}"))
+            }
+        })?;
         match self.fs.metadata(path) {
             Some(stat) if stat.size == bytes.len() as u64 => Ok(stat.size),
             Some(stat) => Err(permanent_fail(
@@ -1693,6 +1738,189 @@ mod tests {
         assert_eq!(outcome.downloaded, 0);
     }
 
+    // ── Disk-full aborts the run (issue #17) ────────────────────────
+
+    #[test]
+    fn disk_full_primary_write_aborts_the_run() {
+        // Two MP3 downloads; the first write is out of space. That is systemic,
+        // so the run aborts before the second is even attempted: exactly one
+        // failure is recorded and its reason names the disk-full cause.
+        let c1 = clip("d1");
+        let c2 = clip("d2");
+        let d1 = desired(c1.clone(), AudioFormat::Mp3);
+        let d2 = desired(c2.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![
+                Action::Download {
+                    clip: c1.clone(),
+                    lineage: LineageContext::own_root(&c1),
+                    path: d1.path.clone(),
+                    format: AudioFormat::Mp3,
+                },
+                Action::Download {
+                    clip: c2.clone(),
+                    lineage: LineageContext::own_root(&c2),
+                    path: d2.path.clone(),
+                    format: AudioFormat::Mp3,
+                },
+            ],
+        };
+        let http = ScriptedHttp::new()
+            .route("d1.mp3", Reply::ok(b"body-1".to_vec()))
+            .route("d2.mp3", Reply::ok(b"body-2".to_vec()));
+        let fs = MemFs::new().fail_write_out_of_space("d1.mp3");
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d1, d2],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.status, RunStatus::DiskFull);
+        assert_eq!(outcome.failed(), 1);
+        assert_eq!(outcome.failures[0].clip_id, "d1");
+        assert!(outcome.failures[0].reason.contains("disk full"));
+        assert_eq!(outcome.downloaded, 0);
+        // The second clip was never fetched: the run aborted first.
+        assert_eq!(http.count("d2.mp3"), 0);
+        assert!(!fs.exists("d2.mp3"));
+    }
+
+    #[test]
+    fn disk_full_flac_transcode_aborts_the_run() {
+        // The scratch disk fills during the FLAC re-encode; a WAV rendered, but
+        // there is nowhere to stage the transcode, so the run aborts.
+        let c1 = clip("d1");
+        let c2 = clip("d2");
+        let d1 = desired(c1.clone(), AudioFormat::Flac);
+        let d2 = desired(c2.clone(), AudioFormat::Flac);
+        let plan = Plan {
+            actions: vec![
+                Action::Download {
+                    clip: c1.clone(),
+                    lineage: LineageContext::own_root(&c1),
+                    path: d1.path.clone(),
+                    format: AudioFormat::Flac,
+                },
+                Action::Download {
+                    clip: c2.clone(),
+                    lineage: LineageContext::own_root(&c2),
+                    path: d2.path.clone(),
+                    format: AudioFormat::Flac,
+                },
+            ],
+        };
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route(
+                "/wav_file/",
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/d1.wav"}"#),
+            )
+            .route(".wav", Reply::ok(b"wav".to_vec()));
+        let fs = MemFs::new();
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d1, d2],
+            &http,
+            &fs,
+            &StubFfmpeg::out_of_space(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.status, RunStatus::DiskFull);
+        assert_eq!(outcome.failed(), 1);
+        assert_eq!(outcome.failures[0].clip_id, "d1");
+        assert!(outcome.failures[0].reason.contains("disk full"));
+        assert_eq!(outcome.downloaded, 0);
+    }
+
+    #[test]
+    fn disk_full_artifact_write_aborts_the_run() {
+        // A sidecar write (not a primary download) also aborts on a full disk:
+        // the owning audio is present, the cover fetch succeeds, but the sidecar
+        // cannot be written.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::CoverJpg,
+                path: "a/cover.jpg".to_owned(),
+                source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                hash: "h1".to_owned(),
+                owner_id: "a".to_owned(),
+                content: None,
+            }],
+        };
+        let http = ScriptedHttp::new().route("a/large.jpg", Reply::ok(b"jpg-bytes".to_vec()));
+        let fs = MemFs::new().fail_write_out_of_space("a/cover.jpg");
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.status, RunStatus::DiskFull);
+        assert_eq!(outcome.failed(), 1);
+        assert!(outcome.failures[0].reason.contains("disk full"));
+        assert_eq!(outcome.artifacts_written, 0);
+        // The sidecar slot was never recorded: the write failed before it.
+        assert_eq!(manifest.get("a").unwrap().cover_jpg, None);
+    }
+
+    #[test]
+    fn disk_full_leaves_the_failed_clips_manifest_entry_unchanged() {
+        // write_verify fails before any manifest insert, so a re-download that
+        // hits a full disk leaves the prior entry (and file) exactly as it was.
+        let c = clip("m");
+        let d = desired(c.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format: AudioFormat::Mp3,
+            }],
+        };
+        let http = ScriptedHttp::new().route("m.mp3", Reply::ok(b"new-body".to_vec()));
+        let fs = MemFs::new()
+            .with_file("m.mp3", b"OLD-CONTENT".to_vec())
+            .fail_write_out_of_space("m.mp3");
+        let mut manifest = Manifest::new();
+        let before = entry("m.mp3", AudioFormat::Mp3);
+        manifest.insert("m", before.clone());
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.status, RunStatus::DiskFull);
+        assert_eq!(manifest.get("m"), Some(&before));
+        assert_eq!(fs.read_file("m.mp3").unwrap(), b"OLD-CONTENT");
+    }
+
     #[test]
     fn cdn_download_rejection_skips_the_clip_without_aborting() {
         let c1 = clip("k1");
@@ -1959,6 +2187,46 @@ mod tests {
         assert!(fs.exists("new/p.mp3"));
         assert!(!fs.exists("old/p.mp3"));
         assert_eq!(manifest.get("p").unwrap().path, "new/p.mp3");
+    }
+
+    #[test]
+    fn disk_full_rename_aborts_the_run() {
+        // A move onto a full disk is systemic like a full-disk write: the run
+        // aborts with DiskFull and the source file is left untouched.
+        let c = clip("p");
+        let mut d = desired(c.clone(), AudioFormat::Mp3);
+        d.path = "new/p.mp3".to_owned();
+        let fs = MemFs::new()
+            .with_file("old/p.mp3", b"DATA".to_vec())
+            .fail_rename_out_of_space("new/p.mp3");
+        let mut manifest = Manifest::new();
+        manifest.insert("p", entry("old/p.mp3", AudioFormat::Mp3));
+        let plan = Plan {
+            actions: vec![Action::Rename {
+                from: "old/p.mp3".to_owned(),
+                to: "new/p.mp3".to_owned(),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.status, RunStatus::DiskFull);
+        assert_eq!(outcome.renamed, 0);
+        assert_eq!(outcome.failed(), 1);
+        assert!(outcome.failures[0].reason.contains("disk full"));
+        // The source is untouched: the move never happened.
+        assert!(fs.exists("old/p.mp3"));
+        assert!(!fs.exists("new/p.mp3"));
+        assert_eq!(manifest.get("p").unwrap().path, "old/p.mp3");
     }
 
     #[test]

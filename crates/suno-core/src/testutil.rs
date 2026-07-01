@@ -225,6 +225,8 @@ pub(crate) struct MemFs {
     files: Mutex<HashMap<String, Vec<u8>>>,
     dirs: Mutex<BTreeSet<String>>,
     fail_writes: Mutex<HashSet<String>>,
+    fail_writes_oos: Mutex<HashSet<String>>,
+    fail_renames_oos: Mutex<HashSet<String>>,
     corrupt_writes: Mutex<HashSet<String>>,
     fail_removes: Mutex<HashSet<String>>,
 }
@@ -235,6 +237,8 @@ impl MemFs {
             files: Mutex::new(HashMap::new()),
             dirs: Mutex::new(BTreeSet::new()),
             fail_writes: Mutex::new(HashSet::new()),
+            fail_writes_oos: Mutex::new(HashSet::new()),
+            fail_renames_oos: Mutex::new(HashSet::new()),
             corrupt_writes: Mutex::new(HashSet::new()),
             fail_removes: Mutex::new(HashSet::new()),
         }
@@ -260,6 +264,20 @@ impl MemFs {
     /// Make `write_atomic` to `path` fail, leaving any prior file intact.
     pub(crate) fn fail_write(self, path: &str) -> Self {
         self.fail_writes.lock().unwrap().insert(path.to_owned());
+        self
+    }
+
+    /// Make `write_atomic` to `path` fail with an out-of-space [`FsError`], so
+    /// the executor classifies it as a disk-full run abort (not a per-clip skip).
+    pub(crate) fn fail_write_out_of_space(self, path: &str) -> Self {
+        self.fail_writes_oos.lock().unwrap().insert(path.to_owned());
+        self
+    }
+
+    /// Make a `rename` onto `to` fail with an out-of-space [`FsError`], so the
+    /// executor classifies the move as a disk-full run abort.
+    pub(crate) fn fail_rename_out_of_space(self, to: &str) -> Self {
+        self.fail_renames_oos.lock().unwrap().insert(to.to_owned());
         self
     }
 
@@ -339,6 +357,11 @@ impl MemFs {
 
 impl Filesystem for MemFs {
     fn write_atomic(&self, path: &str, bytes: &[u8]) -> Result<(), FsError> {
+        if self.fail_writes_oos.lock().unwrap().contains(path) {
+            return Err(FsError::out_of_space(format!(
+                "simulated out-of-space write: {path}"
+            )));
+        }
         if self.fail_writes.lock().unwrap().contains(path) {
             return Err(FsError::new(format!("simulated write failure: {path}")));
         }
@@ -353,6 +376,11 @@ impl Filesystem for MemFs {
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<(), FsError> {
+        if self.fail_renames_oos.lock().unwrap().contains(to) {
+            return Err(FsError::out_of_space(format!(
+                "simulated out-of-space rename onto {to}"
+            )));
+        }
         let mut files = self.files.lock().unwrap();
         match files.remove(from) {
             Some(bytes) => {
@@ -444,7 +472,14 @@ fn strictly_under(path: &str, base: &str) -> bool {
 /// FLAC and animated-WebP transcode paths.
 pub(crate) struct StubFfmpeg {
     output: Vec<u8>,
-    fail: bool,
+    fault: Option<StubFault>,
+}
+
+/// The failure a [`StubFfmpeg`] injects, so tests can exercise both a generic
+/// transcode error and a disk-full (out-of-space) one.
+enum StubFault {
+    Generic,
+    OutOfSpace,
 }
 
 impl StubFfmpeg {
@@ -452,7 +487,7 @@ impl StubFfmpeg {
     pub(crate) fn flac() -> Self {
         Self {
             output: minimal_flac(),
-            fail: false,
+            fault: None,
         }
     }
 
@@ -461,7 +496,7 @@ impl StubFfmpeg {
     pub(crate) fn webp() -> Self {
         Self {
             output: b"RIFF\x00\x00\x00\x00WEBP-canned-anim".to_vec(),
-            fail: false,
+            fault: None,
         }
     }
 
@@ -469,7 +504,25 @@ impl StubFfmpeg {
     pub(crate) fn failing() -> Self {
         Self {
             output: Vec::new(),
-            fail: true,
+            fault: Some(StubFault::Generic),
+        }
+    }
+
+    /// Always fails out-of-space, to exercise the disk-full transcode abort.
+    pub(crate) fn out_of_space() -> Self {
+        Self {
+            output: Vec::new(),
+            fault: Some(StubFault::OutOfSpace),
+        }
+    }
+
+    fn result(&self) -> Result<Vec<u8>, FfmpegError> {
+        match &self.fault {
+            None => Ok(self.output.clone()),
+            Some(StubFault::Generic) => Err(FfmpegError::new("simulated transcode failure")),
+            Some(StubFault::OutOfSpace) => Err(FfmpegError::out_of_space(
+                "simulated out-of-space transcode",
+            )),
         }
     }
 }
@@ -479,11 +532,7 @@ impl Ffmpeg for StubFfmpeg {
         &self,
         _wav: &[u8],
     ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
-        let out = if self.fail {
-            Err(FfmpegError::new("simulated transcode failure"))
-        } else {
-            Ok(self.output.clone())
-        };
+        let out = self.result();
         async move { out }
     }
 
@@ -492,11 +541,7 @@ impl Ffmpeg for StubFfmpeg {
         _mp4: &[u8],
         _settings: WebpEncodeSettings,
     ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
-        let out = if self.fail {
-            Err(FfmpegError::new("simulated transcode failure"))
-        } else {
-            Ok(self.output.clone())
-        };
+        let out = self.result();
         async move { out }
     }
 }

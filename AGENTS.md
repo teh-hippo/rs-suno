@@ -51,6 +51,7 @@ Ports and adapters. `suno-core` is runtime-agnostic and performs no direct IO; i
 - Formats: MP3, FLAC, and WAV; default FLAC; per-source override in TOML.
 - Auth: there is no public Suno API key. A Clerk `__client` cookie (a pasted token) mints short-lived JWTs that refresh automatically. The cookie is sent only to Clerk.
 - Deletion safety (critical): one file per account; delete only when a clip is absent from every mirror source; copy and archive always win; never delete on an empty, failed, partial, or truncated listing.
+- A disk-full write (or transcode) is systemic, not a per-clip skip: it aborts the run like an auth failure and exits `9`, leaving the library unchanged for the failing action.
 - Album model: lineage album only.
 
 ## Rules
@@ -88,7 +89,7 @@ Ports and adapters. `suno-core` is runtime-agnostic and performs no direct IO; i
 ## Design and contributing
 
 - The CLI surface, flags, output formats, exit codes, and help text are documented in the user guide (`docs/src/`, published to GitHub Pages). Match it; if you must diverge, say so and update it.
-- Exit codes: `0` ok, `1` general error, `2` usage, `3` config, `4` auth, `5` partial, `6` transient-exhausted, `7` safety abort, `8` interrupted. Usage is `2` to match clap's default.
+- Exit codes: `0` ok, `1` general error, `2` usage, `3` config, `4` auth, `5` partial, `6` transient-exhausted, `7` safety abort, `8` interrupted, `9` disk full. Usage is `2` to match clap's default.
 - Keep each change tightly scoped to one module or concern. Add new modules as their own files and export them from `lib.rs`; avoid wide edits that cause integration conflicts.
 - We integrate fast-forward only (rebase onto `main`, then `git merge --ff-only`).
 

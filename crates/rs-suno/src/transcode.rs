@@ -68,6 +68,15 @@ pub fn wav_to_flac(wav: &[u8], scratch_dir: &Path) -> Result<Vec<u8>> {
     }
 
     if !status.success() {
+        // ffmpeg reports a full disk only as stderr text with no io::Error. The
+        // scratch dir is the library destination, so a disk that fills mid-encode
+        // (the WAV staged, but no room for the WAV+FLAC pair) would otherwise
+        // degrade to a per-clip skip and repeat for every clip. Probe the scratch
+        // dir: if a tiny write also hits ENOSPC, carry a real out-of-space
+        // io::Error so the adapter classifies this as a disk-full run abort.
+        if let Some(err) = scratch_out_of_space(scratch_dir) {
+            return Err(anyhow::Error::new(err).context("disk full while transcoding to FLAC"));
+        }
         bail!(
             "ffmpeg failed to transcode WAV to FLAC: {}",
             stderr_tail(&stderr)
@@ -186,6 +195,23 @@ fn stderr_tail(stderr: &[u8]) -> String {
     lines[start..].join("; ")
 }
 
+/// Probe `dir` for out-of-space by writing a tiny hidden file.
+///
+/// Returns `Some(err)` only when the probe write fails with an out-of-space
+/// error (proving the disk is full); a successful probe or any other error
+/// returns `None`, so a genuine encode failure on a healthy disk stays a
+/// per-clip skip. The probe file is removed best-effort in every case.
+fn scratch_out_of_space(dir: &Path) -> Option<std::io::Error> {
+    let probe = dir.join(format!(".suno-space-probe-{}", unique_stamp()));
+    let result = std::fs::write(&probe, b"0");
+    let _ = std::fs::remove_file(&probe);
+    match result {
+        Ok(()) => None,
+        Err(err) if crate::diskspace::is_out_of_space(&err) => Some(err),
+        Err(_) => None,
+    }
+}
+
 /// A process- and call-unique stamp for temporary file names.
 fn unique_stamp() -> String {
     let nanos = SystemTime::now()
@@ -233,6 +259,18 @@ mod tests {
         };
         assert_eq!(quality_args(&settings), vec!["-lossless", "1"]);
         assert_eq!(compression_args(&settings), vec!["-compression_level", "0"]);
+    }
+
+    #[test]
+    fn scratch_probe_is_none_on_a_writable_dir() {
+        // A healthy, writable scratch dir never reports out-of-space, so a real
+        // encode failure there stays a per-clip skip. The true-ENOSPC branch
+        // reuses the already-tested `is_out_of_space` and is not unit-testable
+        // without a genuinely full disk.
+        let dir = Path::new("target").join(format!("space-probe-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(scratch_out_of_space(&dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Proves the real ffmpeg pipeline: a file-output FLAC carries a complete

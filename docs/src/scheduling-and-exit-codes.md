@@ -17,6 +17,7 @@ correctly.
 | 6 | Transient failure (exhausted) | Every clip failed with transient errors; nothing progressed. |
 | 7 | Safety abort | A deletion safety rule triggered; no files were deleted. |
 | 8 | Interrupted | The run received an interrupt; partial progress is preserved. |
+| 9 | Disk full | The destination ran out of space; free space and re-run. The library is unchanged for the failing action. |
 
 `check --exit-code` is the exception to this table: it exits 1 to signal that
 changes are pending, and 0 when the destination is already up to date.

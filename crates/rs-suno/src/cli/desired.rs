@@ -36,6 +36,7 @@ pub enum ExitCode {
     Transient = 6,
     Safety = 7,
     Interrupted = 8,
+    DiskFull = 9,
 }
 
 impl ExitCode {
@@ -323,9 +324,13 @@ pub fn confirmed(answer: &str) -> bool {
 
 /// Map an [`ExecOutcome`] to a process exit code (docs/src/scheduling-and-exit-codes.md).
 ///
-/// An auth abort is 4. A clean run is 0. With failures, the run is "transient
+/// A disk-full abort is 9 and an auth abort is 4, both checked before the
+/// failures list. A clean run is 0. With failures, the run is "transient
 /// exhausted" (6) when nothing at all progressed, otherwise "partial" (5).
 pub fn run_exit_code(outcome: &ExecOutcome) -> ExitCode {
+    if outcome.status == RunStatus::DiskFull {
+        return ExitCode::DiskFull;
+    }
     if outcome.status == RunStatus::AuthAborted {
         return ExitCode::Auth;
     }
@@ -931,6 +936,14 @@ mod tests {
     }
 
     #[test]
+    fn exit_code_disk_full_abort() {
+        // A disk-full abort maps to 9, ahead of the failures-based partial logic
+        // even though one clip is recorded as failed.
+        let o = outcome(3, 0, 1, RunStatus::DiskFull);
+        assert_eq!(run_exit_code(&o), ExitCode::DiskFull);
+    }
+
+    #[test]
     fn exit_code_clean_run() {
         let o = outcome(12, 100, 0, RunStatus::Completed);
         assert_eq!(run_exit_code(&o), ExitCode::Ok);
@@ -965,6 +978,7 @@ mod tests {
         assert_eq!(ExitCode::Transient.code(), 6);
         assert_eq!(ExitCode::Safety.code(), 7);
         assert_eq!(ExitCode::Interrupted.code(), 8);
+        assert_eq!(ExitCode::DiskFull.code(), 9);
     }
 
     fn path_of<'a>(desired: &'a [Desired], id: &str) -> &'a str {

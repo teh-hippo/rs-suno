@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use suno_core::{Clip, Http, HttpRequest};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -35,11 +35,11 @@ pub async fn cover(http: &impl Http, clip: &Clip) -> Option<Vec<u8>> {
 ///
 /// The temp name is process-unique so two concurrent writers never race on it,
 /// and a drop guard removes it if writing or the final rename fails.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = temp_sibling(path);
     let _scratch = Scratch(tmp.clone());
-    std::fs::write(&tmp, bytes).with_context(|| format!("could not write {}", tmp.display()))?;
-    replace(&tmp, path).with_context(|| format!("could not finalise {}", path.display()))?;
+    std::fs::write(&tmp, bytes)?;
+    replace(&tmp, path)?;
     Ok(())
 }
 
