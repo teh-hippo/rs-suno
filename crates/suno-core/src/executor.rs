@@ -35,7 +35,7 @@ use crate::client::SunoClient;
 use crate::clock::Clock;
 use crate::config::AudioFormat;
 use crate::error::Error;
-use crate::ffmpeg::Ffmpeg;
+use crate::ffmpeg::{Ffmpeg, WebpEncodeSettings};
 use crate::fs::Filesystem;
 use crate::http::{Http, HttpRequest};
 use crate::lineage::LineageContext;
@@ -504,6 +504,10 @@ where
     /// owning clip and returned as a per-clip [`Fail`], so a bad sidecar never
     /// aborts the whole run (only an auth class does, matching audio).
     ///
+    /// The bytes written depend on the kind: a static cover is the fetched image
+    /// verbatim, while an animated cover is the clip's MP4 preview transcoded to
+    /// WebP through the ffmpeg port (see [`artifact_bytes`](Self::artifact_bytes)).
+    ///
     /// A sidecar is only ever written for a clip whose audio is present: a
     /// successful `Download`/`Reformat` creates the manifest entry earlier in
     /// this run, and a prior-run clip already has one. So an absent owning entry
@@ -521,10 +525,7 @@ where
         if manifest.get(owner_id).is_none() {
             return Ok(Effect::Skipped);
         }
-        let bytes = self
-            .fetch_bytes(source_url)
-            .await
-            .map_err(|err| err.attribute(owner_id))?;
+        let bytes = self.artifact_bytes(kind, source_url, owner_id).await?;
         self.write_verify(owner_id, path, &bytes)?;
         if let Some(entry) = manifest.entries.get_mut(owner_id) {
             set_manifest_artifact(
@@ -537,6 +538,34 @@ where
             );
         }
         Ok(Effect::ArtifactWritten)
+    }
+
+    /// Produce a sidecar's bytes from its source, branching on kind.
+    ///
+    /// A [`CoverWebp`](ArtifactKind::CoverWebp) fetches the clip's `video_cover`
+    /// MP4 preview and transcodes it to an animated WebP through the ffmpeg port;
+    /// every other kind is the fetched source verbatim (e.g. the static
+    /// [`CoverJpg`](ArtifactKind::CoverJpg) image). A fetch or transcode failure
+    /// is attributed to the owning clip so it is a per-clip [`Fail`], never a run
+    /// abort, matching the audio path.
+    async fn artifact_bytes(
+        &self,
+        kind: ArtifactKind,
+        source_url: &str,
+        owner_id: &str,
+    ) -> Result<Vec<u8>, Fail> {
+        let source = self
+            .fetch_bytes(source_url)
+            .await
+            .map_err(|err| err.attribute(owner_id))?;
+        match kind {
+            ArtifactKind::CoverWebp => self
+                .ffmpeg
+                .mp4_to_webp(&source, WebpEncodeSettings::default())
+                .await
+                .map_err(|err| permanent_fail(owner_id, format!("cover transcode failed: {err}"))),
+            _ => Ok(source),
+        }
     }
 
     /// Remove a sidecar file and clear its slot on the owning manifest entry.
@@ -2215,6 +2244,108 @@ mod tests {
         assert!(!fs.exists("a/cover.jpg"));
         assert!(manifest.get("a").is_none());
         // The healthy clip's sidecar still succeeded.
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(fs.read_file("b/cover.jpg").unwrap(), b"jpg-b");
+        assert!(manifest.get("b").unwrap().cover_jpg.is_some());
+    }
+
+    #[test]
+    fn write_artifact_transcodes_animated_cover_to_webp() {
+        // A CoverWebp fetches the clip's MP4 preview, runs it through the ffmpeg
+        // port, and writes the transcoded WebP (not the fetched MP4), recording
+        // the sidecar on the owning entry.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::CoverWebp,
+                path: "a/cover.webp".to_owned(),
+                source_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+                hash: "v1".to_owned(),
+                owner_id: "a".to_owned(),
+            }],
+        };
+        let http = ScriptedHttp::new().route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec()));
+        let fs = MemFs::new();
+        let ffmpeg = StubFfmpeg::webp();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &ffmpeg,
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(outcome.status, RunStatus::Completed);
+        // The fetched MP4 was transcoded: the file holds the ffmpeg WebP output.
+        assert_eq!(http.count("a/video.mp4"), 1);
+        let written = fs.read_file("a/cover.webp").unwrap();
+        assert_ne!(written, b"mp4-bytes");
+        assert!(written.starts_with(b"RIFF"));
+        assert_eq!(
+            manifest.get("a").unwrap().cover_webp,
+            Some(ArtifactState {
+                path: "a/cover.webp".to_owned(),
+                hash: "v1".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn write_artifact_webp_transcode_failure_is_per_clip() {
+        // A transcode failure is attributed to the owning clip: it is a per-clip
+        // failure, the run completes, no sidecar is written, and the slot stays
+        // empty. A healthy static cover in the same run still succeeds.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
+        manifest.insert("b", entry("b.mp3", AudioFormat::Mp3));
+        let plan = Plan {
+            actions: vec![
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverWebp,
+                    path: "a/cover.webp".to_owned(),
+                    source_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+                    hash: "v1".to_owned(),
+                    owner_id: "a".to_owned(),
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "b/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/b/large.jpg".to_owned(),
+                    hash: "h1".to_owned(),
+                    owner_id: "b".to_owned(),
+                },
+            ],
+        };
+        let http = ScriptedHttp::new()
+            .route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec()))
+            .route("b/large.jpg", Reply::ok(b"jpg-b".to_vec()));
+        let fs = MemFs::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::failing(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(outcome.failed(), 1);
+        assert_eq!(outcome.failures[0].clip_id, "a");
+        // The animated cover failed to transcode: nothing written, slot empty.
+        assert!(!fs.exists("a/cover.webp"));
+        assert_eq!(manifest.get("a").unwrap().cover_webp, None);
+        // The static cover in the same run still succeeded.
         assert_eq!(outcome.artifacts_written, 1);
         assert_eq!(fs.read_file("b/cover.jpg").unwrap(), b"jpg-b");
         assert!(manifest.get("b").unwrap().cover_jpg.is_some());

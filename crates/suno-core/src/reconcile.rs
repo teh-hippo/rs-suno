@@ -414,6 +414,24 @@ fn is_per_clip_kind(kind: ArtifactKind) -> bool {
     matches!(kind, ArtifactKind::CoverJpg | ArtifactKind::CoverWebp)
 }
 
+/// Whether a no-longer-desired ("removed kind") artifact may be delete-reconciled
+/// while its owning clip's audio is kept this run.
+///
+/// Cover art deliberately opts out: a clip's art or video-preview URL can be
+/// transiently absent for a run (the feed omits it, or a fetch fails), and the
+/// desired set then simply lacks that cover. Treating that absence as a removal
+/// and deleting the on-disk sidecar would churn a perfectly good cover, so an
+/// empty/transient URL must KEEP the existing file. A cover is therefore removed
+/// only by [`co_delete_artifacts`], when the owning clip leaves every mirror
+/// source and its audio is deleted (a fully gated path). The removed-kind
+/// mechanism is kept intact for any future sidecar kind that genuinely wants it.
+fn removed_kind_delete_eligible(kind: ArtifactKind) -> bool {
+    match kind {
+        ArtifactKind::CoverJpg | ArtifactKind::CoverWebp => false,
+        ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => true,
+    }
+}
+
 /// The manifest slot for a per-clip artifact kind, if that kind is stored on the
 /// entry. Album/library classes have no per-clip slot yet, so they map to
 /// `None`; the match stays generic so later phases can add slots without
@@ -460,10 +478,12 @@ pub(crate) fn set_manifest_artifact(
 /// Reconcile the artifacts of a clip whose audio is kept this run.
 ///
 /// Writes each desired per-clip artifact that the manifest lacks, whose stored
-/// hash drifts, or whose stored path drifts (the audio moved). Deletes each
-/// manifest artifact whose kind is no longer desired (a removed kind), always
+/// hash drifts, or whose stored path drifts (the audio moved). Delete-reconciles
+/// each manifest artifact whose kind is no longer desired (a removed kind)
 /// through the shared [`delete_artifact_action`] gate, unless the clip is
-/// protected this run.
+/// protected this run, and unless the kind opts out of removed-kind deletion
+/// ([`removed_kind_delete_eligible`]) — cover art does, so a transient empty URL
+/// keeps its sidecar rather than deleting it.
 fn plan_clip_artifacts(d: &Desired, manifest: &Manifest, can_delete: bool, out: &mut Vec<Action>) {
     let owner_id = d.clip.id.as_str();
     let entry = manifest.get(owner_id);
@@ -480,7 +500,7 @@ fn plan_clip_artifacts(d: &Desired, manifest: &Manifest, can_delete: bool, out: 
         // renamed to a new album/name). Removing the OLD sidecar at the previous
         // path on a move is deferred to P10 (RenameClip). Self-healing a sidecar
         // that is missing on disk despite a matching manifest record is deferred
-        // to P7 (it needs a local-artifact presence probe, as audio has).
+        // beyond P7 (it needs a local-artifact presence probe, as audio has).
         let needs_write = match entry.and_then(|e| manifest_artifact_by_kind(e, artifact.kind)) {
             None => true,
             Some(state) => state.hash != artifact.hash || state.path != artifact.path,
@@ -509,7 +529,13 @@ fn plan_clip_artifacts(d: &Desired, manifest: &Manifest, can_delete: bool, out: 
             .map(|a| a.kind)
             .collect();
         for (kind, state) in manifest_artifacts(entry) {
-            if !desired_kinds.contains(&kind)
+            // Cover kinds opt out of removed-kind deletion (see
+            // `removed_kind_delete_eligible`): an absent desired cover means an
+            // empty/transient URL, which must KEEP the on-disk sidecar, never
+            // delete it. Only a co-delete (audio gone) removes a cover. The loop
+            // and gate stay in place for any future kind that opts back in.
+            if removed_kind_delete_eligible(kind)
+                && !desired_kinds.contains(&kind)
                 && let Some(action) =
                     delete_artifact_action(owner_id, kind, &state.path, manifest, can_delete)
             {
@@ -1775,28 +1801,40 @@ mod tests {
     }
 
     #[test]
-    fn delete_artifact_emitted_for_removed_kind_when_can_delete() {
-        // The clip is kept but no longer desires a cover.jpg (kind removed), so
-        // the stale manifest sidecar is reconciled for deletion.
+    fn removed_kind_cover_is_kept_not_deleted() {
+        // The clip is kept but no longer desires a cover.jpg (an empty/transient
+        // art URL this run). Covers opt out of removed-kind deletion, so the
+        // existing sidecar is KEPT: no DeleteArtifact, no write, just a Skip.
+        // This is the empty-art-URL keep the P6 review deferred to P7.
         let mut manifest = Manifest::new();
         manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
         let d = vec![desired_arts("a", vec![])];
         let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
-        assert_eq!(plan.artifact_deletes(), 1);
+        assert_eq!(plan.artifact_deletes(), 0);
         assert_eq!(plan.artifact_writes(), 0);
-        // The audio is untouched.
+        // The audio is untouched and the cover is preserved on disk.
         assert_eq!(plan.deletes(), 0);
-        assert!(plan.actions.contains(&Action::DeleteArtifact {
-            kind: ArtifactKind::CoverJpg,
-            path: "a/cover.jpg".to_string(),
-            owner_id: "a".to_string(),
-        }));
+        assert_eq!(
+            plan.actions,
+            vec![Action::Skip {
+                clip_id: "a".to_string()
+            }]
+        );
+        assert!(!plan.actions.iter().any(|a| matches!(
+            a,
+            Action::DeleteArtifact {
+                kind: ArtifactKind::CoverJpg,
+                ..
+            }
+        )));
     }
 
     #[test]
     fn delete_artifact_never_on_incomplete_listing() {
-        // A not-fully-enumerated mirror forbids every delete, sidecars included:
-        // this is the B2 gate. Even a large manifest of stale sidecars is safe.
+        // Kept clips no longer desiring their covers keep them: covers opt out of
+        // removed-kind deletion. An incomplete mirror is a further backstop that
+        // forbids every delete (the B2 gate on the co-delete path). Either way, a
+        // large manifest of stale sidecars is safe.
         let mut manifest = Manifest::new();
         manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
         manifest.insert("b", entry_with_cover_jpg("b", "b/cover.jpg", "h1"));
@@ -1818,7 +1856,8 @@ mod tests {
 
     #[test]
     fn delete_artifact_never_when_entry_preserved() {
-        // A preserved clip's sidecars are preserved too, even fully enumerated.
+        // A kept clip that stops desiring its cover keeps it (covers opt out of
+        // removed-kind deletion); the preserve marker is a further backstop.
         let mut manifest = Manifest::new();
         let preserved = ManifestEntry {
             preserve: true,
@@ -1831,12 +1870,14 @@ mod tests {
     }
 
     #[test]
-    fn delete_artifact_never_when_path_empty() {
-        // A sidecar with an empty path must never become a delete of the root.
+    fn co_delete_never_when_path_empty() {
+        // The empty-path guard now matters on the co-delete path (covers opt out
+        // of removed-kind deletion). An absent clip's audio is deleted, but its
+        // sidecar with an empty path must never become a delete of the root.
         let mut manifest = Manifest::new();
-        manifest.insert("a", entry_with_cover_jpg("a", "", "h1"));
-        let d = vec![desired_arts("a", vec![])];
-        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        manifest.insert("gone", entry_with_cover_jpg("gone", "", "h1"));
+        let plan = reconcile(&manifest, &[], &HashMap::new(), &mirror_ok());
+        assert_eq!(plan.deletes(), 1);
         assert_eq!(plan.artifact_deletes(), 0);
     }
 
@@ -2032,9 +2073,11 @@ mod tests {
 
     #[test]
     fn removed_kind_sidecar_kept_when_clip_is_protected_this_run() {
-        // The persisted entry is NOT preserve-marked, so only the clip's
-        // current-run protection can save its sidecar. A private clip and a
-        // copy-held clip each keep a removed-kind cover, even fully enumerated.
+        // Covers opt out of removed-kind deletion, so a kept clip keeps its cover
+        // regardless of protection. This case additionally proves protection is
+        // honoured: a private clip and a copy-held clip each keep a removed-kind
+        // cover even though the persisted entry is NOT preserve-marked and the
+        // mirror is fully enumerated.
         let mut manifest = Manifest::new();
         manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
         assert!(!manifest.get("a").unwrap().preserve);

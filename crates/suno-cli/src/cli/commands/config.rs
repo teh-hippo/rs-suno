@@ -142,6 +142,7 @@ fn render_show(config: &Config) -> String {
         || d.concurrency.is_some()
         || d.retries.is_some()
         || d.min_newest.is_some()
+        || d.animated_covers.is_some()
     {
         out.push_str("[defaults]\n");
         push_opt(&mut out, "format", d.format.map(|f| f.to_string()));
@@ -152,6 +153,11 @@ fn render_show(config: &Config) -> String {
         );
         push_opt(&mut out, "retries", d.retries.map(|v| v.to_string()));
         push_opt(&mut out, "min_newest", d.min_newest.map(|v| v.to_string()));
+        push_opt(
+            &mut out,
+            "animated_covers",
+            d.animated_covers.map(|v| v.to_string()),
+        );
         out.push('\n');
     }
 
@@ -176,6 +182,11 @@ fn render_show(config: &Config) -> String {
             &mut out,
             "min_newest",
             acc.min_newest.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "animated_covers",
+            acc.animated_covers.map(|v| v.to_string()),
         );
         let mut sources: Vec<&String> = acc.sources.keys().collect();
         sources.sort();
@@ -328,6 +339,16 @@ mod tests {
         let shown = render_show(&config);
         assert!(shown.contains("concurrency = 8"));
         assert!(shown.contains("reserved; downloads are sequential"));
+    }
+
+    #[test]
+    fn show_renders_animated_covers() {
+        let toml =
+            "[defaults]\nanimated_covers = true\n\n[accounts.alice]\nanimated_covers = false\n";
+        let config = Config::from_toml(toml).unwrap();
+        let shown = render_show(&config);
+        assert!(shown.contains("animated_covers = true"));
+        assert!(shown.contains("animated_covers = false"));
     }
 
     #[test]

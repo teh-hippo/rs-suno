@@ -386,6 +386,8 @@ fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
         concurrency: args.concurrency,
         retries: args.retries,
         min_newest: args.min_newest,
+        // A presence-only toggle can only enable; absence defers to config/env.
+        animated_covers: args.animated_covers.then_some(true),
     }
 }
 
@@ -506,6 +508,7 @@ async fn run_one(
         verb.mode(),
         &contexts,
         &colliding_albums,
+        settings.animated_covers,
     );
 
     let dry_run = global.dry_run || verb == Verb::Check;

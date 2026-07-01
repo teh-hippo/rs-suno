@@ -10,8 +10,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path};
 
 use suno_core::{
-    AudioFormat, Clip, Desired, ExecOutcome, LineageContext, NamingConfig, NamingRequest,
-    RunStatus, SourceMode, art_hash, meta_hash, render_clip_names,
+    ArtifactKind, AudioFormat, Clip, Desired, DesiredArtifact, ExecOutcome, LineageContext,
+    NamingConfig, NamingRequest, RunStatus, SourceMode, art_hash, art_url_hash, meta_hash,
+    render_clip_names,
 };
 
 /// Below this manifest size the mass-deletion fraction rule does not fire; a
@@ -58,12 +59,17 @@ impl ExitCode {
 /// more than one distinct root; a clip whose album is in that set is folded into
 /// a `[{root_id8}]`-suffixed folder so two distinct roots never share one,
 /// regardless of which clips this batch happens to hold.
+///
+/// `animated_covers` mirrors the resolved `--animated-covers` setting: when set,
+/// a clip with a video preview also gains a `cover.webp` sidecar (see
+/// [`clip_artifacts`]).
 pub fn build_desired(
     clips: &[&Clip],
     format: AudioFormat,
     mode: SourceMode,
     contexts: &HashMap<String, LineageContext>,
     colliding_albums: &BTreeSet<String>,
+    animated_covers: bool,
 ) -> Vec<Desired> {
     let config = NamingConfig::default();
     let lineages: Vec<LineageContext> = clips
@@ -91,7 +97,9 @@ pub fn build_desired(
         .zip(names)
         .zip(lineages)
         .map(|((clip, name), lineage)| {
-            let path = format!("{}.{format}", rel_to_string(&name.relative_path));
+            // The extensionless audio path; the sidecars swap the extension.
+            let base = rel_to_string(&name.relative_path);
+            let path = format!("{base}.{format}");
             let meta_hash = meta_hash(clip, &lineage);
             Desired {
                 clip: (*clip).clone(),
@@ -103,14 +111,41 @@ pub fn build_desired(
                 modes: vec![mode],
                 trashed: false,
                 private: false,
-                // P7 populates the per-clip cover sidecars here. It must treat
-                // an empty art URL as UNKNOWN => KEEP (do NOT omit CoverJpg when
-                // the URL is empty), so a transient empty URL never strands or
-                // deletes an existing cover. Empty for now: no artifact actions.
-                artifacts: Vec::new(),
+                artifacts: clip_artifacts(clip, &base, animated_covers),
             }
         })
         .collect()
+}
+
+/// The per-clip cover sidecars desired alongside `base`, the extensionless audio
+/// path (so `cover.jpg` and `cover.webp` sit next to the audio file).
+///
+/// A static `CoverJpg` is emitted whenever the clip has non-empty selected art;
+/// an animated `CoverWebp` only when `animated_covers` is set and the clip
+/// carries a video preview. An empty art URL emits NO `CoverJpg`: reconcile
+/// reads a desired that simply lacks a cover as UNKNOWN => KEEP, never a delete,
+/// so a transient empty URL cannot strand or remove an existing cover. The
+/// `CoverJpg` hash tracks the art URL (`art_hash`); the `CoverWebp` hash tracks
+/// the video URL, so a changed source re-transcodes.
+fn clip_artifacts(clip: &Clip, base: &str, animated_covers: bool) -> Vec<DesiredArtifact> {
+    let mut artifacts = Vec::new();
+    if let Some(url) = clip.selected_image_url().filter(|u| !u.is_empty()) {
+        artifacts.push(DesiredArtifact {
+            kind: ArtifactKind::CoverJpg,
+            path: format!("{base}.jpg"),
+            source_url: url.to_owned(),
+            hash: art_hash(clip),
+        });
+    }
+    if animated_covers && !clip.video_cover_url.is_empty() {
+        artifacts.push(DesiredArtifact {
+            kind: ArtifactKind::CoverWebp,
+            path: format!("{base}.webp"),
+            source_url: clip.video_cover_url.clone(),
+            hash: art_url_hash(&clip.video_cover_url),
+        });
+    }
+    artifacts
 }
 
 /// Render a relative path as a forward-slash string, dropping any non-normal
@@ -277,6 +312,7 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
+            false,
         );
         assert_eq!(desired.len(), 1);
         assert!(
@@ -314,6 +350,7 @@ mod tests {
             SourceMode::Mirror,
             &contexts,
             &no_collisions(),
+            false,
         );
         // The album folders under the root title, and the hash/lineage carry the
         // resolved context, not a self-rooted fallback.
@@ -388,6 +425,7 @@ mod tests {
             SourceMode::Mirror,
             &contexts_of(&store),
             &store.colliding_root_titles(),
+            false,
         );
         let child1 = cycle1.iter().find(|d| d.clip.id == "child-remix").unwrap();
         assert!(
@@ -403,6 +441,7 @@ mod tests {
             SourceMode::Mirror,
             &contexts_of(&store),
             &store.colliding_root_titles(),
+            false,
         );
         for (a, b) in cycle1.iter().zip(&cycle2) {
             assert_eq!(a.path, b.path, "album path drifted for {}", a.clip.id);
@@ -436,6 +475,7 @@ mod tests {
             SourceMode::Copy,
             &no_contexts(),
             &no_collisions(),
+            false,
         );
         assert_ne!(desired[0].path, desired[1].path);
         assert!(desired.iter().all(|d| d.path.ends_with(".mp3")));
@@ -452,9 +492,119 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
+            false,
         );
         assert!(!desired[0].path.contains('\\'));
         assert!(desired[0].path.contains('/'));
+    }
+
+    fn art_clip(id: &str) -> Clip {
+        Clip {
+            image_large_url: format!("https://art.suno.ai/{id}/large.jpg"),
+            ..clip(id, "Song", "alice")
+        }
+    }
+
+    #[test]
+    fn build_desired_emits_cover_jpg_next_to_audio() {
+        // A clip with art gains a single CoverJpg whose path is the audio path
+        // with a .jpg extension, sourced from the selected image and hashed by
+        // art_hash. No CoverWebp without --animated-covers.
+        let a = art_clip("id-a");
+        let clips = [&a];
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            false,
+        );
+        let base = desired[0].path.strip_suffix(".flac").unwrap();
+        assert_eq!(desired[0].artifacts.len(), 1);
+        let jpg = &desired[0].artifacts[0];
+        assert_eq!(jpg.kind, ArtifactKind::CoverJpg);
+        assert_eq!(jpg.path, format!("{base}.jpg"));
+        assert_eq!(jpg.source_url, a.selected_image_url().unwrap());
+        assert_eq!(jpg.hash, art_hash(&a));
+    }
+
+    #[test]
+    fn build_desired_omits_cover_jpg_when_art_is_empty() {
+        // No selected art (all image/video URLs empty) => NO CoverJpg. Reconcile
+        // reads the absence as UNKNOWN => KEEP, so a transient empty URL never
+        // deletes an existing cover.
+        let a = clip("id-a", "Song", "alice");
+        assert!(a.selected_image_url().is_none());
+        let clips = [&a];
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            true,
+        );
+        assert!(desired[0].artifacts.is_empty());
+    }
+
+    #[test]
+    fn build_desired_emits_cover_webp_only_when_animated_and_video_present() {
+        let with_video = Clip {
+            video_cover_url: "https://cdn.suno.ai/id-a/video.mp4".to_owned(),
+            ..art_clip("id-a")
+        };
+        let clips = [&with_video];
+
+        // Off by default: only the static cover, even with a video present.
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            false,
+        );
+        assert_eq!(desired[0].artifacts.len(), 1);
+        assert_eq!(desired[0].artifacts[0].kind, ArtifactKind::CoverJpg);
+
+        // Enabled with a video: a CoverWebp joins the CoverJpg, pathed .webp,
+        // sourced from the video URL and hashed by art_url_hash.
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            true,
+        );
+        let base = desired[0].path.strip_suffix(".flac").unwrap();
+        let webp = desired[0]
+            .artifacts
+            .iter()
+            .find(|art| art.kind == ArtifactKind::CoverWebp)
+            .expect("animated cover expected");
+        assert_eq!(webp.path, format!("{base}.webp"));
+        assert_eq!(webp.source_url, with_video.video_cover_url);
+        assert_eq!(webp.hash, art_url_hash(&with_video.video_cover_url));
+
+        // Enabled but no video: no CoverWebp is emitted.
+        let no_video = art_clip("id-b");
+        let clips = [&no_video];
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            true,
+        );
+        assert!(
+            desired[0]
+                .artifacts
+                .iter()
+                .all(|art| art.kind != ArtifactKind::CoverWebp)
+        );
     }
 
     #[test]

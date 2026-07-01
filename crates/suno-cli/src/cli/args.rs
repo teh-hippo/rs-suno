@@ -136,6 +136,9 @@ pub struct SyncArgs {
     /// Simultaneous downloads (reserved; downloads are currently sequential).
     #[arg(long, value_name = "N", hide = true)]
     pub concurrency: Option<u32>,
+    /// Also write an animated cover.webp from each clip's video preview.
+    #[arg(long)]
+    pub animated_covers: bool,
 }
 
 /// `check` accepts every `sync` flag plus `--exit-code`.
@@ -295,8 +298,24 @@ mod tests {
                 assert_eq!(args.format, Some(AudioFmt::Mp3));
                 assert_eq!(args.limit, Some(5));
                 assert_eq!(args.min_newest, Some(0));
+                assert!(!args.animated_covers);
             }
             _ => panic!("expected sync"),
+        }
+    }
+
+    #[test]
+    fn sync_parses_animated_covers_flag() {
+        // Present enables it; absent leaves it off (default false).
+        let cli = Cli::try_parse_from(["suno", "sync", "/music", "--animated-covers"]).unwrap();
+        match cli.command {
+            Command::Sync(args) => assert!(args.animated_covers),
+            _ => panic!("expected sync"),
+        }
+        let cli = Cli::try_parse_from(["suno", "copy", "/music"]).unwrap();
+        match cli.command {
+            Command::Copy(args) => assert!(!args.animated_covers),
+            _ => panic!("expected copy"),
         }
     }
 

@@ -57,16 +57,27 @@ pub fn meta_hash(clip: &Clip, lineage: &LineageContext) -> String {
     digest(fields.as_bytes())
 }
 
-/// A sentinel for the embedded cover art: a digest of the selected art URL, or
-/// the empty string when the clip carries no art. A mismatch against the
-/// manifest means the file on disk holds stale art even if its tags are current.
-pub fn art_hash(clip: &Clip) -> String {
-    let url = clip.selected_image_url().unwrap_or("");
+/// A stable digest of an artifact source URL (FNV-1a), or the empty string when
+/// `url` is empty.
+///
+/// Shared by [`art_hash`] (the embedded static cover) and the external animated
+/// cover sidecar, whose rewrite detection keys on the clip's `video_cover_url`
+/// rather than the selected image. Keeping both on the one helper means an empty
+/// URL always maps to the empty sentinel, the value reconcile reads as "no such
+/// artifact this run".
+pub fn art_url_hash(url: &str) -> String {
     if url.is_empty() {
         String::new()
     } else {
         digest(url.as_bytes())
     }
+}
+
+/// A sentinel for the embedded cover art: a digest of the selected art URL, or
+/// the empty string when the clip carries no art. A mismatch against the
+/// manifest means the file on disk holds stale art even if its tags are current.
+pub fn art_hash(clip: &Clip) -> String {
+    art_url_hash(clip.selected_image_url().unwrap_or(""))
 }
 
 #[cfg(test)]
@@ -125,6 +136,20 @@ mod tests {
         bare.image_url = String::new();
         bare.video_cover_url = String::new();
         assert_eq!(art_hash(&bare), "");
+    }
+
+    #[test]
+    fn art_url_hash_is_stable_and_empty_for_empty_url() {
+        assert_eq!(art_url_hash(""), "");
+        let h = art_url_hash("https://cdn1.suno.ai/video_cover.mp4");
+        assert_eq!(h.len(), 16);
+        assert_eq!(h, art_url_hash("https://cdn1.suno.ai/video_cover.mp4"));
+        assert_ne!(h, art_url_hash("https://cdn1.suno.ai/other.mp4"));
+        // art_hash routes the selected image URL through the same helper.
+        assert_eq!(
+            art_hash(&sample()),
+            art_url_hash(sample().selected_image_url().unwrap())
+        );
     }
 
     #[test]

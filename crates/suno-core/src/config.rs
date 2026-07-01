@@ -52,6 +52,7 @@ pub struct Defaults {
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
+    pub animated_covers: Option<bool>,
 }
 
 /// Per-source overridable settings within an account.
@@ -61,6 +62,7 @@ pub struct SourceConfig {
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
+    pub animated_covers: Option<bool>,
 }
 
 /// Configuration for a single named account.
@@ -72,6 +74,7 @@ pub struct AccountConfig {
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
+    pub animated_covers: Option<bool>,
     #[serde(default)]
     pub sources: HashMap<String, SourceConfig>,
 }
@@ -215,6 +218,16 @@ impl Config {
             "MIN_NEWEST",
         )?;
 
+        let animated_covers = resolve_bool(
+            flags.animated_covers,
+            env_val("ANIMATED_COVERS"),
+            src.and_then(|s| s.animated_covers),
+            acc.animated_covers,
+            self.defaults.animated_covers,
+            false,
+            "ANIMATED_COVERS",
+        )?;
+
         let token = flags
             .token
             .clone()
@@ -228,6 +241,7 @@ impl Config {
             concurrency,
             retries,
             min_newest,
+            animated_covers,
         })
     }
 }
@@ -241,6 +255,26 @@ fn resolve_u32(
     compiled: u32,
     name: &str,
 ) -> Result<u32> {
+    if let Some(v) = flag {
+        return Ok(v);
+    }
+    if let Some(s) = env_str {
+        return s
+            .parse()
+            .map_err(|_| Error::Config(format!("invalid {name}: '{s}'")));
+    }
+    Ok(src.or(acc).or(defaults).unwrap_or(compiled))
+}
+
+fn resolve_bool(
+    flag: Option<bool>,
+    env_str: Option<&str>,
+    src: Option<bool>,
+    acc: Option<bool>,
+    defaults: Option<bool>,
+    compiled: bool,
+    name: &str,
+) -> Result<bool> {
     if let Some(v) = flag {
         return Ok(v);
     }
@@ -268,6 +302,7 @@ pub struct FlagOverrides {
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
+    pub animated_covers: Option<bool>,
 }
 
 /// Resolved effective settings for one account/source combination.
@@ -278,6 +313,7 @@ pub struct EffectiveSettings {
     pub concurrency: u32,
     pub retries: u32,
     pub min_newest: u32,
+    pub animated_covers: bool,
 }
 
 #[cfg(test)]
@@ -319,12 +355,14 @@ mod tests {
             concurrency = 8
             retries = 5
             min_newest = 2
+            animated_covers = true
         "#;
         let cfg = Config::from_toml(toml).unwrap();
         assert_eq!(cfg.defaults.format, Some(AudioFormat::Mp3));
         assert_eq!(cfg.defaults.concurrency, Some(8));
         assert_eq!(cfg.defaults.retries, Some(5));
         assert_eq!(cfg.defaults.min_newest, Some(2));
+        assert_eq!(cfg.defaults.animated_covers, Some(true));
     }
 
     #[test]
@@ -340,6 +378,7 @@ mod tests {
                 concurrency: 4,
                 retries: 3,
                 min_newest: 1,
+                animated_covers: false,
             }
         );
     }
@@ -501,6 +540,61 @@ mod tests {
         let toml = "[accounts.alice]\n";
         let cfg = Config::from_toml(toml).unwrap();
         let env: HashMap<String, String> = [("SUNO_CONCURRENCY".into(), "many".into())]
+            .into_iter()
+            .collect();
+        assert!(cfg.resolve("alice", None, &env, &no_flags()).is_err());
+    }
+
+    #[test]
+    fn animated_covers_defaults_off_and_follows_precedence() {
+        // Compiled default is off.
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert!(!eff.animated_covers);
+
+        // File default on; per-source off; env on; flag off — flag wins.
+        let toml = r#"
+            [defaults]
+            animated_covers = true
+
+            [accounts.alice.sources.liked]
+            animated_covers = false
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+
+        // File default (defaults) turns it on for an unscoped resolve.
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert!(eff.animated_covers);
+
+        // Per-source file setting overrides the file default.
+        let eff = cfg
+            .resolve("alice", Some("liked"), &no_env(), &no_flags())
+            .unwrap();
+        assert!(!eff.animated_covers);
+
+        // Env overrides file (even the per-source off).
+        let env: HashMap<String, String> = [("SUNO_ANIMATED_COVERS".into(), "true".into())]
+            .into_iter()
+            .collect();
+        let eff = cfg
+            .resolve("alice", Some("liked"), &env, &no_flags())
+            .unwrap();
+        assert!(eff.animated_covers);
+
+        // Flag overrides env.
+        let flags = FlagOverrides {
+            animated_covers: Some(false),
+            ..Default::default()
+        };
+        let eff = cfg.resolve("alice", Some("liked"), &env, &flags).unwrap();
+        assert!(!eff.animated_covers);
+    }
+
+    #[test]
+    fn invalid_env_bool_errors() {
+        let toml = "[accounts.alice]\n";
+        let cfg = Config::from_toml(toml).unwrap();
+        let env: HashMap<String, String> = [("SUNO_ANIMATED_COVERS".into(), "yes".into())]
             .into_iter()
             .collect();
         assert!(cfg.resolve("alice", None, &env, &no_flags()).is_err());

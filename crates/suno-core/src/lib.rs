@@ -40,10 +40,10 @@ pub use config::{
 pub use error::{Error, Result};
 pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute};
 pub use extras::{M3u8Entry, render_m3u8};
-pub use ffmpeg::{Ffmpeg, FfmpegError};
+pub use ffmpeg::{Ffmpeg, FfmpegError, WebpEncodeSettings};
 pub use fs::{FileStat, Filesystem, FsError};
 pub use graph::{CacheEntry, LineageStore, Node, StoredEdge};
-pub use hash::{art_hash, meta_hash};
+pub use hash::{art_hash, art_url_hash, meta_hash};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use lineage::{
     Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveOpts, ResolveStatus, RootInfo,

@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::clock::Clock;
-use crate::ffmpeg::{Ffmpeg, FfmpegError};
+use crate::ffmpeg::{Ffmpeg, FfmpegError, WebpEncodeSettings};
 use crate::fs::{FileStat, Filesystem, FsError};
 use crate::http::{Http, HttpRequest, HttpResponse, TransportError};
 
@@ -367,7 +367,8 @@ impl Filesystem for MemFs {
     }
 }
 
-/// A stub [`Ffmpeg`] that returns canned FLAC bytes (or a failure).
+/// A stub [`Ffmpeg`] that returns canned bytes (or a failure) for both the
+/// FLAC and animated-WebP transcode paths.
 pub(crate) struct StubFfmpeg {
     output: Vec<u8>,
     fail: bool,
@@ -382,7 +383,16 @@ impl StubFfmpeg {
         }
     }
 
-    /// Always fails, to exercise the transcode-failure path.
+    /// Returns canned WebP bytes for the animated-cover path, so core tests
+    /// exercise `mp4_to_webp` without invoking a real ffmpeg.
+    pub(crate) fn webp() -> Self {
+        Self {
+            output: b"RIFF\x00\x00\x00\x00WEBP-canned-anim".to_vec(),
+            fail: false,
+        }
+    }
+
+    /// Always fails, to exercise the transcode-failure path (FLAC or WebP).
     pub(crate) fn failing() -> Self {
         Self {
             output: Vec::new(),
@@ -395,6 +405,19 @@ impl Ffmpeg for StubFfmpeg {
     fn wav_to_flac(
         &self,
         _wav: &[u8],
+    ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
+        let out = if self.fail {
+            Err(FfmpegError::new("simulated transcode failure"))
+        } else {
+            Ok(self.output.clone())
+        };
+        async move { out }
+    }
+
+    fn mp4_to_webp(
+        &self,
+        _mp4: &[u8],
+        _settings: WebpEncodeSettings,
     ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
         let out = if self.fail {
             Err(FfmpegError::new("simulated transcode failure"))

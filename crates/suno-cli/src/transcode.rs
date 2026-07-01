@@ -1,18 +1,21 @@
-//! The ffmpeg adapter: transcode WAV bytes to FLAC bytes.
+//! The ffmpeg adapter: transcode WAV bytes to FLAC bytes, and MP4 preview bytes
+//! to animated WebP cover bytes.
 //!
-//! This is the engine's ffmpeg port realised with a child process. ffmpeg
-//! reads and writes seekable temporary files so it patches `STREAMINFO`
-//! (notably `total_samples`), which a non-seekable pipe would leave at zero and
-//! make players report an unknown duration. Tagging is handled separately by
-//! the pure core tagger; this step only re-encodes the audio.
+//! The FLAC path reads and writes seekable temporary files so ffmpeg patches
+//! `STREAMINFO` (notably `total_samples`), which a non-seekable pipe would leave
+//! at zero and make players report an unknown duration. The WebP path has no
+//! such requirement, so it streams the MP4 in and the WebP out over pipes,
+//! draining both output streams on threads to avoid a pipe deadlock. Tagging is
+//! handled separately by the pure core tagger; these steps only re-encode media.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use suno_core::WebpEncodeSettings;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -75,6 +78,106 @@ pub fn wav_to_flac(wav: &[u8], scratch_dir: &Path) -> Result<Vec<u8>> {
         .with_context(|| format!("could not read transcoded FLAC at {}", flac_path.display()))
 }
 
+/// Transcode an MP4 preview to animated WebP bytes under `settings`.
+///
+/// The MP4 streams in on stdin and the WebP streams out on stdout, so no
+/// temporary files are staged. Both output pipes are drained on their own
+/// threads while a third feeds stdin, because ffmpeg interleaves writing the
+/// encoded frames with reading the input: draining only after `wait` would
+/// deadlock once a pipe buffer fills.
+pub fn mp4_to_webp(mp4: &[u8], settings: WebpEncodeSettings) -> Result<Vec<u8>> {
+    let mut child = Command::new("ffmpeg")
+        .arg("-y")
+        .args(["-i", "pipe:0", "-an"])
+        .args(["-vf", &video_filter(&settings)])
+        .args(["-c:v", "libwebp_anim"])
+        .args(quality_args(&settings))
+        .args(compression_args(&settings))
+        .args(["-loop", "0", "-f", "webp", "pipe:1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("could not run ffmpeg (is it installed?)")?;
+
+    // Feed stdin on its own thread, then close it so ffmpeg sees EOF.
+    let mut stdin = child.stdin.take().context("ffmpeg stdin was not piped")?;
+    let input = mp4.to_vec();
+    let feeder = std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+        drop(stdin);
+    });
+
+    // Drain stdout and stderr concurrently to avoid a full-pipe deadlock.
+    let mut out_pipe = child.stdout.take().context("ffmpeg stdout was not piped")?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let mut err_pipe = child.stderr.take().context("ffmpeg stderr was not piped")?;
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + FFMPEG_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().context("could not wait for ffmpeg")? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "ffmpeg timed out after {} seconds",
+                FFMPEG_TIMEOUT.as_secs()
+            );
+        }
+        std::thread::sleep(FFMPEG_POLL_INTERVAL);
+    };
+
+    let _ = feeder.join();
+    let webp = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    if !status.success() {
+        bail!(
+            "ffmpeg failed to transcode MP4 to WebP: {}",
+            stderr_tail(&stderr)
+        );
+    }
+    if webp.is_empty() {
+        bail!("ffmpeg produced an empty WebP: {}", stderr_tail(&stderr));
+    }
+    Ok(webp)
+}
+
+/// The `-vf` chain: cap the width (never upscaling) keeping the aspect ratio to
+/// an even height, then cap the frame rate.
+fn video_filter(settings: &WebpEncodeSettings) -> String {
+    format!(
+        "scale='min({},iw)':-2,fps={}",
+        settings.max_width, settings.max_fps
+    )
+}
+
+/// The quality flags: a lossless switch, or the lossy `-q:v` scale.
+fn quality_args(settings: &WebpEncodeSettings) -> Vec<String> {
+    if settings.lossless {
+        vec!["-lossless".to_owned(), "1".to_owned()]
+    } else {
+        vec!["-q:v".to_owned(), settings.quality.to_string()]
+    }
+}
+
+/// The compression-effort flag: full effort when on, none when off.
+fn compression_args(settings: &WebpEncodeSettings) -> Vec<String> {
+    let level = if settings.compression { "6" } else { "0" };
+    vec!["-compression_level".to_owned(), level.to_owned()]
+}
+
 /// The last few lines of ffmpeg's stderr, for a concise error message.
 fn stderr_tail(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
@@ -107,6 +210,30 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_webp_filter_caps_width_and_fps() {
+        let filter = video_filter(&WebpEncodeSettings::default());
+        assert_eq!(filter, "scale='min(720,iw)':-2,fps=24");
+    }
+
+    #[test]
+    fn lossy_quality_uses_q_scale_and_compression_effort() {
+        let settings = WebpEncodeSettings::default();
+        assert_eq!(quality_args(&settings), vec!["-q:v", "70"]);
+        assert_eq!(compression_args(&settings), vec!["-compression_level", "6"]);
+    }
+
+    #[test]
+    fn lossless_and_no_compression_flip_the_flags() {
+        let settings = WebpEncodeSettings {
+            lossless: true,
+            compression: false,
+            ..Default::default()
+        };
+        assert_eq!(quality_args(&settings), vec!["-lossless", "1"]);
+        assert_eq!(compression_args(&settings), vec!["-compression_level", "0"]);
+    }
 
     /// Proves the real ffmpeg pipeline: a file-output FLAC carries a complete
     /// `STREAMINFO` so the duration is correct. Ignored because CI has no
@@ -160,5 +287,38 @@ mod tests {
 
         let _ = std::fs::remove_file(&wav_path);
         let _ = std::fs::remove_file(&flac_path);
+    }
+
+    /// Proves the real animated-WebP pipeline: a generated MP4 streams through
+    /// ffmpeg over pipes and yields a non-empty RIFF/WEBP file. Ignored because
+    /// CI has no ffmpeg; run locally with `cargo test -p suno-cli -- --ignored`.
+    #[test]
+    #[ignore = "requires ffmpeg with libwebp_anim"]
+    fn mp4_to_webp_yields_a_riff_webp() {
+        let dir = Path::new("target").join("transcode-smoke");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mp4_path = dir.join("preview.mp4");
+        let made = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x360:rate=30:duration=2",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&mp4_path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        let mp4 = std::fs::read(&mp4_path).unwrap();
+        let webp = mp4_to_webp(&mp4, WebpEncodeSettings::default()).unwrap();
+        assert!(!webp.is_empty());
+        assert_eq!(&webp[..4], b"RIFF");
+        assert_eq!(&webp[8..12], b"WEBP");
+
+        let _ = std::fs::remove_file(&mp4_path);
     }
 }
