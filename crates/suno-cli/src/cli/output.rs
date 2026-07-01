@@ -274,6 +274,7 @@ mod tests {
             image_large_url: "https://cdn1.suno.ai/il.jpeg".to_owned(),
             video_url: String::new(),
             video_cover_url: String::new(),
+            ..Default::default()
         }
     }
 

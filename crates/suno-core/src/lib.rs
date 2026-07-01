@@ -43,7 +43,7 @@ pub use fs::{FileStat, Filesystem, FsError};
 pub use hash::{art_hash, meta_hash};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use manifest::{Manifest, ManifestEntry};
-pub use model::Clip;
+pub use model::{Clip, HistoryEntry};
 pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, derive_album,
     render_clip_name, render_clip_names,

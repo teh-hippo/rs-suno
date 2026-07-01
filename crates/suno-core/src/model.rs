@@ -32,6 +32,29 @@ pub struct Clip {
     pub root_ancestor_id: String,
     pub lineage_status: String,
     pub edited_clip_id: String,
+    pub task: String,
+    pub is_remix: bool,
+    pub cover_clip_id: String,
+    pub upsample_clip_id: String,
+    pub remaster_clip_id: String,
+    pub speed_clip_id: String,
+    pub override_history_clip_id: String,
+    pub override_future_clip_id: String,
+    pub history: Vec<HistoryEntry>,
+    pub concat_history: Vec<HistoryEntry>,
+}
+
+/// One entry in a clip's `history` or `concat_history`, mirroring the API's
+/// per-segment lineage record. Ids are stored verbatim (any `m_` prefix is left
+/// for the resolver to strip).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HistoryEntry {
+    pub id: String,
+    pub infill: bool,
+    pub continue_at: Option<f64>,
+    pub infill_start_s: Option<f64>,
+    pub infill_end_s: Option<f64>,
+    pub infill_lyrics: String,
 }
 
 impl Clip {
@@ -93,6 +116,19 @@ impl Clip {
             root_ancestor_id: string(raw, "root_ancestor_id"),
             lineage_status: string(raw, "lineage_status"),
             edited_clip_id: string(&metadata, "edited_clip_id"),
+            task: string(&metadata, "task"),
+            is_remix: metadata
+                .get("is_remix")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            cover_clip_id: string(&metadata, "cover_clip_id"),
+            upsample_clip_id: string(&metadata, "upsample_clip_id"),
+            remaster_clip_id: string(&metadata, "remaster_clip_id"),
+            speed_clip_id: string(&metadata, "speed_clip_id"),
+            override_history_clip_id: string(&metadata, "override_history_clip_id"),
+            override_future_clip_id: string(&metadata, "override_future_clip_id"),
+            history: history_entries(&metadata, "history"),
+            concat_history: history_entries(&metadata, "concat_history"),
         }
     }
 
@@ -139,6 +175,36 @@ fn cdn(value: &Value, key: &str) -> String {
     string(value, key).replace("cdn2.suno.ai", "cdn1.suno.ai")
 }
 
+/// Read `value[key]` as an array of history records into [`HistoryEntry`]s.
+///
+/// Each element is mapped verbatim: a bare JSON string becomes an entry with
+/// only its `id` set, while an object supplies `id`, `infill`, `continue_at`,
+/// `infill_start_s`, `infill_end_s`, and `infill_lyrics`. Anything else (a
+/// missing key, a non-array, or an unexpected element type) yields an empty
+/// `Vec` or a defaulted entry, so parsing never fails.
+fn history_entries(value: &Value, key: &str) -> Vec<HistoryEntry> {
+    let Some(Value::Array(items)) = value.get(key) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            Value::String(id) => HistoryEntry {
+                id: id.clone(),
+                ..HistoryEntry::default()
+            },
+            _ => HistoryEntry {
+                id: string(item, "id"),
+                infill: item.get("infill").and_then(Value::as_bool).unwrap_or(false),
+                continue_at: item.get("continue_at").and_then(Value::as_f64),
+                infill_start_s: item.get("infill_start_s").and_then(Value::as_f64),
+                infill_end_s: item.get("infill_end_s").and_then(Value::as_f64),
+                infill_lyrics: string(item, "infill_lyrics"),
+            },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +242,134 @@ mod tests {
         assert_eq!(art_clip("", "I", "V").selected_image_url(), Some("I"));
         assert_eq!(art_clip("", "", "V").selected_image_url(), Some("V"));
         assert_eq!(art_clip("", "", "").selected_image_url(), None);
+    }
+
+    #[test]
+    fn from_json_parses_all_lineage_metadata_fields() {
+        let raw = serde_json::json!({
+            "id": "self",
+            "title": "Lineage",
+            "metadata": {
+                "task": "extend",
+                "is_remix": true,
+                "cover_clip_id": "cover-1",
+                "upsample_clip_id": "upsample-2",
+                "remaster_clip_id": "remaster-3",
+                "speed_clip_id": "speed-4",
+                "override_history_clip_id": "ovh-5",
+                "override_future_clip_id": "ovf-6",
+                "history": [
+                    {
+                        "infill": false,
+                        "id": "0a3c311a-hist",
+                        "source": "ios",
+                        "type": "gen",
+                        "continue_at": 115.35
+                    },
+                    {
+                        "infill": true,
+                        "id": "infill-hist",
+                        "source": "web",
+                        "type": "gen",
+                        "infill_start_s": 12.0,
+                        "infill_end_s": 28.5,
+                        "infill_lyrics": "new words here"
+                    }
+                ],
+                "concat_history": [
+                    {"infill": false, "id": "122d0d15-base", "continue_at": 131.5},
+                    {"id": "cf7cb30f-part"}
+                ]
+            }
+        });
+
+        let clip = Clip::from_json(&raw);
+
+        assert_eq!(clip.task, "extend");
+        assert!(clip.is_remix);
+        assert_eq!(clip.cover_clip_id, "cover-1");
+        assert_eq!(clip.upsample_clip_id, "upsample-2");
+        assert_eq!(clip.remaster_clip_id, "remaster-3");
+        assert_eq!(clip.speed_clip_id, "speed-4");
+        assert_eq!(clip.override_history_clip_id, "ovh-5");
+        assert_eq!(clip.override_future_clip_id, "ovf-6");
+
+        assert_eq!(
+            clip.history,
+            vec![
+                HistoryEntry {
+                    id: "0a3c311a-hist".to_owned(),
+                    infill: false,
+                    continue_at: Some(115.35),
+                    ..Default::default()
+                },
+                HistoryEntry {
+                    id: "infill-hist".to_owned(),
+                    infill: true,
+                    infill_start_s: Some(12.0),
+                    infill_end_s: Some(28.5),
+                    infill_lyrics: "new words here".to_owned(),
+                    ..Default::default()
+                },
+            ]
+        );
+
+        assert_eq!(
+            clip.concat_history,
+            vec![
+                HistoryEntry {
+                    id: "122d0d15-base".to_owned(),
+                    continue_at: Some(131.5),
+                    ..Default::default()
+                },
+                HistoryEntry {
+                    id: "cf7cb30f-part".to_owned(),
+                    ..Default::default()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_string_history_element_parses_to_id_only_entry() {
+        let raw = serde_json::json!({
+            "id": "self",
+            "metadata": {"history": ["m_bare-id-verbatim"]}
+        });
+
+        let clip = Clip::from_json(&raw);
+
+        assert_eq!(
+            clip.history,
+            vec![HistoryEntry {
+                id: "m_bare-id-verbatim".to_owned(),
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[test]
+    fn absent_or_null_lineage_metadata_defaults_to_empty() {
+        let raw = serde_json::json!({
+            "id": "self",
+            "metadata": {
+                "cover_clip_id": null,
+                "is_remix": null,
+                "history": null
+            }
+        });
+
+        let clip = Clip::from_json(&raw);
+
+        assert_eq!(clip.task, "");
+        assert!(!clip.is_remix);
+        assert_eq!(clip.cover_clip_id, "");
+        assert_eq!(clip.upsample_clip_id, "");
+        assert_eq!(clip.remaster_clip_id, "");
+        assert_eq!(clip.speed_clip_id, "");
+        assert_eq!(clip.override_history_clip_id, "");
+        assert_eq!(clip.override_future_clip_id, "");
+        assert!(clip.history.is_empty());
+        assert!(clip.concat_history.is_empty());
     }
 }
