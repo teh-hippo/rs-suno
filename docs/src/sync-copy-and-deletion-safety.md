@@ -183,7 +183,8 @@ Failures are classified so one bad clip never derails a whole run:
 
 ## What a run leaves behind
 
-Alongside the mirrored audio, a run keeps a few dotfiles at the destination:
+Alongside the mirrored audio, a run keeps a few dotfiles at the destination,
+plus one visible index file:
 
 | File | Purpose |
 |---|---|
@@ -193,8 +194,10 @@ Alongside the mirrored audio, a run keeps a few dotfiles at the destination:
 | `.suno-audit.log` | Append-only log of every deletion and rename. |
 | `.suno-failures.log` | Append-only log of clips that failed after all retries. |
 | `.suno.lock` | Present only while a run is active. |
+| `suno-index.json` | A visible, machine-readable catalogue of the mirror for scripting; written best-effort on a fully-enumerated run. |
 
-The audit and failure logs are not written during a `--dry-run` or `check`.
+The audit and failure logs are not written during a `--dry-run` or `check`, and
+neither is `suno-index.json`.
 
 ## Recipes
 
