@@ -237,30 +237,22 @@ fn write_config(path: &Path, body: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
-        set_private_dir_permissions(parent)?;
+        set_private_permissions(parent, PRIVATE_CONFIG_DIR_MODE)?;
     }
     write_atomic(path, body.as_bytes())
         .with_context(|| format!("could not write {}", path.display()))?;
-    set_private_file_permissions(path)
+    set_private_permissions(path, PRIVATE_CONFIG_FILE_MODE)
 }
 
-fn set_private_dir_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    std::fs::set_permissions(
-        path,
-        std::fs::Permissions::from_mode(PRIVATE_CONFIG_DIR_MODE),
-    )
-    .with_context(|| format!("could not set permissions on {}", path.display()))?;
+#[cfg(unix)]
+fn set_private_permissions(path: &Path, mode: u32) -> Result<()> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("could not set permissions on {}", path.display()))?;
     Ok(())
 }
 
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    std::fs::set_permissions(
-        path,
-        std::fs::Permissions::from_mode(PRIVATE_CONFIG_FILE_MODE),
-    )
-    .with_context(|| format!("could not set permissions on {}", path.display()))?;
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 

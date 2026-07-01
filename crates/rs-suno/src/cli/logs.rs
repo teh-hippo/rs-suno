@@ -147,7 +147,10 @@ pub fn acquire_lock(dest: &Path) -> Result<LockGuard> {
     match opts.open(&path) {
         Ok(mut file) => {
             let _ = writeln!(file, "{}", std::process::id());
-            let _ = set_private_file_permissions(&path);
+            if let Err(err) = set_private_file_permissions(&path) {
+                return Err(err)
+                    .with_context(|| format!("could not secure lock {}", path.display()));
+            }
             Ok(LockGuard { path })
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => bail!(
