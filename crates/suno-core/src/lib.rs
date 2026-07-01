@@ -41,8 +41,8 @@ pub use config::{
 pub use error::{Error, Result};
 pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute};
 pub use extras::{M3u8Entry, render_m3u8};
-pub use ffmpeg::{Ffmpeg, FfmpegError, WebpEncodeSettings};
-pub use fs::{FileStat, Filesystem, FsError};
+pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind, WebpEncodeSettings};
+pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
 pub use graph::{AlbumArt, CacheEntry, LineageStore, Node, PlaylistState, StoredEdge};
 pub use hash::{art_hash, art_url_hash, content_hash, meta_hash};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};

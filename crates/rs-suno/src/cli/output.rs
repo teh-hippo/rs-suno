@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use serde::Serialize;
-use suno_core::{Action, ArtifactKind, Clip, ExecOutcome, Plan};
+use suno_core::{Action, ArtifactKind, Clip, ExecOutcome, Plan, RunStatus};
 
 /// Truncate `text` to `max` characters, appending an ellipsis when shortened.
 pub fn truncate(text: &str, max: usize) -> String {
@@ -229,7 +229,11 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// The per-run summary printed after a `sync` or `copy` completes.
+/// The per-run summary printed after a `sync` or `copy` finishes.
+///
+/// A clean or per-clip-failed run reads "{verb} complete"; a run the engine
+/// aborted (a full disk or a bad token) reads "{verb} aborted" and names why,
+/// so the counters are never mistaken for a finished mirror.
 pub fn run_summary(verb_label: &str, account: &str, outcome: &ExecOutcome, secs: f64) -> String {
     let downloaded = outcome.downloaded + outcome.reformatted;
     let tagged = outcome.retagged;
@@ -238,8 +242,17 @@ pub fn run_summary(verb_label: &str, account: &str, outcome: &ExecOutcome, secs:
     let skipped = outcome.skipped;
     let failed = outcome.failed();
     let total = downloaded + tagged + renamed + deleted + skipped + failed;
+    let header = match outcome.status {
+        RunStatus::Completed => format!("{verb_label} complete: {account}"),
+        RunStatus::DiskFull => {
+            format!("{verb_label} aborted: {account} (disk full, run stopped early)")
+        }
+        RunStatus::AuthAborted => {
+            format!("{verb_label} aborted: {account} (authentication failed, run stopped early)")
+        }
+    };
     format!(
-        "{verb_label} complete: {account}\n  downloaded  {downloaded:>4}\n  tagged      {tagged:>4}\n  renamed     {renamed:>4}\n  deleted     {deleted:>4}\n  skipped     {skipped:>4}\n  failed      {failed:>4}\n  total       {total:>4}\nDuration: {secs:.1}s"
+        "{header}\n  downloaded  {downloaded:>4}\n  tagged      {tagged:>4}\n  renamed     {renamed:>4}\n  deleted     {deleted:>4}\n  skipped     {skipped:>4}\n  failed      {failed:>4}\n  total       {total:>4}\nDuration: {secs:.1}s"
     )
 }
 
@@ -376,6 +389,25 @@ mod tests {
         assert!(text.contains("downloaded    12"));
         assert!(text.contains("total        147"));
         assert!(text.contains("Duration: 43.2s"));
+    }
+
+    #[test]
+    fn run_summary_disk_full_reads_aborted_not_complete() {
+        let outcome = ExecOutcome {
+            downloaded: 4,
+            failures: vec![suno_core::Failure {
+                clip_id: "z".to_owned(),
+                reason: "disk full: no space left to write z.flac".to_owned(),
+            }],
+            status: RunStatus::DiskFull,
+            ..Default::default()
+        };
+        let text = run_summary("Sync", "alice", &outcome, 1.0);
+        assert!(!text.contains("complete"));
+        assert!(text.contains("aborted"));
+        assert!(text.contains("disk full"));
+        // The counters still render.
+        assert!(text.contains("downloaded     4"));
     }
 
     #[test]

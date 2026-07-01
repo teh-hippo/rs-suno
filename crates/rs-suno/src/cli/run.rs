@@ -18,8 +18,8 @@ use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
     AlbumArt, AlbumDesired, ClerkAuth, Clip, Config, Error as CoreError, ExecOptions, Filesystem,
     FlagOverrides, LineageContext, LocalFile, PlaylistDesired, PlaylistState, Ports, ResolveOpts,
-    SourceMode, SourceStatus, SunoClient, album_desired, deletion_allowed, plan_album_artifacts,
-    plan_playlist_artifacts, reconcile, resolve_roots,
+    RunStatus, SourceMode, SourceStatus, SunoClient, album_desired, deletion_allowed,
+    plan_album_artifacts, plan_playlist_artifacts, reconcile, resolve_roots,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
@@ -270,7 +270,7 @@ async fn run(
         )
         .await?;
         worst = worse(worst, code);
-        if code == ExitCode::Interrupted {
+        if code == ExitCode::Interrupted || code == ExitCode::DiskFull {
             break;
         }
     }
@@ -728,6 +728,37 @@ async fn execute_plan(
         );
         return Ok(ExitCode::Interrupted);
     };
+
+    if outcome.status == RunStatus::DiskFull {
+        // A full disk aborts the run; persistence would only re-hit ENOSPC, so
+        // save best-effort (mirroring the interrupt path) and stop before the
+        // `?`-propagating summary writes below. The summary and hint are
+        // eprintln-only, so they never re-hit the full disk.
+        let _ = logs::save_manifest(dest, &manifest);
+        let _ = logs::save_graph(dest, store);
+        let _ = fs.prune_empty_dirs("");
+        // The counter block honours quiet mode, but the actionable error and its
+        // specific reason always print (even under `-qq`), matching main.rs.
+        if verbosity >= -1 {
+            eprintln!(
+                "{}",
+                output::run_summary(
+                    verb.summary_label(),
+                    account,
+                    &outcome,
+                    started.elapsed().as_secs_f64()
+                )
+            );
+        }
+        eprintln!(
+            "error: {} The library is unchanged for the failing action.",
+            crate::diskspace::DISK_FULL_HINT
+        );
+        if let Some(last) = outcome.failures.last() {
+            eprintln!("  {}", last.reason);
+        }
+        return Ok(ExitCode::DiskFull);
+    }
 
     logs::save_manifest(dest, &manifest)?;
     // Persist the graph again after execute: the lineage part was already saved

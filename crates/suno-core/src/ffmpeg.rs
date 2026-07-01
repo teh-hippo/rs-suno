@@ -10,15 +10,51 @@
 
 use std::future::Future;
 
-/// An ffmpeg transcode failure, carrying a human-readable, secret-free reason.
+/// Why an ffmpeg transcode failed, so the executor can treat a full scratch
+/// disk as a systemic abort rather than a skippable per-clip fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfmpegErrorKind {
+    /// The scratch device or quota ran out of space.
+    OutOfSpace,
+    /// Any other failure (bad input, missing binary, encode error).
+    Other,
+}
+
+/// An ffmpeg transcode failure, carrying a kind and a human-readable,
+/// secret-free reason.
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct FfmpegError(pub String);
+#[error("{reason}")]
+pub struct FfmpegError {
+    kind: FfmpegErrorKind,
+    reason: String,
+}
 
 impl FfmpegError {
-    /// Build an [`FfmpegError`] from any displayable cause.
+    /// Build an [`FfmpegError`] of kind [`FfmpegErrorKind::Other`] from any
+    /// displayable cause.
     pub fn new(reason: impl Into<String>) -> Self {
-        Self(reason.into())
+        Self {
+            kind: FfmpegErrorKind::Other,
+            reason: reason.into(),
+        }
+    }
+
+    /// Build an out-of-space [`FfmpegError`] (kind [`FfmpegErrorKind::OutOfSpace`]).
+    pub fn out_of_space(reason: impl Into<String>) -> Self {
+        Self {
+            kind: FfmpegErrorKind::OutOfSpace,
+            reason: reason.into(),
+        }
+    }
+
+    /// The failure kind.
+    pub fn kind(&self) -> FfmpegErrorKind {
+        self.kind
+    }
+
+    /// Whether this failure was a full scratch disk or exhausted quota.
+    pub fn is_out_of_space(&self) -> bool {
+        self.kind == FfmpegErrorKind::OutOfSpace
     }
 }
 

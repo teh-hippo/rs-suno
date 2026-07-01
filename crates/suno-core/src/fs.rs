@@ -18,15 +18,51 @@ pub struct FileStat {
     pub size: u64,
 }
 
-/// A filesystem failure, carrying a human-readable, secret-free reason.
+/// Why a filesystem write failed, so the executor can treat a full disk as a
+/// systemic abort rather than one more skippable per-clip fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsErrorKind {
+    /// The device or quota ran out of space.
+    OutOfSpace,
+    /// Any other failure (permission, missing parent, corruption).
+    Other,
+}
+
+/// A filesystem failure, carrying a kind and a human-readable, secret-free
+/// reason.
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct FsError(pub String);
+#[error("{reason}")]
+pub struct FsError {
+    kind: FsErrorKind,
+    reason: String,
+}
 
 impl FsError {
-    /// Build an [`FsError`] from any displayable cause.
+    /// Build an [`FsError`] of kind [`FsErrorKind::Other`] from any displayable
+    /// cause.
     pub fn new(reason: impl Into<String>) -> Self {
-        Self(reason.into())
+        Self {
+            kind: FsErrorKind::Other,
+            reason: reason.into(),
+        }
+    }
+
+    /// Build an out-of-space [`FsError`] (kind [`FsErrorKind::OutOfSpace`]).
+    pub fn out_of_space(reason: impl Into<String>) -> Self {
+        Self {
+            kind: FsErrorKind::OutOfSpace,
+            reason: reason.into(),
+        }
+    }
+
+    /// The failure kind.
+    pub fn kind(&self) -> FsErrorKind {
+        self.kind
+    }
+
+    /// Whether this failure was a full disk or exhausted quota.
+    pub fn is_out_of_space(&self) -> bool {
+        self.kind == FsErrorKind::OutOfSpace
     }
 }
 
