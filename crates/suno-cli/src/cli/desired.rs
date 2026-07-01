@@ -9,8 +9,8 @@
 use std::path::{Component, Path};
 
 use suno_core::{
-    AlbumMode, AudioFormat, Clip, Desired, ExecOutcome, NamingConfig, NamingRequest, RunStatus,
-    SourceMode, art_hash, meta_hash, render_clip_names,
+    AudioFormat, Clip, Desired, ExecOutcome, NamingConfig, NamingRequest, RunStatus, SourceMode,
+    art_hash, meta_hash, render_clip_names,
 };
 
 /// Below this manifest size the mass-deletion fraction rule does not fire; a
@@ -47,27 +47,10 @@ impl ExitCode {
 /// Naming is rendered as a batch so collisions are disambiguated, then the
 /// target format's extension is appended. `mode` is the source kind: a `sync`
 /// verb yields [`SourceMode::Mirror`], a `copy` verb [`SourceMode::Copy`].
-pub fn build_desired(
-    clips: &[&Clip],
-    format: AudioFormat,
-    playlists_as_albums: bool,
-    mode: SourceMode,
-) -> Vec<Desired> {
-    let config = NamingConfig {
-        album_mode: if playlists_as_albums {
-            AlbumMode::Playlist
-        } else {
-            AlbumMode::Lineage
-        },
-        ..NamingConfig::default()
-    };
-    let requests: Vec<NamingRequest<'_>> = clips
-        .iter()
-        .map(|clip| NamingRequest {
-            clip,
-            playlist_title: None,
-        })
-        .collect();
+pub fn build_desired(clips: &[&Clip], format: AudioFormat, mode: SourceMode) -> Vec<Desired> {
+    let config = NamingConfig::default();
+    let requests: Vec<NamingRequest<'_>> =
+        clips.iter().map(|clip| NamingRequest { clip }).collect();
     let names = render_clip_names(&requests, &config);
 
     clips
@@ -237,7 +220,7 @@ mod tests {
     fn build_desired_appends_extension_and_mode() {
         let a = clip("id-a", "Song A", "alice");
         let clips = [&a];
-        let desired = build_desired(&clips, AudioFormat::Flac, false, SourceMode::Mirror);
+        let desired = build_desired(&clips, AudioFormat::Flac, SourceMode::Mirror);
         assert_eq!(desired.len(), 1);
         assert!(
             desired[0].path.ends_with(".flac"),
@@ -258,7 +241,7 @@ mod tests {
         let a = clip("id-a", "Same", "alice");
         let b = clip("id-b", "Same", "alice");
         let clips = [&a, &b];
-        let desired = build_desired(&clips, AudioFormat::Mp3, false, SourceMode::Copy);
+        let desired = build_desired(&clips, AudioFormat::Mp3, SourceMode::Copy);
         assert_ne!(desired[0].path, desired[1].path);
         assert!(desired.iter().all(|d| d.path.ends_with(".mp3")));
         assert!(desired.iter().all(|d| d.modes == vec![SourceMode::Copy]));
@@ -268,7 +251,7 @@ mod tests {
     fn build_desired_uses_forward_slashes() {
         let a = clip("id-a", "Song A", "alice");
         let clips = [&a];
-        let desired = build_desired(&clips, AudioFormat::Flac, false, SourceMode::Mirror);
+        let desired = build_desired(&clips, AudioFormat::Flac, SourceMode::Mirror);
         assert!(!desired[0].path.contains('\\'));
         assert!(desired[0].path.contains('/'));
     }

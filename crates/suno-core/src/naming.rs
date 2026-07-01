@@ -21,18 +21,10 @@ pub enum CharacterSet {
     Ascii,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum AlbumMode {
-    #[default]
-    Lineage,
-    Playlist,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamingConfig {
     pub template: String,
     pub character_set: CharacterSet,
-    pub album_mode: AlbumMode,
     pub max_component_len: usize,
 }
 
@@ -41,7 +33,6 @@ impl Default for NamingConfig {
         Self {
             template: DEFAULT_TEMPLATE.to_string(),
             character_set: CharacterSet::Unicode,
-            album_mode: AlbumMode::Lineage,
             max_component_len: DEFAULT_MAX_COMPONENT_LEN,
         }
     }
@@ -50,7 +41,6 @@ impl Default for NamingConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct NamingRequest<'a> {
     pub clip: &'a Clip,
-    pub playlist_title: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,18 +49,8 @@ pub struct RenderedName {
     pub base_name: String,
 }
 
-pub fn derive_album(
-    clip: &Clip,
-    playlist_title: Option<&str>,
-    album_mode: AlbumMode,
-) -> Option<String> {
-    match album_mode {
-        AlbumMode::Lineage => lineage_album(clip),
-        AlbumMode::Playlist => playlist_title
-            .and_then(non_blank)
-            .map(str::to_string)
-            .or_else(|| lineage_album(clip)),
-    }
+pub fn derive_album(clip: &Clip) -> Option<String> {
+    lineage_album(clip)
 }
 
 pub fn render_clip_name(request: NamingRequest<'_>, config: &NamingConfig) -> RenderedName {
@@ -114,7 +94,7 @@ fn render_single(request: NamingRequest<'_>, config: &NamingConfig) -> RenderedN
         config.max_component_len,
     );
     let handle = sanitise_component(&clip.handle, config.character_set, config.max_component_len);
-    let album = derive_album(clip, request.playlist_title, config.album_mode)
+    let album = derive_album(clip)
         .map(|value| sanitise_component(&value, config.character_set, config.max_component_len))
         .unwrap_or_default();
     let title = sanitise_component(
@@ -348,23 +328,14 @@ mod tests {
     fn unicode_names_are_preserved_and_ascii_falls_back() {
         let clip = test_clip("abc12345", "Beyoncé/東京");
 
-        let unicode = render_clip_name(
-            NamingRequest {
-                clip: &clip,
-                playlist_title: None,
-            },
-            &NamingConfig::default(),
-        );
+        let unicode = render_clip_name(NamingRequest { clip: &clip }, &NamingConfig::default());
         assert_eq!(
             unicode.relative_path.to_string_lossy(),
             "München/Beyoncé 東京"
         );
 
         let ascii = render_clip_name(
-            NamingRequest {
-                clip: &clip,
-                playlist_title: None,
-            },
+            NamingRequest { clip: &clip },
             &NamingConfig {
                 character_set: CharacterSet::Ascii,
                 ..NamingConfig::default()
@@ -382,13 +353,7 @@ mod tests {
             ..Clip::default()
         };
 
-        let rendered = render_clip_name(
-            NamingRequest {
-                clip: &clip,
-                playlist_title: None,
-            },
-            &NamingConfig::default(),
-        );
+        let rendered = render_clip_name(NamingRequest { clip: &clip }, &NamingConfig::default());
         assert_eq!(rendered.relative_path.to_string_lossy(), "AUX_/CON_");
     }
 
@@ -396,13 +361,7 @@ mod tests {
     fn blank_titles_use_a_stable_suffix() {
         let clip = test_clip("12345678-clip", "   ");
 
-        let rendered = render_clip_name(
-            NamingRequest {
-                clip: &clip,
-                playlist_title: None,
-            },
-            &NamingConfig::default(),
-        );
+        let rendered = render_clip_name(NamingRequest { clip: &clip }, &NamingConfig::default());
         assert_eq!(rendered.base_name, "Untitled [12345678-clip]");
         assert_eq!(
             rendered.relative_path.to_string_lossy(),
@@ -414,10 +373,7 @@ mod tests {
     fn very_long_titles_are_trimmed() {
         let clip = test_clip("abcdef12", &"a".repeat(120));
         let rendered = render_clip_name(
-            NamingRequest {
-                clip: &clip,
-                playlist_title: None,
-            },
+            NamingRequest { clip: &clip },
             &NamingConfig {
                 max_component_len: 24,
                 ..NamingConfig::default()
@@ -433,24 +389,12 @@ mod tests {
         let first = test_clip("11111111-alpha", "Shared");
         let second = test_clip("22222222-beta", "Shared");
         let requests = [
-            NamingRequest {
-                clip: &first,
-                playlist_title: None,
-            },
-            NamingRequest {
-                clip: &second,
-                playlist_title: None,
-            },
+            NamingRequest { clip: &first },
+            NamingRequest { clip: &second },
         ];
         let swapped = [
-            NamingRequest {
-                clip: &second,
-                playlist_title: None,
-            },
-            NamingRequest {
-                clip: &first,
-                playlist_title: None,
-            },
+            NamingRequest { clip: &second },
+            NamingRequest { clip: &first },
         ];
 
         let names = render_clip_names(&requests, &NamingConfig::default());
@@ -509,34 +453,9 @@ mod tests {
             ..Clip::default()
         };
 
-        assert_eq!(derive_album(&root, None, AlbumMode::Lineage), None);
-        assert_eq!(
-            derive_album(&child, None, AlbumMode::Lineage).as_deref(),
-            Some("root")
-        );
-        assert_eq!(
-            derive_album(&album, None, AlbumMode::Lineage).as_deref(),
-            Some("Weather Series")
-        );
-    }
-
-    #[test]
-    fn playlist_album_mode_prefers_the_playlist_title() {
-        let clip = Clip {
-            id: "clip".to_string(),
-            title: "Track".to_string(),
-            album_title: "Lineage Album".to_string(),
-            ..Clip::default()
-        };
-
-        assert_eq!(
-            derive_album(&clip, Some("Road Trip"), AlbumMode::Playlist).as_deref(),
-            Some("Road Trip")
-        );
-        assert_eq!(
-            derive_album(&clip, Some("   "), AlbumMode::Playlist).as_deref(),
-            Some("Lineage Album")
-        );
+        assert_eq!(derive_album(&root), None);
+        assert_eq!(derive_album(&child).as_deref(), Some("root"));
+        assert_eq!(derive_album(&album).as_deref(), Some("Weather Series"));
     }
 
     #[test]
@@ -545,14 +464,8 @@ mod tests {
         let second = test_clip("abcd1234-second", "Untitled");
         let rendered = render_clip_names(
             &[
-                NamingRequest {
-                    clip: &first,
-                    playlist_title: None,
-                },
-                NamingRequest {
-                    clip: &second,
-                    playlist_title: None,
-                },
+                NamingRequest { clip: &first },
+                NamingRequest { clip: &second },
             ],
             &NamingConfig::default(),
         );
@@ -576,13 +489,7 @@ mod tests {
             ..Clip::default()
         };
 
-        let rendered = render_clip_name(
-            NamingRequest {
-                clip: &clip,
-                playlist_title: None,
-            },
-            &NamingConfig::default(),
-        );
+        let rendered = render_clip_name(NamingRequest { clip: &clip }, &NamingConfig::default());
         assert_eq!(
             rendered.relative_path.to_string_lossy(),
             "AUX.flac_/NUL.mp3_"

@@ -121,9 +121,6 @@ pub struct SyncArgs {
     /// Audio format: mp3, flac, wav.
     #[arg(long, value_enum, value_name = "FORMAT")]
     pub format: Option<AudioFmt>,
-    /// Tag playlists as album names instead of using the lineage album.
-    #[arg(long)]
-    pub playlists_as_albums: bool,
     /// Mirror only the N most recent clips.
     #[arg(long, value_name = "N")]
     pub limit: Option<usize>,

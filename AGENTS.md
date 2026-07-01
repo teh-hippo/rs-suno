@@ -51,7 +51,7 @@ Ports and adapters. `suno-core` is runtime-agnostic and performs no direct IO; i
 - Formats: MP3, FLAC, and WAV; default FLAC; per-source override in TOML.
 - Auth: there is no public Suno API key. A Clerk `__client` cookie (a pasted token) mints short-lived JWTs that refresh automatically. The cookie is sent only to Clerk.
 - Deletion safety (critical): one file per account; delete only when a clip is absent from every mirror source; copy and archive always win; never delete on an empty, failed, partial, or truncated listing.
-- Album model: lineage album by default, with opt-in `--playlists-as-albums` (off).
+- Album model: lineage album only.
 
 ## Rules
 

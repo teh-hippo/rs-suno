@@ -142,7 +142,6 @@ fn render_show(config: &Config) -> String {
         || d.concurrency.is_some()
         || d.retries.is_some()
         || d.min_newest.is_some()
-        || d.playlists_as_albums.is_some()
     {
         out.push_str("[defaults]\n");
         push_opt(&mut out, "format", d.format.map(|f| f.to_string()));
@@ -153,11 +152,6 @@ fn render_show(config: &Config) -> String {
         );
         push_opt(&mut out, "retries", d.retries.map(|v| v.to_string()));
         push_opt(&mut out, "min_newest", d.min_newest.map(|v| v.to_string()));
-        push_opt(
-            &mut out,
-            "playlists_as_albums",
-            d.playlists_as_albums.map(|v| v.to_string()),
-        );
         out.push('\n');
     }
 
@@ -182,11 +176,6 @@ fn render_show(config: &Config) -> String {
             &mut out,
             "min_newest",
             acc.min_newest.map(|v| v.to_string()),
-        );
-        push_opt(
-            &mut out,
-            "playlists_as_albums",
-            acc.playlists_as_albums.map(|v| v.to_string()),
         );
         let mut sources: Vec<&String> = acc.sources.keys().collect();
         sources.sort();

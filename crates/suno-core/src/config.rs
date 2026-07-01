@@ -52,7 +52,6 @@ pub struct Defaults {
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
-    pub playlists_as_albums: Option<bool>,
 }
 
 /// Per-source overridable settings within an account.
@@ -62,7 +61,6 @@ pub struct SourceConfig {
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
-    pub playlists_as_albums: Option<bool>,
 }
 
 /// Configuration for a single named account.
@@ -74,7 +72,6 @@ pub struct AccountConfig {
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
-    pub playlists_as_albums: Option<bool>,
     #[serde(default)]
     pub sources: HashMap<String, SourceConfig>,
 }
@@ -218,16 +215,6 @@ impl Config {
             "MIN_NEWEST",
         )?;
 
-        let playlists_as_albums = resolve_bool(
-            flags.playlists_as_albums,
-            env_val("PLAYLISTS_AS_ALBUMS"),
-            src.and_then(|s| s.playlists_as_albums),
-            acc.playlists_as_albums,
-            self.defaults.playlists_as_albums,
-            false,
-            "PLAYLISTS_AS_ALBUMS",
-        )?;
-
         let token = flags
             .token
             .clone()
@@ -241,7 +228,6 @@ impl Config {
             concurrency,
             retries,
             min_newest,
-            playlists_as_albums,
         })
     }
 }
@@ -266,28 +252,6 @@ fn resolve_u32(
     Ok(src.or(acc).or(defaults).unwrap_or(compiled))
 }
 
-fn resolve_bool(
-    flag: Option<bool>,
-    env_str: Option<&str>,
-    src: Option<bool>,
-    acc: Option<bool>,
-    defaults: Option<bool>,
-    compiled: bool,
-    name: &str,
-) -> Result<bool> {
-    if let Some(v) = flag {
-        return Ok(v);
-    }
-    if let Some(s) = env_str {
-        return match s.to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" => Ok(true),
-            "0" | "false" | "no" => Ok(false),
-            _ => Err(Error::Config(format!("invalid boolean {name}: '{s}'"))),
-        };
-    }
-    Ok(src.or(acc).or(defaults).unwrap_or(compiled))
-}
-
 /// Convert an account label to its environment variable prefix.
 ///
 /// `my-lib` becomes `MY_LIB`.
@@ -304,7 +268,6 @@ pub struct FlagOverrides {
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
-    pub playlists_as_albums: Option<bool>,
 }
 
 /// Resolved effective settings for one account/source combination.
@@ -315,7 +278,6 @@ pub struct EffectiveSettings {
     pub concurrency: u32,
     pub retries: u32,
     pub min_newest: u32,
-    pub playlists_as_albums: bool,
 }
 
 #[cfg(test)]
@@ -357,14 +319,12 @@ mod tests {
             concurrency = 8
             retries = 5
             min_newest = 2
-            playlists_as_albums = true
         "#;
         let cfg = Config::from_toml(toml).unwrap();
         assert_eq!(cfg.defaults.format, Some(AudioFormat::Mp3));
         assert_eq!(cfg.defaults.concurrency, Some(8));
         assert_eq!(cfg.defaults.retries, Some(5));
         assert_eq!(cfg.defaults.min_newest, Some(2));
-        assert_eq!(cfg.defaults.playlists_as_albums, Some(true));
     }
 
     #[test]
@@ -380,7 +340,6 @@ mod tests {
                 concurrency: 4,
                 retries: 3,
                 min_newest: 1,
-                playlists_as_albums: false,
             }
         );
     }
@@ -535,40 +494,6 @@ mod tests {
         .collect();
         let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
         assert_eq!(eff.token.as_deref(), Some("per_account"));
-    }
-
-    #[test]
-    fn bool_env_values() {
-        let toml = "[accounts.alice]\n";
-        let cfg = Config::from_toml(toml).unwrap();
-
-        for truthy in &["1", "true", "yes", "TRUE", "YES"] {
-            let env: HashMap<String, String> =
-                [("SUNO_PLAYLISTS_AS_ALBUMS".into(), (*truthy).into())]
-                    .into_iter()
-                    .collect();
-            let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
-            assert!(eff.playlists_as_albums, "expected true for '{truthy}'");
-        }
-
-        for falsy in &["0", "false", "no"] {
-            let env: HashMap<String, String> =
-                [("SUNO_PLAYLISTS_AS_ALBUMS".into(), (*falsy).into())]
-                    .into_iter()
-                    .collect();
-            let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
-            assert!(!eff.playlists_as_albums, "expected false for '{falsy}'");
-        }
-    }
-
-    #[test]
-    fn invalid_env_bool_errors() {
-        let toml = "[accounts.alice]\n";
-        let cfg = Config::from_toml(toml).unwrap();
-        let env: HashMap<String, String> = [("SUNO_PLAYLISTS_AS_ALBUMS".into(), "maybe".into())]
-            .into_iter()
-            .collect();
-        assert!(cfg.resolve("alice", None, &env, &no_flags()).is_err());
     }
 
     #[test]

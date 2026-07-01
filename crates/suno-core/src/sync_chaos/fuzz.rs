@@ -147,7 +147,7 @@ proptest! {
             max_component_len,
             ..Default::default()
         };
-        let request = NamingRequest { clip: &clip, playlist_title: None };
+        let request = NamingRequest { clip: &clip };
         let rendered = render_clip_name(request, &config);
 
         prop_assert!(rendered.relative_path.is_relative(), "the path must be relative");

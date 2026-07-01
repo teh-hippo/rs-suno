@@ -386,7 +386,6 @@ fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
         concurrency: args.concurrency,
         retries: args.retries,
         min_newest: args.min_newest,
-        playlists_as_albums: args.playlists_as_albums.then_some(true),
     }
 }
 
@@ -466,12 +465,7 @@ async fn run_one(
         last_run: read_last_run(dest),
     };
     let selected = select(&clips, &params);
-    let desired = build_desired(
-        &selected,
-        settings.format,
-        settings.playlists_as_albums,
-        verb.mode(),
-    );
+    let desired = build_desired(&selected, settings.format, verb.mode());
 
     let dry_run = global.dry_run || verb == Verb::Check;
 

@@ -37,7 +37,7 @@ pub use config::{
 };
 pub use error::{Error, Result};
 pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute};
-pub use extras::{IndexEntry, M3u8Entry, render_clip_sidecar, render_library_index, render_m3u8};
+pub use extras::{M3u8Entry, render_m3u8};
 pub use ffmpeg::{Ffmpeg, FfmpegError};
 pub use fs::{FileStat, Filesystem, FsError};
 pub use hash::{art_hash, meta_hash};
@@ -45,8 +45,8 @@ pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use manifest::{Manifest, ManifestEntry};
 pub use model::Clip;
 pub use naming::{
-    AlbumMode, CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName,
-    derive_album, render_clip_name, render_clip_names,
+    CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, derive_album,
+    render_clip_name, render_clip_names,
 };
 pub use reconcile::{Action, Desired, LocalFile, Plan, SourceMode, SourceStatus, reconcile};
 pub use tag::{TrackMetadata, tag_flac, tag_mp3};

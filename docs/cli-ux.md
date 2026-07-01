@@ -43,7 +43,6 @@ suno sync [OPTIONS] <DEST>
 | Flag | Short | Type | Default | Env var | Description |
 |---|---|---|---|---|---|
 | `--format <fmt>` | | enum | `flac` | `SUNO_FORMAT` | Audio format: `mp3`, `flac`, `wav`. Per-source config override applies. |
-| `--playlists-as-albums` | | bool | false | `SUNO_PLAYLISTS_AS_ALBUMS` | Tag playlists as album names instead of using the lineage album. |
 | `--limit <n>` | | uint | | | Mirror only the N most recent clips. |
 | `--since <spec>` | | string | | | Mirror clips newer than a relative time (`7d`, `2w`) or `last-run`. |
 | `--min-newest <n>` | | uint | 1 | `SUNO_MIN_NEWEST` | Minimum number of newest clips kept even when a recency filter would produce an empty set. |
@@ -489,7 +488,6 @@ Arguments:
 
 Options:
       --format <FORMAT>         Audio format: mp3, flac, wav [env: SUNO_FORMAT] [default: flac]
-      --playlists-as-albums     Tag playlists as album names [env: SUNO_PLAYLISTS_AS_ALBUMS]
       --limit <N>               Mirror only the N most recent clips
       --since <SPEC>            Mirror clips newer than a relative time (e.g. 7d, 2w, last-run)
       --min-newest <N>          Minimum newest clips kept when a recency filter applies [default: 1]
