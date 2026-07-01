@@ -1,0 +1,26 @@
+name: Auto-merge Copilot PRs
+
+# Turn on auto-merge for pull requests opened by the Copilot coding agent, so a
+# green CI run ships the change without a manual click while you are away. The
+# `main` ruleset still gates the actual merge on the required `check`, so nothing
+# lands red. Only the agent's own `copilot/*` branches qualify.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable-auto-merge:
+    if: >-
+      !github.event.pull_request.draft &&
+      startsWith(github.event.pull_request.head.ref, 'copilot/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge (squash)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge "${{ github.event.pull_request.number }}" --auto --squash --repo "${{ github.repository }}"
