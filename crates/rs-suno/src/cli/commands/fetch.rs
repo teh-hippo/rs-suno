@@ -61,7 +61,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     if let Err(err) = auth.authenticate(&http).await {
         return Ok(run::report_auth_failure(&label, &err));
     }
-    let mut client = SunoClient::new(auth);
+    let mut client = SunoClient::new(auth, TokioClock);
 
     let clip = client
         .get_clip(&http, &id)
@@ -167,7 +167,7 @@ fn looks_like_dir(dest: &Path) -> bool {
 
 /// Resolve the rendered WAV URL, requesting a render and polling if needed.
 async fn ensure_wav_url(
-    client: &mut SunoClient,
+    client: &mut SunoClient<TokioClock>,
     http: &ReqwestHttp,
     clock: &impl Clock,
     id: &str,

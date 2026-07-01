@@ -1,5 +1,7 @@
 //! Error types for the Suno engine.
 
+use std::time::Duration;
+
 /// An error raised by the engine.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -19,9 +21,10 @@ pub enum Error {
     /// `5xx`, which must surface as a real error.
     #[error("not found: {0}")]
     NotFound(String),
-    /// The Suno API rate-limited the request.
+    /// The Suno API rate-limited the request, with the server's `Retry-After`
+    /// hint in whole seconds when it sent one (it usually does not).
     #[error("rate limited")]
-    RateLimited,
+    RateLimited { retry_after: Option<Duration> },
     /// Reading or writing audio metadata tags failed.
     #[error("tagging failed: {0}")]
     Tag(String),

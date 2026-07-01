@@ -22,7 +22,7 @@ use crate::lineage::LineageContext;
 use crate::model::Clip;
 use crate::naming::{DEFAULT_TEMPLATE, NamingConfig, NamingRequest, render_clip_name};
 use crate::select::RecencySpec;
-use crate::testutil::{ChaosHttp, Outcome};
+use crate::testutil::{ChaosHttp, Outcome, RecordingClock};
 
 /// A recursive arbitrary JSON value: nulls, bools, integers, arbitrary strings,
 /// and nested arrays and objects. Floats are omitted so the generator can never
@@ -102,7 +102,7 @@ proptest! {
         let http = ChaosHttp::new()
             .with_auth()
             .program("/api/feed/v2/", vec![Outcome::ok(body)]);
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"));
+        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let _ = pollster::block_on(client.list_clips(&http, false, Some(3)));
     }
 
@@ -115,7 +115,7 @@ proptest! {
         let http = ChaosHttp::new()
             .with_auth()
             .program("/api/feed/v2/", vec![Outcome::ok(body)]);
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"));
+        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let _ = pollster::block_on(client.list_clips(&http, true, Some(3)));
     }
 

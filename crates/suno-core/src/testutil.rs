@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::clock::Clock;
@@ -502,18 +502,22 @@ impl Ffmpeg for StubFfmpeg {
 }
 
 /// A [`Clock`] that records requested sleeps and returns immediately.
+///
+/// Cloneable with shared state, so a test can keep a handle after moving one
+/// into a [`SunoClient`](crate::SunoClient) and still read back its sleeps.
+#[derive(Clone)]
 pub(crate) struct RecordingClock {
-    sleeps: Mutex<Vec<Duration>>,
+    sleeps: Arc<Mutex<Vec<Duration>>>,
 }
 
 impl RecordingClock {
     pub(crate) fn new() -> Self {
         Self {
-            sleeps: Mutex::new(Vec::new()),
+            sleeps: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// The durations the executor asked to sleep, in order.
+    /// The durations the caller asked to sleep, in order.
     pub(crate) fn sleeps(&self) -> Vec<Duration> {
         self.sleeps.lock().unwrap().clone()
     }
