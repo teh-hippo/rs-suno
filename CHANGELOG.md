@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/teh-hippo/rs-suno/compare/v0.3.0...v0.4.0) (2026-07-01)
+
+
+### Features
+
+* refuse to run against a token for a different Suno account ([#41](https://github.com/teh-hippo/rs-suno/issues/41)) ([26af161](https://github.com/teh-hippo/rs-suno/commit/26af1615f118e57646826ab4d486982b9f4cecc2)), closes [#10](https://github.com/teh-hippo/rs-suno/issues/10)
+
 ## [0.3.0](https://github.com/teh-hippo/rs-suno/compare/v0.2.2...v0.3.0) (2026-07-01)
 
 
