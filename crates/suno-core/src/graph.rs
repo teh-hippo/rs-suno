@@ -25,7 +25,9 @@ use crate::lineage::{
     Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveStatus, RootInfo,
     immediate_parent, lineage_edges,
 };
+use crate::manifest::ArtifactState;
 use crate::model::Clip;
+use crate::reconcile::ArtifactKind;
 
 /// The whole lineage graph, kept relational for a clean SQLite migration.
 ///
@@ -42,6 +44,9 @@ pub struct LineageStore {
     pub edges: Vec<StoredEdge>,
     /// The last resolved (or last-known) root per clip, keyed by clip id.
     pub resolution_cache: BTreeMap<String, CacheEntry>,
+    /// The reconciled folder-art state per album, keyed by the album's stable
+    /// root id (HARDENING H2). Additive: absent in older stores, defaults empty.
+    pub albums: BTreeMap<String, AlbumArt>,
 }
 
 impl Default for LineageStore {
@@ -51,7 +56,58 @@ impl Default for LineageStore {
             nodes: BTreeMap::new(),
             edges: Vec::new(),
             resolution_cache: BTreeMap::new(),
+            albums: BTreeMap::new(),
         }
+    }
+}
+
+/// The reconciled folder-art state for one album (one stable root id).
+///
+/// Folder art is album-scoped, not per-clip, so it lives here rather than on a
+/// [`ManifestEntry`](crate::manifest::ManifestEntry). Each slot records the
+/// sidecar's path and the content hash of the art it was rendered from, so a
+/// later reconcile rewrites only on a genuine content change (HARDENING H1: a
+/// most-played flip that yields the same art hash is a no-op). Kept relational
+/// (two explicit slots) so it migrates cleanly to a SQLite `album_art` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AlbumArt {
+    /// The album's static `folder.jpg`, sourced from the most-played variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_jpg: Option<ArtifactState>,
+    /// The album's animated `cover.webp`, from the first-created animated variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_webp: Option<ArtifactState>,
+}
+
+impl AlbumArt {
+    /// The stored state for one folder-art `kind`, if present. Per-clip and
+    /// library kinds have no album slot and map to `None`.
+    pub fn artifact(&self, kind: ArtifactKind) -> Option<&ArtifactState> {
+        match kind {
+            ArtifactKind::FolderJpg => self.folder_jpg.as_ref(),
+            ArtifactKind::FolderWebp => self.folder_webp.as_ref(),
+            ArtifactKind::CoverJpg | ArtifactKind::CoverWebp | ArtifactKind::Playlist => None,
+        }
+    }
+
+    /// Set (or clear, with `None`) the state for one folder-art `kind`.
+    ///
+    /// The executor calls this after a folder-art write (with the new state) or
+    /// delete (with `None`), so the kind-to-slot mapping lives in one place.
+    /// Non-album kinds have no slot here and are no-ops.
+    pub fn set(&mut self, kind: ArtifactKind, state: Option<ArtifactState>) {
+        match kind {
+            ArtifactKind::FolderJpg => self.folder_jpg = state,
+            ArtifactKind::FolderWebp => self.folder_webp = state,
+            ArtifactKind::CoverJpg | ArtifactKind::CoverWebp | ArtifactKind::Playlist => {}
+        }
+    }
+
+    /// True when the album holds no folder art at all (both slots empty), so the
+    /// store can prune the now-dead album row.
+    pub fn is_empty(&self) -> bool {
+        self.folder_jpg.is_none() && self.folder_webp.is_none()
     }
 }
 
@@ -151,6 +207,41 @@ impl LineageStore {
     /// The cached root resolution for `id`, if present.
     pub fn get_root(&self, id: &str) -> Option<&CacheEntry> {
         self.resolution_cache.get(id)
+    }
+
+    /// The reconciled folder-art state for the album rooted at `root_id`.
+    pub fn album_art(&self, root_id: &str) -> Option<&AlbumArt> {
+        self.albums.get(root_id)
+    }
+
+    /// Set (or clear, with `None`) one folder-art `kind` for the album rooted at
+    /// `root_id`.
+    ///
+    /// A set upserts the album row; a clear that empties the row removes it, so
+    /// the store never accumulates dead all-`None` album entries. This is the
+    /// store-level counterpart the CLI persists after the executor mutates the
+    /// [`albums`](Self::albums) map in place.
+    pub fn set_album_artifact(
+        &mut self,
+        root_id: &str,
+        kind: ArtifactKind,
+        state: Option<ArtifactState>,
+    ) {
+        match state {
+            Some(state) => self
+                .albums
+                .entry(root_id.to_owned())
+                .or_default()
+                .set(kind, Some(state)),
+            None => {
+                if let Some(art) = self.albums.get_mut(root_id) {
+                    art.set(kind, None);
+                    if art.is_empty() {
+                        self.albums.remove(root_id);
+                    }
+                }
+            }
+        }
     }
 
     /// Build a [`LineageContext`] for `clip` from the durable store.
@@ -670,6 +761,81 @@ mod tests {
         assert_eq!(node.status, "observed");
         assert_eq!(store.edges[0].status, "active");
         assert!(store.resolution_cache.is_empty());
+        // The album-art collection is additive: a store written before folder
+        // art existed loads with no albums and no folder art.
+        assert!(store.albums.is_empty());
+        assert!(store.album_art("x").is_none());
+    }
+
+    #[test]
+    fn album_art_roundtrips_and_reads_by_kind() {
+        let mut store = LineageStore::new();
+        store.albums.insert(
+            "root-1".to_owned(),
+            AlbumArt {
+                folder_jpg: Some(ArtifactState {
+                    path: "alice/Album/folder.jpg".to_owned(),
+                    hash: "jpg-h".to_owned(),
+                }),
+                folder_webp: Some(ArtifactState {
+                    path: "alice/Album/cover.webp".to_owned(),
+                    hash: "webp-h".to_owned(),
+                }),
+            },
+        );
+
+        let json = serde_json::to_string(&store).unwrap();
+        let back: LineageStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(store, back);
+
+        // The serialised shape is a relational `albums` map keyed by root id.
+        let value: serde_json::Value = serde_json::to_value(&store).unwrap();
+        let album = value.get("albums").unwrap().get("root-1").unwrap();
+        assert_eq!(
+            album.get("folder_jpg").unwrap().get("hash").unwrap(),
+            "jpg-h"
+        );
+
+        let art = back.album_art("root-1").unwrap();
+        assert_eq!(
+            art.artifact(ArtifactKind::FolderJpg).unwrap().path,
+            "alice/Album/folder.jpg"
+        );
+        assert_eq!(
+            art.artifact(ArtifactKind::FolderWebp).unwrap().hash,
+            "webp-h"
+        );
+        // A per-clip kind has no album slot.
+        assert!(art.artifact(ArtifactKind::CoverJpg).is_none());
+    }
+
+    #[test]
+    fn empty_album_art_omits_slots_when_serialised() {
+        // An all-`None` AlbumArt round-trips and writes an empty object, so the
+        // absent-slot default holds both ways.
+        let empty = AlbumArt::default();
+        assert!(empty.is_empty());
+        let value = serde_json::to_value(&empty).unwrap();
+        assert!(value.get("folder_jpg").is_none());
+        assert!(value.get("folder_webp").is_none());
+        let back: AlbumArt = serde_json::from_str("{}").unwrap();
+        assert_eq!(back, empty);
+    }
+
+    #[test]
+    fn set_album_artifact_upserts_then_prunes_when_emptied() {
+        let mut store = LineageStore::new();
+        let jpg = ArtifactState {
+            path: "a/folder.jpg".to_owned(),
+            hash: "h1".to_owned(),
+        };
+        store.set_album_artifact("root-1", ArtifactKind::FolderJpg, Some(jpg.clone()));
+        assert_eq!(store.album_art("root-1").unwrap().folder_jpg, Some(jpg));
+
+        // Clearing the only slot prunes the whole album row (no dead entries).
+        store.set_album_artifact("root-1", ArtifactKind::FolderJpg, None);
+        assert!(store.album_art("root-1").is_none());
+        assert!(store.albums.is_empty());
     }
 
     #[test]

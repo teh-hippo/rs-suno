@@ -28,6 +28,7 @@
 //! [`Filesystem`] confirms. Higher-level safety (empty-listing abort, the
 //! destructive-sync confirmation, exit codes) is the caller's job.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -37,6 +38,7 @@ use crate::config::AudioFormat;
 use crate::error::Error;
 use crate::ffmpeg::{Ffmpeg, WebpEncodeSettings};
 use crate::fs::Filesystem;
+use crate::graph::AlbumArt;
 use crate::http::{Http, HttpRequest};
 use crate::lineage::LineageContext;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
@@ -144,18 +146,22 @@ pub struct Ports<'a, H, F, G, C> {
     pub clock: &'a C,
 }
 
-/// Apply `plan` to disk, updating `manifest` in place, and return the outcome.
+/// Apply `plan` to disk, updating `manifest` and `albums` in place, and return
+/// the outcome.
 ///
 /// `desired` carries the per-clip metadata and art hashes plus the source modes
 /// that decide the [`preserve`](ManifestEntry::preserve) marker; it is indexed
 /// by clip id (and by target path, for renames) so each written entry records
-/// the right hashes and protection. `ports` bundles the authenticated client
-/// and the network, disk, transcode, and backoff ports. A single clip's failure
+/// the right hashes and protection. `albums` is the album-art store, keyed by
+/// stable root id: folder-art writes and deletes record their state there rather
+/// than on the per-clip `manifest`. `ports` bundles the authenticated client and
+/// the network, disk, transcode, and backoff ports. A single clip's failure
 /// never aborts the run, except an auth failure, which stops it with
 /// [`RunStatus::AuthAborted`].
 pub async fn execute<H, F, G, C>(
     plan: &Plan,
     manifest: &mut Manifest,
+    albums: &mut BTreeMap<String, AlbumArt>,
     desired: &[Desired],
     ports: Ports<'_, H, F, G, C>,
     opts: &ExecOptions,
@@ -187,7 +193,7 @@ where
 
     let mut outcome = ExecOutcome::default();
     for action in &plan.actions {
-        match ctx.apply(action, client, manifest).await {
+        match ctx.apply(action, client, manifest, albums).await {
             Ok(effect) => outcome.record(effect),
             Err(fail) => {
                 let aborts = matches!(fail.class, Class::Auth);
@@ -259,6 +265,13 @@ fn permanent_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail
     }
 }
 
+/// Whether an artifact kind is album-scoped folder art (owned by a root id and
+/// recorded on the album store) rather than a per-clip sidecar (recorded on the
+/// manifest).
+fn is_album_kind(kind: ArtifactKind) -> bool {
+    matches!(kind, ArtifactKind::FolderJpg | ArtifactKind::FolderWebp)
+}
+
 /// A classified fetch failure, not yet attributed to a clip.
 struct FetchError {
     class: Class,
@@ -324,6 +337,7 @@ where
         action: &Action,
         client: &mut SunoClient,
         manifest: &mut Manifest,
+        albums: &mut BTreeMap<String, AlbumArt>,
     ) -> Result<Effect, Fail> {
         match action {
             Action::Download {
@@ -363,14 +377,14 @@ where
                 hash,
                 owner_id,
             } => {
-                self.write_artifact(manifest, *kind, path, source_url, hash, owner_id)
+                self.write_artifact(manifest, albums, *kind, path, source_url, hash, owner_id)
                     .await
             }
             Action::DeleteArtifact {
                 kind,
                 path,
                 owner_id,
-            } => self.delete_artifact(manifest, *kind, path, owner_id),
+            } => self.delete_artifact(manifest, albums, *kind, path, owner_id),
         }
     }
 
@@ -513,39 +527,50 @@ where
     /// this run, and a prior-run clip already has one. So an absent owning entry
     /// means the audio failed or never existed this run; we skip (no fetch, no
     /// write) rather than strand an untracked sidecar with no owning audio.
+    ///
+    /// Folder art ([`FolderJpg`](ArtifactKind::FolderJpg) /
+    /// [`FolderWebp`](ArtifactKind::FolderWebp)) is album-scoped: its `owner_id`
+    /// is the album's stable root id, not a manifest clip, so it skips the
+    /// manifest presence guard and records its state on the album store instead.
+    #[allow(clippy::too_many_arguments)]
     async fn write_artifact(
         &self,
         manifest: &mut Manifest,
+        albums: &mut BTreeMap<String, AlbumArt>,
         kind: ArtifactKind,
         path: &str,
         source_url: &str,
         hash: &str,
         owner_id: &str,
     ) -> Result<Effect, Fail> {
-        if manifest.get(owner_id).is_none() {
+        if !is_album_kind(kind) && manifest.get(owner_id).is_none() {
             return Ok(Effect::Skipped);
         }
         let bytes = self.artifact_bytes(kind, source_url, owner_id).await?;
         self.write_verify(owner_id, path, &bytes)?;
-        if let Some(entry) = manifest.entries.get_mut(owner_id) {
-            set_manifest_artifact(
-                entry,
-                kind,
-                Some(ArtifactState {
-                    path: path.to_owned(),
-                    hash: hash.to_owned(),
-                }),
-            );
+        let state = ArtifactState {
+            path: path.to_owned(),
+            hash: hash.to_owned(),
+        };
+        if is_album_kind(kind) {
+            albums
+                .entry(owner_id.to_owned())
+                .or_default()
+                .set(kind, Some(state));
+        } else if let Some(entry) = manifest.entries.get_mut(owner_id) {
+            set_manifest_artifact(entry, kind, Some(state));
         }
         Ok(Effect::ArtifactWritten)
     }
 
     /// Produce a sidecar's bytes from its source, branching on kind.
     ///
-    /// A [`CoverWebp`](ArtifactKind::CoverWebp) fetches the clip's `video_cover`
-    /// MP4 preview and transcodes it to an animated WebP through the ffmpeg port;
-    /// every other kind is the fetched source verbatim (e.g. the static
-    /// [`CoverJpg`](ArtifactKind::CoverJpg) image). A fetch or transcode failure
+    /// An animated cover — a per-clip [`CoverWebp`](ArtifactKind::CoverWebp) or an
+    /// album [`FolderWebp`](ArtifactKind::FolderWebp) — fetches the clip's
+    /// `video_cover` MP4 preview and transcodes it to an animated WebP through the
+    /// ffmpeg port; every other kind is the fetched source verbatim (e.g. the
+    /// static [`CoverJpg`](ArtifactKind::CoverJpg) or album
+    /// [`FolderJpg`](ArtifactKind::FolderJpg) image). A fetch or transcode failure
     /// is attributed to the owning clip so it is a per-clip [`Fail`], never a run
     /// abort, matching the audio path.
     async fn artifact_bytes(
@@ -559,7 +584,7 @@ where
             .await
             .map_err(|err| err.attribute(owner_id))?;
         match kind {
-            ArtifactKind::CoverWebp => self
+            ArtifactKind::CoverWebp | ArtifactKind::FolderWebp => self
                 .ffmpeg
                 .mp4_to_webp(&source, WebpEncodeSettings::default())
                 .await
@@ -574,6 +599,9 @@ where
     /// When the owning entry is already gone (its audio was deleted earlier this
     /// run, co-deleting the sidecar), there is no slot to clear and that is fine.
     ///
+    /// Folder art is album-scoped: its slot is cleared on the album store keyed by
+    /// the album's root id, not on a manifest clip.
+    ///
     /// The audio `Delete` is applied before its sidecar `DeleteArtifact`. If the
     /// sidecar removal fails after the audio is already gone, the sidecar lingers
     /// untracked; transactional recovery of that ordering is deferred to P10
@@ -581,6 +609,7 @@ where
     fn delete_artifact(
         &self,
         manifest: &mut Manifest,
+        albums: &mut BTreeMap<String, AlbumArt>,
         kind: ArtifactKind,
         path: &str,
         owner_id: &str,
@@ -588,7 +617,14 @@ where
         self.fs
             .remove(path)
             .map_err(|err| permanent_fail(owner_id, format!("artifact delete failed: {err}")))?;
-        if let Some(entry) = manifest.entries.get_mut(owner_id) {
+        if is_album_kind(kind) {
+            if let Some(art) = albums.get_mut(owner_id) {
+                art.set(kind, None);
+                if art.is_empty() {
+                    albums.remove(owner_id);
+                }
+            }
+        } else if let Some(entry) = manifest.entries.get_mut(owner_id) {
             set_manifest_artifact(entry, kind, None);
         }
         Ok(Effect::ArtifactDeleted)
@@ -961,10 +997,37 @@ mod tests {
         clock: &RecordingClock,
         opts: &ExecOptions,
     ) -> ExecOutcome {
+        let mut albums = BTreeMap::new();
+        run_with_albums(
+            plan,
+            manifest,
+            &mut albums,
+            desired,
+            http,
+            fs,
+            ffmpeg,
+            clock,
+            opts,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_with_albums(
+        plan: &Plan,
+        manifest: &mut Manifest,
+        albums: &mut BTreeMap<String, AlbumArt>,
+        desired: &[Desired],
+        http: &ScriptedHttp,
+        fs: &MemFs,
+        ffmpeg: &StubFfmpeg,
+        clock: &RecordingClock,
+        opts: &ExecOptions,
+    ) -> ExecOutcome {
         let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"));
         pollster::block_on(execute(
             plan,
             manifest,
+            albums,
             desired,
             Ports {
                 client: &mut client,
@@ -2349,5 +2412,137 @@ mod tests {
         assert_eq!(outcome.artifacts_written, 1);
         assert_eq!(fs.read_file("b/cover.jpg").unwrap(), b"jpg-b");
         assert!(manifest.get("b").unwrap().cover_jpg.is_some());
+    }
+
+    // ── Phase 8: folder art routes to the album store ───────────────
+
+    #[test]
+    fn folder_jpg_write_records_album_state_and_skips_manifest() {
+        // Folder art is owned by the album root id, not a manifest clip: it
+        // writes even with an empty manifest and records on the album store.
+        let mut manifest = Manifest::new();
+        let mut albums: BTreeMap<String, AlbumArt> = BTreeMap::new();
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::FolderJpg,
+                path: "creator/album/folder.jpg".to_owned(),
+                source_url: "https://art.suno.ai/root/large.jpg".to_owned(),
+                hash: "jh".to_owned(),
+                owner_id: "root".to_owned(),
+            }],
+        };
+        let http = ScriptedHttp::new().route("root/large.jpg", Reply::ok(b"folder-jpg".to_vec()));
+        let fs = MemFs::new();
+
+        let outcome = run_with_albums(
+            &plan,
+            &mut manifest,
+            &mut albums,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(
+            fs.read_file("creator/album/folder.jpg").unwrap(),
+            b"folder-jpg"
+        );
+        assert_eq!(
+            albums.get("root").unwrap().folder_jpg,
+            Some(ArtifactState {
+                path: "creator/album/folder.jpg".to_owned(),
+                hash: "jh".to_owned(),
+            })
+        );
+        assert!(manifest.get("root").is_none());
+    }
+
+    #[test]
+    fn folder_webp_write_transcodes_and_records_album_state() {
+        let mut manifest = Manifest::new();
+        let mut albums: BTreeMap<String, AlbumArt> = BTreeMap::new();
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::FolderWebp,
+                path: "creator/album/cover.webp".to_owned(),
+                source_url: "https://cdn.suno.ai/root/video.mp4".to_owned(),
+                hash: "wh".to_owned(),
+                owner_id: "root".to_owned(),
+            }],
+        };
+        let http = ScriptedHttp::new().route("root/video.mp4", Reply::ok(b"mp4-bytes".to_vec()));
+        let fs = MemFs::new();
+
+        let outcome = run_with_albums(
+            &plan,
+            &mut manifest,
+            &mut albums,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::webp(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(outcome.failed(), 0);
+        // The MP4 was transcoded to WebP, not written verbatim.
+        let written = fs.read_file("creator/album/cover.webp").unwrap();
+        assert_ne!(written, b"mp4-bytes");
+        assert!(written.starts_with(b"RIFF"));
+        assert_eq!(
+            albums.get("root").unwrap().folder_webp,
+            Some(ArtifactState {
+                path: "creator/album/cover.webp".to_owned(),
+                hash: "wh".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn folder_art_delete_clears_album_state() {
+        let fs = MemFs::new().with_file("creator/album/folder.jpg", b"jpg".to_vec());
+        let mut manifest = Manifest::new();
+        let mut albums: BTreeMap<String, AlbumArt> = BTreeMap::new();
+        albums.insert(
+            "root".to_owned(),
+            AlbumArt {
+                folder_jpg: Some(ArtifactState {
+                    path: "creator/album/folder.jpg".to_owned(),
+                    hash: "jh".to_owned(),
+                }),
+                folder_webp: None,
+            },
+        );
+        let plan = Plan {
+            actions: vec![Action::DeleteArtifact {
+                kind: ArtifactKind::FolderJpg,
+                path: "creator/album/folder.jpg".to_owned(),
+                owner_id: "root".to_owned(),
+            }],
+        };
+
+        let outcome = run_with_albums(
+            &plan,
+            &mut manifest,
+            &mut albums,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_deleted, 1);
+        assert!(!fs.exists("creator/album/folder.jpg"));
+        // The album row had only the one kind, so it is pruned entirely.
+        assert!(!albums.contains_key("root"));
     }
 }

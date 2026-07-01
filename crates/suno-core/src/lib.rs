@@ -42,7 +42,7 @@ pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute}
 pub use extras::{M3u8Entry, render_m3u8};
 pub use ffmpeg::{Ffmpeg, FfmpegError, WebpEncodeSettings};
 pub use fs::{FileStat, Filesystem, FsError};
-pub use graph::{CacheEntry, LineageStore, Node, StoredEdge};
+pub use graph::{AlbumArt, CacheEntry, LineageStore, Node, StoredEdge};
 pub use hash::{art_hash, art_url_hash, meta_hash};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use lineage::{
@@ -56,7 +56,7 @@ pub use naming::{
     render_clip_names,
 };
 pub use reconcile::{
-    Action, ArtifactKind, Desired, DesiredArtifact, LocalFile, Plan, SourceMode, SourceStatus,
-    reconcile,
+    Action, AlbumDesired, ArtifactKind, Desired, DesiredArtifact, LocalFile, Plan, SourceMode,
+    SourceStatus, album_desired, deletion_allowed, plan_album_artifacts, reconcile,
 };
 pub use tag::{TrackMetadata, tag_flac, tag_mp3};

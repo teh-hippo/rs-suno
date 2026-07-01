@@ -35,6 +35,8 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use crate::config::AudioFormat;
+use crate::graph::AlbumArt;
+use crate::hash::{art_hash, art_url_hash};
 use crate::lineage::LineageContext;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
@@ -124,6 +126,26 @@ pub struct DesiredArtifact {
     pub source_url: String,
     /// Content/source change hash; a change from the manifest triggers a write.
     pub hash: String,
+}
+
+/// The desired folder-art target for one album (one stable root id).
+///
+/// Folder art is album-scoped, so it is reconciled against the album store
+/// ([`AlbumArt`]) rather than the per-clip manifest. Each present kind carries a
+/// [`DesiredArtifact`] whose `hash` is the *content* hash of the chosen art, not
+/// the source clip id: a most-played flip that yields the same art content is a
+/// no-op (HARDENING H1). A `None` kind means the album desires no art of that
+/// kind this run (no art-bearing clip, no animated source, or the feature is
+/// off), which delete-reconciles any stored art of that kind under the shared
+/// deletion gate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumDesired {
+    /// The album's stable key: the resolved root ancestor id (HARDENING H2).
+    pub root_id: String,
+    /// The desired static `folder.jpg`, from the most-played art-bearing variant.
+    pub folder_jpg: Option<DesiredArtifact>,
+    /// The desired animated `cover.webp`, from the first-created animated variant.
+    pub folder_webp: Option<DesiredArtifact>,
 }
 
 /// The caller's on-disk probe of one manifest path.
@@ -343,7 +365,10 @@ pub fn reconcile(
 /// copy listing is just as unreliable as a mirror one, so it suppresses deletes
 /// too. With no mirror source there is no authoritative listing to delete
 /// against, and copy-only runs are additive.
-fn deletion_allowed(sources: &[SourceStatus]) -> bool {
+///
+/// This is the single deletion verdict for the run; the CLI threads the same
+/// value into [`plan_album_artifacts`] so folder-art deletes share it.
+pub fn deletion_allowed(sources: &[SourceStatus]) -> bool {
     let mut saw_mirror = false;
     for status in sources {
         if !status.fully_enumerated {
@@ -762,6 +787,235 @@ fn plan_desired(
 /// Whether the desired metadata or art hash differs from the manifest entry.
 fn meta_or_art_changed(d: &Desired, entry: &ManifestEntry) -> bool {
     d.meta_hash != entry.meta_hash || d.art_hash != entry.art_hash
+}
+
+// ── Folder art (album-scoped) ───────────────────────────────────────────────
+
+/// Derive the desired folder art for every album in `desired`, grouped by the
+/// stable root id (HARDENING H2).
+///
+/// This is pure: it groups the selected clips by their resolved `root_id`, then
+/// per album chooses the folder-art sources deterministically:
+///
+/// - `folder.jpg` comes from the MOST-PLAYED art-bearing variant; ties break to
+///   the EARLIEST `created_at`, then the lexicographically smallest id. Its hash
+///   is the chosen art's content hash ([`art_hash`]), so a most-played flip to a
+///   variant sharing the same art is a no-op downstream (H1).
+/// - `cover.webp` (only when `animated_covers` is set) comes from the
+///   EARLIEST-created variant with a non-empty `video_cover_url`; ties break to
+///   the smallest id. `None` when no variant has an animated source.
+///
+/// The album folder is the common parent of the album's clips' audio paths (they
+/// share `{creator}/{album}/`); `folder.jpg` lands at `{album_dir}/folder.jpg`
+/// and the animated cover at `{album_dir}/cover.webp`.
+pub fn album_desired(desired: &[Desired], animated_covers: bool) -> Vec<AlbumDesired> {
+    let mut groups: BTreeMap<&str, Vec<&Desired>> = BTreeMap::new();
+    for d in desired {
+        groups
+            .entry(d.lineage.root_id.as_str())
+            .or_default()
+            .push(d);
+    }
+
+    groups
+        .into_iter()
+        .map(|(root_id, members)| {
+            let album_dir = album_dir_of(&members);
+            let folder_jpg = folder_jpg_source(&members).map(|source| DesiredArtifact {
+                kind: ArtifactKind::FolderJpg,
+                path: album_child(&album_dir, "folder.jpg"),
+                source_url: source.clip.selected_image_url().unwrap_or("").to_owned(),
+                hash: art_hash(&source.clip),
+            });
+            let folder_webp = animated_covers
+                .then(|| folder_webp_source(&members))
+                .flatten()
+                .map(|source| DesiredArtifact {
+                    kind: ArtifactKind::FolderWebp,
+                    path: album_child(&album_dir, "cover.webp"),
+                    source_url: source.clip.video_cover_url.clone(),
+                    hash: art_url_hash(&source.clip.video_cover_url),
+                });
+            AlbumDesired {
+                root_id: root_id.to_owned(),
+                folder_jpg,
+                folder_webp,
+            }
+        })
+        .collect()
+}
+
+/// The album folder: the common parent of the members' audio paths.
+///
+/// The album's clips share `{creator}/{album}/`, so any member's parent is the
+/// album dir; the smallest is taken so a stray differing path stays deterministic.
+fn album_dir_of(members: &[&Desired]) -> String {
+    members
+        .iter()
+        .map(|d| parent_dir(&d.path))
+        .min()
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// The most-played art-bearing variant: the `folder.jpg` source.
+///
+/// Filtered to variants that carry selectable art, then the winner MAXIMISES
+/// `play_count`, breaking ties to the EARLIEST `created_at` and then the
+/// lexicographically smallest id, so selection is fully deterministic.
+fn folder_jpg_source<'a>(members: &[&'a Desired]) -> Option<&'a Desired> {
+    members
+        .iter()
+        .copied()
+        .filter(|d| {
+            d.clip
+                .selected_image_url()
+                .is_some_and(|url| !url.is_empty())
+        })
+        .min_by(|a, b| {
+            b.clip
+                .play_count
+                .cmp(&a.clip.play_count)
+                .then_with(|| a.clip.created_at.cmp(&b.clip.created_at))
+                .then_with(|| a.clip.id.cmp(&b.clip.id))
+        })
+}
+
+/// The first-created animated variant: the `cover.webp` source.
+///
+/// Filtered to variants with a non-empty `video_cover_url`, then the winner is
+/// the EARLIEST `created_at`, tie-broken by the smallest id for determinism.
+fn folder_webp_source<'a>(members: &[&'a Desired]) -> Option<&'a Desired> {
+    members
+        .iter()
+        .copied()
+        .filter(|d| !d.clip.video_cover_url.is_empty())
+        .min_by(|a, b| {
+            a.clip
+                .created_at
+                .cmp(&b.clip.created_at)
+                .then_with(|| a.clip.id.cmp(&b.clip.id))
+        })
+}
+
+/// The parent directory of a forward-slash relative path, or `""` at the root.
+fn parent_dir(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some((dir, _)) => dir,
+        None => "",
+    }
+}
+
+/// Join an album dir and a file name with a forward slash, tolerating an empty
+/// dir (a path at the account root).
+fn album_child(album_dir: &str, name: &str) -> String {
+    if album_dir.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{album_dir}/{name}")
+    }
+}
+
+/// Plan the folder-art writes and deletes for this run's albums.
+///
+/// Writes are keyed on the CHOSEN ART CONTENT HASH (and the target path), never
+/// the source clip id: for each present desired kind, a [`Action::WriteArtifact`]
+/// is emitted only when the album store lacks that kind, its stored hash differs,
+/// or its stored path differs. When both hash and path match, nothing is written,
+/// so a most-played flip that resolves to the same art content is a no-op
+/// (HARDENING H1). Exactly one write can be emitted per album per kind.
+///
+/// Deletes cover any stored album/kind no longer desired — the album emptied (no
+/// selected clips root there this run) or the kind's source disappeared (no
+/// art-bearing or animated variant). Each is emitted only when `can_delete` (the
+/// shared [`deletion_allowed`] verdict), so folder art is never removed on an
+/// empty, failed, partial, or truncated listing. Folder art has no preserve
+/// concept; the `can_delete` gate is the guard.
+///
+/// The output is deterministic: actions are sorted by `(root_id, kind)`, and a
+/// given `(root_id, kind)` yields at most one action (a write or a delete).
+pub fn plan_album_artifacts(
+    desired: &[AlbumDesired],
+    albums: &BTreeMap<String, AlbumArt>,
+    can_delete: bool,
+) -> Vec<Action> {
+    let mut actions: Vec<Action> = Vec::new();
+    let by_root: BTreeMap<&str, &AlbumDesired> =
+        desired.iter().map(|d| (d.root_id.as_str(), d)).collect();
+
+    for d in desired {
+        let stored = albums.get(&d.root_id);
+        for artifact in [d.folder_jpg.as_ref(), d.folder_webp.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let needs_write = match stored.and_then(|a| a.artifact(artifact.kind)) {
+                None => true,
+                Some(state) => state.hash != artifact.hash || state.path != artifact.path,
+            };
+            if needs_write {
+                actions.push(Action::WriteArtifact {
+                    kind: artifact.kind,
+                    path: artifact.path.clone(),
+                    source_url: artifact.source_url.clone(),
+                    hash: artifact.hash.clone(),
+                    owner_id: d.root_id.clone(),
+                });
+            }
+        }
+    }
+
+    // Deletes are fully gated: nothing is removed on an unreliable listing.
+    if can_delete {
+        for (root_id, art) in albums {
+            for (kind, state) in album_artifacts(art) {
+                let desired_here = by_root
+                    .get(root_id.as_str())
+                    .is_some_and(|d| album_desires_kind(d, kind));
+                if !desired_here && !state.path.is_empty() {
+                    actions.push(Action::DeleteArtifact {
+                        kind,
+                        path: state.path.clone(),
+                        owner_id: root_id.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    actions.sort_by(|a, b| album_action_key(a).cmp(&album_action_key(b)));
+    actions
+}
+
+/// The folder-art artifacts an album currently stores, paired with their kind,
+/// in a stable order.
+fn album_artifacts(art: &AlbumArt) -> Vec<(ArtifactKind, &ArtifactState)> {
+    let mut out = Vec::new();
+    if let Some(state) = &art.folder_jpg {
+        out.push((ArtifactKind::FolderJpg, state));
+    }
+    if let Some(state) = &art.folder_webp {
+        out.push((ArtifactKind::FolderWebp, state));
+    }
+    out
+}
+
+/// Whether an [`AlbumDesired`] desires the given folder-art kind this run.
+fn album_desires_kind(d: &AlbumDesired, kind: ArtifactKind) -> bool {
+    match kind {
+        ArtifactKind::FolderJpg => d.folder_jpg.is_some(),
+        ArtifactKind::FolderWebp => d.folder_webp.is_some(),
+        ArtifactKind::CoverJpg | ArtifactKind::CoverWebp | ArtifactKind::Playlist => false,
+    }
+}
+
+/// The `(root_id, kind)` sort key for a folder-art action, for deterministic order.
+fn album_action_key(action: &Action) -> (&str, ArtifactKind) {
+    match action {
+        Action::WriteArtifact { owner_id, kind, .. }
+        | Action::DeleteArtifact { owner_id, kind, .. } => (owner_id.as_str(), *kind),
+        _ => ("", ArtifactKind::CoverJpg),
+    }
 }
 
 #[cfg(test)]
@@ -2179,6 +2433,450 @@ mod tests {
         let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
         assert_eq!(plan.artifact_writes(), 0);
         assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    // ── Phase 8: folder art (album-scoped) ──────────────────────────
+
+    fn album_clip(id: &str, play_count: u64, created_at: &str, image: &str, video: &str) -> Clip {
+        Clip {
+            id: id.to_string(),
+            title: "Song".to_string(),
+            image_large_url: image.to_string(),
+            video_cover_url: video.to_string(),
+            play_count,
+            created_at: created_at.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn album_member(clip: Clip, root_id: &str, path: &str) -> Desired {
+        let mut lineage = LineageContext::own_root(&clip);
+        lineage.root_id = root_id.to_string();
+        Desired {
+            clip,
+            lineage,
+            path: path.to_string(),
+            format: AudioFormat::Flac,
+            meta_hash: "m".to_string(),
+            art_hash: "a".to_string(),
+            modes: vec![SourceMode::Mirror],
+            trashed: false,
+            private: false,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn stored(path: &str, hash: &str) -> ArtifactState {
+        ArtifactState {
+            path: path.to_string(),
+            hash: hash.to_string(),
+        }
+    }
+
+    #[test]
+    fn folder_jpg_source_is_most_played() {
+        let members = vec![
+            album_member(album_clip("a", 5, "t0", "art-a", ""), "root", "c/al/a.flac"),
+            album_member(album_clip("b", 9, "t1", "art-b", ""), "root", "c/al/b.flac"),
+            album_member(album_clip("c", 2, "t2", "art-c", ""), "root", "c/al/c.flac"),
+        ];
+        let albums = album_desired(&members, false);
+        assert_eq!(albums.len(), 1);
+        let jpg = albums[0].folder_jpg.as_ref().unwrap();
+        // "b" has the highest play_count, so its art content hash wins.
+        assert_eq!(jpg.hash, art_url_hash("art-b"));
+        assert_eq!(jpg.source_url, "art-b");
+        assert_eq!(jpg.path, "c/al/folder.jpg");
+        assert_eq!(jpg.kind, ArtifactKind::FolderJpg);
+    }
+
+    #[test]
+    fn folder_jpg_tie_breaks_earliest_then_lex_id() {
+        // Equal play_count: earliest created_at wins.
+        let by_time = vec![
+            album_member(album_clip("z", 4, "t2", "art-z", ""), "root", "c/al/z.flac"),
+            album_member(album_clip("y", 4, "t0", "art-y", ""), "root", "c/al/y.flac"),
+            album_member(album_clip("x", 4, "t1", "art-x", ""), "root", "c/al/x.flac"),
+        ];
+        let jpg = album_desired(&by_time, false)[0]
+            .folder_jpg
+            .clone()
+            .unwrap();
+        assert_eq!(jpg.source_url, "art-y");
+
+        // Equal play_count and created_at: lexicographically smallest id wins.
+        let by_id = vec![
+            album_member(album_clip("m", 4, "t0", "art-m", ""), "root", "c/al/m.flac"),
+            album_member(album_clip("g", 4, "t0", "art-g", ""), "root", "c/al/g.flac"),
+        ];
+        let jpg = album_desired(&by_id, false)[0].folder_jpg.clone().unwrap();
+        assert_eq!(jpg.source_url, "art-g");
+    }
+
+    #[test]
+    fn folder_webp_source_is_first_created_animated() {
+        let members = vec![
+            album_member(
+                album_clip("a", 9, "t2", "art-a", "vid-a"),
+                "root",
+                "c/al/a.flac",
+            ),
+            album_member(
+                album_clip("b", 1, "t0", "art-b", "vid-b"),
+                "root",
+                "c/al/b.flac",
+            ),
+            album_member(album_clip("c", 5, "t1", "art-c", ""), "root", "c/al/c.flac"),
+        ];
+        let webp = album_desired(&members, true)[0]
+            .folder_webp
+            .clone()
+            .unwrap();
+        // "b" is earliest-created with an animated source, regardless of plays.
+        assert_eq!(webp.source_url, "vid-b");
+        assert_eq!(webp.hash, art_url_hash("vid-b"));
+        assert_eq!(webp.path, "c/al/cover.webp");
+        assert_eq!(webp.kind, ArtifactKind::FolderWebp);
+    }
+
+    #[test]
+    fn animated_covers_off_yields_no_folder_webp() {
+        let members = vec![album_member(
+            album_clip("a", 1, "t0", "art-a", "vid-a"),
+            "root",
+            "c/al/a.flac",
+        )];
+        let off = album_desired(&members, false);
+        assert!(off[0].folder_webp.is_none());
+        let on = album_desired(&members, true);
+        assert!(on[0].folder_webp.is_some());
+    }
+
+    #[test]
+    fn album_with_no_art_yields_no_folder_jpg() {
+        let members = vec![album_member(
+            album_clip("a", 3, "t0", "", ""),
+            "root",
+            "c/al/a.flac",
+        )];
+        let albums = album_desired(&members, true);
+        assert!(albums[0].folder_jpg.is_none());
+        assert!(albums[0].folder_webp.is_none());
+    }
+
+    #[test]
+    fn album_desired_groups_by_root_id() {
+        let members = vec![
+            album_member(album_clip("a", 1, "t0", "art-a", ""), "r1", "c/al1/a.flac"),
+            album_member(album_clip("b", 1, "t0", "art-b", ""), "r2", "c/al2/b.flac"),
+            album_member(album_clip("c", 9, "t0", "art-c", ""), "r1", "c/al1/c.flac"),
+        ];
+        let albums = album_desired(&members, false);
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums[0].root_id, "r1");
+        assert_eq!(albums[0].folder_jpg.as_ref().unwrap().source_url, "art-c");
+        assert_eq!(
+            albums[0].folder_jpg.as_ref().unwrap().path,
+            "c/al1/folder.jpg"
+        );
+        assert_eq!(albums[1].root_id, "r2");
+        assert_eq!(albums[1].folder_jpg.as_ref().unwrap().source_url, "art-b");
+        assert_eq!(
+            albums[1].folder_jpg.as_ref().unwrap().path,
+            "c/al2/folder.jpg"
+        );
+    }
+
+    #[test]
+    fn plan_writes_folder_art_when_store_empty() {
+        let members = vec![album_member(
+            album_clip("a", 1, "t0", "art-a", "vid-a"),
+            "root",
+            "c/al/a.flac",
+        )];
+        let desired = album_desired(&members, true);
+        let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true);
+        assert_eq!(
+            actions,
+            vec![
+                Action::WriteArtifact {
+                    kind: ArtifactKind::FolderJpg,
+                    path: "c/al/folder.jpg".to_string(),
+                    source_url: "art-a".to_string(),
+                    hash: art_url_hash("art-a"),
+                    owner_id: "root".to_string(),
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::FolderWebp,
+                    path: "c/al/cover.webp".to_string(),
+                    source_url: "vid-a".to_string(),
+                    hash: art_url_hash("vid-a"),
+                    owner_id: "root".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_skips_when_hash_and_path_match() {
+        let members = vec![album_member(
+            album_clip("a", 1, "t0", "art-a", ""),
+            "root",
+            "c/al/a.flac",
+        )];
+        let desired = album_desired(&members, false);
+        let mut albums = BTreeMap::new();
+        albums.insert(
+            "root".to_string(),
+            AlbumArt {
+                folder_jpg: Some(stored("c/al/folder.jpg", &art_url_hash("art-a"))),
+                folder_webp: None,
+            },
+        );
+        assert!(plan_album_artifacts(&desired, &albums, true).is_empty());
+    }
+
+    #[test]
+    fn plan_rewrites_when_path_drifts_even_if_hash_matches() {
+        let members = vec![album_member(
+            album_clip("a", 1, "t0", "art-a", ""),
+            "root",
+            "c/al/a.flac",
+        )];
+        let desired = album_desired(&members, false);
+        let mut albums = BTreeMap::new();
+        albums.insert(
+            "root".to_string(),
+            AlbumArt {
+                folder_jpg: Some(stored("old/folder.jpg", &art_url_hash("art-a"))),
+                folder_webp: None,
+            },
+        );
+        let actions = plan_album_artifacts(&desired, &albums, true);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            &actions[0],
+            Action::WriteArtifact { path, .. } if path == "c/al/folder.jpg"
+        ));
+    }
+
+    #[test]
+    fn h1_most_played_flip_to_same_art_writes_nothing() {
+        // Two variants sharing identical art. Run 1: "a" is most-played.
+        let run1 = vec![
+            album_member(
+                album_clip("a", 9, "t0", "same-art", ""),
+                "root",
+                "c/al/a.flac",
+            ),
+            album_member(
+                album_clip("b", 1, "t1", "same-art", ""),
+                "root",
+                "c/al/b.flac",
+            ),
+        ];
+        let desired1 = album_desired(&run1, false);
+        let write1 = plan_album_artifacts(&desired1, &BTreeMap::new(), true);
+        assert_eq!(write1.len(), 1);
+
+        // Persist the winner's state as the executor would.
+        let mut albums = BTreeMap::new();
+        if let Action::WriteArtifact {
+            path,
+            hash,
+            owner_id,
+            ..
+        } = &write1[0]
+        {
+            albums.insert(
+                owner_id.clone(),
+                AlbumArt {
+                    folder_jpg: Some(stored(path, hash)),
+                    folder_webp: None,
+                },
+            );
+        }
+
+        // Run 2: "b" overtakes "a" on plays, but the art content is identical.
+        let run2 = vec![
+            album_member(
+                album_clip("a", 1, "t0", "same-art", ""),
+                "root",
+                "c/al/a.flac",
+            ),
+            album_member(
+                album_clip("b", 9, "t1", "same-art", ""),
+                "root",
+                "c/al/b.flac",
+            ),
+        ];
+        let desired2 = album_desired(&run2, false);
+        // The winner flipped, but the chosen art content hash did not: no churn.
+        assert!(plan_album_artifacts(&desired2, &albums, true).is_empty());
+    }
+
+    #[test]
+    fn h1_flip_to_different_art_writes_exactly_one() {
+        let mut albums = BTreeMap::new();
+        albums.insert(
+            "root".to_string(),
+            AlbumArt {
+                folder_jpg: Some(stored("c/al/folder.jpg", &art_url_hash("old-art"))),
+                folder_webp: None,
+            },
+        );
+        // The new most-played variant carries genuinely different art.
+        let members = vec![
+            album_member(
+                album_clip("a", 1, "t0", "old-art", ""),
+                "root",
+                "c/al/a.flac",
+            ),
+            album_member(
+                album_clip("b", 9, "t1", "new-art", ""),
+                "root",
+                "c/al/b.flac",
+            ),
+        ];
+        let desired = album_desired(&members, false);
+        let actions = plan_album_artifacts(&desired, &albums, true);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            &actions[0],
+            Action::WriteArtifact { hash, .. } if *hash == art_url_hash("new-art")
+        ));
+    }
+
+    #[test]
+    fn one_write_per_album_regardless_of_clip_count() {
+        let members: Vec<Desired> = (0..200)
+            .map(|i| {
+                album_member(
+                    album_clip(
+                        &format!("clip-{i:03}"),
+                        i as u64,
+                        &format!("t{i:03}"),
+                        &format!("art-{i:03}"),
+                        &format!("vid-{i:03}"),
+                    ),
+                    "root",
+                    &format!("c/al/clip-{i:03}.flac"),
+                )
+            })
+            .collect();
+        let desired = album_desired(&members, true);
+        assert_eq!(desired.len(), 1);
+        let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true);
+        // Exactly one folder.jpg and one cover.webp for the whole 200-clip album.
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| matches!(a, Action::WriteArtifact { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn emptied_album_deletes_only_when_can_delete() {
+        let mut albums = BTreeMap::new();
+        albums.insert(
+            "root".to_string(),
+            AlbumArt {
+                folder_jpg: Some(stored("c/al/folder.jpg", "h")),
+                folder_webp: Some(stored("c/al/cover.webp", "hw")),
+            },
+        );
+        // No album desires this root any more (it emptied out this run).
+        let desired: Vec<AlbumDesired> = Vec::new();
+
+        // Gated off: an incomplete/unsafe listing removes nothing.
+        assert!(plan_album_artifacts(&desired, &albums, false).is_empty());
+
+        // Gated on: both stored kinds are removed, sorted by kind.
+        let actions = plan_album_artifacts(&desired, &albums, true);
+        assert_eq!(
+            actions,
+            vec![
+                Action::DeleteArtifact {
+                    kind: ArtifactKind::FolderJpg,
+                    path: "c/al/folder.jpg".to_string(),
+                    owner_id: "root".to_string(),
+                },
+                Action::DeleteArtifact {
+                    kind: ArtifactKind::FolderWebp,
+                    path: "c/al/cover.webp".to_string(),
+                    owner_id: "root".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn disappeared_webp_source_deletes_only_that_kind_when_gated() {
+        let mut albums = BTreeMap::new();
+        albums.insert(
+            "root".to_string(),
+            AlbumArt {
+                folder_jpg: Some(stored("c/al/folder.jpg", &art_url_hash("art-a"))),
+                folder_webp: Some(stored("c/al/cover.webp", &art_url_hash("vid-a"))),
+            },
+        );
+        // The album is still present with the same folder.jpg, but animated
+        // covers are now off, so the webp source has disappeared.
+        let members = vec![album_member(
+            album_clip("a", 1, "t0", "art-a", "vid-a"),
+            "root",
+            "c/al/a.flac",
+        )];
+        let desired = album_desired(&members, false);
+
+        assert!(plan_album_artifacts(&desired, &albums, false).is_empty());
+
+        let actions = plan_album_artifacts(&desired, &albums, true);
+        assert_eq!(
+            actions,
+            vec![Action::DeleteArtifact {
+                kind: ArtifactKind::FolderWebp,
+                path: "c/al/cover.webp".to_string(),
+                owner_id: "root".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn plan_album_artifacts_is_deterministically_ordered() {
+        let members = vec![
+            album_member(
+                album_clip("a", 1, "t0", "art-a", "vid-a"),
+                "r2",
+                "c/al2/a.flac",
+            ),
+            album_member(
+                album_clip("b", 1, "t0", "art-b", "vid-b"),
+                "r1",
+                "c/al1/b.flac",
+            ),
+        ];
+        let desired = album_desired(&members, true);
+        let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true);
+        let keys: Vec<(&str, ArtifactKind)> = actions
+            .iter()
+            .map(|a| match a {
+                Action::WriteArtifact { owner_id, kind, .. } => (owner_id.as_str(), *kind),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("r1", ArtifactKind::FolderJpg),
+                ("r1", ArtifactKind::FolderWebp),
+                ("r2", ArtifactKind::FolderJpg),
+                ("r2", ArtifactKind::FolderWebp),
+            ]
+        );
     }
 }
 

@@ -16,6 +16,7 @@ pub struct Clip {
     pub video_cover_url: String,
     pub tags: String,
     pub duration: f64,
+    pub play_count: u64,
     pub status: String,
     pub created_at: String,
     pub display_name: String,
@@ -91,6 +92,7 @@ impl Clip {
                 .get("duration")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0),
+            play_count: raw.get("play_count").and_then(Value::as_u64).unwrap_or(0),
             status: raw
                 .get("status")
                 .and_then(Value::as_str)
@@ -352,6 +354,21 @@ mod tests {
                 id: "m_bare-id-verbatim".to_owned(),
                 ..Default::default()
             }]
+        );
+    }
+
+    #[test]
+    fn play_count_parses_top_level_and_defaults_to_zero() {
+        let with_count = serde_json::json!({"id": "x", "play_count": 4242});
+        assert_eq!(Clip::from_json(&with_count).play_count, 4242);
+        // Absent or non-integer play_count falls back to zero.
+        assert_eq!(
+            Clip::from_json(&serde_json::json!({"id": "x"})).play_count,
+            0
+        );
+        assert_eq!(
+            Clip::from_json(&serde_json::json!({"id": "x", "play_count": null})).play_count,
+            0
         );
     }
 

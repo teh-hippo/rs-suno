@@ -47,9 +47,11 @@ fn drive_capturing(
     let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"));
     let clock = RecordingClock::new();
     let ffmpeg = StubFfmpeg::flac();
+    let mut albums = std::collections::BTreeMap::new();
     let outcome = pollster::block_on(execute(
         plan,
         manifest,
+        &mut albums,
         desired,
         Ports {
             client: &mut client,

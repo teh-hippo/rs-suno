@@ -8,7 +8,7 @@
 //! a signal so an interrupt preserves partial progress), and writing the
 //! manifest, logs, and last-run marker.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,8 +16,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
-    ClerkAuth, Clip, Config, Error as CoreError, ExecOptions, FlagOverrides, LineageContext,
-    LocalFile, Ports, ResolveOpts, SourceMode, SourceStatus, SunoClient, reconcile, resolve_roots,
+    AlbumArt, AlbumDesired, ClerkAuth, Clip, Config, Error as CoreError, ExecOptions,
+    FlagOverrides, LineageContext, LocalFile, Ports, ResolveOpts, SourceMode, SourceStatus,
+    SunoClient, album_desired, deletion_allowed, plan_album_artifacts, reconcile, resolve_roots,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
@@ -510,13 +511,24 @@ async fn run_one(
         &colliding_albums,
         settings.animated_covers,
     );
+    // Folder-level album art is keyed on the stable root id and chosen purely
+    // from the selected clips (most-played for folder.jpg, first-created animated
+    // for cover.webp); --animated-covers gates the webp.
+    let albums_desired = album_desired(&desired, settings.animated_covers);
 
     let dry_run = global.dry_run || verb == Verb::Check;
 
     // Dry-run and check report without touching disk: the destination is not
     // created and no lock is taken. A missing manifest reads as empty.
     if dry_run {
-        let (_manifest, plan) = load_and_reconcile(dest, &desired, enumerated, verb)?;
+        let (_manifest, plan) = load_and_reconcile(
+            dest,
+            &desired,
+            &albums_desired,
+            &store.albums,
+            enumerated,
+            verb,
+        )?;
         if verbosity >= 1 {
             let no_failures = HashSet::new();
             for line in output::action_lines(&plan, &no_failures, verbosity) {
@@ -540,7 +552,14 @@ async fn run_one(
     std::fs::create_dir_all(dest)
         .with_context(|| format!("could not create {}", dest.display()))?;
     let _lock = logs::acquire_lock(dest)?;
-    let (manifest, plan) = load_and_reconcile(dest, &desired, enumerated, verb)?;
+    let (manifest, plan) = load_and_reconcile(
+        dest,
+        &desired,
+        &albums_desired,
+        &store.albums,
+        enumerated,
+        verb,
+    )?;
 
     // Persist the lineage graph *before* execute (durability H4), under the same
     // lock as the manifest, but only when this run refreshed it — a failed
@@ -608,6 +627,7 @@ async fn run_one(
         &plan,
         &desired,
         manifest,
+        &mut store,
         &mut client,
         &http,
         dest,
@@ -624,6 +644,7 @@ async fn execute_plan(
     plan: &suno_core::Plan,
     desired: &[suno_core::Desired],
     mut manifest: suno_core::Manifest,
+    store: &mut suno_core::LineageStore,
     client: &mut SunoClient,
     http: &ReqwestHttp,
     dest: &Path,
@@ -650,13 +671,16 @@ async fn execute_plan(
             clock: &clock,
         };
         tokio::select! {
-            out = suno_core::execute(plan, &mut manifest, desired, ports, &opts) => Some(out),
+            out = suno_core::execute(plan, &mut manifest, &mut store.albums, desired, ports, &opts) => Some(out),
             _ = wait_for_signal() => None,
         }
     };
 
     let Some(outcome) = outcome else {
         logs::save_manifest(dest, &manifest)?;
+        // Folder art may have been written before the interrupt; persist the
+        // album-art store so those sidecars are tracked on the next run.
+        logs::save_graph(dest, store)?;
         eprintln!(
             "warning: interrupted -- partial run saved\n  Progress so far is recorded in the manifest; re-run to continue."
         );
@@ -664,6 +688,10 @@ async fn execute_plan(
     };
 
     logs::save_manifest(dest, &manifest)?;
+    // Persist the graph again after execute: the lineage part was already saved
+    // for durability before execute, but album-art state is mutated *during*
+    // execute (folder.jpg / cover.webp writes and deletes), so it lands now.
+    logs::save_graph(dest, store)?;
     let clips_by_id: HashMap<&str, &Clip> = desired
         .iter()
         .map(|d| (d.clip.id.as_str(), &d.clip))
@@ -709,14 +737,20 @@ async fn execute_plan(
     Ok(run_exit_code(&outcome))
 }
 
-/// Load the manifest beside `dest` and reconcile `desired` against it.
+/// Load the manifest beside `dest` and reconcile `desired` against it, then
+/// append the folder-art plan for `albums_desired`.
 ///
 /// Shared by the dry-run and executing paths. Reading a missing manifest yields
 /// an empty one and statting absent files is harmless, so this never creates the
-/// destination directory.
+/// destination directory. The folder-art actions share the run's single deletion
+/// verdict ([`deletion_allowed`]) so album art is never removed on an incomplete
+/// listing, and they land on the same [`Plan`] so the mass-delete cap and the
+/// confirmation prompt already cover them.
 fn load_and_reconcile(
     dest: &Path,
     desired: &[suno_core::Desired],
+    albums_desired: &[AlbumDesired],
+    albums: &BTreeMap<String, AlbumArt>,
     enumerated: bool,
     verb: Verb,
 ) -> Result<(suno_core::Manifest, suno_core::Plan)> {
@@ -726,7 +760,10 @@ fn load_and_reconcile(
         mode: verb.mode(),
         fully_enumerated: enumerated,
     }];
-    let plan = reconcile(&manifest, desired, &local, &sources);
+    let can_delete = deletion_allowed(&sources);
+    let mut plan = reconcile(&manifest, desired, &local, &sources);
+    plan.actions
+        .extend(plan_album_artifacts(albums_desired, albums, can_delete));
     Ok((manifest, plan))
 }
 
@@ -944,7 +981,8 @@ mod tests {
             Path::new("target").join(format!("run-nodir-{}-{}", std::process::id(), now_secs()));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!dir.exists());
-        let (manifest, plan) = load_and_reconcile(&dir, &[], false, Verb::Sync).unwrap();
+        let (manifest, plan) =
+            load_and_reconcile(&dir, &[], &[], &BTreeMap::new(), false, Verb::Sync).unwrap();
         assert!(manifest.is_empty());
         assert!(plan.actions.is_empty());
         assert!(
