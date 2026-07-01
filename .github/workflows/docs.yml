@@ -1,0 +1,23 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  docs:
+    uses: teh-hippo/common-repo-configs/.github/workflows/mdbook.yml@c931fba4d72479caec16ca097b7ce105aa56ede4 # v1
+    permissions:
+      pages: write
+      id-token: write
+      contents: read
+    with:
+      path: docs
