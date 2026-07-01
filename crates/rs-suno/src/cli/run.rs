@@ -443,7 +443,7 @@ async fn run_one(
         return Ok(report_auth_failure(&target.label, &err));
     }
     let account = auth.display_name().to_owned();
-    let mut client = SunoClient::new(auth);
+    let mut client = SunoClient::new(auth, TokioClock);
 
     let (clips, complete) = match client.list_clips(&http, false, args.limit).await {
         Ok(result) => result,
@@ -683,7 +683,7 @@ async fn execute_plan(
     desired: &[suno_core::Desired],
     mut manifest: suno_core::Manifest,
     store: &mut suno_core::LineageStore,
-    client: &mut SunoClient,
+    client: &mut SunoClient<TokioClock>,
     http: &ReqwestHttp,
     dest: &Path,
     settings: &suno_core::EffectiveSettings,
@@ -791,7 +791,7 @@ async fn execute_plan(
 /// neither rewritten nor removed. The synthetic liked feed is appended last, in
 /// liked order, under the id [`LIKED_PLAYLIST_ID`].
 async fn fetch_playlist_desired(
-    client: &mut SunoClient,
+    client: &mut SunoClient<TokioClock>,
     http: &ReqwestHttp,
     desired: &[suno_core::Desired],
     protected: &mut BTreeSet<String>,
@@ -980,7 +980,7 @@ pub(crate) fn report_auth_failure(label: &str, err: &CoreError) -> ExitCode {
 pub(crate) fn report_listing_failure(label: &str, err: &CoreError) -> ExitCode {
     match err {
         CoreError::Auth(_) => report_auth_failure(label, err),
-        CoreError::Connection(_) | CoreError::RateLimited => {
+        CoreError::Connection(_) | CoreError::RateLimited { .. } => {
             eprintln!(
                 "error: could not list the library for '{label}': {err}\n  No files were written. Re-run when connectivity is restored."
             );

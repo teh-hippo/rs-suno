@@ -3,9 +3,11 @@
 use serde_json::Value;
 
 use crate::auth::ClerkAuth;
+use crate::backoff::{backoff_delay, retry_after};
+use crate::clock::Clock;
 use crate::consts::{
-    CLIP_PARENT_PATH, FEED_V2_PATH, IDS_PER_REQUEST, MAX_PAGES, PLAYLIST_ME_PATH, PLAYLIST_PATH,
-    SUNO_API_BASE_URL,
+    API_MAX_RETRIES, CLIP_PARENT_PATH, FEED_PAGE_DELAY, FEED_PAGE_SIZE, FEED_V2_PATH,
+    IDS_PER_REQUEST, MAX_PAGES, PLAYLIST_ME_PATH, PLAYLIST_PATH, SUNO_API_BASE_URL,
 };
 use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
@@ -31,14 +33,20 @@ pub struct Playlist {
 }
 
 /// A client for the Suno library API, owning the account's [`ClerkAuth`].
-pub struct SunoClient {
+///
+/// The [`Clock`] is held so [`api_request`](Self::api_request) can back off
+/// through the port on a `429` or transient failure, and paged listings can
+/// pace themselves under Suno's rate limiter — the engine still sleeps nowhere
+/// itself.
+pub struct SunoClient<C> {
     auth: ClerkAuth,
+    clock: C,
 }
 
-impl SunoClient {
+impl<C: Clock> SunoClient<C> {
     /// Create a client from a fresh or already-authenticated [`ClerkAuth`].
-    pub fn new(auth: ClerkAuth) -> Self {
-        Self { auth }
+    pub fn new(auth: ClerkAuth, clock: C) -> Self {
+        Self { auth, clock }
     }
 
     /// Borrow the underlying authenticator.
@@ -66,8 +74,11 @@ impl SunoClient {
         let suffix = if liked { "&is_liked=true" } else { "" };
         let mut complete = false;
         for page in 0..MAX_PAGES {
-            let path = format!("/api/feed/v2/?page={page}{suffix}");
-            let body = self.api_get(http, &path).await?;
+            if page > 0 {
+                self.clock.sleep(FEED_PAGE_DELAY).await;
+            }
+            let path = format!("{FEED_V2_PATH}?page={page}&page_size={FEED_PAGE_SIZE}{suffix}");
+            let body = self.api_get_retrying(http, &path).await?;
             let (page_clips, has_more) = parse_feed(&body)?;
             clips.extend(page_clips);
             if !has_more {
@@ -133,7 +144,7 @@ impl SunoClient {
             }
             let joined = chunk.join(",");
             let path = format!("{FEED_V2_PATH}?ids={joined}");
-            let body = self.api_get(http, &path).await?;
+            let body = self.api_get_retrying(http, &path).await?;
             clips.extend(map_all_clips(&body)?);
         }
         Ok(clips)
@@ -148,7 +159,7 @@ impl SunoClient {
     /// `5xx`, propagates as an error rather than being mistaken for a root.
     pub async fn get_clip_parent(&mut self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
         let path = format!("{CLIP_PARENT_PATH}?clip_id={id}");
-        match self.api_get(http, &path).await {
+        match self.api_get_retrying(http, &path).await {
             Ok(body) => Ok(parse_clip(&body)),
             Err(Error::NotFound(_)) => Ok(None),
             Err(err) => Err(err),
@@ -168,9 +179,12 @@ impl SunoClient {
     pub async fn get_playlists(&mut self, http: &impl Http) -> Result<Vec<Playlist>> {
         let mut playlists = Vec::new();
         for page in 1..=MAX_PAGES {
+            if page > 1 {
+                self.clock.sleep(FEED_PAGE_DELAY).await;
+            }
             let path =
                 format!("{PLAYLIST_ME_PATH}?page={page}&show_trashed=false&show_sharelist=false");
-            let body = self.api_get(http, &path).await?;
+            let body = self.api_get_retrying(http, &path).await?;
             let page_playlists = parse_playlists(&body)?;
             if page_playlists.is_empty() {
                 break;
@@ -189,7 +203,7 @@ impl SunoClient {
     /// only clips with a non-empty id are kept.
     pub async fn get_playlist_clips(&mut self, http: &impl Http, id: &str) -> Result<Vec<Clip>> {
         let path = format!("{PLAYLIST_PATH}{id}/");
-        let body = self.api_get(http, &path).await?;
+        let body = self.api_get_retrying(http, &path).await?;
         parse_playlist_clips(&body)
     }
 
@@ -197,7 +211,7 @@ impl SunoClient {
     /// returns a body that does not yield the requested clip.
     async fn try_get_clip(&mut self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
         let path = format!("/api/clip/{id}");
-        match self.api_get(http, &path).await {
+        match self.api_get_retrying(http, &path).await {
             Ok(body) => Ok(parse_clip(&body).filter(|clip| clip.id == id)),
             Err(Error::NotFound(_)) => Ok(None),
             Err(err) => Err(err),
@@ -218,6 +232,33 @@ impl SunoClient {
         self.api_request(http, Method::Get, path).await
     }
 
+    /// Like [`api_get`](Self::api_get) but rides through Suno's rate limiter,
+    /// backing off through the [`Clock`] on a `429` (honouring `Retry-After`
+    /// when present) or a transient connection failure, up to
+    /// [`API_MAX_RETRIES`] times.
+    ///
+    /// The WAV render flow deliberately keeps to the plain [`api_get`](Self::api_get):
+    /// the executor owns that retry so its budget and poll interval stay in one
+    /// place. Library, playlist, and lineage reads use this so a full-library
+    /// walk is not aborted by a single throttled page.
+    async fn api_get_retrying(&mut self, http: &impl Http, path: &str) -> Result<Vec<u8>> {
+        let mut retries = 0;
+        loop {
+            match self.api_get(http, path).await {
+                Ok(body) => return Ok(body),
+                Err(Error::RateLimited { retry_after }) if retries < API_MAX_RETRIES => {
+                    self.clock.sleep(backoff_delay(retries, retry_after)).await;
+                    retries += 1;
+                }
+                Err(Error::Connection(_)) if retries < API_MAX_RETRIES => {
+                    self.clock.sleep(backoff_delay(retries, None)).await;
+                    retries += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     /// Perform an authenticated request, refreshing the JWT once on a 401/403.
     async fn api_request(
         &mut self,
@@ -226,7 +267,8 @@ impl SunoClient {
         path: &str,
     ) -> Result<Vec<u8>> {
         let url = format!("{SUNO_API_BASE_URL}{path}");
-        for attempt in 0..2 {
+        let mut auth_refreshed = false;
+        loop {
             let jwt = self.auth.ensure_jwt(http).await?;
             let request = HttpRequest {
                 method,
@@ -239,14 +281,21 @@ impl SunoClient {
                 .map_err(|err| Error::Connection(err.to_string()))?;
             match response.status {
                 200..=299 => return Ok(response.body),
-                401 | 403 if attempt == 0 => self.auth.invalidate_jwt(),
+                401 | 403 if !auth_refreshed => {
+                    self.auth.invalidate_jwt();
+                    auth_refreshed = true;
+                }
                 401 | 403 => {
                     return Err(Error::Auth(format!(
                         "Suno API auth failed with status {}",
                         response.status
                     )));
                 }
-                429 => return Err(Error::RateLimited),
+                429 => {
+                    return Err(Error::RateLimited {
+                        retry_after: retry_after(&response),
+                    });
+                }
                 404 => {
                     return Err(Error::NotFound(format!("Suno API returned 404: {path}")));
                 }
@@ -259,7 +308,6 @@ impl SunoClient {
                 }
             }
         }
-        Err(Error::Api("Suno API request failed after retries".into()))
     }
 }
 
@@ -406,7 +454,8 @@ fn keep_clip(raw: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockHttp, Rule};
+    use crate::testutil::{MockHttp, RecordingClock, Reply, Rule, ScriptedHttp};
+    use std::time::Duration;
 
     fn feed_body() -> String {
         serde_json::json!({
@@ -469,7 +518,7 @@ mod tests {
 
         let mut auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(&http)).unwrap();
-        let mut client = SunoClient::new(auth);
+        let mut client = SunoClient::new(auth, RecordingClock::new());
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, "a");
@@ -517,10 +566,98 @@ mod tests {
         ]
     }
 
-    fn authed_client(http: &MockHttp) -> SunoClient {
+    fn authed_client(http: &MockHttp) -> SunoClient<RecordingClock> {
         let mut auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(http)).unwrap();
-        SunoClient::new(auth)
+        SunoClient::new(auth, RecordingClock::new())
+    }
+
+    fn scripted_client(http: &ScriptedHttp, clock: RecordingClock) -> SunoClient<RecordingClock> {
+        let mut auth = ClerkAuth::new("eyJtoken");
+        pollster::block_on(auth.authenticate(http)).unwrap();
+        SunoClient::new(auth, clock)
+    }
+
+    fn one_clip_page(id: &str, has_more: bool) -> String {
+        serde_json::json!({
+            "has_more": has_more,
+            "clips": [{
+                "id": id, "title": "Song", "status": "complete",
+                "audio_url": format!("https://cdn1.suno.ai/{id}.mp3"),
+                "metadata": {"type": "gen"}
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn list_clips_retries_a_rate_limited_page() {
+        let http = ScriptedHttp::new().with_auth().route_seq(
+            "/api/feed/v2",
+            vec![Reply::status(429), Reply::json(&feed_body())],
+        );
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert!(complete);
+        // The throttled page was retried once, waiting out one base backoff.
+        assert_eq!(http.count("/api/feed/v2"), 2);
+        assert_eq!(clock.sleeps(), vec![Duration::from_secs(1)]);
+    }
+
+    #[test]
+    fn list_clips_honours_retry_after_on_a_throttled_page() {
+        let http = ScriptedHttp::new().with_auth().route_seq(
+            "/api/feed/v2",
+            vec![
+                Reply::status(429).with_retry_after(7),
+                Reply::json(&feed_body()),
+            ],
+        );
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let (clips, _complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert_eq!(clips.len(), 1);
+        // The server's Retry-After floors the backoff above the 1s base.
+        assert_eq!(clock.sleeps(), vec![Duration::from_secs(7)]);
+    }
+
+    #[test]
+    fn list_clips_paces_between_pages() {
+        let http = ScriptedHttp::new().with_auth().route_seq(
+            "/api/feed/v2",
+            vec![
+                Reply::json(&one_clip_page("a", true)),
+                Reply::json(&one_clip_page("e", false)),
+            ],
+        );
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert!(complete);
+        assert_eq!(clips.len(), 2);
+        assert_eq!(http.count("/api/feed/v2"), 2);
+        // One inter-page pace was waited out before fetching the second page.
+        assert_eq!(clock.sleeps(), vec![crate::consts::FEED_PAGE_DELAY]);
+    }
+
+    #[test]
+    fn list_clips_gives_up_after_max_retries() {
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/feed/v2", Reply::status(429));
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let result = pollster::block_on(client.list_clips(&http, false, None));
+        assert!(matches!(result, Err(Error::RateLimited { .. })));
+        let budget = crate::consts::API_MAX_RETRIES as usize;
+        assert_eq!(clock.sleeps().len(), budget);
+        assert_eq!(http.count("/api/feed/v2"), budget + 1);
     }
 
     #[test]

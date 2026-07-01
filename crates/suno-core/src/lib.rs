@@ -5,6 +5,7 @@
 //! in isolation.
 
 mod auth;
+mod backoff;
 mod client;
 mod clock;
 pub mod config;

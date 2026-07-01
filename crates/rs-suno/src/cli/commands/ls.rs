@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
 
+use crate::clock::TokioClock;
 use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{ClerkAuth, FlagOverrides, SunoClient};
@@ -53,7 +54,7 @@ pub async fn run_ls(global: &GlobalArgs, args: &LsArgs, force_json: bool) -> Res
         Err(err) => return Ok(run::report_auth_failure(&label, &err)),
     };
     let display_name = auth.display_name().to_owned();
-    let mut client = SunoClient::new(auth);
+    let mut client = SunoClient::new(auth, TokioClock);
 
     let (clips, _complete) = match client.list_clips(&http, args.liked, args.limit).await {
         Ok(result) => result,

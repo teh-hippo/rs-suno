@@ -16,6 +16,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::client::SunoClient;
+use crate::clock::Clock;
 use crate::error::Result;
 use crate::http::Http;
 use crate::model::Clip;
@@ -352,7 +353,7 @@ pub fn lineage_edges(clip: &Clip) -> Vec<Edge> {
 /// every input clip, plus the gap-filled ancestor clips it fetched.
 pub async fn resolve_roots(
     clips: &[Clip],
-    client: &mut SunoClient,
+    client: &mut SunoClient<impl Clock>,
     http: &impl Http,
     opts: ResolveOpts,
 ) -> Result<Resolution> {
@@ -475,7 +476,7 @@ impl Resolver {
 
     /// Resolve every target, gap-filling missing ancestors until the whole set
     /// is settled or the budget runs out.
-    async fn run(&mut self, client: &mut SunoClient, http: &impl Http) -> Result<()> {
+    async fn run(&mut self, client: &mut SunoClient<impl Clock>, http: &impl Http) -> Result<()> {
         let targets = self.targets.clone();
         loop {
             let mut frontier: Vec<String> = Vec::new();
@@ -576,7 +577,7 @@ impl Resolver {
     /// grew, so the caller can detect a stalled resolution.
     async fn gap_fill(
         &mut self,
-        client: &mut SunoClient,
+        client: &mut SunoClient<impl Clock>,
         http: &impl Http,
         frontier: &[String],
     ) -> Result<bool> {
@@ -710,7 +711,7 @@ mod tests {
     use super::*;
     use crate::auth::ClerkAuth;
     use crate::model::HistoryEntry;
-    use crate::testutil::{Reply, ScriptedHttp};
+    use crate::testutil::{RecordingClock, Reply, ScriptedHttp};
 
     fn history(id: &str) -> HistoryEntry {
         HistoryEntry {
@@ -780,10 +781,10 @@ mod tests {
         ]
     }
 
-    fn authed_client(http: &ScriptedHttp) -> SunoClient {
+    fn authed_client(http: &ScriptedHttp) -> SunoClient<RecordingClock> {
         let mut auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(http)).unwrap();
-        SunoClient::new(auth)
+        SunoClient::new(auth, RecordingClock::new())
     }
 
     #[test]
@@ -1191,7 +1192,7 @@ mod tests {
     #[test]
     fn resolve_roots_walks_a_connected_chain_with_no_http() {
         let http = ScriptedHttp::new();
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"));
+        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let clips = chain1_clips();
 
         let roots = pollster::block_on(resolve_roots(
@@ -1369,7 +1370,7 @@ mod tests {
             ..Default::default()
         };
         let http = ScriptedHttp::new();
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"));
+        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
 
         let roots = pollster::block_on(resolve_roots(
             &[a, b],

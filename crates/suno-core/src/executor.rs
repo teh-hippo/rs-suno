@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::backoff::{backoff_delay, retry_after};
 use crate::client::SunoClient;
 use crate::clock::Clock;
 use crate::config::AudioFormat;
@@ -45,11 +46,6 @@ use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
 use crate::reconcile::{Action, ArtifactKind, Desired, Plan, SourceMode, set_manifest_artifact};
 use crate::tag::{TrackMetadata, tag_flac, tag_mp3};
-
-/// First backoff step; doubles each retry, capped at [`BACKOFF_CAP`].
-const BACKOFF_BASE: Duration = Duration::from_secs(1);
-/// Hard ceiling on any single backoff, matching the reference integration.
-const BACKOFF_CAP: Duration = Duration::from_secs(300);
 
 /// Tunables for one [`execute`] run.
 #[derive(Debug, Clone)]
@@ -135,7 +131,7 @@ impl ExecOutcome {
 /// flow and so mutates its cached session. The rest are shared references.
 pub struct Ports<'a, H, F, G, C> {
     /// Performs the authenticated WAV render and poll flow.
-    pub client: &'a mut SunoClient,
+    pub client: &'a mut SunoClient<C>,
     /// The public network port (CDN audio, rendered WAV, cover art).
     pub http: &'a H,
     /// The disk port.
@@ -366,7 +362,7 @@ where
     async fn apply(
         &self,
         action: &Action,
-        client: &mut SunoClient,
+        client: &mut SunoClient<C>,
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
         playlists: &mut BTreeMap<String, PlaylistState>,
@@ -434,7 +430,7 @@ where
     /// Fetch, tag, and write a new file, then record the manifest entry.
     async fn download(
         &self,
-        client: &mut SunoClient,
+        client: &mut SunoClient<C>,
         manifest: &mut Manifest,
         clip: &Clip,
         lineage: &LineageContext,
@@ -450,7 +446,7 @@ where
     /// Re-encode to a new format at the new path, then remove the old file.
     async fn reformat(
         &self,
-        client: &mut SunoClient,
+        client: &mut SunoClient<C>,
         manifest: &mut Manifest,
         clip: &Clip,
         path: &str,
@@ -748,7 +744,7 @@ where
     /// Download (and transcode/tag) the audio for `clip` in `format`.
     async fn produce_audio(
         &self,
-        client: &mut SunoClient,
+        client: &mut SunoClient<C>,
         clip: &Clip,
         lineage: &LineageContext,
         format: AudioFormat,
@@ -780,7 +776,7 @@ where
     }
 
     /// Resolve the rendered WAV URL and download it.
-    async fn fetch_wav(&self, client: &mut SunoClient, clip: &Clip) -> Result<Vec<u8>, Fail> {
+    async fn fetch_wav(&self, client: &mut SunoClient<C>, clip: &Clip) -> Result<Vec<u8>, Fail> {
         let url = match self.resolve_wav_url(client, &clip.id).await? {
             Some(url) => url,
             None => return Err(transient_fail(&clip.id, "WAV render was not ready")),
@@ -796,7 +792,7 @@ where
     /// caller treats that as a non-fatal transient failure, never a silent skip.
     async fn resolve_wav_url(
         &self,
-        client: &mut SunoClient,
+        client: &mut SunoClient<C>,
         id: &str,
     ) -> Result<Option<String>, Fail> {
         if let Some(url) = self.wav_url_retrying(client, id).await? {
@@ -816,7 +812,7 @@ where
     /// (SYNC-16/17), so the default FLAC path is as resilient as the CDN path.
     async fn wav_url_retrying(
         &self,
-        client: &mut SunoClient,
+        client: &mut SunoClient<C>,
         id: &str,
     ) -> Result<Option<String>, Fail> {
         let mut attempt: u32 = 0;
@@ -832,7 +828,7 @@ where
     }
 
     /// Ask Suno to render a WAV, retrying transient API failures with backoff.
-    async fn request_wav_retrying(&self, client: &mut SunoClient, id: &str) -> Result<(), Fail> {
+    async fn request_wav_retrying(&self, client: &mut SunoClient<C>, id: &str) -> Result<(), Fail> {
         let mut attempt: u32 = 0;
         loop {
             match client.request_wav(self.http, id).await {
@@ -1016,7 +1012,7 @@ fn classify_core(id: &str, err: Error) -> Fail {
     let reason = err.to_string();
     match err {
         Error::Auth(_) => auth_fail(id, reason),
-        Error::RateLimited | Error::Connection(_) => transient_fail(id, reason),
+        Error::RateLimited { .. } | Error::Connection(_) => transient_fail(id, reason),
         Error::Api(_) | Error::NotFound(_) | Error::Tag(_) | Error::Config(_) => {
             permanent_fail(id, reason)
         }
@@ -1026,20 +1022,6 @@ fn classify_core(id: &str, err: Error) -> Fail {
 /// The provider-reported body size from `Content-Length`, if present and valid.
 fn content_length(response: &crate::http::HttpResponse) -> Option<u64> {
     response.header("content-length")?.trim().parse().ok()
-}
-
-/// The `Retry-After` delay in whole seconds, if present and valid.
-fn retry_after(response: &crate::http::HttpResponse) -> Option<Duration> {
-    let seconds: u64 = response.header("retry-after")?.trim().parse().ok()?;
-    Some(Duration::from_secs(seconds))
-}
-
-/// Exponential backoff with a `Retry-After` floor, capped at [`BACKOFF_CAP`].
-fn backoff_delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
-    let factor = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
-    let base = BACKOFF_BASE.checked_mul(factor).unwrap_or(BACKOFF_CAP);
-    let delay = retry_after.map_or(base, |hint| hint.max(base));
-    delay.min(BACKOFF_CAP)
 }
 
 #[cfg(test)]
@@ -1166,7 +1148,7 @@ mod tests {
         clock: &RecordingClock,
         opts: &ExecOptions,
     ) -> ExecOutcome {
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"));
+        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         pollster::block_on(execute(
             plan,
             manifest,
@@ -2019,28 +2001,13 @@ mod tests {
     // ── Pure helpers ────────────────────────────────────────────────
 
     #[test]
-    fn backoff_honours_retry_after_and_cap() {
-        assert_eq!(backoff_delay(0, None), Duration::from_secs(1));
-        assert_eq!(backoff_delay(2, None), Duration::from_secs(4));
-        assert_eq!(
-            backoff_delay(0, Some(Duration::from_secs(9))),
-            Duration::from_secs(9)
-        );
-        assert_eq!(backoff_delay(40, None), BACKOFF_CAP);
-    }
-
-    #[test]
     fn header_helpers_parse_or_ignore() {
         let resp = HttpResponse {
             status: 200,
-            headers: vec![
-                ("Content-Length".to_owned(), "42".to_owned()),
-                ("Retry-After".to_owned(), "5".to_owned()),
-            ],
+            headers: vec![("Content-Length".to_owned(), "42".to_owned())],
             body: Vec::new(),
         };
         assert_eq!(content_length(&resp), Some(42));
-        assert_eq!(retry_after(&resp), Some(Duration::from_secs(5)));
 
         let bare = HttpResponse {
             status: 200,
@@ -2048,7 +2015,6 @@ mod tests {
             body: Vec::new(),
         };
         assert_eq!(content_length(&bare), None);
-        assert_eq!(retry_after(&bare), None);
     }
 
     #[test]

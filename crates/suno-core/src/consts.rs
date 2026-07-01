@@ -13,6 +13,14 @@ pub(crate) const CDN_BASE_URL: &str = "https://cdn1.suno.ai";
 pub(crate) const JWT_REFRESH_BUFFER: i64 = 60;
 /// Hard cap on feed pages so a runaway `has_more` cannot loop forever.
 pub(crate) const MAX_PAGES: u32 = 100;
+/// Clips requested per feed page. A larger page means fewer requests to walk a
+/// big library, so the rate limiter is tripped less often.
+pub(crate) const FEED_PAGE_SIZE: u32 = 50;
+/// Wait this long between successive feed pages to pace a full-library walk
+/// under Suno's rate limiter, rather than only reacting to a 429.
+pub(crate) const FEED_PAGE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+/// Retry a rate-limited or transient API request this many times before failing.
+pub(crate) const API_MAX_RETRIES: u32 = 3;
 
 /// The library feed endpoint. Paged for listing, or filtered with `?ids=` to
 /// gap-fill specific ancestors (including trashed ones) during lineage
