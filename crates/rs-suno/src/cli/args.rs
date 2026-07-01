@@ -143,6 +143,12 @@ pub struct SyncArgs {
     /// deliberately point it at a different Suno account).
     #[arg(long)]
     pub allow_account_change: bool,
+    /// Also write a plain-text `.details.txt` sidecar next to each song.
+    #[arg(long)]
+    pub details_sidecar: bool,
+    /// Also write a plain-text `.lyrics.txt` sidecar next to each song.
+    #[arg(long)]
+    pub lyrics_sidecar: bool,
 }
 
 /// `check` accepts every `sync` flag plus `--exit-code`.
@@ -335,6 +341,34 @@ mod tests {
             Cli::try_parse_from(["suno", "sync", "/music", "--allow-account-change"]).unwrap();
         match cli.command {
             Command::Sync(args) => assert!(args.allow_account_change),
+            _ => panic!("expected sync"),
+        }
+    }
+
+    #[test]
+    fn sync_parses_text_sidecar_flags() {
+        // Each present flag enables its sidecar; absent leaves both off.
+        let cli = Cli::try_parse_from([
+            "suno",
+            "sync",
+            "/music",
+            "--details-sidecar",
+            "--lyrics-sidecar",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Sync(args) => {
+                assert!(args.details_sidecar);
+                assert!(args.lyrics_sidecar);
+            }
+            _ => panic!("expected sync"),
+        }
+        let cli = Cli::try_parse_from(["suno", "sync", "/music"]).unwrap();
+        match cli.command {
+            Command::Sync(args) => {
+                assert!(!args.details_sidecar);
+                assert!(!args.lyrics_sidecar);
+            }
             _ => panic!("expected sync"),
         }
     }

@@ -1,4 +1,5 @@
-//! Pure "media extras" generators: M3U8 playlists and the library index.
+//! Pure "media extras" generators: M3U8 playlists, per-song text sidecars, and
+//! the library index.
 //!
 //! Every function here is pure. It takes clip data plus relative paths and
 //! returns the text the CLI writes to disk later, with no IO, no clock, and no
@@ -10,9 +11,12 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use crate::config::AudioFormat;
+use crate::consts::SUNO_SONG_BASE_URL;
 use crate::graph::LineageStore;
+use crate::lineage::LineageContext;
 use crate::manifest::Manifest;
 use crate::model::Clip;
+use crate::tag::TrackMetadata;
 
 /// The schema version of the library index document.
 ///
@@ -187,9 +191,259 @@ fn to_single_line(text: &str) -> String {
     text.replace('\r', "").replace('\n', " ")
 }
 
+/// Render the plain-text per-song details sidecar for `clip`.
+///
+/// The body is a fixed-order block of `Label: value` lines, built from the same
+/// [`TrackMetadata`] that drives the embedded tags (so the dump matches the file
+/// tags), plus the clip id, its duration as `mm:ss`, and the canonical
+/// `https://suno.com/song/<id>` page URL. A field whose value is empty is
+/// omitted, so the output is deterministic and never carries blank labels. The
+/// generation prompt is labelled `Prompt:` (never `Lyrics:` — the lyrics live in
+/// their own sidecar). Because [`TrackMetadata`] carries no URLs, signed CDN
+/// links are excluded automatically, and play-count/liked/trashed/status are not
+/// mapped. Every value is folded to a single line so one field can never break
+/// the block structure.
+pub fn render_clip_details(clip: &Clip, lineage: &LineageContext) -> String {
+    let meta = TrackMetadata::from_clip(clip, lineage);
+    let url = if clip.id.is_empty() {
+        String::new()
+    } else {
+        format!("{SUNO_SONG_BASE_URL}/{}", clip.id)
+    };
+    let fields: [(&str, &str); 17] = [
+        ("Title", &meta.title),
+        ("Artist", &meta.artist),
+        ("Album", &meta.album),
+        ("Album Artist", &meta.album_artist),
+        ("Date", &meta.date),
+        ("Duration", &format_duration(clip.duration)),
+        ("Model", &meta.model),
+        ("Handle", &meta.handle),
+        ("Style", &meta.style),
+        ("Style Summary", &meta.style_summary),
+        ("Comment", &meta.comment),
+        ("Prompt", &meta.lyrics),
+        ("Parent", &meta.parent),
+        ("Root", &meta.root),
+        ("Lineage", &meta.lineage),
+        ("Id", &clip.id),
+        ("Url", &url),
+    ];
+    let mut out = String::new();
+    for (label, value) in fields {
+        if value.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "{label}: {}", to_single_line(value));
+    }
+    out
+}
+
+/// Render the plain-text lyrics sidecar for `clip`, or `None` when it has none.
+///
+/// The clip's own `lyrics` are emitted verbatim, normalised to exactly one
+/// trailing newline. When the lyrics are empty or whitespace-only, `None` is
+/// returned so no empty `.lyrics.txt` is ever written. The generation prompt is
+/// deliberately not used here (that lives in the details sidecar).
+pub fn render_clip_lyrics(clip: &Clip) -> Option<String> {
+    if clip.lyrics.trim().is_empty() {
+        return None;
+    }
+    Some(format!("{}\n", clip.lyrics.trim_end()))
+}
+
+/// Format a duration in seconds as `mm:ss`, or the empty string when it is
+/// non-finite or non-positive (so an unknown duration is omitted, not `00:00`).
+fn format_duration(secs: f64) -> String {
+    if !secs.is_finite() || secs <= 0.0 {
+        return String::new();
+    }
+    let total = secs.round() as i64;
+    format!("{}:{:02}", total / 60, total % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lineage::{EdgeType, ResolveStatus};
+
+    fn full_clip() -> Clip {
+        Clip {
+            id: "clip-1234abcd".to_owned(),
+            title: "Electric Storm".to_owned(),
+            tags: "ambient, cinematic".to_owned(),
+            duration: 211.6,
+            created_at: "2024-03-10T14:22:01Z".to_owned(),
+            display_name: "alice".to_owned(),
+            handle: "alice".to_owned(),
+            prompt: "an orchestral storm".to_owned(),
+            gpt_description_prompt: "a moody cinematic build".to_owned(),
+            lyrics: "thunder rolls\nover the plains".to_owned(),
+            model_name: "chirp-v4".to_owned(),
+            major_model_version: "v4".to_owned(),
+            image_large_url: "https://cdn1.suno.ai/signed?token=secret".to_owned(),
+            audio_url: "https://cdn1.suno.ai/clip-1234abcd.mp3".to_owned(),
+            ..Clip::default()
+        }
+    }
+
+    fn full_lineage() -> LineageContext {
+        LineageContext {
+            root_id: "rootid567890".to_owned(),
+            root_title: "Weather Series".to_owned(),
+            parent_id: "parentid1234".to_owned(),
+            edge_type: Some(EdgeType::Extend),
+            status: ResolveStatus::Resolved,
+        }
+    }
+
+    #[test]
+    fn details_render_is_exact_and_fixed_order() {
+        let rendered = render_clip_details(&full_clip(), &full_lineage());
+        let expected = "Title: Electric Storm\n\
+            Artist: alice\n\
+            Album: Weather Series\n\
+            Album Artist: alice\n\
+            Date: 2024-03-10\n\
+            Duration: 3:32\n\
+            Model: chirp-v4 (v4)\n\
+            Handle: alice\n\
+            Style: ambient, cinematic\n\
+            Style Summary: a moody cinematic build\n\
+            Comment: a moody cinematic build\n\
+            Prompt: an orchestral storm\n\
+            Parent: parentid1234\n\
+            Root: rootid567890\n\
+            Lineage: Extended from parentid Root rootid56 (Weather Series)\n\
+            Id: clip-1234abcd\n\
+            Url: https://suno.com/song/clip-1234abcd\n";
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn details_omit_empty_fields() {
+        let clip = Clip {
+            id: "only-id".to_owned(),
+            title: "Bare".to_owned(),
+            ..Clip::default()
+        };
+        let rendered = render_clip_details(&clip, &LineageContext::own_root(&clip));
+        // Only the always-present fields survive: title, artist/album fallbacks,
+        // the self-root id (SUNO_ROOT mirrors the embedded tag), and id/url. No
+        // Date, Duration, Style, Prompt, Parent, or Lineage.
+        let expected = "Title: Bare\n\
+            Artist: Suno\n\
+            Album: Bare\n\
+            Album Artist: Suno\n\
+            Root: only-id\n\
+            Id: only-id\n\
+            Url: https://suno.com/song/only-id\n";
+        assert_eq!(rendered, expected);
+        assert!(!rendered.contains("Duration:"));
+        assert!(!rendered.contains("Prompt:"));
+    }
+
+    #[test]
+    fn details_exclude_signed_cdn_urls() {
+        let rendered = render_clip_details(&full_clip(), &full_lineage());
+        assert!(!rendered.contains("cdn1.suno.ai"));
+        assert!(!rendered.contains("token=secret"));
+        assert!(!rendered.contains(".mp3"));
+    }
+
+    #[test]
+    fn details_use_canonical_song_url() {
+        let rendered = render_clip_details(&full_clip(), &full_lineage());
+        assert!(rendered.contains("Url: https://suno.com/song/clip-1234abcd\n"));
+    }
+
+    #[test]
+    fn details_label_prompt_not_lyrics() {
+        let rendered = render_clip_details(&full_clip(), &full_lineage());
+        assert!(rendered.contains("Prompt: an orchestral storm\n"));
+        // The details dump never labels the generation prompt as lyrics, and it
+        // never carries the actual lyrics.
+        assert!(!rendered.contains("Lyrics:"));
+        assert!(!rendered.contains("thunder rolls"));
+    }
+
+    #[test]
+    fn details_use_resolved_lineage_not_feed_fields() {
+        let clip = Clip {
+            id: "child".to_owned(),
+            title: "Child".to_owned(),
+            album_title: "Ignored Feed Album".to_owned(),
+            ..Clip::default()
+        };
+        let lineage = LineageContext {
+            root_id: "root-01".to_owned(),
+            root_title: "Resolved Album".to_owned(),
+            parent_id: "root-01".to_owned(),
+            edge_type: Some(EdgeType::Cover),
+            status: ResolveStatus::Resolved,
+        };
+        let rendered = render_clip_details(&clip, &lineage);
+        assert!(rendered.contains("Album: Resolved Album\n"));
+        assert!(!rendered.contains("Ignored Feed Album"));
+    }
+
+    #[test]
+    fn details_for_a_pure_root_omit_lineage_and_parent() {
+        let clip = Clip {
+            id: "root".to_owned(),
+            title: "Root".to_owned(),
+            ..Clip::default()
+        };
+        let rendered = render_clip_details(&clip, &LineageContext::own_root(&clip));
+        // A pure root has no parent edge and no lineage summary; SUNO_ROOT still
+        // mirrors the embedded tag (the clip's own id).
+        assert!(!rendered.contains("Parent:"));
+        assert!(!rendered.contains("Lineage:"));
+        assert!(rendered.contains("Root: root\n"));
+    }
+
+    #[test]
+    fn lyrics_render_verbatim_with_one_trailing_newline() {
+        let clip = Clip {
+            lyrics: "line one\nline two".to_owned(),
+            ..Clip::default()
+        };
+        assert_eq!(
+            render_clip_lyrics(&clip),
+            Some("line one\nline two\n".to_owned())
+        );
+    }
+
+    #[test]
+    fn lyrics_normalise_trailing_whitespace_to_one_newline() {
+        let clip = Clip {
+            lyrics: "verse\n\n\n".to_owned(),
+            ..Clip::default()
+        };
+        assert_eq!(render_clip_lyrics(&clip), Some("verse\n".to_owned()));
+    }
+
+    #[test]
+    fn lyrics_none_when_empty_or_whitespace_only() {
+        assert_eq!(render_clip_lyrics(&Clip::default()), None);
+        let clip = Clip {
+            lyrics: "  \n\t \n".to_owned(),
+            ..Clip::default()
+        };
+        assert_eq!(render_clip_lyrics(&clip), None);
+    }
+
+    #[test]
+    fn lyrics_use_clip_lyrics_not_prompt() {
+        let clip = Clip {
+            prompt: "the generation prompt".to_owned(),
+            lyrics: "the actual sung words".to_owned(),
+            ..Clip::default()
+        };
+        let rendered = render_clip_lyrics(&clip).unwrap();
+        assert!(rendered.contains("the actual sung words"));
+        assert!(!rendered.contains("the generation prompt"));
+    }
 
     #[test]
     fn m3u8_preserves_order_and_rounds_extinf() {
@@ -304,7 +558,7 @@ mod tests {
         );
     }
 
-    use crate::lineage::{Resolution, ResolveStatus, RootInfo};
+    use crate::lineage::{Resolution, RootInfo};
     use crate::manifest::ManifestEntry;
     use serde_json::Value;
     use std::collections::HashMap as Map;

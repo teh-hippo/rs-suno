@@ -153,6 +153,31 @@ Proceed? [y/N]
 After removing files, `sync` prunes any directories left empty, so the tree does
 not accumulate stale folders. The destination root itself is always kept.
 
+### Per-song sidecars
+
+The optional per-song sidecars follow the same gated deletion path as the audio,
+but they differ in when an on-disk file is removed after the feature is turned
+off:
+
+- **Covers (`cover.jpg` / `cover.webp`).** A clip's art URL can be missing for a
+  run (the feed omits it, or a fetch fails), so an absent cover is treated as
+  UNKNOWN and the existing file is kept. A cover is only removed when its whole
+  song leaves every source and the audio is deleted with it.
+- **Details (`.details.txt`).** The details dump is always renderable, so once
+  the feature is off the sidecar can only be intentionally unwanted. Turning
+  `details_sidecar` off therefore removes the existing `.details.txt` on the next
+  `sync`, through the same fully-enumerated and preserve gates as any deletion.
+- **Lyrics (`.lyrics.txt`).** The lyrics file is only written when a song
+  actually has lyrics, so an absent lyrics sidecar is ambiguous: it could mean
+  the feature is off, or that a single feed read returned empty lyrics. To avoid
+  deleting real lyrics on a transient empty read, lyrics opt out of removal the
+  same way covers do. Turning `lyrics_sidecar` off leaves existing `.lyrics.txt`
+  files in place; delete them by hand if you want them gone.
+
+Whichever the case, a sidecar is only ever deleted through the shared gate, so
+an incomplete listing or a preserved (private or copy-held) song never loses
+one.
+
 ## Robustness
 
 Beyond deletion, several rules protect an in-progress run:

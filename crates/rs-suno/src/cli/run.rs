@@ -25,8 +25,9 @@ use suno_core::{
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
 use crate::cli::desired::{
-    Confirm, ExitCode, LIKED_PLAYLIST_ID, PlaylistInput, build_desired, build_playlist_desired,
-    confirm_decision, confirmed, fully_enumerated, is_narrowed, mass_delete_abort, run_exit_code,
+    ArtifactToggles, Confirm, ExitCode, LIKED_PLAYLIST_ID, PlaylistInput, build_desired,
+    build_playlist_desired, confirm_decision, confirmed, fully_enumerated, is_narrowed,
+    mass_delete_abort, run_exit_code,
 };
 use crate::cli::logs;
 use crate::cli::output;
@@ -391,6 +392,8 @@ fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
         min_newest: args.min_newest,
         // A presence-only toggle can only enable; absence defers to config/env.
         animated_covers: args.animated_covers.then_some(true),
+        details_sidecar: args.details_sidecar.then_some(true),
+        lyrics_sidecar: args.lyrics_sidecar.then_some(true),
     }
 }
 
@@ -692,7 +695,11 @@ async fn run_one(
         mode,
         &contexts,
         &colliding_albums,
-        settings.animated_covers,
+        ArtifactToggles {
+            animated_covers: settings.animated_covers,
+            details: settings.details_sidecar,
+            lyrics: settings.lyrics_sidecar,
+        },
     );
     // Folder-level album art is keyed on the stable root id and chosen purely
     // from the selected clips (most-played for folder.jpg, first-created animated

@@ -51,6 +51,12 @@ pub struct ManifestEntry {
     /// Prior state of the external `cover.webp` sidecar, when one was written.
     #[serde(default)]
     pub cover_webp: Option<ArtifactState>,
+    /// Prior state of the plain-text `.details.txt` sidecar, when one was written.
+    #[serde(default)]
+    pub details_txt: Option<ArtifactState>,
+    /// Prior state of the plain-text `.lyrics.txt` sidecar, when one was written.
+    #[serde(default)]
+    pub lyrics_txt: Option<ArtifactState>,
 }
 
 /// The full prior download state, keyed by clip id.
@@ -184,7 +190,7 @@ mod tests {
         let mut m = Manifest::new();
         m.insert("a", entry("a.flac", AudioFormat::Flac));
         m.insert("b", entry("b.mp3", AudioFormat::Mp3));
-        // An entry carrying both sidecar artifacts must round-trip intact.
+        // An entry carrying every sidecar artifact must round-trip intact.
         let mut c = entry("c.flac", AudioFormat::Flac);
         c.cover_jpg = Some(ArtifactState {
             path: "c/cover.jpg".to_string(),
@@ -193,6 +199,14 @@ mod tests {
         c.cover_webp = Some(ArtifactState {
             path: "c/cover.webp".to_string(),
             hash: "webp-hash".to_string(),
+        });
+        c.details_txt = Some(ArtifactState {
+            path: "c.details.txt".to_string(),
+            hash: "details-hash".to_string(),
+        });
+        c.lyrics_txt = Some(ArtifactState {
+            path: "c.lyrics.txt".to_string(),
+            hash: "lyrics-hash".to_string(),
         });
         m.insert("c", c);
         let json = serde_json::to_string(&m).unwrap();
@@ -274,6 +288,8 @@ mod tests {
         let e = m.get("clip1").unwrap();
         assert_eq!(e.cover_jpg, None);
         assert_eq!(e.cover_webp, None);
+        assert_eq!(e.details_txt, None);
+        assert_eq!(e.lyrics_txt, None);
         assert!(!e.preserve);
     }
 

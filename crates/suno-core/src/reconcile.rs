@@ -47,8 +47,9 @@ use crate::model::Clip;
 /// ([`Action::WriteArtifact`] / [`Action::DeleteArtifact`]) rather than one
 /// variant per class; the `kind` distinguishes them so the executor and the
 /// manifest can route each to the right slot. `VideoMp4` is deferred and
-/// intentionally absent. Per-clip classes ([`CoverJpg`](ArtifactKind::CoverJpg)
-/// and [`CoverWebp`](ArtifactKind::CoverWebp)) map to a manifest entry field;
+/// intentionally absent. Per-clip classes ([`CoverJpg`](ArtifactKind::CoverJpg),
+/// [`CoverWebp`](ArtifactKind::CoverWebp), [`DetailsTxt`](ArtifactKind::DetailsTxt),
+/// and [`LyricsTxt`](ArtifactKind::LyricsTxt)) map to a manifest entry field;
 /// the album/library classes are reconciled by later phases and have no per-clip
 /// manifest slot yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -57,6 +58,10 @@ pub enum ArtifactKind {
     CoverJpg,
     /// The per-song animated cover, derived from `video_cover_url`.
     CoverWebp,
+    /// The per-song plain-text details dump (generated, inline content).
+    DetailsTxt,
+    /// The per-song plain-text lyrics file (generated, inline content).
+    LyricsTxt,
     /// The album folder's static cover (album-scoped, later phase).
     FolderJpg,
     /// The album folder's animated cover (album-scoped, later phase).
@@ -122,10 +127,15 @@ pub struct DesiredArtifact {
     pub kind: ArtifactKind,
     /// Resolved relative target path for the sidecar.
     pub path: String,
-    /// The URL the sidecar's bytes are fetched from.
+    /// The URL the sidecar's bytes are fetched from. Empty for a generated
+    /// artifact that carries its body inline via `content`.
     pub source_url: String,
     /// Content/source change hash; a change from the manifest triggers a write.
     pub hash: String,
+    /// Inline body for a *generated* artifact (the text sidecars). When `Some`,
+    /// the executor writes these exact bytes and never touches the network;
+    /// fetched artifacts (covers) leave it `None`.
+    pub content: Option<String>,
 }
 
 /// The desired folder-art target for one album (one stable root id).
@@ -469,7 +479,13 @@ fn delete_artifact_action(
 /// (folder art, playlists) are owned by later phases and reconciled elsewhere,
 /// so per-clip planning ignores them.
 fn is_per_clip_kind(kind: ArtifactKind) -> bool {
-    matches!(kind, ArtifactKind::CoverJpg | ArtifactKind::CoverWebp)
+    matches!(
+        kind,
+        ArtifactKind::CoverJpg
+            | ArtifactKind::CoverWebp
+            | ArtifactKind::DetailsTxt
+            | ArtifactKind::LyricsTxt
+    )
 }
 
 /// Whether a no-longer-desired ("removed kind") artifact may be delete-reconciled
@@ -483,10 +499,21 @@ fn is_per_clip_kind(kind: ArtifactKind) -> bool {
 /// only by [`co_delete_artifacts`], when the owning clip leaves every mirror
 /// source and its audio is deleted (a fully gated path). The removed-kind
 /// mechanism is kept intact for any future sidecar kind that genuinely wants it.
+///
+/// The text sidecars split on totality. [`render_clip_details`](crate::render_clip_details)
+/// is TOTAL (always renders), so a desired `DetailsTxt` is absent only when the
+/// feature is off — an unambiguous removal that is safe to delete through the
+/// shared gate. [`render_clip_lyrics`](crate::render_clip_lyrics) is PARTIAL
+/// (`None` on empty lyrics), so an absent `LyricsTxt` is ambiguous (feature off
+/// OR a transient empty-lyrics read); it opts out cover-style, so turning the
+/// lyrics feature off leaves existing `.lyrics.txt` files in place.
 fn removed_kind_delete_eligible(kind: ArtifactKind) -> bool {
     match kind {
-        ArtifactKind::CoverJpg | ArtifactKind::CoverWebp => false,
-        ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => true,
+        ArtifactKind::CoverJpg | ArtifactKind::CoverWebp | ArtifactKind::LyricsTxt => false,
+        ArtifactKind::DetailsTxt
+        | ArtifactKind::FolderJpg
+        | ArtifactKind::FolderWebp
+        | ArtifactKind::Playlist => true,
     }
 }
 
@@ -498,6 +525,8 @@ fn manifest_artifact_by_kind(entry: &ManifestEntry, kind: ArtifactKind) -> Optio
     match kind {
         ArtifactKind::CoverJpg => entry.cover_jpg.as_ref(),
         ArtifactKind::CoverWebp => entry.cover_webp.as_ref(),
+        ArtifactKind::DetailsTxt => entry.details_txt.as_ref(),
+        ArtifactKind::LyricsTxt => entry.lyrics_txt.as_ref(),
         ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => None,
     }
 }
@@ -511,6 +540,12 @@ fn manifest_artifacts(entry: &ManifestEntry) -> Vec<(ArtifactKind, &ArtifactStat
     }
     if let Some(state) = &entry.cover_webp {
         out.push((ArtifactKind::CoverWebp, state));
+    }
+    if let Some(state) = &entry.details_txt {
+        out.push((ArtifactKind::DetailsTxt, state));
+    }
+    if let Some(state) = &entry.lyrics_txt {
+        out.push((ArtifactKind::LyricsTxt, state));
     }
     out
 }
@@ -529,6 +564,8 @@ pub(crate) fn set_manifest_artifact(
     match kind {
         ArtifactKind::CoverJpg => entry.cover_jpg = state,
         ArtifactKind::CoverWebp => entry.cover_webp = state,
+        ArtifactKind::DetailsTxt => entry.details_txt = state,
+        ArtifactKind::LyricsTxt => entry.lyrics_txt = state,
         ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => {}
     }
 }
@@ -572,7 +609,7 @@ fn plan_clip_artifacts(d: &Desired, manifest: &Manifest, can_delete: bool, out: 
                 source_url: artifact.source_url.clone(),
                 hash: artifact.hash.clone(),
                 owner_id: owner_id.to_string(),
-                content: None,
+                content: artifact.content.clone(),
             });
         }
     }
@@ -862,6 +899,7 @@ pub fn album_desired(desired: &[Desired], animated_covers: bool) -> Vec<AlbumDes
                 path: album_child(&album_dir, "folder.jpg"),
                 source_url: source.clip.selected_image_url().unwrap_or("").to_owned(),
                 hash: art_hash(&source.clip),
+                content: None,
             });
             let folder_webp = animated_covers
                 .then(|| folder_webp_source(&members))
@@ -871,6 +909,7 @@ pub fn album_desired(desired: &[Desired], animated_covers: bool) -> Vec<AlbumDes
                     path: album_child(&album_dir, "cover.webp"),
                     source_url: source.clip.video_cover_url.clone(),
                     hash: art_url_hash(&source.clip.video_cover_url),
+                    content: None,
                 });
             AlbumDesired {
                 root_id: root_id.to_owned(),
@@ -1042,7 +1081,11 @@ fn album_desires_kind(d: &AlbumDesired, kind: ArtifactKind) -> bool {
     match kind {
         ArtifactKind::FolderJpg => d.folder_jpg.is_some(),
         ArtifactKind::FolderWebp => d.folder_webp.is_some(),
-        ArtifactKind::CoverJpg | ArtifactKind::CoverWebp | ArtifactKind::Playlist => false,
+        ArtifactKind::CoverJpg
+        | ArtifactKind::CoverWebp
+        | ArtifactKind::DetailsTxt
+        | ArtifactKind::LyricsTxt
+        | ArtifactKind::Playlist => false,
     }
 }
 
@@ -1164,6 +1207,7 @@ fn playlist_action_key(action: &Action) -> (&str, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::content_hash;
 
     fn clip(id: &str) -> Clip {
         Clip {
@@ -2155,6 +2199,18 @@ mod tests {
             path: path.to_string(),
             source_url: url.to_string(),
             hash: hash.to_string(),
+            content: None,
+        }
+    }
+
+    /// A generated text sidecar desired artifact carrying its body inline.
+    fn text_art(kind: ArtifactKind, path: &str, body: &str) -> DesiredArtifact {
+        DesiredArtifact {
+            kind,
+            path: path.to_string(),
+            source_url: String::new(),
+            hash: content_hash(body),
+            content: Some(body.to_string()),
         }
     }
 
@@ -2421,6 +2477,237 @@ mod tests {
         let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
         assert_eq!(plan.deletes(), 0);
         assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    // ── Issue #15: per-song text sidecars ───────────────────────────
+
+    #[test]
+    fn details_sidecar_written_with_inline_content_when_slot_absent() {
+        // The audio is unchanged (Skip) but no details slot exists, so the
+        // generated sidecar is written and carries its body inline.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let d = vec![desired_arts(
+            "a",
+            vec![text_art(
+                ArtifactKind::DetailsTxt,
+                "a.details.txt",
+                "Title: A\n",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 1);
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert_eq!(
+            write_artifacts(&plan)[0],
+            &Action::WriteArtifact {
+                kind: ArtifactKind::DetailsTxt,
+                path: "a.details.txt".to_string(),
+                source_url: String::new(),
+                hash: content_hash("Title: A\n"),
+                owner_id: "a".to_string(),
+                content: Some("Title: A\n".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn text_sidecars_skipped_when_hash_and_path_match() {
+        // Present with a matching content hash and path: no write, no delete.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.details_txt = Some(cover("a.details.txt", &content_hash("Title: A\n")));
+        e.lyrics_txt = Some(cover("a.lyrics.txt", &content_hash("la la\n")));
+        manifest.insert("a", e);
+        let d = vec![desired_arts(
+            "a",
+            vec![
+                text_art(ArtifactKind::DetailsTxt, "a.details.txt", "Title: A\n"),
+                text_art(ArtifactKind::LyricsTxt, "a.lyrics.txt", "la la\n"),
+            ],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 0);
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn details_rewritten_when_content_hash_differs() {
+        // A title change alters the details body, so its content hash drifts and
+        // the sidecar is rewritten even though the audio is otherwise unchanged.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.details_txt = Some(cover("a.details.txt", &content_hash("Title: Old\n")));
+        manifest.insert("a", e);
+        let d = vec![desired_arts(
+            "a",
+            vec![text_art(
+                ArtifactKind::DetailsTxt,
+                "a.details.txt",
+                "Title: New\n",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 1);
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn lyrics_rewritten_when_content_hash_differs_though_meta_unchanged() {
+        // The per-sidecar content hash keys on the rendered lyrics, which
+        // meta_hash omits, so edited lyrics rewrite the file with no audio retag.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.lyrics_txt = Some(cover("a.lyrics.txt", &content_hash("old words\n")));
+        manifest.insert("a", e);
+        let d = vec![desired_arts(
+            "a",
+            vec![text_art(
+                ArtifactKind::LyricsTxt,
+                "a.lyrics.txt",
+                "new words\n",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        // The audio meta_hash matches ("m"), so only the sidecar rewrites.
+        assert_eq!(plan.artifact_writes(), 1);
+        assert_eq!(plan.retags(), 0);
+    }
+
+    #[test]
+    fn text_sidecar_relocated_when_path_differs() {
+        // The audio moved (rename), so the tracked details path drifts and the
+        // sidecar is rewritten at the new path even though the content matches.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.details_txt = Some(cover("old/a.details.txt", &content_hash("Title: A\n")));
+        manifest.insert("a", e);
+        let d = vec![desired_arts(
+            "a",
+            vec![text_art(
+                ArtifactKind::DetailsTxt,
+                "new/a.details.txt",
+                "Title: A\n",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 1);
+        if let Action::WriteArtifact { path, .. } = write_artifacts(&plan)[0] {
+            assert_eq!(path, "new/a.details.txt");
+        } else {
+            panic!("expected a WriteArtifact");
+        }
+    }
+
+    #[test]
+    fn details_removed_kind_is_deleted_when_feature_off() {
+        // DetailsTxt is total, so an absent desired can only mean the feature is
+        // off: the stale sidecar is delete-reconciled through the shared gate.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.details_txt = Some(cover("a.details.txt", &content_hash("Title: A\n")));
+        manifest.insert("a", e);
+        let d = vec![desired_arts("a", vec![])];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 1);
+        assert!(plan.actions.contains(&Action::DeleteArtifact {
+            kind: ArtifactKind::DetailsTxt,
+            path: "a.details.txt".to_string(),
+            owner_id: "a".to_string(),
+        }));
+    }
+
+    #[test]
+    fn lyrics_removed_kind_is_kept_not_deleted() {
+        // LyricsTxt is partial (absent could be feature-off OR a transient empty
+        // lyrics read), so it opts out of removed-kind deletion cover-style: the
+        // existing file is KEPT when no lyrics sidecar is desired this run.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.lyrics_txt = Some(cover("a.lyrics.txt", &content_hash("words\n")));
+        manifest.insert("a", e);
+        let d = vec![desired_arts("a", vec![])];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert_eq!(plan.deletes(), 0);
+    }
+
+    #[test]
+    fn details_removed_kind_not_deleted_on_incomplete_listing() {
+        // The removed-kind delete still obeys the enumeration gate: an incomplete
+        // mirror forbids removing the stale details sidecar.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.details_txt = Some(cover("a.details.txt", &content_hash("Title: A\n")));
+        manifest.insert("a", e);
+        let d = vec![desired_arts("a", vec![])];
+        let sources = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: false,
+        }];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &sources);
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn details_removed_kind_not_deleted_when_preserved() {
+        // A preserved (private/copy-held) clip keeps its stale details sidecar
+        // even when the feature is off this run.
+        let mut manifest = Manifest::new();
+        let mut e = ManifestEntry {
+            preserve: true,
+            ..entry("a.flac", AudioFormat::Flac, "m", "art")
+        };
+        e.details_txt = Some(cover("a.details.txt", &content_hash("Title: A\n")));
+        manifest.insert("a", e);
+        let d = vec![desired_arts("a", vec![])];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn co_delete_orphan_removes_every_text_sidecar() {
+        // An orphaned clip's audio is deleted; ALL its per-clip sidecars must be
+        // co-deleted. This fails if `manifest_artifacts` misses a kind, which
+        // would strand the file. Guards the single most important #15 wiring.
+        let mut manifest = Manifest::new();
+        let mut e = entry("gone.flac", AudioFormat::Flac, "m", "art");
+        e.cover_jpg = Some(cover("gone/cover.jpg", "h1"));
+        e.details_txt = Some(cover("gone.details.txt", &content_hash("Title: G\n")));
+        e.lyrics_txt = Some(cover("gone.lyrics.txt", &content_hash("words\n")));
+        manifest.insert("gone", e);
+        let plan = reconcile(&manifest, &[], &HashMap::new(), &mirror_ok());
+        assert_eq!(plan.deletes(), 1);
+        assert_eq!(plan.artifact_deletes(), 3);
+        for (kind, path) in [
+            (ArtifactKind::CoverJpg, "gone/cover.jpg"),
+            (ArtifactKind::DetailsTxt, "gone.details.txt"),
+            (ArtifactKind::LyricsTxt, "gone.lyrics.txt"),
+        ] {
+            assert!(
+                plan.actions.contains(&Action::DeleteArtifact {
+                    kind,
+                    path: path.to_string(),
+                    owner_id: "gone".to_string(),
+                }),
+                "missing co-delete for {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn co_delete_trashed_removes_every_text_sidecar() {
+        // The same co-delete completeness holds on the trashed path.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.details_txt = Some(cover("a.details.txt", &content_hash("Title: A\n")));
+        e.lyrics_txt = Some(cover("a.lyrics.txt", &content_hash("words\n")));
+        manifest.insert("a", e);
+        let mut d = desired_arts("a", vec![]);
+        d.trashed = true;
+        let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+        assert_eq!(plan.deletes(), 1);
+        assert_eq!(plan.artifact_deletes(), 2);
     }
 
     #[test]
