@@ -38,7 +38,7 @@ use crate::config::AudioFormat;
 use crate::error::Error;
 use crate::ffmpeg::{Ffmpeg, WebpEncodeSettings};
 use crate::fs::Filesystem;
-use crate::graph::AlbumArt;
+use crate::graph::{AlbumArt, PlaylistState};
 use crate::http::{Http, HttpRequest};
 use crate::lineage::LineageContext;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
@@ -162,6 +162,7 @@ pub async fn execute<H, F, G, C>(
     plan: &Plan,
     manifest: &mut Manifest,
     albums: &mut BTreeMap<String, AlbumArt>,
+    playlists: &mut BTreeMap<String, PlaylistState>,
     desired: &[Desired],
     ports: Ports<'_, H, F, G, C>,
     opts: &ExecOptions,
@@ -193,7 +194,7 @@ where
 
     let mut outcome = ExecOutcome::default();
     for action in &plan.actions {
-        match ctx.apply(action, client, manifest, albums).await {
+        match ctx.apply(action, client, manifest, albums, playlists).await {
             Ok(effect) => outcome.record(effect),
             Err(fail) => {
                 let aborts = matches!(fail.class, Class::Auth);
@@ -272,6 +273,31 @@ fn is_album_kind(kind: ArtifactKind) -> bool {
     matches!(kind, ArtifactKind::FolderJpg | ArtifactKind::FolderWebp)
 }
 
+/// True for the library-scoped playlist artifact, routed to the playlist store.
+fn is_playlist_kind(kind: ArtifactKind) -> bool {
+    matches!(kind, ArtifactKind::Playlist)
+}
+
+/// True for a per-song sidecar (`cover.jpg`/`cover.webp`), whose write requires
+/// the owning clip's manifest entry. Album and playlist kinds are keyed by a
+/// root/playlist id that is deliberately absent from the manifest.
+fn is_per_clip_kind(kind: ArtifactKind) -> bool {
+    matches!(kind, ArtifactKind::CoverJpg | ArtifactKind::CoverWebp)
+}
+
+/// Recover a playlist's display name from its `.m3u8` path's file stem.
+///
+/// The path is `<sanitised name>.m3u8` at the library root, so the stem is the
+/// sanitised name. Reconcile only ever reads a playlist's `path` and `hash`, so
+/// this recovered name is a convenience for humans and its lossiness (the
+/// sanitiser is not reversible) never affects a decision.
+fn playlist_name_from_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// A classified fetch failure, not yet attributed to a clip.
 struct FetchError {
     class: Class,
@@ -338,6 +364,7 @@ where
         client: &mut SunoClient,
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
+        playlists: &mut BTreeMap<String, PlaylistState>,
     ) -> Result<Effect, Fail> {
         match action {
             Action::Download {
@@ -376,15 +403,26 @@ where
                 source_url,
                 hash,
                 owner_id,
+                content,
             } => {
-                self.write_artifact(manifest, albums, *kind, path, source_url, hash, owner_id)
-                    .await
+                self.write_artifact(
+                    manifest,
+                    albums,
+                    playlists,
+                    *kind,
+                    path,
+                    source_url,
+                    hash,
+                    owner_id,
+                    content.as_deref(),
+                )
+                .await
             }
             Action::DeleteArtifact {
                 kind,
                 path,
                 owner_id,
-            } => self.delete_artifact(manifest, albums, *kind, path, owner_id),
+            } => self.delete_artifact(manifest, albums, playlists, *kind, path, owner_id),
         }
     }
 
@@ -537,28 +575,52 @@ where
         &self,
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
+        playlists: &mut BTreeMap<String, PlaylistState>,
         kind: ArtifactKind,
         path: &str,
         source_url: &str,
         hash: &str,
         owner_id: &str,
+        content: Option<&str>,
     ) -> Result<Effect, Fail> {
-        if !is_album_kind(kind) && manifest.get(owner_id).is_none() {
+        // A per-song sidecar needs its owning clip's manifest entry; album and
+        // playlist kinds are keyed elsewhere and skip this guard.
+        if is_per_clip_kind(kind) && manifest.get(owner_id).is_none() {
             return Ok(Effect::Skipped);
         }
-        let bytes = self.artifact_bytes(kind, source_url, owner_id).await?;
-        self.write_verify(owner_id, path, &bytes)?;
-        let state = ArtifactState {
-            path: path.to_owned(),
-            hash: hash.to_owned(),
+        // A generated artifact (a playlist) carries its body inline and never
+        // touches the network; a fetched one pulls (and transcodes) its source.
+        let bytes = match content {
+            Some(text) => text.as_bytes().to_vec(),
+            None => self.artifact_bytes(kind, source_url, owner_id).await?,
         };
+        self.write_verify(owner_id, path, &bytes)?;
         if is_album_kind(kind) {
-            albums
-                .entry(owner_id.to_owned())
-                .or_default()
-                .set(kind, Some(state));
+            albums.entry(owner_id.to_owned()).or_default().set(
+                kind,
+                Some(ArtifactState {
+                    path: path.to_owned(),
+                    hash: hash.to_owned(),
+                }),
+            );
+        } else if is_playlist_kind(kind) {
+            playlists.insert(
+                owner_id.to_owned(),
+                PlaylistState {
+                    name: playlist_name_from_path(path),
+                    path: path.to_owned(),
+                    hash: hash.to_owned(),
+                },
+            );
         } else if let Some(entry) = manifest.entries.get_mut(owner_id) {
-            set_manifest_artifact(entry, kind, Some(state));
+            set_manifest_artifact(
+                entry,
+                kind,
+                Some(ArtifactState {
+                    path: path.to_owned(),
+                    hash: hash.to_owned(),
+                }),
+            );
         }
         Ok(Effect::ArtifactWritten)
     }
@@ -610,6 +672,7 @@ where
         &self,
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
+        playlists: &mut BTreeMap<String, PlaylistState>,
         kind: ArtifactKind,
         path: &str,
         owner_id: &str,
@@ -624,6 +687,8 @@ where
                     albums.remove(owner_id);
                 }
             }
+        } else if is_playlist_kind(kind) {
+            playlists.remove(owner_id);
         } else if let Some(entry) = manifest.entries.get_mut(owner_id) {
             set_manifest_artifact(entry, kind, None);
         }
@@ -1023,11 +1088,40 @@ mod tests {
         clock: &RecordingClock,
         opts: &ExecOptions,
     ) -> ExecOutcome {
+        let mut playlists = BTreeMap::new();
+        run_full(
+            plan,
+            manifest,
+            albums,
+            &mut playlists,
+            desired,
+            http,
+            fs,
+            ffmpeg,
+            clock,
+            opts,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_full(
+        plan: &Plan,
+        manifest: &mut Manifest,
+        albums: &mut BTreeMap<String, AlbumArt>,
+        playlists: &mut BTreeMap<String, PlaylistState>,
+        desired: &[Desired],
+        http: &ScriptedHttp,
+        fs: &MemFs,
+        ffmpeg: &StubFfmpeg,
+        clock: &RecordingClock,
+        opts: &ExecOptions,
+    ) -> ExecOutcome {
         let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"));
         pollster::block_on(execute(
             plan,
             manifest,
             albums,
+            playlists,
             desired,
             Ports {
                 client: &mut client,
@@ -2047,6 +2141,7 @@ mod tests {
                 source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
                 hash: "h1".to_owned(),
                 owner_id: "a".to_owned(),
+                content: None,
             }],
         };
         let http = ScriptedHttp::new().route("a/large.jpg", Reply::ok(b"jpg-bytes".to_vec()));
@@ -2160,6 +2255,7 @@ mod tests {
                     source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
                     hash: "h1".to_owned(),
                     owner_id: "a".to_owned(),
+                    content: None,
                 },
                 Action::WriteArtifact {
                     kind: ArtifactKind::CoverJpg,
@@ -2167,6 +2263,7 @@ mod tests {
                     source_url: "https://art.suno.ai/b/large.jpg".to_owned(),
                     hash: "h2".to_owned(),
                     owner_id: "b".to_owned(),
+                    content: None,
                 },
             ],
         };
@@ -2266,6 +2363,7 @@ mod tests {
                     source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
                     hash: "h1".to_owned(),
                     owner_id: "a".to_owned(),
+                    content: None,
                 },
                 Action::WriteArtifact {
                     kind: ArtifactKind::CoverJpg,
@@ -2273,6 +2371,7 @@ mod tests {
                     source_url: "https://art.suno.ai/b/large.jpg".to_owned(),
                     hash: "h2".to_owned(),
                     owner_id: "b".to_owned(),
+                    content: None,
                 },
             ],
         };
@@ -2326,6 +2425,7 @@ mod tests {
                 source_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
                 hash: "v1".to_owned(),
                 owner_id: "a".to_owned(),
+                content: None,
             }],
         };
         let http = ScriptedHttp::new().route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec()));
@@ -2376,6 +2476,7 @@ mod tests {
                     source_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
                     hash: "v1".to_owned(),
                     owner_id: "a".to_owned(),
+                    content: None,
                 },
                 Action::WriteArtifact {
                     kind: ArtifactKind::CoverJpg,
@@ -2383,6 +2484,7 @@ mod tests {
                     source_url: "https://art.suno.ai/b/large.jpg".to_owned(),
                     hash: "h1".to_owned(),
                     owner_id: "b".to_owned(),
+                    content: None,
                 },
             ],
         };
@@ -2429,6 +2531,7 @@ mod tests {
                 source_url: "https://art.suno.ai/root/large.jpg".to_owned(),
                 hash: "jh".to_owned(),
                 owner_id: "root".to_owned(),
+                content: None,
             }],
         };
         let http = ScriptedHttp::new().route("root/large.jpg", Reply::ok(b"folder-jpg".to_vec()));
@@ -2473,6 +2576,7 @@ mod tests {
                 source_url: "https://cdn.suno.ai/root/video.mp4".to_owned(),
                 hash: "wh".to_owned(),
                 owner_id: "root".to_owned(),
+                content: None,
             }],
         };
         let http = ScriptedHttp::new().route("root/video.mp4", Reply::ok(b"mp4-bytes".to_vec()));
@@ -2544,5 +2648,98 @@ mod tests {
         assert!(!fs.exists("creator/album/folder.jpg"));
         // The album row had only the one kind, so it is pruned entirely.
         assert!(!albums.contains_key("root"));
+    }
+
+    // ── Phase 9: playlist artifacts ─────────────────────────────────
+
+    #[test]
+    fn playlist_write_uses_inline_content_and_records_state() {
+        // A playlist body is generated, carried inline. With an empty manifest
+        // and NO http routes, the write still succeeds — proving it skipped the
+        // network — and records the playlist store keyed by the playlist id.
+        let mut manifest = Manifest::new();
+        let mut albums: BTreeMap<String, AlbumArt> = BTreeMap::new();
+        let mut playlists: BTreeMap<String, PlaylistState> = BTreeMap::new();
+        let body = "#EXTM3U\n#PLAYLIST:Road Trip\n#EXTINF:60,One\nA/One.flac\n";
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::Playlist,
+                path: "Road Trip.m3u8".to_owned(),
+                source_url: String::new(),
+                hash: "ph1".to_owned(),
+                owner_id: "pl1".to_owned(),
+                content: Some(body.to_owned()),
+            }],
+        };
+        let fs = MemFs::new();
+
+        let outcome = run_full(
+            &plan,
+            &mut manifest,
+            &mut albums,
+            &mut playlists,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(outcome.failed(), 0);
+        // The exact inline bytes were written, verbatim.
+        assert_eq!(fs.read_file("Road Trip.m3u8").unwrap(), body.as_bytes());
+        assert_eq!(
+            playlists.get("pl1"),
+            Some(&PlaylistState {
+                name: "Road Trip".to_owned(),
+                path: "Road Trip.m3u8".to_owned(),
+                hash: "ph1".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn playlist_delete_removes_file_and_clears_state() {
+        let fs = MemFs::new().with_file("Old.m3u8", b"#EXTM3U\n".to_vec());
+        let mut manifest = Manifest::new();
+        let mut albums: BTreeMap<String, AlbumArt> = BTreeMap::new();
+        let mut playlists: BTreeMap<String, PlaylistState> = BTreeMap::new();
+        playlists.insert(
+            "pl1".to_owned(),
+            PlaylistState {
+                name: "Old".to_owned(),
+                path: "Old.m3u8".to_owned(),
+                hash: "ph1".to_owned(),
+            },
+        );
+        let plan = Plan {
+            actions: vec![Action::DeleteArtifact {
+                kind: ArtifactKind::Playlist,
+                path: "Old.m3u8".to_owned(),
+                owner_id: "pl1".to_owned(),
+            }],
+        };
+
+        let outcome = run_full(
+            &plan,
+            &mut manifest,
+            &mut albums,
+            &mut playlists,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_deleted, 1);
+        assert!(!fs.exists("Old.m3u8"));
+        assert!(
+            !playlists.contains_key("pl1"),
+            "the playlist row is cleared on delete"
+        );
     }
 }

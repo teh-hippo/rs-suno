@@ -4,7 +4,8 @@ use serde_json::Value;
 
 use crate::auth::ClerkAuth;
 use crate::consts::{
-    CLIP_PARENT_PATH, FEED_V2_PATH, IDS_PER_REQUEST, MAX_PAGES, SUNO_API_BASE_URL,
+    CLIP_PARENT_PATH, FEED_V2_PATH, IDS_PER_REQUEST, MAX_PAGES, PLAYLIST_ME_PATH, PLAYLIST_PATH,
+    SUNO_API_BASE_URL,
 };
 use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
@@ -12,6 +13,22 @@ use crate::model::Clip;
 
 const EXCLUDED_TASKS: [&str; 2] = ["infill", "fixed_infill"];
 const EXCLUDED_TYPES: [&str; 1] = ["rendered_context_window"];
+
+/// One of the account's own playlists, as listed by `/api/playlist/me`.
+///
+/// Carries only what playlist reconciliation needs: the stable id (the state
+/// key), the display name (drives the `.m3u8` file name and `#PLAYLIST` line),
+/// and the member count for reporting. The ordered members are fetched
+/// separately with [`SunoClient::get_playlist_clips`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Playlist {
+    /// The playlist's stable Suno id.
+    pub id: String,
+    /// The playlist's display name.
+    pub name: String,
+    /// The number of clips Suno reports in the playlist.
+    pub num_clips: u64,
+}
 
 /// A client for the Suno library API, owning the account's [`ClerkAuth`].
 pub struct SunoClient {
@@ -136,6 +153,44 @@ impl SunoClient {
             Err(Error::NotFound(_)) => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    /// List the account's own playlists, paging `/api/playlist/me`.
+    ///
+    /// Trashed and share-list playlists are excluded by query, so the result is
+    /// the account's authoritative own set. Paging stops on the first empty page
+    /// and is hard-capped at [`MAX_PAGES`] so a server that ignores the page
+    /// parameter cannot loop forever. Only entries with a non-empty id are kept.
+    ///
+    /// A hard failure propagates as an error; the caller treats that as "the
+    /// playlist listing did not fully enumerate" and refuses every playlist
+    /// deletion this run, so a dropped fetch can never remove a `.m3u8`.
+    pub async fn get_playlists(&mut self, http: &impl Http) -> Result<Vec<Playlist>> {
+        let mut playlists = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let path =
+                format!("{PLAYLIST_ME_PATH}?page={page}&show_trashed=false&show_sharelist=false");
+            let body = self.api_get(http, &path).await?;
+            let page_playlists = parse_playlists(&body)?;
+            if page_playlists.is_empty() {
+                break;
+            }
+            playlists.extend(page_playlists);
+        }
+        Ok(playlists)
+    }
+
+    /// Fetch one playlist's clips in Suno order via `/api/playlist/{id}/`.
+    ///
+    /// The response's `playlist_clips[]` is already ordered and trashed members
+    /// are excluded by Suno, so the order is preserved exactly and no `keep_clip`
+    /// filtering is applied — a playlist may legitimately contain any clip. Each
+    /// entry's `clip` object is mapped (falling back to the entry itself), and
+    /// only clips with a non-empty id are kept.
+    pub async fn get_playlist_clips(&mut self, http: &impl Http, id: &str) -> Result<Vec<Clip>> {
+        let path = format!("{PLAYLIST_PATH}{id}/");
+        let body = self.api_get(http, &path).await?;
+        parse_playlist_clips(&body)
     }
 
     /// Try the dedicated clip endpoint, returning `None` when it is missing or
@@ -268,6 +323,70 @@ fn map_all_clips(body: &[u8]) -> Result<Vec<Clip>> {
         .map(Clip::from_json)
         .filter(|clip| !clip.id.is_empty())
         .collect())
+}
+
+/// Parse a `/api/playlist/me` page into playlists, dropping entries with no id.
+fn parse_playlists(body: &[u8]) -> Result<Vec<Playlist>> {
+    let data: Value = serde_json::from_slice(body)
+        .map_err(|err| Error::Api(format!("invalid playlist JSON: {err}")))?;
+    Ok(data
+        .get("playlists")
+        .and_then(Value::as_array)
+        .map(|raw| raw.iter().filter_map(parse_playlist_item).collect())
+        .unwrap_or_default())
+}
+
+/// Map one raw `/api/playlist/me` entry, or `None` when it carries no id.
+///
+/// `num_total_results` is the playlist's member count; a missing name defaults
+/// to `Untitled` (matching the clip mapping) so the file name is never empty.
+fn parse_playlist_item(raw: &Value) -> Option<Playlist> {
+    let id = raw
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?
+        .to_string();
+    let name = match raw.get("name") {
+        Some(Value::String(name)) if !name.is_empty() => name.clone(),
+        _ => "Untitled".to_string(),
+    };
+    let num_clips = raw
+        .get("num_total_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Some(Playlist {
+        id,
+        name,
+        num_clips,
+    })
+}
+
+/// Parse a `/api/playlist/{id}/` body into its ordered member clips.
+///
+/// Each `playlist_clips[]` entry wraps the clip under `clip`; the wrapper is
+/// unwrapped (falling back to the entry itself), order is preserved exactly, and
+/// only clips with a non-empty id survive. No `keep_clip` filter is applied: a
+/// playlist may hold any clip, and members absent from the local library are
+/// reconciled as comment lines by the caller, not dropped here.
+fn parse_playlist_clips(body: &[u8]) -> Result<Vec<Clip>> {
+    let data: Value = serde_json::from_slice(body)
+        .map_err(|err| Error::Api(format!("invalid playlist JSON: {err}")))?;
+    Ok(data
+        .get("playlist_clips")
+        .and_then(Value::as_array)
+        .map(|raw| {
+            raw.iter()
+                .map(|entry| {
+                    let clip = entry
+                        .get("clip")
+                        .filter(|value| value.is_object())
+                        .unwrap_or(entry);
+                    Clip::from_json(clip)
+                })
+                .filter(|clip| !clip.id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// Keep only finished clips that are not infills or context-window artefacts.
@@ -589,5 +708,101 @@ mod tests {
                 "status {status} must propagate as an error, not Ok(None)"
             );
         }
+    }
+
+    #[test]
+    fn get_playlists_maps_entries_and_skips_missing_ids() {
+        let page1 = serde_json::json!({
+            "playlists": [
+                {"id": "pl1", "name": "Road Trip", "num_total_results": 12},
+                {"id": "", "name": "No Id", "num_total_results": 3},
+                {"name": "Also No Id"}
+            ]
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        // Page 1 returns entries; page 2 is empty, ending pagination.
+        rules.push(Rule::new("/api/playlist/me?page=1", 200, page1));
+        rules.push(Rule::new(
+            "/api/playlist/me?page=2",
+            200,
+            r#"{"playlists": []}"#.to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let playlists = pollster::block_on(client.get_playlists(&http)).unwrap();
+        assert_eq!(playlists.len(), 1, "entries without an id are dropped");
+        assert_eq!(
+            playlists[0],
+            Playlist {
+                id: "pl1".to_owned(),
+                name: "Road Trip".to_owned(),
+                num_clips: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn get_playlists_defaults_a_missing_name_to_untitled() {
+        let page1 = serde_json::json!({
+            "playlists": [{"id": "pl9", "num_total_results": 1}]
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/playlist/me?page=1", 200, page1));
+        rules.push(Rule::new(
+            "/api/playlist/me?page=2",
+            200,
+            r#"{"playlists": []}"#.to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let playlists = pollster::block_on(client.get_playlists(&http)).unwrap();
+        assert_eq!(playlists[0].name, "Untitled");
+    }
+
+    #[test]
+    fn get_playlist_clips_preserves_order_and_unwraps_clip() {
+        // Members arrive wrapped under `clip`, in playlist order, already
+        // non-trashed. Order is preserved and no keep_clip filter is applied.
+        let body = serde_json::json!({
+            "playlist_clips": [
+                {"clip": {
+                    "id": "second", "title": "Second", "status": "complete",
+                    "metadata": {"duration": 60.0, "type": "gen"}
+                }},
+                {"clip": {
+                    "id": "first", "title": "First", "status": "complete",
+                    "metadata": {"duration": 30.0, "task": "infill", "type": "gen"}
+                }}
+            ]
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/playlist/pl1/", 200, body));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let clips = pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
+        assert_eq!(clips.len(), 2, "an infill member is not filtered out");
+        assert_eq!(clips[0].id, "second");
+        assert_eq!(clips[1].id, "first");
+    }
+
+    #[test]
+    fn get_playlist_clips_is_empty_for_a_playlist_with_no_members() {
+        let mut rules = auth_rules();
+        rules.push(Rule::new(
+            "/api/playlist/empty/",
+            200,
+            r#"{"playlist_clips": []}"#.to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let clips = pollster::block_on(client.get_playlist_clips(&http, "empty")).unwrap();
+        assert!(clips.is_empty());
     }
 }

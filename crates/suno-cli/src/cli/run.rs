@@ -8,7 +8,7 @@
 //! a signal so an interrupt preserves partial progress), and writing the
 //! manifest, logs, and last-run marker.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,14 +17,15 @@ use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
     AlbumArt, AlbumDesired, ClerkAuth, Clip, Config, Error as CoreError, ExecOptions,
-    FlagOverrides, LineageContext, LocalFile, Ports, ResolveOpts, SourceMode, SourceStatus,
-    SunoClient, album_desired, deletion_allowed, plan_album_artifacts, reconcile, resolve_roots,
+    FlagOverrides, LineageContext, LocalFile, PlaylistDesired, PlaylistState, Ports, ResolveOpts,
+    SourceMode, SourceStatus, SunoClient, album_desired, deletion_allowed, plan_album_artifacts,
+    plan_playlist_artifacts, reconcile, resolve_roots,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
 use crate::cli::desired::{
-    Confirm, ExitCode, build_desired, confirm_decision, confirmed, fully_enumerated, is_narrowed,
-    mass_delete_abort, run_exit_code,
+    Confirm, ExitCode, LIKED_PLAYLIST_ID, PlaylistInput, build_desired, build_playlist_desired,
+    confirm_decision, confirmed, fully_enumerated, is_narrowed, mass_delete_abort, run_exit_code,
 };
 use crate::cli::logs;
 use crate::cli::output;
@@ -516,6 +517,37 @@ async fn run_one(
     // for cover.webp); --animated-covers gates the webp.
     let albums_desired = album_desired(&desired, settings.animated_covers);
 
+    // Playlists (.m3u8) are reconciled only on a fully-enumerated run: a narrowed
+    // or truncated audio listing cannot authoritatively render a playlist (its
+    // members outside the selection would look absent), so leave every existing
+    // .m3u8 untouched rather than rewrite it to a comment-only stub (B2 spirit).
+    // Within a full run the fetch is best-effort per HARDENING B2: a failed
+    // /api/playlist/me listing yields an empty desired and playlists_enumerated
+    // = false (no writes, no deletes); a failed single-playlist member fetch adds
+    // that id to `protected`, excluding it from BOTH the desired writes and the
+    // stale-delete candidate set so its file is neither rewritten nor removed.
+    let mut protected_playlists: BTreeSet<String> = BTreeSet::new();
+    let (playlist_desired, playlists_enumerated) = if enumerated {
+        fetch_playlist_desired(
+            &mut client,
+            &http,
+            &desired,
+            &mut protected_playlists,
+            verbosity,
+        )
+        .await
+    } else {
+        (Vec::new(), false)
+    };
+    // The stored view handed to the planner drops protected ids, so a playlist
+    // whose members could not be fetched is never treated as stale (B2).
+    let stored_playlists: BTreeMap<String, PlaylistState> = store
+        .playlists
+        .iter()
+        .filter(|(id, _)| !protected_playlists.contains(id.as_str()))
+        .map(|(id, state)| (id.clone(), state.clone()))
+        .collect();
+
     let dry_run = global.dry_run || verb == Verb::Check;
 
     // Dry-run and check report without touching disk: the destination is not
@@ -526,7 +558,10 @@ async fn run_one(
             &desired,
             &albums_desired,
             &store.albums,
+            &playlist_desired,
+            &stored_playlists,
             enumerated,
+            playlists_enumerated,
             verb,
         )?;
         if verbosity >= 1 {
@@ -557,7 +592,10 @@ async fn run_one(
         &desired,
         &albums_desired,
         &store.albums,
+        &playlist_desired,
+        &stored_playlists,
         enumerated,
+        playlists_enumerated,
         verb,
     )?;
 
@@ -671,7 +709,7 @@ async fn execute_plan(
             clock: &clock,
         };
         tokio::select! {
-            out = suno_core::execute(plan, &mut manifest, &mut store.albums, desired, ports, &opts) => Some(out),
+            out = suno_core::execute(plan, &mut manifest, &mut store.albums, &mut store.playlists, desired, ports, &opts) => Some(out),
             _ = wait_for_signal() => None,
         }
     };
@@ -737,8 +775,93 @@ async fn execute_plan(
     Ok(run_exit_code(&outcome))
 }
 
+/// Fetch this run's playlists best-effort and build their desired `.m3u8`
+/// state, honouring HARDENING B2 at every step.
+///
+/// Only ever called on a fully-enumerated run (the caller gates on that). A
+/// failed `/api/playlist/me` listing returns `(empty, false)` so the planner
+/// makes no playlist writes or deletes and every existing `.m3u8` is left
+/// untouched. A single playlist whose member fetch fails, or a truncated liked
+/// feed, is added to `protected` and excluded from the desired set, so the
+/// caller can also exclude it from the stale-delete candidate set: its file is
+/// neither rewritten nor removed. The synthetic liked feed is appended last, in
+/// liked order, under the id [`LIKED_PLAYLIST_ID`].
+async fn fetch_playlist_desired(
+    client: &mut SunoClient,
+    http: &ReqwestHttp,
+    desired: &[suno_core::Desired],
+    protected: &mut BTreeSet<String>,
+    verbosity: i8,
+) -> (Vec<PlaylistDesired>, bool) {
+    let playlists = match client.get_playlists(http).await {
+        Ok(playlists) => playlists,
+        Err(err) => {
+            if verbosity >= -1 {
+                eprintln!(
+                    "warning: playlist listing failed ({err}); leaving existing .m3u8 files untouched"
+                );
+            }
+            return (Vec::new(), false);
+        }
+    };
+
+    // Own each playlist's members so the borrowed `PlaylistInput`s stay valid.
+    let mut fetched: Vec<(String, String, Vec<Clip>)> = Vec::new();
+    for playlist in &playlists {
+        match client.get_playlist_clips(http, &playlist.id).await {
+            Ok(members) => fetched.push((playlist.id.clone(), playlist.name.clone(), members)),
+            Err(err) => {
+                if verbosity >= -1 {
+                    eprintln!(
+                        "warning: playlist '{}' members failed to list ({err}); keeping its .m3u8 unchanged",
+                        playlist.name
+                    );
+                }
+                protected.insert(playlist.id.clone());
+            }
+        }
+    }
+
+    // The liked feed becomes a synthetic "Liked Songs" playlist, but only when it
+    // drained fully: a truncated feed would render a short playlist and is left
+    // untouched instead (B2).
+    match client.list_clips(http, true, None).await {
+        Ok((liked, true)) => {
+            fetched.push((
+                LIKED_PLAYLIST_ID.to_owned(),
+                "Liked Songs".to_owned(),
+                liked,
+            ));
+        }
+        Ok((_, false)) => {
+            if verbosity >= -1 {
+                eprintln!("warning: liked feed was truncated; keeping Liked Songs.m3u8 unchanged");
+            }
+            protected.insert(LIKED_PLAYLIST_ID.to_owned());
+        }
+        Err(err) => {
+            if verbosity >= -1 {
+                eprintln!(
+                    "warning: liked feed failed to list ({err}); keeping Liked Songs.m3u8 unchanged"
+                );
+            }
+            protected.insert(LIKED_PLAYLIST_ID.to_owned());
+        }
+    }
+
+    let inputs: Vec<PlaylistInput<'_>> = fetched
+        .iter()
+        .map(|(id, name, members)| PlaylistInput {
+            id: id.as_str(),
+            name: name.as_str(),
+            members: members.as_slice(),
+        })
+        .collect();
+    (build_playlist_desired(&inputs, desired), true)
+}
+
 /// Load the manifest beside `dest` and reconcile `desired` against it, then
-/// append the folder-art plan for `albums_desired`.
+/// append the folder-art and playlist plans.
 ///
 /// Shared by the dry-run and executing paths. Reading a missing manifest yields
 /// an empty one and statting absent files is harmless, so this never creates the
@@ -746,12 +869,23 @@ async fn execute_plan(
 /// verdict ([`deletion_allowed`]) so album art is never removed on an incomplete
 /// listing, and they land on the same [`Plan`] so the mass-delete cap and the
 /// confirmation prompt already cover them.
+///
+/// Playlists carry a second, independent gate: `playlists_enumerated` is true
+/// only when the `/api/playlist/me` listing succeeded on a fully-enumerated run.
+/// [`plan_playlist_artifacts`] emits a playlist delete only when BOTH the shared
+/// `can_delete` verdict and `playlists_enumerated` hold, so a failed, empty, or
+/// partial playlist listing never removes an existing `.m3u8` (HARDENING B2).
+/// These deletes also count toward the mass-delete cap via [`Plan::artifact_deletes`].
+#[allow(clippy::too_many_arguments)]
 fn load_and_reconcile(
     dest: &Path,
     desired: &[suno_core::Desired],
     albums_desired: &[AlbumDesired],
     albums: &BTreeMap<String, AlbumArt>,
+    playlist_desired: &[PlaylistDesired],
+    playlists: &BTreeMap<String, PlaylistState>,
     enumerated: bool,
+    playlists_enumerated: bool,
     verb: Verb,
 ) -> Result<(suno_core::Manifest, suno_core::Plan)> {
     let manifest = logs::load_manifest(dest)?;
@@ -764,6 +898,12 @@ fn load_and_reconcile(
     let mut plan = reconcile(&manifest, desired, &local, &sources);
     plan.actions
         .extend(plan_album_artifacts(albums_desired, albums, can_delete));
+    plan.actions.extend(plan_playlist_artifacts(
+        playlist_desired,
+        playlists,
+        can_delete,
+        playlists_enumerated,
+    ));
     Ok((manifest, plan))
 }
 
@@ -981,8 +1121,18 @@ mod tests {
             Path::new("target").join(format!("run-nodir-{}-{}", std::process::id(), now_secs()));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!dir.exists());
-        let (manifest, plan) =
-            load_and_reconcile(&dir, &[], &[], &BTreeMap::new(), false, Verb::Sync).unwrap();
+        let (manifest, plan) = load_and_reconcile(
+            &dir,
+            &[],
+            &[],
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            false,
+            false,
+            Verb::Sync,
+        )
+        .unwrap();
         assert!(manifest.is_empty());
         assert!(plan.actions.is_empty());
         assert!(

@@ -32,7 +32,7 @@ mod testutil;
 mod sync_chaos;
 
 pub use auth::ClerkAuth;
-pub use client::SunoClient;
+pub use client::{Playlist, SunoClient};
 pub use clock::Clock;
 pub use config::{
     AccountConfig, AudioFormat, Config, Defaults, EffectiveSettings, FlagOverrides, SourceConfig,
@@ -42,8 +42,8 @@ pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute}
 pub use extras::{M3u8Entry, render_m3u8};
 pub use ffmpeg::{Ffmpeg, FfmpegError, WebpEncodeSettings};
 pub use fs::{FileStat, Filesystem, FsError};
-pub use graph::{AlbumArt, CacheEntry, LineageStore, Node, StoredEdge};
-pub use hash::{art_hash, art_url_hash, meta_hash};
+pub use graph::{AlbumArt, CacheEntry, LineageStore, Node, PlaylistState, StoredEdge};
+pub use hash::{art_hash, art_url_hash, content_hash, meta_hash};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use lineage::{
     Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveOpts, ResolveStatus, RootInfo,
@@ -53,10 +53,11 @@ pub use manifest::{ArtifactState, Manifest, ManifestEntry};
 pub use model::{Clip, HistoryEntry};
 pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,
-    render_clip_names,
+    render_clip_names, sanitise_name,
 };
 pub use reconcile::{
-    Action, AlbumDesired, ArtifactKind, Desired, DesiredArtifact, LocalFile, Plan, SourceMode,
-    SourceStatus, album_desired, deletion_allowed, plan_album_artifacts, reconcile,
+    Action, AlbumDesired, ArtifactKind, Desired, DesiredArtifact, LocalFile, Plan, PlaylistDesired,
+    SourceMode, SourceStatus, album_desired, deletion_allowed, plan_album_artifacts,
+    plan_playlist_artifacts, reconcile,
 };
 pub use tag::{TrackMetadata, tag_flac, tag_mp3};

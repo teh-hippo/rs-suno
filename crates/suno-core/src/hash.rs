@@ -22,6 +22,18 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// A stable sentinel over an arbitrary generated text artefact.
+///
+/// Used for playlists, whose `.m3u8` body is generated rather than fetched: the
+/// hash is taken over the **full rendered text**, so the playlist name, the
+/// member order, and every member's relative path, title, and duration all feed
+/// it (HARDENING B1: a change to anything that ends up in the file changes the
+/// hash and so triggers a rewrite). Because the render is deterministic, the
+/// hash is stable across runs and platforms.
+pub fn content_hash(text: &str) -> String {
+    digest(text.as_bytes())
+}
+
 /// A sentinel for the clip's tag-bearing metadata and chosen art.
 ///
 /// Covers every field that affects file *content* — title, tags, the selected
@@ -199,5 +211,22 @@ mod tests {
         clip.video_cover_url = "https://cdn1.suno.ai/video_cover.jpeg".to_owned();
         let video = art_hash(&clip);
         assert_ne!(standard, video);
+    }
+
+    #[test]
+    fn content_hash_is_stable_and_tracks_any_change() {
+        let text = "#EXTM3U\n#PLAYLIST:Mix\n#EXTINF:60,One\nA/One.flac\n";
+        let h = content_hash(text);
+        assert_eq!(h.len(), 16);
+        assert_eq!(h, content_hash(text), "same text hashes the same");
+        // A different name, order, path, title, or duration changes the digest.
+        assert_ne!(
+            h,
+            content_hash("#EXTM3U\n#PLAYLIST:Other\n#EXTINF:60,One\nA/One.flac\n")
+        );
+        assert_ne!(
+            h,
+            content_hash("#EXTM3U\n#PLAYLIST:Mix\n#EXTINF:61,One\nA/One.flac\n")
+        );
     }
 }

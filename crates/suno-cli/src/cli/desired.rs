@@ -11,8 +11,8 @@ use std::path::{Component, Path};
 
 use suno_core::{
     ArtifactKind, AudioFormat, Clip, Desired, DesiredArtifact, ExecOutcome, LineageContext,
-    NamingConfig, NamingRequest, RunStatus, SourceMode, art_hash, art_url_hash, meta_hash,
-    render_clip_names,
+    M3u8Entry, NamingConfig, NamingRequest, PlaylistDesired, RunStatus, SourceMode, art_hash,
+    art_url_hash, content_hash, meta_hash, render_clip_names, render_m3u8, sanitise_name,
 };
 
 /// Below this manifest size the mass-deletion fraction rule does not fire; a
@@ -146,6 +146,73 @@ fn clip_artifacts(clip: &Clip, base: &str, animated_covers: bool) -> Vec<Desired
         });
     }
     artifacts
+}
+
+/// The synthetic playlist id for the liked feed, rendered as "Liked Songs".
+///
+/// Suno playlist ids are UUIDs, so this short literal never collides with a real
+/// playlist id in the store keyspace.
+pub const LIKED_PLAYLIST_ID: &str = "liked";
+
+/// One fetched playlist to render: its stable id, display name, and ordered
+/// member clips (already non-trashed, in Suno order).
+pub struct PlaylistInput<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub members: &'a [Clip],
+}
+
+/// Build the desired `.m3u8` playlists for this run from the fetched playlists.
+///
+/// Each input is rendered, in Suno order, into an extended-M3U8 body: every
+/// member clip id is looked up in this run's `desired` audio set and mapped to
+/// its rendered relative path, title, and duration. A member **absent from the
+/// desired set** is emitted as an L1 `# (not in library)` comment (an empty
+/// relative path in the [`M3u8Entry`]), using the member's own title, rather
+/// than a dangling path (HARDENING L1). The content hash is taken over the full
+/// rendered body so a name, order, path, title, or duration change all trigger a
+/// rewrite (HARDENING B1), and the file path is `<sanitised name>.m3u8` at the
+/// library root.
+///
+/// This is pure; the caller (run) does the best-effort fetching, excludes any
+/// playlist whose member fetch failed, and appends the synthetic liked feed as a
+/// final input with id [`LIKED_PLAYLIST_ID`].
+pub fn build_playlist_desired(
+    inputs: &[PlaylistInput<'_>],
+    desired: &[Desired],
+) -> Vec<PlaylistDesired> {
+    let by_id: HashMap<&str, &Desired> = desired.iter().map(|d| (d.clip.id.as_str(), d)).collect();
+    inputs
+        .iter()
+        .map(|input| {
+            let entries: Vec<M3u8Entry<'_>> = input
+                .members
+                .iter()
+                .map(|member| match by_id.get(member.id.as_str()) {
+                    Some(d) => M3u8Entry {
+                        title: d.clip.title.as_str(),
+                        duration_secs: d.clip.duration,
+                        relative_path: d.path.as_str(),
+                    },
+                    None => M3u8Entry {
+                        title: member.title.as_str(),
+                        duration_secs: member.duration,
+                        relative_path: "",
+                    },
+                })
+                .collect();
+            let content = render_m3u8(input.name, &entries);
+            let hash = content_hash(&content);
+            let path = format!("{}.m3u8", sanitise_name(input.name));
+            PlaylistDesired {
+                id: input.id.to_owned(),
+                name: input.name.to_owned(),
+                path,
+                content,
+                hash,
+            }
+        })
+        .collect()
 }
 
 /// Render a relative path as a forward-slash string, dropping any non-normal
@@ -897,5 +964,93 @@ mod tests {
         assert_eq!(ExitCode::Transient.code(), 6);
         assert_eq!(ExitCode::Safety.code(), 7);
         assert_eq!(ExitCode::Interrupted.code(), 8);
+    }
+
+    fn path_of<'a>(desired: &'a [Desired], id: &str) -> &'a str {
+        desired
+            .iter()
+            .find(|d| d.clip.id == id)
+            .map(|d| d.path.as_str())
+            .expect("clip in desired set")
+    }
+
+    #[test]
+    fn build_playlist_desired_orders_members_and_marks_absent() {
+        let a = clip("id-a", "Song A", "alice");
+        let b = clip("id-b", "Song B", "alice");
+        let desired = build_desired(
+            &[&a, &b],
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            false,
+        );
+        // A playlist with b, then a clip absent from the library, then a.
+        let missing = clip("id-x", "Missing Song", "bob");
+        let members = vec![b.clone(), missing.clone(), a.clone()];
+        let inputs = vec![PlaylistInput {
+            id: "pl1",
+            name: "Road/Trip",
+            members: &members,
+        }];
+
+        let out = build_playlist_desired(&inputs, &desired);
+        assert_eq!(out.len(), 1);
+        let pl = &out[0];
+        assert_eq!(pl.id, "pl1");
+        // The path is sanitised (slash folded); the #PLAYLIST body keeps the raw name.
+        assert_eq!(pl.path, "Road Trip.m3u8");
+        assert!(pl.content.starts_with("#EXTM3U\n#PLAYLIST:Road/Trip\n"));
+
+        // Suno order is preserved: b, then the L1 comment, then a.
+        let pos_b = pl.content.find(path_of(&desired, "id-b")).unwrap();
+        let pos_missing = pl.content.find("# (not in library) Missing Song").unwrap();
+        let pos_a = pl.content.find(path_of(&desired, "id-a")).unwrap();
+        assert!(pos_b < pos_missing && pos_missing < pos_a);
+        // The absent member is a comment, never a dangling path or EXTINF.
+        assert!(!pl.content.contains("Missing Song\nbob/"));
+        // The hash is over the full rendered body (B1).
+        assert_eq!(pl.hash, content_hash(&pl.content));
+    }
+
+    #[test]
+    fn build_playlist_desired_builds_liked_and_multiple_in_order() {
+        let a = clip("id-a", "Song A", "alice");
+        let desired = build_desired(
+            &[&a],
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            false,
+        );
+        let members = vec![a.clone()];
+        let inputs = vec![
+            PlaylistInput {
+                id: "pl1",
+                name: "First",
+                members: &members,
+            },
+            PlaylistInput {
+                id: LIKED_PLAYLIST_ID,
+                name: "Liked Songs",
+                members: &members,
+            },
+        ];
+
+        let out = build_playlist_desired(&inputs, &desired);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, "pl1");
+        assert_eq!(out[1].id, LIKED_PLAYLIST_ID);
+        assert_eq!(out[1].path, "Liked Songs.m3u8");
+        // Both reference the in-library audio path.
+        assert!(out[0].content.contains(path_of(&desired, "id-a")));
+        assert!(out[1].content.contains(path_of(&desired, "id-a")));
+    }
+
+    #[test]
+    fn build_playlist_desired_is_empty_for_no_inputs() {
+        assert!(build_playlist_desired(&[], &[]).is_empty());
     }
 }

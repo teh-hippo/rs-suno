@@ -20,6 +20,12 @@ pub(crate) const MAX_PAGES: u32 = 100;
 pub(crate) const FEED_V2_PATH: &str = "/api/feed/v2/";
 /// The dedicated parent-lookup endpoint: one hop up a clip's lineage.
 pub(crate) const CLIP_PARENT_PATH: &str = "/api/clips/parent";
+/// The caller's own playlists, paged. Trashed and share-list playlists are
+/// excluded by query so the listing is the account's authoritative own set.
+pub(crate) const PLAYLIST_ME_PATH: &str = "/api/playlist/me";
+/// One playlist's detail, including its ordered `playlist_clips`. The id and a
+/// trailing slash are appended: `/api/playlist/{id}/`.
+pub(crate) const PLAYLIST_PATH: &str = "/api/playlist/";
 /// Fetch at most this many clip ids per `?ids=` request so a batch cannot build
 /// an over-long URL.
 pub(crate) const IDS_PER_REQUEST: usize = 40;

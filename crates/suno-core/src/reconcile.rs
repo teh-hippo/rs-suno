@@ -35,7 +35,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use crate::config::AudioFormat;
-use crate::graph::AlbumArt;
+use crate::graph::{AlbumArt, PlaylistState};
 use crate::hash::{art_hash, art_url_hash};
 use crate::lineage::LineageContext;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
@@ -148,6 +148,31 @@ pub struct AlbumDesired {
     pub folder_webp: Option<DesiredArtifact>,
 }
 
+/// The desired `.m3u8` target for one playlist (a Suno playlist, or the
+/// synthetic liked feed).
+///
+/// A playlist's body is *generated* from this run's rendered audio paths, not
+/// fetched, so it is reconciled by a single content [`hash`](Self::hash) over
+/// the full rendered text (HARDENING B1: the name, member order, and every
+/// member's path/title/duration feed it). The rendered body is carried inline
+/// in [`content`](Self::content) so the executor writes it without a network
+/// round-trip. [`path`](Self::path) is `<sanitised name>.m3u8` at the library
+/// root, tracked so a rename removes the stale file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaylistDesired {
+    /// The playlist's stable key: its Suno id (the synthetic `"liked"` id for
+    /// the liked feed).
+    pub id: String,
+    /// The playlist's display name, as shown on Suno.
+    pub name: String,
+    /// The `.m3u8` file's library-relative path (`<sanitised name>.m3u8`).
+    pub path: String,
+    /// The fully rendered `.m3u8` body, written inline (no fetch).
+    pub content: String,
+    /// The content hash over `content`, driving rewrite detection.
+    pub hash: String,
+}
+
 /// The caller's on-disk probe of one manifest path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LocalFile {
@@ -204,12 +229,20 @@ pub enum Action {
     ///
     /// Emitted when the manifest lacks the artifact or its stored hash differs
     /// from `hash`. A write is additive and never gated by deletion safety.
+    ///
+    /// `content` carries an inline body for *generated* artifacts (playlists):
+    /// when `Some`, the executor writes those exact bytes atomically and skips
+    /// the network entirely; when `None`, it fetches (and transcodes) from
+    /// `source_url` as before. A fetched artifact leaves `source_url` set and
+    /// `content` `None`; a generated one leaves `source_url` empty and `content`
+    /// `Some`.
     WriteArtifact {
         kind: ArtifactKind,
         path: String,
         source_url: String,
         hash: String,
         owner_id: String,
+        content: Option<String>,
     },
     /// Delete an external sidecar artifact (a removed kind, or a co-deleted
     /// sidecar of a clip whose audio is being deleted).
@@ -537,6 +570,7 @@ fn plan_clip_artifacts(d: &Desired, manifest: &Manifest, can_delete: bool, out: 
                 source_url: artifact.source_url.clone(),
                 hash: artifact.hash.clone(),
                 owner_id: owner_id.to_string(),
+                content: None,
             });
         }
     }
@@ -960,6 +994,7 @@ pub fn plan_album_artifacts(
                     source_url: artifact.source_url.clone(),
                     hash: artifact.hash.clone(),
                     owner_id: d.root_id.clone(),
+                    content: None,
                 });
             }
         }
@@ -1015,6 +1050,112 @@ fn album_action_key(action: &Action) -> (&str, ArtifactKind) {
         Action::WriteArtifact { owner_id, kind, .. }
         | Action::DeleteArtifact { owner_id, kind, .. } => (owner_id.as_str(), *kind),
         _ => ("", ArtifactKind::CoverJpg),
+    }
+}
+
+/// Plan the `.m3u8` writes and deletes for this run's playlists.
+///
+/// # Writes
+///
+/// For each desired playlist a single [`Action::WriteArtifact`] of kind
+/// [`Playlist`](ArtifactKind::Playlist) is emitted (carrying the rendered body
+/// inline in `content`) when the store lacks the playlist, its stored hash
+/// differs, or its stored path differs. The hash is taken over the full rendered
+/// text, so a name, order, path, title, or duration change all trigger a rewrite
+/// (HARDENING B1); an unchanged playlist writes nothing (idempotent).
+///
+/// A **rename** (the same id whose sanitised name, and so path, changed) writes
+/// the new file and, gated exactly like a stale delete (`can_delete &&
+/// list_fully_enumerated`), also deletes the old stored path so the previous
+/// `<oldname>.m3u8` does not linger.
+///
+/// # Deletes (HARDENING B2 — paramount)
+///
+/// A stored playlist absent from `desired` is stale (removed on Suno) and its
+/// file is deleted **only** when `can_delete` AND `list_fully_enumerated`. The
+/// second gate is the playlist-specific safety valve: `list_fully_enumerated`
+/// is `true` only when the `/api/playlist/me` listing succeeded and was fully
+/// paginated. If that listing **failed or was not fully enumerated**, the caller
+/// passes `list_fully_enumerated = false` (and an empty `desired`), so this
+/// function emits **zero deletes and zero writes** and every existing `.m3u8` is
+/// left untouched. A failed *member* fetch for one playlist is handled upstream
+/// by excluding that id from BOTH `desired` and `stored`, so it is never treated
+/// as stale here.
+///
+/// The output is deterministic (sorted by `(owner_id, kind)`) and self-suppresses
+/// path aliasing, so a rename to a name another playlist also renders this run
+/// downgrades the colliding delete rather than removing a just-written file.
+pub fn plan_playlist_artifacts(
+    desired: &[PlaylistDesired],
+    stored: &BTreeMap<String, PlaylistState>,
+    can_delete: bool,
+    list_fully_enumerated: bool,
+) -> Vec<Action> {
+    let mut actions: Vec<Action> = Vec::new();
+    let desired_ids: BTreeSet<&str> = desired.iter().map(|d| d.id.as_str()).collect();
+    // Deletes (stale removals and rename cleanups) are gated on BOTH the shared
+    // deletion verdict and a fully-enumerated playlist listing (B2).
+    let deletes_allowed = can_delete && list_fully_enumerated;
+
+    for d in desired {
+        let stored_here = stored.get(&d.id);
+        let needs_write = match stored_here {
+            None => true,
+            Some(state) => state.hash != d.hash || state.path != d.path,
+        };
+        if needs_write {
+            actions.push(Action::WriteArtifact {
+                kind: ArtifactKind::Playlist,
+                path: d.path.clone(),
+                source_url: String::new(),
+                hash: d.hash.clone(),
+                owner_id: d.id.clone(),
+                content: Some(d.content.clone()),
+            });
+        }
+        // A rename changed the path: remove the old file, under the delete gate.
+        if deletes_allowed
+            && let Some(state) = stored_here
+            && !state.path.is_empty()
+            && state.path != d.path
+        {
+            actions.push(Action::DeleteArtifact {
+                kind: ArtifactKind::Playlist,
+                path: state.path.clone(),
+                owner_id: d.id.clone(),
+            });
+        }
+    }
+
+    // Stale playlists (removed on Suno) are deleted only under the full gate, so
+    // a failed or partial listing never removes an existing `.m3u8` (B2).
+    if deletes_allowed {
+        for (id, state) in stored {
+            if !desired_ids.contains(id.as_str()) && !state.path.is_empty() {
+                actions.push(Action::DeleteArtifact {
+                    kind: ArtifactKind::Playlist,
+                    path: state.path.clone(),
+                    owner_id: id.clone(),
+                });
+            }
+        }
+    }
+
+    actions.sort_by(|a, b| playlist_action_key(a).cmp(&playlist_action_key(b)));
+    // A rename to a name another playlist also renders this run must not delete
+    // the file that write just produced; downgrade any such colliding delete.
+    suppress_path_aliasing(&mut actions);
+    actions
+}
+
+/// The `(owner_id, is_delete)` sort key for a playlist action, so writes and
+/// deletes for one id stay adjacent and order is deterministic.
+fn playlist_action_key(action: &Action) -> (&str, u8) {
+    match action {
+        Action::WriteArtifact { owner_id, .. } => (owner_id.as_str(), 0),
+        Action::DeleteArtifact { owner_id, .. } => (owner_id.as_str(), 1),
+        Action::Skip { clip_id } => (clip_id.as_str(), 2),
+        _ => ("", 3),
     }
 }
 
@@ -2000,6 +2141,7 @@ mod tests {
                 source_url: "https://art/a".to_string(),
                 hash: "h1".to_string(),
                 owner_id: "a".to_string(),
+                content: None,
             }
         );
     }
@@ -2605,6 +2747,7 @@ mod tests {
                     source_url: "art-a".to_string(),
                     hash: art_url_hash("art-a"),
                     owner_id: "root".to_string(),
+                    content: None,
                 },
                 Action::WriteArtifact {
                     kind: ArtifactKind::FolderWebp,
@@ -2612,6 +2755,7 @@ mod tests {
                     source_url: "vid-a".to_string(),
                     hash: art_url_hash("vid-a"),
                     owner_id: "root".to_string(),
+                    content: None,
                 },
             ]
         );
@@ -2877,6 +3021,240 @@ mod tests {
                 ("r2", ArtifactKind::FolderWebp),
             ]
         );
+    }
+
+    // ── Phase 9: playlist artifacts ─────────────────────────────────
+
+    fn pl_desired(id: &str, name: &str, path: &str, hash: &str) -> PlaylistDesired {
+        PlaylistDesired {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            path: path.to_owned(),
+            content: format!("#EXTM3U\n#PLAYLIST:{name}\n<{hash}>\n"),
+            hash: hash.to_owned(),
+        }
+    }
+
+    fn pl_state(name: &str, path: &str, hash: &str) -> PlaylistState {
+        PlaylistState {
+            name: name.to_owned(),
+            path: path.to_owned(),
+            hash: hash.to_owned(),
+        }
+    }
+
+    fn pl_store(entries: &[(&str, PlaylistState)]) -> BTreeMap<String, PlaylistState> {
+        entries
+            .iter()
+            .map(|(id, state)| ((*id).to_owned(), state.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn playlist_write_emitted_for_a_new_playlist() {
+        let desired = vec![pl_desired("pl1", "Road Trip", "Road Trip.m3u8", "h1")];
+        let actions = plan_playlist_artifacts(&desired, &BTreeMap::new(), true, true);
+        assert_eq!(
+            actions,
+            vec![Action::WriteArtifact {
+                kind: ArtifactKind::Playlist,
+                path: "Road Trip.m3u8".to_owned(),
+                source_url: String::new(),
+                hash: "h1".to_owned(),
+                owner_id: "pl1".to_owned(),
+                content: Some("#EXTM3U\n#PLAYLIST:Road Trip\n<h1>\n".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn playlist_write_emitted_when_hash_changes() {
+        // Same id and path, different content hash (a member's title, an order
+        // flip, a new path) — the m3u8 is rewritten (B1).
+        let desired = vec![pl_desired("pl1", "Mix", "Mix.m3u8", "h2")];
+        let stored = pl_store(&[("pl1", pl_state("Mix", "Mix.m3u8", "h1"))]);
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            &actions[0],
+            Action::WriteArtifact { hash, owner_id, .. } if hash == "h2" && owner_id == "pl1"
+        ));
+    }
+
+    #[test]
+    fn playlist_unchanged_is_idempotent() {
+        let desired = vec![pl_desired("pl1", "Mix", "Mix.m3u8", "h1")];
+        let stored = pl_store(&[("pl1", pl_state("Mix", "Mix.m3u8", "h1"))]);
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true);
+        assert!(actions.is_empty(), "an unchanged playlist plans nothing");
+    }
+
+    #[test]
+    fn playlist_rename_writes_new_and_deletes_old_path() {
+        // The playlist was renamed on Suno, so its sanitised path changed: write
+        // the new file and delete the old one, both under the full delete gate.
+        let desired = vec![pl_desired("pl1", "Summer", "Summer.m3u8", "h2")];
+        let stored = pl_store(&[("pl1", pl_state("Spring", "Spring.m3u8", "h1"))]);
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true);
+        assert_eq!(
+            actions,
+            vec![
+                Action::WriteArtifact {
+                    kind: ArtifactKind::Playlist,
+                    path: "Summer.m3u8".to_owned(),
+                    source_url: String::new(),
+                    hash: "h2".to_owned(),
+                    owner_id: "pl1".to_owned(),
+                    content: Some("#EXTM3U\n#PLAYLIST:Summer\n<h2>\n".to_owned()),
+                },
+                Action::DeleteArtifact {
+                    kind: ArtifactKind::Playlist,
+                    path: "Spring.m3u8".to_owned(),
+                    owner_id: "pl1".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn playlist_rename_keeps_old_file_when_deletes_disallowed() {
+        // A rename still writes the new file, but the OLD-path cleanup is a
+        // delete and is gated: no can_delete means no removal (B2).
+        let desired = vec![pl_desired("pl1", "Summer", "Summer.m3u8", "h2")];
+        let stored = pl_store(&[("pl1", pl_state("Spring", "Spring.m3u8", "h1"))]);
+        let actions = plan_playlist_artifacts(&desired, &stored, false, true);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            &actions[0],
+            Action::WriteArtifact { path, .. } if path == "Summer.m3u8"
+        ));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::DeleteArtifact { .. })),
+            "old path must not be deleted when deletes are disallowed"
+        );
+    }
+
+    #[test]
+    fn playlist_stale_removed_only_under_full_gate() {
+        // A stored playlist absent from desired is stale. It is deleted only when
+        // BOTH can_delete and list_fully_enumerated hold.
+        let stored = pl_store(&[("gone", pl_state("Gone", "Gone.m3u8", "h1"))]);
+
+        let deleted = plan_playlist_artifacts(&[], &stored, true, true);
+        assert_eq!(
+            deleted,
+            vec![Action::DeleteArtifact {
+                kind: ArtifactKind::Playlist,
+                path: "Gone.m3u8".to_owned(),
+                owner_id: "gone".to_owned(),
+            }]
+        );
+
+        // Any gate off → no delete.
+        assert!(plan_playlist_artifacts(&[], &stored, false, true).is_empty());
+        assert!(plan_playlist_artifacts(&[], &stored, true, false).is_empty());
+        assert!(plan_playlist_artifacts(&[], &stored, false, false).is_empty());
+    }
+
+    #[test]
+    fn b2_failed_list_emits_zero_writes_and_zero_deletes() {
+        // B2 BLOCKER: when the /api/playlist/me listing fails, the caller passes
+        // an empty desired and list_fully_enumerated=false. Even with a
+        // non-empty store and can_delete, NOTHING is planned — every existing
+        // .m3u8 is left untouched.
+        let stored = pl_store(&[
+            ("pl1", pl_state("Mix", "Mix.m3u8", "h1")),
+            ("pl2", pl_state("Chill", "Chill.m3u8", "h2")),
+        ]);
+        let actions = plan_playlist_artifacts(&[], &stored, true, false);
+        assert!(
+            actions.is_empty(),
+            "a failed playlist listing must plan zero actions, got {actions:?}"
+        );
+    }
+
+    #[test]
+    fn b2_empty_list_deletes_only_when_fully_enumerated() {
+        // An empty desired that contradicts a non-empty store is a genuine
+        // wipe ONLY when the listing was fully enumerated (and can_delete). That
+        // path IS a mass delete — the CLI cap/confirmation then guards it — but
+        // an unreliable listing (not fully enumerated) plans nothing here (B2).
+        let stored = pl_store(&[
+            ("pl1", pl_state("Mix", "Mix.m3u8", "h1")),
+            ("pl2", pl_state("Chill", "Chill.m3u8", "h2")),
+        ]);
+
+        // Not fully enumerated: zero deletes (the safety valve).
+        assert!(plan_playlist_artifacts(&[], &stored, true, false).is_empty());
+
+        // Fully enumerated and allowed: both are deleted (the caller's cap
+        // catches this mass removal).
+        let wiped = plan_playlist_artifacts(&[], &stored, true, true);
+        assert_eq!(
+            wiped
+                .iter()
+                .filter(|a| matches!(a, Action::DeleteArtifact { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn b2_failed_member_playlist_is_untouched_while_others_reconcile() {
+        // A playlist whose member fetch failed is excluded upstream from BOTH
+        // desired and the stored map handed here, so it is neither rewritten nor
+        // treated as stale: its .m3u8 survives while a sibling reconciles.
+        // `pl_ok` reconciles; `pl_fail` is simply absent from both maps.
+        let desired = vec![pl_desired("pl_ok", "Ok", "Ok.m3u8", "h2")];
+        let stored = pl_store(&[("pl_ok", pl_state("Ok", "Ok.m3u8", "h1"))]);
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true);
+        // Only the healthy playlist is rewritten; nothing references pl_fail.
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            &actions[0],
+            Action::WriteArtifact { owner_id, .. } if owner_id == "pl_ok"
+        ));
+        assert!(
+            !actions.iter().any(|a| match a {
+                Action::WriteArtifact { owner_id, .. }
+                | Action::DeleteArtifact { owner_id, .. } => owner_id == "pl_fail",
+                _ => false,
+            }),
+            "a protected (failed-member) playlist must have no action"
+        );
+    }
+
+    #[test]
+    fn playlist_rename_collision_downgrades_the_delete() {
+        // pl1 renames Old -> Shared.m3u8; pl2 already renders Shared.m3u8 this
+        // run. The delete of pl1's old path is fine, but a delete must never
+        // alias a write target, so if the OLD path equals another write target
+        // it is downgraded. Here we force the collision: pl1's old path is the
+        // very path pl2 writes.
+        let desired = vec![
+            pl_desired("pl1", "Shared", "Shared.m3u8", "h2"),
+            pl_desired("pl2", "Shared", "Shared.m3u8", "h3"),
+        ];
+        let stored = pl_store(&[("pl1", pl_state("Old", "Shared.m3u8", "h1"))]);
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true);
+        // No DeleteArtifact survives against a path some write produces.
+        let write_paths: BTreeSet<&str> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::WriteArtifact { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        for a in &actions {
+            if let Action::DeleteArtifact { path, .. } = a {
+                assert!(
+                    !write_paths.contains(path.as_str()),
+                    "a playlist delete aliases a write target: {path}"
+                );
+            }
+        }
     }
 }
 

@@ -251,6 +251,22 @@ fn append_suffix(base: &str, suffix: &str, max_component_len: usize) -> String {
     sanitise_component(&combined, CharacterSet::Unicode, max_len)
 }
 
+/// Sanitise a free-form playlist name into a single safe path component.
+///
+/// Applies the same Unicode filtering and length cap as clip path components
+/// (default [`CharacterSet::Unicode`], [`DEFAULT_MAX_COMPONENT_LEN`]), so a
+/// playlist file name obeys the same filesystem rules as the rest of the
+/// library. An empty or fully-stripped name falls back to `playlist` so the
+/// caller always has a non-empty stem to append `.m3u8` to.
+pub fn sanitise_name(name: &str) -> String {
+    let cleaned = sanitise_component(name, CharacterSet::Unicode, DEFAULT_MAX_COMPONENT_LEN);
+    if cleaned.is_empty() {
+        "playlist".to_string()
+    } else {
+        cleaned
+    }
+}
+
 fn sanitise_component(
     value: &str,
     character_set: CharacterSet,
@@ -672,5 +688,14 @@ mod tests {
             names[0].relative_path.to_string_lossy(),
             "München/Solo/München-Solo [solo-1]"
         );
+    }
+
+    #[test]
+    fn sanitise_name_strips_separators_and_falls_back_when_empty() {
+        assert_eq!(sanitise_name("Road/Trip: 2024"), "Road Trip 2024");
+        assert_eq!(sanitise_name(""), "playlist");
+        // A name made only of illegal characters strips to nothing, so the
+        // caller still gets a usable, non-empty stem.
+        assert_eq!(sanitise_name("///"), "playlist");
     }
 }

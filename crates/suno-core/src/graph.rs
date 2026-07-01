@@ -47,6 +47,10 @@ pub struct LineageStore {
     /// The reconciled folder-art state per album, keyed by the album's stable
     /// root id (HARDENING H2). Additive: absent in older stores, defaults empty.
     pub albums: BTreeMap<String, AlbumArt>,
+    /// The reconciled `.m3u8` state per playlist, keyed by the playlist's Suno
+    /// id (the synthetic `"liked"` id for the liked feed). Additive: absent in
+    /// older stores, defaults empty.
+    pub playlists: BTreeMap<String, PlaylistState>,
 }
 
 impl Default for LineageStore {
@@ -57,6 +61,7 @@ impl Default for LineageStore {
             edges: Vec::new(),
             resolution_cache: BTreeMap::new(),
             albums: BTreeMap::new(),
+            playlists: BTreeMap::new(),
         }
     }
 }
@@ -109,6 +114,25 @@ impl AlbumArt {
     pub fn is_empty(&self) -> bool {
         self.folder_jpg.is_none() && self.folder_webp.is_none()
     }
+}
+
+/// The reconciled `.m3u8` state for one playlist.
+///
+/// A playlist's body is *generated*, not fetched, so unlike per-clip artifacts
+/// its change detection is a single content hash over the full rendered text
+/// (HARDENING B1: name, order, and every member's path/title/duration feed it).
+/// The `path` is the sidecar's library-relative location, tracked so a rename
+/// (a playlist renamed on Suno) is detected and the old file removed. Kept as a
+/// flat row so it migrates cleanly to a SQLite `playlists` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlaylistState {
+    /// The playlist's display name at the time it was last written.
+    pub name: String,
+    /// The `.m3u8` file's library-relative path (`<sanitised name>.m3u8`).
+    pub path: String,
+    /// The content hash of the rendered `.m3u8` this row was written from.
+    pub hash: String,
 }
 
 /// One clip in the graph. Mirrors the fields lineage needs to survive a purge:
@@ -240,6 +264,29 @@ impl LineageStore {
                         self.albums.remove(root_id);
                     }
                 }
+            }
+        }
+    }
+
+    /// The reconciled `.m3u8` state for the playlist with `id`, if present.
+    pub fn playlist(&self, id: &str) -> Option<&PlaylistState> {
+        self.playlists.get(id)
+    }
+
+    /// Upsert (with `Some`) or remove (with `None`) the `.m3u8` state for the
+    /// playlist `id`.
+    ///
+    /// This is the store-level counterpart the CLI persists after the executor
+    /// mutates the [`playlists`](Self::playlists) map in place: a write records
+    /// the new state; a delete clears the row so the store never keeps a
+    /// dangling entry for a playlist whose file was removed.
+    pub fn set_playlist(&mut self, id: &str, state: Option<PlaylistState>) {
+        match state {
+            Some(state) => {
+                self.playlists.insert(id.to_owned(), state);
+            }
+            None => {
+                self.playlists.remove(id);
             }
         }
     }
@@ -765,6 +812,11 @@ mod tests {
         // art existed loads with no albums and no folder art.
         assert!(store.albums.is_empty());
         assert!(store.album_art("x").is_none());
+        // The playlist collection is likewise additive: absent in an older
+        // store, it defaults empty (HARDENING B2: no stored playlist means no
+        // reconcile ever treats one as stale).
+        assert!(store.playlists.is_empty());
+        assert!(store.playlist("x").is_none());
     }
 
     #[test]
@@ -836,6 +888,59 @@ mod tests {
         store.set_album_artifact("root-1", ArtifactKind::FolderJpg, None);
         assert!(store.album_art("root-1").is_none());
         assert!(store.albums.is_empty());
+    }
+
+    #[test]
+    fn playlist_state_roundtrips_by_id() {
+        let mut store = LineageStore::new();
+        store.playlists.insert(
+            "pl1".to_owned(),
+            PlaylistState {
+                name: "Road Trip".to_owned(),
+                path: "Road Trip.m3u8".to_owned(),
+                hash: "abc123".to_owned(),
+            },
+        );
+
+        let json = serde_json::to_string(&store).unwrap();
+        let back: LineageStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(store, back);
+
+        // The serialised shape is a relational `playlists` map keyed by id.
+        let value: serde_json::Value = serde_json::to_value(&store).unwrap();
+        let pl = value.get("playlists").unwrap().get("pl1").unwrap();
+        assert_eq!(pl.get("path").unwrap(), "Road Trip.m3u8");
+        assert_eq!(pl.get("hash").unwrap(), "abc123");
+
+        let stored = back.playlist("pl1").unwrap();
+        assert_eq!(stored.name, "Road Trip");
+        assert_eq!(stored.hash, "abc123");
+    }
+
+    #[test]
+    fn set_playlist_upserts_then_clears() {
+        let mut store = LineageStore::new();
+        let state = PlaylistState {
+            name: "Mix".to_owned(),
+            path: "Mix.m3u8".to_owned(),
+            hash: "h1".to_owned(),
+        };
+        store.set_playlist("pl1", Some(state.clone()));
+        assert_eq!(store.playlist("pl1"), Some(&state));
+
+        // A rewrite replaces the row in place.
+        let renamed = PlaylistState {
+            name: "Mix v2".to_owned(),
+            path: "Mix v2.m3u8".to_owned(),
+            hash: "h2".to_owned(),
+        };
+        store.set_playlist("pl1", Some(renamed.clone()));
+        assert_eq!(store.playlist("pl1"), Some(&renamed));
+
+        // Clearing removes the row so no dangling entry survives a delete.
+        store.set_playlist("pl1", None);
+        assert!(store.playlist("pl1").is_none());
+        assert!(store.playlists.is_empty());
     }
 
     #[test]

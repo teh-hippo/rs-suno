@@ -290,10 +290,12 @@ pub(super) fn drive(
     let clock = RecordingClock::new();
     let ffmpeg = StubFfmpeg::flac();
     let mut albums = std::collections::BTreeMap::new();
+    let mut playlists = std::collections::BTreeMap::new();
     pollster::block_on(execute(
         plan,
         manifest,
         &mut albums,
+        &mut playlists,
         desired,
         Ports {
             client: &mut client,
