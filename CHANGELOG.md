@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/teh-hippo/rs-suno/compare/v0.2.0...v0.2.1) (2026-07-01)
+
+
+### Bug Fixes
+
+* **client:** ride through Suno rate limits when listing the library ([#30](https://github.com/teh-hippo/rs-suno/issues/30)) ([3009583](https://github.com/teh-hippo/rs-suno/commit/300958323fe58abf36e3fbc74bdf03185888e3e5))
+
 ## [0.2.0](https://github.com/teh-hippo/rs-suno/compare/v0.1.0...v0.2.0) (2026-07-01)
 
 
