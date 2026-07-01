@@ -36,8 +36,32 @@ use std::collections::HashMap;
 
 use crate::config::AudioFormat;
 use crate::lineage::LineageContext;
-use crate::manifest::{Manifest, ManifestEntry};
+use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
+
+/// The class of an external sidecar artifact a clip (or album/library) owns.
+///
+/// The reconcile engine keeps a single pair of artifact actions
+/// ([`Action::WriteArtifact`] / [`Action::DeleteArtifact`]) rather than one
+/// variant per class; the `kind` distinguishes them so the executor and the
+/// manifest can route each to the right slot. `VideoMp4` is deferred and
+/// intentionally absent. Per-clip classes ([`CoverJpg`](ArtifactKind::CoverJpg)
+/// and [`CoverWebp`](ArtifactKind::CoverWebp)) map to a manifest entry field;
+/// the album/library classes are reconciled by later phases and have no per-clip
+/// manifest slot yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtifactKind {
+    /// The per-song external cover, sourced from `image_large_url`.
+    CoverJpg,
+    /// The per-song animated cover, derived from `video_cover_url`.
+    CoverWebp,
+    /// The album folder's static cover (album-scoped, later phase).
+    FolderJpg,
+    /// The album folder's animated cover (album-scoped, later phase).
+    FolderWebp,
+    /// A library-root `.m3u8` playlist (library-scoped, later phase).
+    Playlist,
+}
 
 /// How a selected source treats its clips: mirror with deletion, or additive copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -76,6 +100,30 @@ pub struct Desired {
     pub trashed: bool,
     /// True when the clip is private; private clips are always kept.
     pub private: bool,
+    /// The clip's desired external artifacts (cover.jpg, cover.webp, ...).
+    ///
+    /// This is the authoritative target set of sidecars for the clip: an
+    /// artifact present here is written when missing or changed, and a manifest
+    /// artifact absent here is a removed kind and reconciled for deletion. It
+    /// defaults to empty; later phases populate it (P7 covers per-song art), so
+    /// for now every production caller passes an empty vec and only tests set it.
+    pub artifacts: Vec<DesiredArtifact>,
+}
+
+/// One desired external artifact for a clip.
+///
+/// Carries where the sidecar should live, where to fetch it, and the content or
+/// source change hash that drives rewrite detection against the manifest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DesiredArtifact {
+    /// Which artifact class this is.
+    pub kind: ArtifactKind,
+    /// Resolved relative target path for the sidecar.
+    pub path: String,
+    /// The URL the sidecar's bytes are fetched from.
+    pub source_url: String,
+    /// Content/source change hash; a change from the manifest triggers a write.
+    pub hash: String,
 }
 
 /// The caller's on-disk probe of one manifest path.
@@ -130,6 +178,28 @@ pub enum Action {
     Delete { path: String, clip_id: String },
     /// Take no action for a clip; recorded so the plan is a full account.
     Skip { clip_id: String },
+    /// Write (or rewrite) an external sidecar artifact for its owning clip.
+    ///
+    /// Emitted when the manifest lacks the artifact or its stored hash differs
+    /// from `hash`. A write is additive and never gated by deletion safety.
+    WriteArtifact {
+        kind: ArtifactKind,
+        path: String,
+        source_url: String,
+        hash: String,
+        owner_id: String,
+    },
+    /// Delete an external sidecar artifact (a removed kind, or a co-deleted
+    /// sidecar of a clip whose audio is being deleted).
+    ///
+    /// Only ever emitted through [`delete_artifact_action`], which shares the
+    /// audio `can_delete` gate and the owning entry's `preserve` marker, so a
+    /// sidecar is never removed on an incomplete listing or for a preserved clip.
+    DeleteArtifact {
+        kind: ArtifactKind,
+        path: String,
+        owner_id: String,
+    },
 }
 
 /// The reconcile output: an ordered, deterministic list of actions.
@@ -183,6 +253,16 @@ impl Plan {
         self.count(|a| matches!(a, Action::Skip { .. }))
     }
 
+    /// Number of [`Action::WriteArtifact`] actions.
+    pub fn artifact_writes(&self) -> usize {
+        self.count(|a| matches!(a, Action::WriteArtifact { .. }))
+    }
+
+    /// Number of [`Action::DeleteArtifact`] actions.
+    pub fn artifact_deletes(&self) -> usize {
+        self.count(|a| matches!(a, Action::DeleteArtifact { .. }))
+    }
+
     fn count(&self, pred: impl Fn(&Action) -> bool) -> usize {
         self.actions.iter().filter(|a| pred(a)).count()
     }
@@ -217,7 +297,20 @@ pub fn reconcile(
     let can_delete = deletion_allowed(sources);
 
     for d in &desired {
+        // Decide the audio action(s) first (unchanged), then reconcile the
+        // clip's artifacts alongside. A clip whose audio is being deleted this
+        // run has its sidecars co-deleted under the same gate; otherwise its
+        // desired artifacts are written and any removed kind reconciled.
+        let before = actions.len();
         plan_desired(d, manifest, local, can_delete, &mut actions);
+        let audio_deleted = actions[before..]
+            .iter()
+            .any(|a| matches!(a, Action::Delete { .. }));
+        if audio_deleted {
+            co_delete_artifacts(d.clip.id.as_str(), manifest, can_delete, &mut actions);
+        } else {
+            plan_clip_artifacts(d, manifest, can_delete, &mut actions);
+        }
     }
 
     // Absent manifest entries, processed in clip-id order (BTreeMap is sorted).
@@ -226,7 +319,11 @@ pub fn reconcile(
             continue;
         }
         match delete_action(clip_id, manifest, can_delete) {
-            Some(action) => actions.push(action),
+            Some(action) => {
+                actions.push(action);
+                // Co-delete the absent clip's sidecars under the same gate.
+                co_delete_artifacts(clip_id, manifest, can_delete, &mut actions);
+            }
             // SYNC-9 / preserve / empty-path: absence is unreliable or the entry
             // is protected, so keep the file rather than delete it.
             None => actions.push(Action::Skip {
@@ -278,6 +375,173 @@ fn delete_action(clip_id: &str, manifest: &Manifest, can_delete: bool) -> Option
     })
 }
 
+/// The single gate every `DeleteArtifact` passes through.
+///
+/// This is the artifact analogue of [`delete_action`] and deliberately shares
+/// the audio deletion safety: it returns a [`Action::DeleteArtifact`] only when
+/// deletion is allowed for the run (`can_delete`, the same
+/// [`deletion_allowed`] verdict), the owning manifest entry exists, the sidecar
+/// `path` is non-empty (so an empty path can never delete the account root), and
+/// the owning entry is not `preserve`-marked (a preserved clip's artifacts are
+/// preserved too). A `None` result means the caller must keep the sidecar.
+fn delete_artifact_action(
+    owner_id: &str,
+    kind: ArtifactKind,
+    path: &str,
+    manifest: &Manifest,
+    can_delete: bool,
+) -> Option<Action> {
+    if !can_delete {
+        return None;
+    }
+    let entry = manifest.get(owner_id)?;
+    if path.is_empty() || entry.preserve {
+        return None;
+    }
+    Some(Action::DeleteArtifact {
+        kind,
+        path: path.to_string(),
+        owner_id: owner_id.to_string(),
+    })
+}
+
+/// Whether an artifact kind is a per-song sidecar reconciled per clip.
+///
+/// Only cover art lives on the manifest entry today; album/library classes
+/// (folder art, playlists) are owned by later phases and reconciled elsewhere,
+/// so per-clip planning ignores them.
+fn is_per_clip_kind(kind: ArtifactKind) -> bool {
+    matches!(kind, ArtifactKind::CoverJpg | ArtifactKind::CoverWebp)
+}
+
+/// The manifest slot for a per-clip artifact kind, if that kind is stored on the
+/// entry. Album/library classes have no per-clip slot yet, so they map to
+/// `None`; the match stays generic so later phases can add slots without
+/// touching callers.
+fn manifest_artifact_by_kind(entry: &ManifestEntry, kind: ArtifactKind) -> Option<&ArtifactState> {
+    match kind {
+        ArtifactKind::CoverJpg => entry.cover_jpg.as_ref(),
+        ArtifactKind::CoverWebp => entry.cover_webp.as_ref(),
+        ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => None,
+    }
+}
+
+/// The per-clip artifacts an entry currently records, paired with their kind, in
+/// a stable order. Only the per-song sidecars live on the entry today.
+fn manifest_artifacts(entry: &ManifestEntry) -> Vec<(ArtifactKind, &ArtifactState)> {
+    let mut out = Vec::new();
+    if let Some(state) = &entry.cover_jpg {
+        out.push((ArtifactKind::CoverJpg, state));
+    }
+    if let Some(state) = &entry.cover_webp {
+        out.push((ArtifactKind::CoverWebp, state));
+    }
+    out
+}
+
+/// Set (or clear) the manifest slot for a per-clip artifact kind.
+///
+/// The executor calls this after a [`Action::WriteArtifact`] (with the new
+/// state) or a [`Action::DeleteArtifact`] (with `None`), so the kind-to-field
+/// mapping lives in exactly one place. Album/library classes have no per-clip
+/// slot yet and are no-ops.
+pub(crate) fn set_manifest_artifact(
+    entry: &mut ManifestEntry,
+    kind: ArtifactKind,
+    state: Option<ArtifactState>,
+) {
+    match kind {
+        ArtifactKind::CoverJpg => entry.cover_jpg = state,
+        ArtifactKind::CoverWebp => entry.cover_webp = state,
+        ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => {}
+    }
+}
+
+/// Reconcile the artifacts of a clip whose audio is kept this run.
+///
+/// Writes each desired per-clip artifact that the manifest lacks, whose stored
+/// hash drifts, or whose stored path drifts (the audio moved). Deletes each
+/// manifest artifact whose kind is no longer desired (a removed kind), always
+/// through the shared [`delete_artifact_action`] gate, unless the clip is
+/// protected this run.
+fn plan_clip_artifacts(d: &Desired, manifest: &Manifest, can_delete: bool, out: &mut Vec<Action>) {
+    let owner_id = d.clip.id.as_str();
+    let entry = manifest.get(owner_id);
+
+    for artifact in &d.artifacts {
+        // Per-clip reconcile owns only the per-song sidecars (cover.jpg/.webp).
+        // Album/library classes (folder art, playlists) belong to later phases;
+        // ignore them here so they are not rewritten every run.
+        if !is_per_clip_kind(artifact.kind) {
+            continue;
+        }
+        // A write is needed when the manifest lacks the sidecar, its bytes drift
+        // (hash), or the clip moved so the sidecar belongs at a new path (audio
+        // renamed to a new album/name). Removing the OLD sidecar at the previous
+        // path on a move is deferred to P10 (RenameClip). Self-healing a sidecar
+        // that is missing on disk despite a matching manifest record is deferred
+        // to P7 (it needs a local-artifact presence probe, as audio has).
+        let needs_write = match entry.and_then(|e| manifest_artifact_by_kind(e, artifact.kind)) {
+            None => true,
+            Some(state) => state.hash != artifact.hash || state.path != artifact.path,
+        };
+        if needs_write {
+            out.push(Action::WriteArtifact {
+                kind: artifact.kind,
+                path: artifact.path.clone(),
+                source_url: artifact.source_url.clone(),
+                hash: artifact.hash.clone(),
+                owner_id: owner_id.to_string(),
+            });
+        }
+    }
+
+    // A clip protected THIS run (private or copy-held) keeps its sidecars even
+    // when a kind is no longer desired, regardless of the persisted preserve
+    // marker (which may still be false on the run that first protects the clip).
+    // Preserve wins, so no removed-kind delete is emitted for it.
+    let protected_now = d.private || d.modes.contains(&SourceMode::Copy);
+    if !protected_now && let Some(entry) = entry {
+        let desired_kinds: BTreeSet<ArtifactKind> = d
+            .artifacts
+            .iter()
+            .filter(|a| is_per_clip_kind(a.kind))
+            .map(|a| a.kind)
+            .collect();
+        for (kind, state) in manifest_artifacts(entry) {
+            if !desired_kinds.contains(&kind)
+                && let Some(action) =
+                    delete_artifact_action(owner_id, kind, &state.path, manifest, can_delete)
+            {
+                out.push(action);
+            }
+        }
+    }
+}
+
+/// Co-delete every sidecar of a clip whose audio is being deleted this run.
+///
+/// Each removal flows through the shared [`delete_artifact_action`] gate, so a
+/// sidecar is co-deleted only when the audio delete itself was allowed; on an
+/// incomplete listing or a preserved entry nothing is emitted.
+fn co_delete_artifacts(
+    owner_id: &str,
+    manifest: &Manifest,
+    can_delete: bool,
+    out: &mut Vec<Action>,
+) {
+    let Some(entry) = manifest.get(owner_id) else {
+        return;
+    };
+    for (kind, state) in manifest_artifacts(entry) {
+        if let Some(action) =
+            delete_artifact_action(owner_id, kind, &state.path, manifest, can_delete)
+        {
+            out.push(action);
+        }
+    }
+}
+
 /// Collapse duplicate desired entries for one clip id into a single record.
 ///
 /// Safety folds are order-independent: `private` and copy-held are unions, and
@@ -306,6 +570,7 @@ fn aggregate_desired(desired: &[Desired]) -> Vec<Desired> {
                     acc.format = d.format;
                     acc.meta_hash = d.meta_hash.clone();
                     acc.art_hash = d.art_hash.clone();
+                    acc.artifacts = d.artifacts.clone();
                 }
             }
         }
@@ -342,14 +607,17 @@ fn rep_key(d: &Desired) -> (&str, &str, &str, u8) {
     )
 }
 
-/// Downgrade any `Delete` whose path is also written by a `Download`,
-/// `Reformat`, or `Rename` this run, so a deletion can never clobber a file the
-/// same plan just produced.
+/// Downgrade any delete whose path is also written by a `Download`,
+/// `Reformat`, `Rename`, or `WriteArtifact` this run, so a deletion can never
+/// clobber a file the same plan just produced. This covers both the audio
+/// [`Action::Delete`] and every artifact [`Action::DeleteArtifact`] class.
 fn suppress_path_aliasing(actions: &mut [Action]) {
     let targets: BTreeSet<String> = actions
         .iter()
         .filter_map(|a| match a {
-            Action::Download { path, .. } | Action::Reformat { path, .. } => Some(path.clone()),
+            Action::Download { path, .. }
+            | Action::Reformat { path, .. }
+            | Action::WriteArtifact { path, .. } => Some(path.clone()),
             Action::Rename { to, .. } => Some(to.clone()),
             _ => None,
         })
@@ -360,6 +628,13 @@ fn suppress_path_aliasing(actions: &mut [Action]) {
         {
             *a = Action::Skip {
                 clip_id: clip_id.clone(),
+            };
+        }
+        if let Action::DeleteArtifact { path, owner_id, .. } = a
+            && targets.contains(path.as_str())
+        {
+            *a = Action::Skip {
+                clip_id: owner_id.clone(),
             };
         }
     }
@@ -509,6 +784,7 @@ mod tests {
             modes: vec![SourceMode::Mirror],
             trashed: false,
             private: false,
+            artifacts: Vec::new(),
         }
     }
 
@@ -1299,6 +1575,8 @@ mod tests {
                 Action::Delete { clip_id, .. } => clip_id.as_str(),
                 Action::Reformat { clip, .. } => clip.id.as_str(),
                 Action::Rename { to, .. } => to.as_str(),
+                Action::WriteArtifact { owner_id, .. }
+                | Action::DeleteArtifact { owner_id, .. } => owner_id.as_str(),
             })
             .collect();
         assert_eq!(ids, ["a", "b", "c", "z"]);
@@ -1372,6 +1650,492 @@ mod tests {
         assert_eq!(plan.renames(), 1);
         assert_eq!(plan.deletes(), 1);
         assert_eq!(plan.skips(), 1);
+    }
+
+    // ── Phase 6: artifact reconcile ─────────────────────────────────
+
+    fn cover(path: &str, hash: &str) -> ArtifactState {
+        ArtifactState {
+            path: path.to_string(),
+            hash: hash.to_string(),
+        }
+    }
+
+    fn art(kind: ArtifactKind, path: &str, url: &str, hash: &str) -> DesiredArtifact {
+        DesiredArtifact {
+            kind,
+            path: path.to_string(),
+            source_url: url.to_string(),
+            hash: hash.to_string(),
+        }
+    }
+
+    // An unchanged FLAC clip (Skip audio) that desires the given artifacts.
+    fn desired_arts(id: &str, arts: Vec<DesiredArtifact>) -> Desired {
+        Desired {
+            artifacts: arts,
+            ..desired(id, &format!("{id}.flac"), AudioFormat::Flac, "m", "art")
+        }
+    }
+
+    // A manifest entry for an unchanged FLAC clip carrying a cover.jpg sidecar.
+    fn entry_with_cover_jpg(id: &str, cover_path: &str, cover_hash: &str) -> ManifestEntry {
+        ManifestEntry {
+            cover_jpg: Some(cover(cover_path, cover_hash)),
+            ..entry(&format!("{id}.flac"), AudioFormat::Flac, "m", "art")
+        }
+    }
+
+    fn write_artifacts(plan: &Plan) -> Vec<&Action> {
+        plan.actions
+            .iter()
+            .filter(|a| matches!(a, Action::WriteArtifact { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn write_artifact_emitted_when_manifest_lacks_it() {
+        // The clip's audio is unchanged (Skip), but the manifest has no cover.jpg
+        // slot, so the desired sidecar is written.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "a/cover.jpg",
+                "https://art/a",
+                "h1",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 1);
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert_eq!(plan.skips(), 1);
+        assert_eq!(
+            write_artifacts(&plan)[0],
+            &Action::WriteArtifact {
+                kind: ArtifactKind::CoverJpg,
+                path: "a/cover.jpg".to_string(),
+                source_url: "https://art/a".to_string(),
+                hash: "h1".to_string(),
+                owner_id: "a".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn write_artifact_emitted_when_hash_differs() {
+        // The manifest already tracks a cover.jpg, but its stored hash differs
+        // from the desired one, so it is rewritten (and never delete-reconciled).
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "old"));
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "a/cover.jpg",
+                "https://art/a",
+                "new",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 1);
+        assert_eq!(plan.artifact_deletes(), 0);
+        if let Action::WriteArtifact { hash, .. } = write_artifacts(&plan)[0] {
+            assert_eq!(hash, "new");
+        } else {
+            panic!("expected a WriteArtifact");
+        }
+    }
+
+    #[test]
+    fn write_artifact_skipped_when_hash_matches() {
+        // Present with a matching hash: no write, no delete.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "a/cover.jpg",
+                "https://art/a",
+                "h1",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 0);
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert_eq!(
+            plan.actions,
+            vec![Action::Skip {
+                clip_id: "a".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn delete_artifact_emitted_for_removed_kind_when_can_delete() {
+        // The clip is kept but no longer desires a cover.jpg (kind removed), so
+        // the stale manifest sidecar is reconciled for deletion.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
+        let d = vec![desired_arts("a", vec![])];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 1);
+        assert_eq!(plan.artifact_writes(), 0);
+        // The audio is untouched.
+        assert_eq!(plan.deletes(), 0);
+        assert!(plan.actions.contains(&Action::DeleteArtifact {
+            kind: ArtifactKind::CoverJpg,
+            path: "a/cover.jpg".to_string(),
+            owner_id: "a".to_string(),
+        }));
+    }
+
+    #[test]
+    fn delete_artifact_never_on_incomplete_listing() {
+        // A not-fully-enumerated mirror forbids every delete, sidecars included:
+        // this is the B2 gate. Even a large manifest of stale sidecars is safe.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
+        manifest.insert("b", entry_with_cover_jpg("b", "b/cover.jpg", "h1"));
+        let d = vec![desired_arts("a", vec![]), desired_arts("b", vec![])];
+        let sources = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: false,
+        }];
+        let local: HashMap<String, LocalFile> = [
+            ("a".to_string(), present(100)),
+            ("b".to_string(), present(100)),
+        ]
+        .into_iter()
+        .collect();
+        let plan = reconcile(&manifest, &d, &local, &sources);
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert_eq!(plan.deletes(), 0);
+    }
+
+    #[test]
+    fn delete_artifact_never_when_entry_preserved() {
+        // A preserved clip's sidecars are preserved too, even fully enumerated.
+        let mut manifest = Manifest::new();
+        let preserved = ManifestEntry {
+            preserve: true,
+            ..entry_with_cover_jpg("a", "a/cover.jpg", "h1")
+        };
+        manifest.insert("a", preserved);
+        let d = vec![desired_arts("a", vec![])];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn delete_artifact_never_when_path_empty() {
+        // A sidecar with an empty path must never become a delete of the root.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "", "h1"));
+        let d = vec![desired_arts("a", vec![])];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn co_delete_absent_clip_deletes_audio_and_cover() {
+        // A clip absent from desired is deleted; its cover.jpg is co-deleted
+        // under the same gate.
+        let mut manifest = Manifest::new();
+        manifest.insert("gone", entry_with_cover_jpg("gone", "gone/cover.jpg", "h1"));
+        let plan = reconcile(&manifest, &[], &HashMap::new(), &mirror_ok());
+        assert_eq!(plan.deletes(), 1);
+        assert_eq!(plan.artifact_deletes(), 1);
+        assert!(plan.actions.contains(&Action::Delete {
+            path: "gone.flac".to_string(),
+            clip_id: "gone".to_string(),
+        }));
+        assert!(plan.actions.contains(&Action::DeleteArtifact {
+            kind: ArtifactKind::CoverJpg,
+            path: "gone/cover.jpg".to_string(),
+            owner_id: "gone".to_string(),
+        }));
+    }
+
+    #[test]
+    fn co_delete_absent_clip_suppressed_when_not_enumerated() {
+        // Neither audio nor sidecar is removed on an incomplete listing.
+        let mut manifest = Manifest::new();
+        manifest.insert("gone", entry_with_cover_jpg("gone", "gone/cover.jpg", "h1"));
+        let sources = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: false,
+        }];
+        let plan = reconcile(&manifest, &[], &HashMap::new(), &sources);
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn co_delete_trashed_desired_clip_removes_audio_and_cover() {
+        // A trashed clip present in desired: audio Delete plus cover co-delete.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
+        let mut d = desired_arts("a", vec![]);
+        d.trashed = true;
+        let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+        assert_eq!(plan.deletes(), 1);
+        assert_eq!(plan.artifact_deletes(), 1);
+    }
+
+    #[test]
+    fn co_delete_trashed_suppressed_when_not_enumerated() {
+        // The trashed co-delete obeys the same enumeration gate as the audio.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
+        let mut d = desired_arts("a", vec![]);
+        d.trashed = true;
+        let sources = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: false,
+        }];
+        let plan = reconcile(&manifest, &[d], &local_present("a"), &sources);
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert_eq!(plan.skips(), 1);
+    }
+
+    #[test]
+    fn co_delete_trashed_suppressed_when_preserved() {
+        // A preserved, trashed clip keeps both audio and sidecar.
+        let mut manifest = Manifest::new();
+        let preserved = ManifestEntry {
+            preserve: true,
+            ..entry_with_cover_jpg("a", "a/cover.jpg", "h1")
+        };
+        manifest.insert("a", preserved);
+        let mut d = desired_arts("a", vec![]);
+        d.trashed = true;
+        let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn suppress_downgrades_delete_artifact_colliding_with_write_artifact() {
+        // Clip "a" writes a cover to the very path clip "b"'s stale cover holds;
+        // deleting it would clobber the freshly written file, so it is dropped.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        manifest.insert("b", entry_with_cover_jpg("b", "shared/cover.jpg", "h1"));
+        // "a" writes a new CoverJpg to the shared path; "b" is absent (its cover
+        // would be co-deleted from the same path).
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "shared/cover.jpg",
+                "https://art/a",
+                "h2",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 1);
+        // The colliding DeleteArtifact is suppressed.
+        assert!(!plan.actions.iter().any(
+            |a| matches!(a, Action::DeleteArtifact { path, .. } if path == "shared/cover.jpg")
+        ));
+        // The audio for "b" is still deleted (different path), just not its cover.
+        assert!(plan.actions.contains(&Action::Delete {
+            path: "b.flac".to_string(),
+            clip_id: "b".to_string(),
+        }));
+    }
+
+    #[test]
+    fn suppress_downgrades_delete_artifact_colliding_with_download() {
+        // A fresh clip downloads audio to the path an absent clip's cover holds.
+        let mut manifest = Manifest::new();
+        manifest.insert("b", entry_with_cover_jpg("b", "shared/x", "h1"));
+        let d = vec![desired("a", "shared/x", AudioFormat::Flac, "m", "art")];
+        let plan = reconcile(&manifest, &d, &HashMap::new(), &mirror_ok());
+        assert_eq!(plan.downloads(), 1);
+        assert!(
+            !plan
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::DeleteArtifact { path, .. } if path == "shared/x"))
+        );
+    }
+
+    #[test]
+    fn adding_artifacts_leaves_the_audio_plan_unchanged() {
+        // SYNC-8/9/10/12 matrix invariance: the audio actions and plan.deletes()
+        // are identical with and without artifacts attached. One absent clip is
+        // deleted, one desired clip is kept (Skip), one trashed clip is deleted.
+        let build = |with_art: bool| {
+            let mut manifest = Manifest::new();
+            manifest.insert("keep", entry_with_cover_jpg("keep", "keep/cover.jpg", "h1"));
+            manifest.insert("gone", entry_with_cover_jpg("gone", "gone/cover.jpg", "h1"));
+            manifest.insert(
+                "trash",
+                entry_with_cover_jpg("trash", "trash/cover.jpg", "h1"),
+            );
+            let keep = if with_art {
+                desired_arts(
+                    "keep",
+                    vec![art(
+                        ArtifactKind::CoverJpg,
+                        "keep/cover.jpg",
+                        "https://art/keep",
+                        "h1",
+                    )],
+                )
+            } else {
+                desired_arts("keep", vec![])
+            };
+            let mut trash = desired_arts("trash", vec![]);
+            trash.trashed = true;
+            let local: HashMap<String, LocalFile> = ["keep", "gone", "trash"]
+                .iter()
+                .map(|id| (id.to_string(), present(100)))
+                .collect();
+            reconcile(&manifest, &[keep, trash], &local, &mirror_ok())
+        };
+
+        let with = build(true);
+        let without = build(false);
+
+        // The audio decisions are identical regardless of artifacts.
+        let audio = |plan: &Plan| -> Vec<Action> {
+            plan.actions
+                .iter()
+                .filter(|a| {
+                    !matches!(
+                        a,
+                        Action::WriteArtifact { .. } | Action::DeleteArtifact { .. }
+                    )
+                })
+                .cloned()
+                .collect()
+        };
+        assert_eq!(audio(&with), audio(&without));
+        assert_eq!(with.deletes(), without.deletes());
+        // gone + trash audio deletes, unaffected by the artifacts.
+        assert_eq!(with.deletes(), 2);
+        // The `with` run additionally reconciles sidecars: gone + trash covers
+        // co-deleted, and keep's cover matches so it is neither written nor
+        // deleted.
+        assert_eq!(with.artifact_deletes(), 2);
+        assert_eq!(with.artifact_writes(), 0);
+    }
+
+    // ── Phase 6 review fixes: protection, path-drift, kind guard ─────
+
+    #[test]
+    fn removed_kind_sidecar_kept_when_clip_is_protected_this_run() {
+        // The persisted entry is NOT preserve-marked, so only the clip's
+        // current-run protection can save its sidecar. A private clip and a
+        // copy-held clip each keep a removed-kind cover, even fully enumerated.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
+        assert!(!manifest.get("a").unwrap().preserve);
+
+        // Private this run.
+        let private = Desired {
+            private: true,
+            ..desired_arts("a", vec![])
+        };
+        let plan = reconcile(&manifest, &[private], &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 0);
+
+        // Copy-held this run (modes contains Copy).
+        let copy_held = Desired {
+            modes: vec![SourceMode::Copy],
+            ..desired_arts("a", vec![])
+        };
+        let plan = reconcile(&manifest, &[copy_held], &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn write_artifact_emitted_when_path_differs_even_if_hash_matches() {
+        // The audio moved (new album/name) so the sidecar belongs at a new path;
+        // the bytes are unchanged (same hash) but a rewrite at the new path is
+        // still required. Removing the old sidecar is deferred to P10.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "old/cover.jpg", "h1"));
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "new/cover.jpg",
+                "https://art/a",
+                "h1",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 1);
+        assert_eq!(plan.artifact_deletes(), 0);
+        if let Action::WriteArtifact { path, .. } = write_artifacts(&plan)[0] {
+            assert_eq!(path, "new/cover.jpg");
+        } else {
+            panic!("expected a WriteArtifact");
+        }
+    }
+
+    #[test]
+    fn per_clip_reconcile_ignores_album_and_library_kinds() {
+        // Album/library kinds must never be written per clip (they have no
+        // per-song manifest slot, so they would be rewritten every run). A
+        // CoverJpg alongside them is still handled.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let d = vec![desired_arts(
+            "a",
+            vec![
+                art(
+                    ArtifactKind::FolderJpg,
+                    "a/folder.jpg",
+                    "https://art/folder",
+                    "hf",
+                ),
+                art(
+                    ArtifactKind::Playlist,
+                    "a/list.m3u",
+                    "https://art/list",
+                    "hp",
+                ),
+                art(ArtifactKind::CoverJpg, "a/cover.jpg", "https://art/a", "h1"),
+            ],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 1);
+        let paths: Vec<&str> = plan
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::WriteArtifact { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths, vec!["a/cover.jpg"]);
+    }
+
+    #[test]
+    fn per_clip_reconcile_emits_nothing_for_album_only_artifacts() {
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::FolderWebp,
+                "a/folder.webp",
+                "https://art/folder",
+                "hf",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 0);
+        assert_eq!(plan.artifact_deletes(), 0);
     }
 }
 
@@ -1523,6 +2287,7 @@ mod proptests {
             modes,
             trashed,
             private,
+            artifacts: Vec::new(),
         }
     }
 

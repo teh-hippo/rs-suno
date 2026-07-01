@@ -39,9 +39,9 @@ use crate::ffmpeg::Ffmpeg;
 use crate::fs::Filesystem;
 use crate::http::{Http, HttpRequest};
 use crate::lineage::LineageContext;
-use crate::manifest::{Manifest, ManifestEntry};
+use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
-use crate::reconcile::{Action, Desired, Plan, SourceMode};
+use crate::reconcile::{Action, ArtifactKind, Desired, Plan, SourceMode, set_manifest_artifact};
 use crate::tag::{TrackMetadata, tag_flac, tag_mp3};
 
 /// First backoff step; doubles each retry, capped at [`BACKOFF_CAP`].
@@ -98,6 +98,8 @@ pub struct ExecOutcome {
     pub renamed: usize,
     pub deleted: usize,
     pub skipped: usize,
+    pub artifacts_written: usize,
+    pub artifacts_deleted: usize,
     /// Actions that failed and were skipped (auth, transient-exhausted, or
     /// permanent). The run continued past each one unless it was an auth abort.
     pub failures: Vec<Failure>,
@@ -119,6 +121,8 @@ impl ExecOutcome {
             Effect::Renamed => self.renamed += 1,
             Effect::Deleted => self.deleted += 1,
             Effect::Skipped => self.skipped += 1,
+            Effect::ArtifactWritten => self.artifacts_written += 1,
+            Effect::ArtifactDeleted => self.artifacts_deleted += 1,
         }
     }
 }
@@ -209,6 +213,8 @@ enum Effect {
     Renamed,
     Deleted,
     Skipped,
+    ArtifactWritten,
+    ArtifactDeleted,
 }
 
 /// How a failure should be handled (SYNC-17).
@@ -350,6 +356,21 @@ where
                 self.refresh_preserve(manifest, clip_id);
                 Ok(Effect::Skipped)
             }
+            Action::WriteArtifact {
+                kind,
+                path,
+                source_url,
+                hash,
+                owner_id,
+            } => {
+                self.write_artifact(manifest, *kind, path, source_url, hash, owner_id)
+                    .await
+            }
+            Action::DeleteArtifact {
+                kind,
+                path,
+                owner_id,
+            } => self.delete_artifact(manifest, *kind, path, owner_id),
         }
     }
 
@@ -472,6 +493,76 @@ where
             .map_err(|err| permanent_fail(clip_id, format!("delete failed: {err}")))?;
         manifest.remove(clip_id);
         Ok(Effect::Deleted)
+    }
+
+    /// Fetch an artifact's bytes, write them atomically, then record the sidecar
+    /// on the owning manifest entry.
+    ///
+    /// The fetch and write share the audio path's resilience: `fetch_bytes`
+    /// retries transient failures and verifies `Content-Length`, and
+    /// `write_verify` confirms the on-disk size. A failure is attributed to the
+    /// owning clip and returned as a per-clip [`Fail`], so a bad sidecar never
+    /// aborts the whole run (only an auth class does, matching audio).
+    ///
+    /// A sidecar is only ever written for a clip whose audio is present: a
+    /// successful `Download`/`Reformat` creates the manifest entry earlier in
+    /// this run, and a prior-run clip already has one. So an absent owning entry
+    /// means the audio failed or never existed this run; we skip (no fetch, no
+    /// write) rather than strand an untracked sidecar with no owning audio.
+    async fn write_artifact(
+        &self,
+        manifest: &mut Manifest,
+        kind: ArtifactKind,
+        path: &str,
+        source_url: &str,
+        hash: &str,
+        owner_id: &str,
+    ) -> Result<Effect, Fail> {
+        if manifest.get(owner_id).is_none() {
+            return Ok(Effect::Skipped);
+        }
+        let bytes = self
+            .fetch_bytes(source_url)
+            .await
+            .map_err(|err| err.attribute(owner_id))?;
+        self.write_verify(owner_id, path, &bytes)?;
+        if let Some(entry) = manifest.entries.get_mut(owner_id) {
+            set_manifest_artifact(
+                entry,
+                kind,
+                Some(ArtifactState {
+                    path: path.to_owned(),
+                    hash: hash.to_owned(),
+                }),
+            );
+        }
+        Ok(Effect::ArtifactWritten)
+    }
+
+    /// Remove a sidecar file and clear its slot on the owning manifest entry.
+    ///
+    /// `remove` is idempotent, so an already-absent sidecar is not a failure.
+    /// When the owning entry is already gone (its audio was deleted earlier this
+    /// run, co-deleting the sidecar), there is no slot to clear and that is fine.
+    ///
+    /// The audio `Delete` is applied before its sidecar `DeleteArtifact`. If the
+    /// sidecar removal fails after the audio is already gone, the sidecar lingers
+    /// untracked; transactional recovery of that ordering is deferred to P10
+    /// hardening.
+    fn delete_artifact(
+        &self,
+        manifest: &mut Manifest,
+        kind: ArtifactKind,
+        path: &str,
+        owner_id: &str,
+    ) -> Result<Effect, Fail> {
+        self.fs
+            .remove(path)
+            .map_err(|err| permanent_fail(owner_id, format!("artifact delete failed: {err}")))?;
+        if let Some(entry) = manifest.entries.get_mut(owner_id) {
+            set_manifest_artifact(entry, kind, None);
+        }
+        Ok(Effect::ArtifactDeleted)
     }
 
     /// Download (and transcode/tag) the audio for `clip` in `format`.
@@ -814,6 +905,7 @@ mod tests {
             modes: vec![SourceMode::Mirror],
             trashed: false,
             private: false,
+            artifacts: Vec::new(),
         }
     }
 
@@ -1846,5 +1938,285 @@ mod tests {
         assert_eq!(http.count("/convert_wav/"), 0);
         // One transient backoff (1s base), not the 5s poll interval.
         assert_eq!(clock.sleeps(), vec![Duration::from_secs(1)]);
+    }
+
+    // ── Phase 6: artifact actions ───────────────────────────────────
+
+    #[test]
+    fn write_artifact_fetches_writes_and_updates_manifest() {
+        // The owning entry exists (its audio was kept this run); WriteArtifact
+        // fetches the source, writes the sidecar, and records it on the entry.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::CoverJpg,
+                path: "a/cover.jpg".to_owned(),
+                source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                hash: "h1".to_owned(),
+                owner_id: "a".to_owned(),
+            }],
+        };
+        let http = ScriptedHttp::new().route("a/large.jpg", Reply::ok(b"jpg-bytes".to_vec()));
+        let fs = MemFs::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(fs.read_file("a/cover.jpg").unwrap(), b"jpg-bytes");
+        assert_eq!(
+            manifest.get("a").unwrap().cover_jpg,
+            Some(ArtifactState {
+                path: "a/cover.jpg".to_owned(),
+                hash: "h1".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_artifact_removes_file_and_clears_slot() {
+        let fs = MemFs::new().with_file("a/cover.jpg", b"jpg".to_vec());
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.mp3", AudioFormat::Mp3);
+        e.cover_jpg = Some(ArtifactState {
+            path: "a/cover.jpg".to_owned(),
+            hash: "h1".to_owned(),
+        });
+        manifest.insert("a", e);
+        let plan = Plan {
+            actions: vec![Action::DeleteArtifact {
+                kind: ArtifactKind::CoverJpg,
+                path: "a/cover.jpg".to_owned(),
+                owner_id: "a".to_owned(),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_deleted, 1);
+        assert!(!fs.exists("a/cover.jpg"));
+        assert_eq!(manifest.get("a").unwrap().cover_jpg, None);
+    }
+
+    #[test]
+    fn delete_artifact_tolerates_already_absent_file() {
+        // `remove` is idempotent, so co-deleting a sidecar that is already gone
+        // is not a failure.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.mp3", AudioFormat::Mp3);
+        e.cover_jpg = Some(ArtifactState {
+            path: "a/cover.jpg".to_owned(),
+            hash: "h1".to_owned(),
+        });
+        manifest.insert("a", e);
+        let plan = Plan {
+            actions: vec![Action::DeleteArtifact {
+                kind: ArtifactKind::CoverJpg,
+                path: "a/cover.jpg".to_owned(),
+                owner_id: "a".to_owned(),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &MemFs::new(),
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_deleted, 1);
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(manifest.get("a").unwrap().cover_jpg, None);
+    }
+
+    #[test]
+    fn write_artifact_http_failure_is_a_per_clip_failure_not_a_run_abort() {
+        // A permanent 404 on one sidecar fetch is recorded as a per-clip failure;
+        // the run continues and the following WriteArtifact still succeeds.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
+        manifest.insert("b", entry("b.mp3", AudioFormat::Mp3));
+        let plan = Plan {
+            actions: vec![
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "a/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                    hash: "h1".to_owned(),
+                    owner_id: "a".to_owned(),
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "b/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/b/large.jpg".to_owned(),
+                    hash: "h2".to_owned(),
+                    owner_id: "b".to_owned(),
+                },
+            ],
+        };
+        let http = ScriptedHttp::new()
+            .route("a/large.jpg", Reply::status(404))
+            .route("b/large.jpg", Reply::ok(b"jpg-b".to_vec()));
+        let fs = MemFs::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(outcome.failed(), 1);
+        assert_eq!(outcome.failures[0].clip_id, "a");
+        assert_eq!(outcome.artifacts_written, 1);
+        // The failed sidecar left no file and no manifest record.
+        assert!(!fs.exists("a/cover.jpg"));
+        assert_eq!(manifest.get("a").unwrap().cover_jpg, None);
+        // The following sidecar was written and recorded.
+        assert_eq!(fs.read_file("b/cover.jpg").unwrap(), b"jpg-b");
+        assert!(manifest.get("b").unwrap().cover_jpg.is_some());
+    }
+
+    #[test]
+    fn co_delete_executes_audio_delete_then_artifact_delete() {
+        // The plan orders the audio Delete before its sidecar DeleteArtifact.
+        // The audio delete removes the manifest entry; the sidecar delete then
+        // removes the file and tolerates the now-absent entry.
+        let fs = MemFs::new()
+            .with_file("gone.mp3", b"DATA".to_vec())
+            .with_file("gone/cover.jpg", b"jpg".to_vec());
+        let mut manifest = Manifest::new();
+        let mut e = entry("gone.mp3", AudioFormat::Mp3);
+        e.cover_jpg = Some(ArtifactState {
+            path: "gone/cover.jpg".to_owned(),
+            hash: "h1".to_owned(),
+        });
+        manifest.insert("gone", e);
+        let plan = Plan {
+            actions: vec![
+                Action::Delete {
+                    path: "gone.mp3".to_owned(),
+                    clip_id: "gone".to_owned(),
+                },
+                Action::DeleteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "gone/cover.jpg".to_owned(),
+                    owner_id: "gone".to_owned(),
+                },
+            ],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.deleted, 1);
+        assert_eq!(outcome.artifacts_deleted, 1);
+        assert_eq!(outcome.failed(), 0);
+        assert!(!fs.exists("gone.mp3"));
+        assert!(!fs.exists("gone/cover.jpg"));
+        assert!(manifest.get("gone").is_none());
+    }
+
+    #[test]
+    fn write_artifact_is_skipped_when_the_owner_audio_is_absent() {
+        // A clip whose Download fails leaves no manifest entry, so its following
+        // WriteArtifact must not strand an untracked sidecar: it is skipped with
+        // no fetch and no write. A following healthy clip still succeeds.
+        let ca = clip("a");
+        let plan = Plan {
+            actions: vec![
+                Action::Download {
+                    clip: ca.clone(),
+                    lineage: LineageContext::own_root(&ca),
+                    path: "a.mp3".to_owned(),
+                    format: AudioFormat::Mp3,
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "a/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                    hash: "h1".to_owned(),
+                    owner_id: "a".to_owned(),
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "b/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/b/large.jpg".to_owned(),
+                    hash: "h2".to_owned(),
+                    owner_id: "b".to_owned(),
+                },
+            ],
+        };
+        // The Download's audio 404s (permanent), so no entry for "a" is created.
+        let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::status(404))
+            .route("a/large.jpg", Reply::ok(b"jpg-a".to_vec()))
+            .route("b/large.jpg", Reply::ok(b"jpg-b".to_vec()));
+        let fs = MemFs::new();
+        let mut manifest = Manifest::new();
+        // "b" already has audio (a prior-run clip), so its sidecar write proceeds.
+        manifest.insert("b", entry("b.mp3", AudioFormat::Mp3));
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.status, RunStatus::Completed);
+        // The audio download is the only failure; the orphan artifact is skipped.
+        assert_eq!(outcome.failed(), 1);
+        assert_eq!(outcome.failures[0].clip_id, "a");
+        assert_eq!(outcome.skipped, 1);
+        // The orphan sidecar was neither fetched nor written, and left no record.
+        assert_eq!(http.count("a/large.jpg"), 0);
+        assert!(!fs.exists("a/cover.jpg"));
+        assert!(manifest.get("a").is_none());
+        // The healthy clip's sidecar still succeeded.
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(fs.read_file("b/cover.jpg").unwrap(), b"jpg-b");
+        assert!(manifest.get("b").unwrap().cover_jpg.is_some());
     }
 }

@@ -103,6 +103,11 @@ pub fn build_desired(
                 modes: vec![mode],
                 trashed: false,
                 private: false,
+                // P7 populates the per-clip cover sidecars here. It must treat
+                // an empty art URL as UNKNOWN => KEEP (do NOT omit CoverJpg when
+                // the URL is empty), so a transient empty URL never strands or
+                // deletes an existing cover. Empty for now: no artifact actions.
+                artifacts: Vec::new(),
             }
         })
         .collect()
@@ -229,7 +234,9 @@ pub fn run_exit_code(outcome: &ExecOutcome) -> ExitCode {
         + outcome.retagged
         + outcome.renamed
         + outcome.deleted
-        + outcome.skipped;
+        + outcome.skipped
+        + outcome.artifacts_written
+        + outcome.artifacts_deleted;
     if progressed == 0 {
         ExitCode::Transient
     } else {
@@ -531,6 +538,112 @@ mod tests {
         // Below the floor only the empty-listing rule applies, not the fraction.
         assert!(!mass_delete_abort(2, 4, 2, 1, false, false));
         assert!(mass_delete_abort(0, 4, 4, 1, false, false));
+    }
+
+    #[test]
+    fn mass_delete_abort_counts_audio_and_artifact_deletes_together() {
+        use suno_core::{Action, ArtifactKind, Plan};
+        // HARDENING B2: the cap counts every destructive action. Three audio
+        // deletes plus three sidecar deletes is 6 of a 10-entry manifest, over
+        // the half threshold; the audio deletes alone (3 of 10) are under it.
+        let del = |id: &str| Action::Delete {
+            path: format!("{id}.flac"),
+            clip_id: id.to_owned(),
+        };
+        let del_art = |id: &str| Action::DeleteArtifact {
+            kind: ArtifactKind::CoverJpg,
+            path: format!("{id}/cover.jpg"),
+            owner_id: id.to_owned(),
+        };
+        let plan = Plan {
+            actions: vec![
+                del("a"),
+                del("b"),
+                del("c"),
+                del_art("a"),
+                del_art("b"),
+                del_art("c"),
+            ],
+        };
+        // run.rs feeds exactly this sum into the cap.
+        let delete_count = plan.deletes() + plan.artifact_deletes();
+        assert_eq!(delete_count, 6);
+        assert!(mass_delete_abort(7, 10, delete_count, 1, false, false));
+        // The audio deletes on their own would not trip it.
+        assert_eq!(plan.deletes(), 3);
+        assert!(!mass_delete_abort(7, 10, plan.deletes(), 1, false, false));
+    }
+
+    #[test]
+    fn mass_delete_abort_fires_on_sidecar_only_mass_delete() {
+        use suno_core::{Action, ArtifactKind, Plan};
+        // A run with no audio deletes but a mass of removed-kind sidecar deletes
+        // (5 of 10) still aborts once run.rs folds them into the count.
+        let plan = Plan {
+            actions: (0..5)
+                .map(|i| Action::DeleteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: format!("clip{i}/cover.jpg"),
+                    owner_id: format!("clip{i}"),
+                })
+                .collect(),
+        };
+        let delete_count = plan.deletes() + plan.artifact_deletes();
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(delete_count, 5);
+        assert!(mass_delete_abort(9, 10, delete_count, 1, false, false));
+    }
+
+    #[test]
+    fn artifact_deletes_on_incomplete_listing_never_reach_the_cap() {
+        use suno_core::{
+            Action, ArtifactState, LocalFile, Manifest, ManifestEntry, SourceMode, SourceStatus,
+            reconcile,
+        };
+        // End-to-end B2: a manifest full of sidecars whose clips are all absent
+        // from an INCOMPLETE listing must yield zero deletes of either kind, so
+        // the count run.rs hands the cap is 0 and no wipe is possible.
+        let mut manifest = Manifest::new();
+        for i in 0..10 {
+            let id = format!("c{i}");
+            manifest.insert(
+                &id,
+                ManifestEntry {
+                    path: format!("{id}.flac"),
+                    format: AudioFormat::Flac,
+                    size: 100,
+                    cover_jpg: Some(ArtifactState {
+                        path: format!("{id}/cover.jpg"),
+                        hash: "h".to_owned(),
+                    }),
+                    ..Default::default()
+                },
+            );
+        }
+        let sources = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: false,
+        }];
+        let local: HashMap<String, LocalFile> = HashMap::new();
+        let plan = reconcile(&manifest, &[], &local, &sources);
+        // Nothing is deletable on an unreliable listing, sidecars included.
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert!(
+            !plan
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::Delete { .. } | Action::DeleteArtifact { .. }))
+        );
+        let delete_count = plan.deletes() + plan.artifact_deletes();
+        assert!(!mass_delete_abort(
+            0,
+            manifest.len(),
+            delete_count,
+            1,
+            false,
+            false
+        ));
     }
 
     #[test]

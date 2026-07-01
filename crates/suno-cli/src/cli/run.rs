@@ -549,11 +549,14 @@ async fn run_one(
     }
 
     let is_sync = verb == Verb::Sync;
+    // The mass-delete cap counts every destructive action, audio and sidecar
+    // alike (HARDENING B2), so a run that would mass-delete artifacts aborts too.
+    let delete_count = plan.deletes() + plan.artifact_deletes();
     if is_sync
         && mass_delete_abort(
             desired.len(),
             manifest.len(),
-            plan.deletes(),
+            delete_count,
             settings.min_newest,
             args.min_newest == Some(0),
             global.yes,
@@ -562,7 +565,7 @@ async fn run_one(
         eprintln!(
             "error: sync aborted -- deletion safety rule triggered\n\nThe listing yielded {} clip(s), which would delete {} of {} local file(s).\nThis is almost certainly a listing error. No files were deleted.\n\nIf you intended to delete everything, pass --min-newest 0 --yes to confirm.",
             desired.len(),
-            plan.deletes(),
+            delete_count,
             manifest.len()
         );
         return Ok(ExitCode::Safety);
@@ -570,7 +573,7 @@ async fn run_one(
 
     match confirm_decision(
         is_sync,
-        plan.deletes(),
+        delete_count,
         global.yes,
         std::io::stdin().is_terminal(),
     ) {
@@ -584,7 +587,7 @@ async fn run_one(
         Confirm::RefuseNonInteractive => {
             eprintln!(
                 "error: sync would delete {} file(s) but stdin is not a TTY and --yes was not passed\n  Pass --yes to confirm, or use 'copy' to skip deletions.",
-                plan.deletes()
+                delete_count
             );
             return Ok(ExitCode::Safety);
         }
@@ -741,19 +744,33 @@ fn stat_manifest(dest: &Path, manifest: &suno_core::Manifest) -> HashMap<String,
 
 /// True when the plan would change disk (anything but skips).
 fn plan_has_changes(plan: &suno_core::Plan) -> bool {
-    plan.downloads() + plan.reformats() + plan.retags() + plan.renames() + plan.deletes() > 0
+    plan.downloads()
+        + plan.reformats()
+        + plan.retags()
+        + plan.renames()
+        + plan.deletes()
+        + plan.artifact_writes()
+        + plan.artifact_deletes()
+        > 0
+}
+
+/// Every path this plan would remove: audio deletes and sidecar (artifact)
+/// deletes alike, so the confirmation listing reflects the full destructive
+/// footprint, not just the audio files.
+fn deletion_paths(plan: &suno_core::Plan) -> Vec<String> {
+    plan.actions
+        .iter()
+        .filter_map(|action| match action {
+            suno_core::Action::Delete { path, .. }
+            | suno_core::Action::DeleteArtifact { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Print the deletion list and read a `[y/N]` answer from stdin.
 fn prompt_delete(plan: &suno_core::Plan, verbosity: i8) -> Result<bool> {
-    let paths: Vec<String> = plan
-        .actions
-        .iter()
-        .filter_map(|action| match action {
-            suno_core::Action::Delete { path, .. } => Some(path.clone()),
-            _ => None,
-        })
-        .collect();
+    let paths = deletion_paths(plan);
     let show = if verbosity >= 1 {
         paths.len()
     } else {
@@ -1031,5 +1048,66 @@ mod tests {
         assert_eq!(Verb::Check.mode(), SourceMode::Mirror);
         assert_eq!(Verb::Copy.mode(), SourceMode::Copy);
         assert_eq!(Verb::Copy.summary_label(), "Copy");
+    }
+
+    #[test]
+    fn artifact_only_deletes_drive_the_confirmation_gate() {
+        use suno_core::{Action, ArtifactKind, Plan};
+        // A plan with zero audio deletes but several sidecar deletes must still
+        // gate: run.rs feeds plan.deletes() + plan.artifact_deletes() into
+        // confirm_decision, so it prompts on a TTY and refuses without one.
+        let plan = Plan {
+            actions: (0..3)
+                .map(|i| Action::DeleteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: format!("c{i}/cover.jpg"),
+                    owner_id: format!("c{i}"),
+                })
+                .collect(),
+        };
+        let delete_count = plan.deletes() + plan.artifact_deletes();
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(delete_count, 3);
+
+        assert_eq!(
+            confirm_decision(true, delete_count, false, true),
+            Confirm::Prompt
+        );
+        assert_eq!(
+            confirm_decision(true, delete_count, false, false),
+            Confirm::RefuseNonInteractive
+        );
+        assert_eq!(
+            confirm_decision(true, delete_count, true, false),
+            Confirm::Proceed
+        );
+
+        // The confirmation listing includes the sidecar paths.
+        assert_eq!(
+            deletion_paths(&plan),
+            vec!["c0/cover.jpg", "c1/cover.jpg", "c2/cover.jpg"]
+        );
+    }
+
+    #[test]
+    fn deletion_paths_lists_both_audio_and_sidecar_removals() {
+        use suno_core::{Action, ArtifactKind, Plan};
+        let plan = Plan {
+            actions: vec![
+                Action::Delete {
+                    path: "a.flac".to_owned(),
+                    clip_id: "a".to_owned(),
+                },
+                Action::DeleteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "a/cover.jpg".to_owned(),
+                    owner_id: "a".to_owned(),
+                },
+                Action::Skip {
+                    clip_id: "z".to_owned(),
+                },
+            ],
+        };
+        assert_eq!(deletion_paths(&plan), vec!["a.flac", "a/cover.jpg"]);
     }
 }

@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use serde::Serialize;
-use suno_core::{Action, Clip, ExecOutcome, Plan};
+use suno_core::{Action, ArtifactKind, Clip, ExecOutcome, Plan};
 
 /// Truncate `text` to `max` characters, appending an ellipsis when shortened.
 pub fn truncate(text: &str, max: usize) -> String {
@@ -185,6 +185,42 @@ fn action_line(action: &Action, failed_ids: &HashSet<&str>) -> String {
         Action::Skip { clip_id } => {
             format!("  skip      {}  already up to date", short_id(clip_id))
         }
+        Action::WriteArtifact {
+            kind,
+            path,
+            owner_id,
+            ..
+        } => mark(
+            owner_id,
+            format!(
+                "artifact  {}  {}  -> {path}",
+                short_id(owner_id),
+                artifact_label(*kind)
+            ),
+        ),
+        Action::DeleteArtifact {
+            kind,
+            path,
+            owner_id,
+        } => mark(
+            owner_id,
+            format!(
+                "artifact  {}  {}  removed {path}",
+                short_id(owner_id),
+                artifact_label(*kind)
+            ),
+        ),
+    }
+}
+
+/// A short, stable label for an artifact kind, for progress and dry-run lines.
+fn artifact_label(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::CoverJpg => "cover.jpg",
+        ArtifactKind::CoverWebp => "cover.webp",
+        ArtifactKind::FolderJpg => "folder.jpg",
+        ArtifactKind::FolderWebp => "folder.webp",
+        ArtifactKind::Playlist => "playlist",
     }
 }
 

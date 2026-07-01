@@ -166,6 +166,7 @@ pub(super) fn desired_of(spec: &ClipSpec) -> Desired {
         private: spec.private,
         lineage,
         clip,
+        artifacts: Vec::new(),
     }
 }
 

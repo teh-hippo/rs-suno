@@ -167,6 +167,11 @@ pub fn append_audit(
             Action::Delete { path, clip_id } if !failed.contains(clip_id.as_str()) => {
                 buf.push_str(&format!("{now}\tDELETE\t{clip_id}\t{path}\t\n"));
             }
+            Action::DeleteArtifact { path, owner_id, .. }
+                if !failed.contains(owner_id.as_str()) =>
+            {
+                buf.push_str(&format!("{now}\tDELETE\t{owner_id}\t{path}\t\n"));
+            }
             Action::Rename { from, to } => {
                 let owner = rename_owner
                     .get(to.as_str())

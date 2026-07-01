@@ -55,5 +55,8 @@ pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,
     render_clip_names,
 };
-pub use reconcile::{Action, Desired, LocalFile, Plan, SourceMode, SourceStatus, reconcile};
+pub use reconcile::{
+    Action, ArtifactKind, Desired, DesiredArtifact, LocalFile, Plan, SourceMode, SourceStatus,
+    reconcile,
+};
 pub use tag::{TrackMetadata, tag_flac, tag_mp3};
