@@ -35,6 +35,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use crate::config::AudioFormat;
+use crate::lineage::LineageContext;
 use crate::manifest::{Manifest, ManifestEntry};
 use crate::model::Clip;
 
@@ -58,6 +59,9 @@ pub enum SourceMode {
 pub struct Desired {
     /// The clip itself, carried so actions can be executed without a re-fetch.
     pub clip: Clip,
+    /// The clip's resolved lineage, carried so the executor tags with the same
+    /// root/parent/album that drove naming and the change hash.
+    pub lineage: LineageContext,
     /// Resolved relative target path for the file.
     pub path: String,
     /// Resolved target format.
@@ -98,6 +102,7 @@ pub enum Action {
     /// Download the clip to `path` in `format` (new, missing, or zero length).
     Download {
         clip: Clip,
+        lineage: LineageContext,
         path: String,
         format: AudioFormat,
     },
@@ -114,7 +119,11 @@ pub enum Action {
         to: AudioFormat,
     },
     /// Re-tag the existing file at `path` to match current metadata or art.
-    Retag { clip: Clip, path: String },
+    Retag {
+        clip: Clip,
+        lineage: LineageContext,
+        path: String,
+    },
     /// Move the file from one relative path to another.
     Rename { from: String, to: String },
     /// Delete the local file for a clip that has left every mirror source.
@@ -386,6 +395,7 @@ fn plan_desired(
         // Not in the manifest: a fresh download.
         out.push(Action::Download {
             clip: d.clip.clone(),
+            lineage: d.lineage.clone(),
             path: d.path.clone(),
             format: d.format,
         });
@@ -398,6 +408,7 @@ fn plan_desired(
     if missing {
         out.push(Action::Download {
             clip: d.clip.clone(),
+            lineage: d.lineage.clone(),
             path: d.path.clone(),
             format: d.format,
         });
@@ -426,6 +437,7 @@ fn plan_desired(
         if meta_or_art_changed(d, entry) {
             out.push(Action::Retag {
                 clip: d.clip.clone(),
+                lineage: d.lineage.clone(),
                 path: d.path.clone(),
             });
         }
@@ -435,6 +447,7 @@ fn plan_desired(
     if meta_or_art_changed(d, entry) {
         out.push(Action::Retag {
             clip: d.clip.clone(),
+            lineage: d.lineage.clone(),
             path: entry.path.clone(),
         });
         return;
@@ -462,6 +475,10 @@ mod tests {
         }
     }
 
+    fn lineage(id: &str) -> LineageContext {
+        LineageContext::own_root(&clip(id))
+    }
+
     fn entry(path: &str, format: AudioFormat, meta: &str, art: &str) -> ManifestEntry {
         ManifestEntry {
             path: path.to_string(),
@@ -483,6 +500,7 @@ mod tests {
     fn desired(id: &str, path: &str, format: AudioFormat, meta: &str, art: &str) -> Desired {
         Desired {
             clip: clip(id),
+            lineage: lineage(id),
             path: path.to_string(),
             format,
             meta_hash: meta.to_string(),
@@ -519,6 +537,7 @@ mod tests {
             plan.actions,
             vec![Action::Download {
                 clip: clip("a"),
+                lineage: lineage("a"),
                 path: "a.flac".to_string(),
                 format: AudioFormat::Flac,
             }]
@@ -549,6 +568,7 @@ mod tests {
             plan.actions,
             vec![Action::Retag {
                 clip: clip("a"),
+                lineage: lineage("a"),
                 path: "a.flac".to_string(),
             }]
         );
@@ -564,6 +584,7 @@ mod tests {
             plan.actions,
             vec![Action::Retag {
                 clip: clip("a"),
+                lineage: lineage("a"),
                 path: "a.flac".to_string(),
             }]
         );
@@ -599,6 +620,7 @@ mod tests {
                 },
                 Action::Retag {
                     clip: clip("a"),
+                    lineage: lineage("a"),
                     path: "new/a.flac".to_string(),
                 },
             ]
@@ -1484,12 +1506,14 @@ mod proptests {
 
     fn build_desired(id: String, fields: DesiredFields) -> Desired {
         let (path, format, meta_hash, art_hash, modes, trashed, private) = fields;
+        let clip = Clip {
+            id,
+            title: "t".to_string(),
+            ..Default::default()
+        };
         Desired {
-            clip: Clip {
-                id,
-                title: "t".to_string(),
-                ..Default::default()
-            },
+            lineage: LineageContext::own_root(&clip),
+            clip,
             path,
             format,
             meta_hash,

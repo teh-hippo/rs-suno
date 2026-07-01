@@ -147,6 +147,82 @@ pub struct Resolution {
     pub gap_filled: Vec<Clip>,
 }
 
+/// The resolved lineage of a single clip, threaded into naming, tagging, and
+/// change detection.
+///
+/// This is the bridge between the pure resolver ([`Resolution`]) and the parts
+/// of the engine that turn a clip into files: it carries exactly the resolved
+/// values that get embedded in a path or a tag (the root the clip folders
+/// under, the immediate parent and how it derives from it), so those consumers
+/// never re-read the now-defunct `root_ancestor_id`/`album_title` feed fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineageContext {
+    /// The resolved root ancestor id (the clip's own id when it is a root).
+    pub root_id: String,
+    /// The root ancestor's title (empty when the root is outside the index).
+    pub root_title: String,
+    /// The immediate parent id ([`immediate_parent`]); empty for a root.
+    pub parent_id: String,
+    /// How the clip derives from its parent; `None` for a root.
+    pub edge_type: Option<EdgeType>,
+    /// How root resolution terminated.
+    pub status: ResolveStatus,
+}
+
+impl LineageContext {
+    /// Build the context for `clip` from a whole-library [`Resolution`].
+    ///
+    /// Root id/title/status come from `resolution.roots[clip.id]`; when the clip
+    /// is absent (it was not part of the resolved set) it is treated as its own
+    /// resolved root. The parent id and edge come from [`immediate_parent`],
+    /// which is empty/`None` for a root.
+    pub fn for_clip(clip: &Clip, resolution: &Resolution) -> LineageContext {
+        let (root_id, root_title, status) = match resolution.roots.get(&clip.id) {
+            Some(info) => (info.root_id.clone(), info.root_title.clone(), info.status),
+            None => (clip.id.clone(), clip.title.clone(), ResolveStatus::Resolved),
+        };
+        let (parent_id, edge_type) = match immediate_parent(clip) {
+            Some((id, edge)) => (id, Some(edge)),
+            None => (String::new(), None),
+        };
+        LineageContext {
+            root_id,
+            root_title,
+            parent_id,
+            edge_type,
+            status,
+        }
+    }
+
+    /// A self-rooted context for `clip`: it is treated as its own resolved root
+    /// with no parent. Used as a defensive fallback where a resolved context is
+    /// unavailable (a clip absent from the current desired set).
+    pub fn own_root(clip: &Clip) -> LineageContext {
+        LineageContext {
+            root_id: clip.id.clone(),
+            root_title: clip.title.clone(),
+            parent_id: String::new(),
+            edge_type: None,
+            status: ResolveStatus::Resolved,
+        }
+    }
+
+    /// The album the clip folders under: the root ancestor's title when it is a
+    /// real, different root, otherwise `own_title`.
+    ///
+    /// A root (or an unresolved clip whose root title is empty, or a clip whose
+    /// root shares its title) folders under its own title; only a resolved,
+    /// differently-titled ancestor pulls the clip into the ancestor's album.
+    pub fn album(&self, own_title: &str) -> String {
+        let root_title = self.root_title.trim();
+        if !root_title.is_empty() && self.root_title != own_title {
+            self.root_title.clone()
+        } else {
+            own_title.to_owned()
+        }
+    }
+}
+
 /// Classify a clip's relationship to its parent, purely from its structure.
 ///
 /// Inspects only `task`, `type`, and the pointer fields; never `is_remix`.
@@ -1387,5 +1463,108 @@ mod tests {
         let info = &roots["child"];
         assert_eq!(info.status, ResolveStatus::External);
         assert_eq!(info.root_id, "outside");
+    }
+
+    fn resolution_with(roots: Vec<(&str, RootInfo)>) -> Resolution {
+        Resolution {
+            roots: roots
+                .into_iter()
+                .map(|(id, info)| (id.to_owned(), info))
+                .collect(),
+            gap_filled: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn context_for_a_root_uses_its_own_id_and_title() {
+        let root = Clip {
+            id: "root-1".into(),
+            title: "Original".into(),
+            ..Default::default()
+        };
+        let resolution = resolution_with(vec![(
+            "root-1",
+            RootInfo {
+                root_id: "root-1".into(),
+                root_title: "Original".into(),
+                status: ResolveStatus::Resolved,
+            },
+        )]);
+
+        let ctx = LineageContext::for_clip(&root, &resolution);
+        assert_eq!(ctx.root_id, "root-1");
+        assert_eq!(ctx.root_title, "Original");
+        assert_eq!(ctx.parent_id, "");
+        assert_eq!(ctx.edge_type, None);
+        // A root folders under its own title.
+        assert_eq!(ctx.album("Original"), "Original");
+    }
+
+    #[test]
+    fn context_for_a_remix_carries_root_and_parent() {
+        let child = Clip {
+            id: "child-1".into(),
+            title: "Remix".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "root-1".into(),
+            edited_clip_id: "root-1".into(),
+            ..Default::default()
+        };
+        let resolution = resolution_with(vec![(
+            "child-1",
+            RootInfo {
+                root_id: "root-1".into(),
+                root_title: "Original".into(),
+                status: ResolveStatus::Resolved,
+            },
+        )]);
+
+        let ctx = LineageContext::for_clip(&child, &resolution);
+        assert_eq!(ctx.root_id, "root-1");
+        assert_eq!(ctx.root_title, "Original");
+        assert_eq!(ctx.parent_id, "root-1");
+        assert_eq!(ctx.edge_type, Some(EdgeType::Cover));
+        // A remix folders under the root's album title, not its own.
+        assert_eq!(ctx.album("Remix"), "Original");
+    }
+
+    #[test]
+    fn context_absent_from_resolution_is_its_own_root() {
+        let clip = Clip {
+            id: "lonely".into(),
+            title: "Solo".into(),
+            ..Default::default()
+        };
+        let ctx = LineageContext::for_clip(&clip, &resolution_with(vec![]));
+        assert_eq!(ctx.root_id, "lonely");
+        assert_eq!(ctx.root_title, "Solo");
+        assert_eq!(ctx.status, ResolveStatus::Resolved);
+        assert_eq!(ctx.album("Solo"), "Solo");
+    }
+
+    #[test]
+    fn album_falls_back_to_own_title_when_root_title_is_empty() {
+        let ctx = LineageContext {
+            root_id: "outside".into(),
+            root_title: String::new(),
+            parent_id: "outside".into(),
+            edge_type: Some(EdgeType::Cover),
+            status: ResolveStatus::External,
+        };
+        assert_eq!(ctx.album("My Title"), "My Title");
+    }
+
+    #[test]
+    fn own_root_has_no_parent() {
+        let clip = Clip {
+            id: "solo".into(),
+            title: "Solo".into(),
+            ..Default::default()
+        };
+        let ctx = LineageContext::own_root(&clip);
+        assert_eq!(ctx.root_id, "solo");
+        assert_eq!(ctx.parent_id, "");
+        assert_eq!(ctx.edge_type, None);
     }
 }

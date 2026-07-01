@@ -245,7 +245,7 @@ pub fn delete_prompt(paths: &[String], show: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::Value;
-    use suno_core::AudioFormat;
+    use suno_core::{AudioFormat, LineageContext};
 
     fn rich_clip() -> Clip {
         Clip {
@@ -350,6 +350,7 @@ mod tests {
                     clip: rich_clip(),
                     path: "a.flac".to_owned(),
                     format: AudioFormat::Flac,
+                    lineage: LineageContext::own_root(&rich_clip()),
                 },
                 Action::Skip {
                     clip_id: "b".to_owned(),
@@ -386,6 +387,7 @@ mod tests {
                 clip: rich_clip(),
                 path: "a.flac".to_owned(),
                 format: AudioFormat::Flac,
+                lineage: LineageContext::own_root(&rich_clip()),
             }],
         };
         let mut failed = HashSet::new();

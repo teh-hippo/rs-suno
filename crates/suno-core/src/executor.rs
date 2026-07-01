@@ -38,6 +38,7 @@ use crate::error::Error;
 use crate::ffmpeg::Ffmpeg;
 use crate::fs::Filesystem;
 use crate::http::{Http, HttpRequest};
+use crate::lineage::LineageContext;
 use crate::manifest::{Manifest, ManifestEntry};
 use crate::model::Clip;
 use crate::reconcile::{Action, Desired, Plan, SourceMode};
@@ -319,8 +320,14 @@ where
         manifest: &mut Manifest,
     ) -> Result<Effect, Fail> {
         match action {
-            Action::Download { clip, path, format } => {
-                self.download(client, manifest, clip, path, *format).await
+            Action::Download {
+                clip,
+                lineage,
+                path,
+                format,
+            } => {
+                self.download(client, manifest, clip, lineage, path, *format)
+                    .await
             }
             Action::Reformat {
                 clip,
@@ -332,7 +339,11 @@ where
                 self.reformat(client, manifest, clip, path, from_path, *to)
                     .await
             }
-            Action::Retag { clip, path } => self.retag(manifest, clip, path).await,
+            Action::Retag {
+                clip,
+                lineage,
+                path,
+            } => self.retag(manifest, clip, lineage, path).await,
             Action::Rename { from, to } => self.rename(manifest, from, to),
             Action::Delete { path, clip_id } => self.delete(manifest, path, clip_id),
             Action::Skip { clip_id } => {
@@ -348,10 +359,11 @@ where
         client: &mut SunoClient,
         manifest: &mut Manifest,
         clip: &Clip,
+        lineage: &LineageContext,
         path: &str,
         format: AudioFormat,
     ) -> Result<Effect, Fail> {
-        let tagged = self.produce_audio(client, clip, format).await?;
+        let tagged = self.produce_audio(client, clip, lineage, format).await?;
         let size = self.write_verify(&clip.id, path, &tagged)?;
         manifest.insert(clip.id.clone(), self.entry(&clip.id, path, format, size));
         Ok(Effect::Downloaded)
@@ -367,7 +379,15 @@ where
         from_path: &str,
         to: AudioFormat,
     ) -> Result<Effect, Fail> {
-        let tagged = self.produce_audio(client, clip, to).await?;
+        // A Reformat action carries no lineage, so recover it from the desired
+        // set (the same context that drove naming and the hash), falling back to
+        // a self-rooted context when the clip is not in the current selection.
+        let lineage = self
+            .by_id
+            .get(clip.id.as_str())
+            .map(|d| d.lineage.clone())
+            .unwrap_or_else(|| LineageContext::own_root(clip));
+        let tagged = self.produce_audio(client, clip, &lineage, to).await?;
         let size = self.write_verify(&clip.id, path, &tagged)?;
         // The new file is safely in place; only now drop the old rendering.
         self.fs
@@ -382,6 +402,7 @@ where
         &self,
         manifest: &mut Manifest,
         clip: &Clip,
+        lineage: &LineageContext,
         path: &str,
     ) -> Result<Effect, Fail> {
         let Some(format) = manifest.get(&clip.id).map(|entry| entry.format) else {
@@ -398,7 +419,7 @@ where
             return Ok(Effect::Retagged);
         }
 
-        let meta = TrackMetadata::from_clip(clip);
+        let meta = TrackMetadata::from_clip(clip, lineage);
         let cover = self.fetch_cover(clip).await;
         let existing = self
             .fs
@@ -458,9 +479,10 @@ where
         &self,
         client: &mut SunoClient,
         clip: &Clip,
+        lineage: &LineageContext,
         format: AudioFormat,
     ) -> Result<Vec<u8>, Fail> {
-        let meta = TrackMetadata::from_clip(clip);
+        let meta = TrackMetadata::from_clip(clip, lineage);
         match format {
             AudioFormat::Mp3 => {
                 let url = clip.mp3_url();
@@ -783,6 +805,7 @@ mod tests {
     fn desired(clip: Clip, format: AudioFormat) -> Desired {
         Desired {
             path: format!("{}.{}", clip.id, ext(format)),
+            lineage: LineageContext::own_root(&clip),
             clip,
             format,
             meta_hash: "m".to_owned(),
@@ -848,6 +871,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Mp3,
             }],
@@ -894,6 +918,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Mp3,
             }],
@@ -924,6 +949,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Flac,
             }],
@@ -967,6 +993,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Flac,
             }],
@@ -1008,6 +1035,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Flac,
             }],
@@ -1046,6 +1074,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Flac,
             }],
@@ -1086,6 +1115,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Mp3,
             }],
@@ -1130,6 +1160,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Mp3,
             }],
@@ -1164,6 +1195,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Mp3,
             }],
@@ -1198,6 +1230,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Mp3,
             }],
@@ -1235,6 +1268,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Mp3,
             }],
@@ -1273,6 +1307,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Mp3,
             }],
@@ -1313,11 +1348,13 @@ mod tests {
             actions: vec![
                 Action::Download {
                     clip: c1.clone(),
+                    lineage: LineageContext::own_root(&c1),
                     path: d1.path.clone(),
                     format: AudioFormat::Mp3,
                 },
                 Action::Download {
                     clip: c2.clone(),
+                    lineage: LineageContext::own_root(&c2),
                     path: d2.path.clone(),
                     format: AudioFormat::Mp3,
                 },
@@ -1358,11 +1395,13 @@ mod tests {
             actions: vec![
                 Action::Download {
                     clip: c1.clone(),
+                    lineage: LineageContext::own_root(&c1),
                     path: d1.path.clone(),
                     format: AudioFormat::Mp3,
                 },
                 Action::Download {
                     clip: c2.clone(),
+                    lineage: LineageContext::own_root(&c2),
                     path: d2.path.clone(),
                     format: AudioFormat::Mp3,
                 },
@@ -1409,16 +1448,19 @@ mod tests {
             actions: vec![
                 Action::Download {
                     clip: mirror.clip.clone(),
+                    lineage: LineageContext::own_root(&mirror.clip),
                     path: mirror.path.clone(),
                     format: AudioFormat::Mp3,
                 },
                 Action::Download {
                     clip: copy_held.clip.clone(),
+                    lineage: LineageContext::own_root(&copy_held.clip),
                     path: copy_held.path.clone(),
                     format: AudioFormat::Mp3,
                 },
                 Action::Download {
                     clip: private.clip.clone(),
+                    lineage: LineageContext::own_root(&private.clip),
                     path: private.path.clone(),
                     format: AudioFormat::Mp3,
                 },
@@ -1494,7 +1536,12 @@ mod tests {
         let mut d = desired(c.clone(), AudioFormat::Mp3);
         d.meta_hash = "new".to_owned();
         d.art_hash = "new-art".to_owned();
-        let existing = tag_mp3(b"audio", &TrackMetadata::from_clip(&c), None).unwrap();
+        let existing = tag_mp3(
+            b"audio",
+            &TrackMetadata::from_clip(&c, &LineageContext::own_root(&c)),
+            None,
+        )
+        .unwrap();
         let fs = MemFs::new().with_file("o.mp3", existing.clone());
         let mut manifest = Manifest::new();
         let mut start = entry("o.mp3", AudioFormat::Mp3);
@@ -1503,6 +1550,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Retag {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: "o.mp3".to_owned(),
             }],
         };
@@ -1761,6 +1809,7 @@ mod tests {
         let plan = Plan {
             actions: vec![Action::Download {
                 clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
                 path: d.path.clone(),
                 format: AudioFormat::Flac,
             }],

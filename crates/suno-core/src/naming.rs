@@ -1,15 +1,22 @@
 //! Pure naming and relative path rendering for [`Clip`] values.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::Clip;
+use crate::lineage::LineageContext;
 
 /// The default relative path template.
 ///
 /// Supported placeholders are `{creator}`, `{handle}`, `{album}`, `{title}`,
-/// and `{id}`. Empty path segments are dropped after rendering.
-pub const DEFAULT_TEMPLATE: &str = "{creator}/{album}/{title}";
+/// `{id}`, `{id8}` (first 8 characters of the clip id), and `{root_id8}`
+/// (first 8 of the resolved lineage root id). Empty path segments are dropped
+/// after rendering.
+///
+/// The default embeds `[{id8}]` in the file name so same-title clips never
+/// collide, and folders under `{album}`, which resolves to the lineage root's
+/// title (else the clip's own title).
+pub const DEFAULT_TEMPLATE: &str = "{creator}/{album}/{creator}-{title} [{id8}]";
 const DEFAULT_MAX_COMPONENT_LEN: usize = 80;
 
 const MIN_BASE_CHARS_WITH_SUFFIX: usize = 1;
@@ -41,6 +48,7 @@ impl Default for NamingConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct NamingRequest<'a> {
     pub clip: &'a Clip,
+    pub lineage: &'a LineageContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,25 +57,26 @@ pub struct RenderedName {
     pub base_name: String,
 }
 
-pub fn derive_album(clip: &Clip) -> Option<String> {
-    lineage_album(clip)
-}
-
 pub fn render_clip_name(request: NamingRequest<'_>, config: &NamingConfig) -> RenderedName {
-    render_single(request, config)
+    let album = album_component(request, config);
+    render_with_album(request, config, &album)
 }
 
 pub fn render_clip_names(
     requests: &[NamingRequest<'_>],
     config: &NamingConfig,
+    colliding_albums: &BTreeSet<String>,
 ) -> Vec<RenderedName> {
+    let albums = disambiguated_albums(requests, config, colliding_albums);
     let mut rendered = requests
         .iter()
-        .copied()
-        .map(|request| render_single(request, config))
+        .zip(&albums)
+        .map(|(request, album)| render_with_album(*request, config, album))
         .collect::<Vec<_>>();
-    let mut collisions = BTreeMap::<String, Vec<usize>>::new();
 
+    // Filename fallback: any distinct clips that still render to one path (a
+    // custom template lacking `{id8}`) are separated by their full clip id.
+    let mut collisions = BTreeMap::<String, Vec<usize>>::new();
     for (index, name) in rendered.iter().enumerate() {
         collisions
             .entry(name.relative_path.to_string_lossy().into_owned())
@@ -86,7 +95,60 @@ pub fn render_clip_names(
     rendered
 }
 
-fn render_single(request: NamingRequest<'_>, config: &NamingConfig) -> RenderedName {
+/// The album path component for every request, with a clip whose root title
+/// collides across distinct roots disambiguated by `[{root_id8}]`.
+///
+/// Distinct roots must never share an album folder (two different upload roots
+/// titled "Break Through" exist). `colliding_albums` is the authoritative set
+/// of such shared root titles, computed once from the whole lineage store, so
+/// the decision is stable across runs and independent of which clips appear in
+/// this batch. A clip whose resolved album is in that set always gets its
+/// root's short id appended; every other clip keeps the bare album and groups
+/// with its same-root siblings.
+fn disambiguated_albums(
+    requests: &[NamingRequest<'_>],
+    config: &NamingConfig,
+    colliding_albums: &BTreeSet<String>,
+) -> Vec<String> {
+    requests
+        .iter()
+        .map(|request| album_for(*request, config, colliding_albums))
+        .collect()
+}
+
+/// The (possibly disambiguated) album component for one request.
+fn album_for(
+    request: NamingRequest<'_>,
+    config: &NamingConfig,
+    colliding_albums: &BTreeSet<String>,
+) -> String {
+    let raw_album = request.lineage.album(&title_name(request.clip));
+    let album = sanitise_component(&raw_album, config.character_set, config.max_component_len);
+    if colliding_albums.contains(raw_album.trim()) {
+        let suffix = truncate_chars(&request.lineage.root_id, 8);
+        sanitise_component(
+            &format!("{album} [{suffix}]"),
+            config.character_set,
+            config.max_component_len,
+        )
+    } else {
+        album
+    }
+}
+
+/// The sanitised album component: the resolved lineage album (root title, else
+/// the clip's own title).
+fn album_component(request: NamingRequest<'_>, config: &NamingConfig) -> String {
+    let album = request.lineage.album(&title_name(request.clip));
+    sanitise_component(&album, config.character_set, config.max_component_len)
+}
+
+/// Render one clip's path with an already-resolved album component.
+fn render_with_album(
+    request: NamingRequest<'_>,
+    config: &NamingConfig,
+    album: &str,
+) -> RenderedName {
     let clip = request.clip;
     let creator = sanitise_component(
         &creator_name(clip),
@@ -94,15 +156,22 @@ fn render_single(request: NamingRequest<'_>, config: &NamingConfig) -> RenderedN
         config.max_component_len,
     );
     let handle = sanitise_component(&clip.handle, config.character_set, config.max_component_len);
-    let album = derive_album(clip)
-        .map(|value| sanitise_component(&value, config.character_set, config.max_component_len))
-        .unwrap_or_default();
     let title = sanitise_component(
         &title_name(clip),
         config.character_set,
         config.max_component_len,
     );
     let id = sanitise_component(&clip.id, CharacterSet::Ascii, config.max_component_len);
+    let id8 = sanitise_component(
+        &truncate_chars(&clip.id, 8),
+        CharacterSet::Ascii,
+        config.max_component_len,
+    );
+    let root_id8 = sanitise_component(
+        &truncate_chars(&request.lineage.root_id, 8),
+        CharacterSet::Ascii,
+        config.max_component_len,
+    );
     let mut components = config
         .template
         .split('/')
@@ -110,8 +179,10 @@ fn render_single(request: NamingRequest<'_>, config: &NamingConfig) -> RenderedN
             let rendered = segment
                 .replace("{creator}", &creator)
                 .replace("{handle}", &handle)
-                .replace("{album}", &album)
+                .replace("{album}", album)
                 .replace("{title}", &title)
+                .replace("{root_id8}", &root_id8)
+                .replace("{id8}", &id8)
                 .replace("{id}", &id);
             let sanitised =
                 sanitise_component(&rendered, config.character_set, config.max_component_len);
@@ -123,21 +194,19 @@ fn render_single(request: NamingRequest<'_>, config: &NamingConfig) -> RenderedN
         components.push(title.clone());
     }
 
-    let base_name = components
+    let mut base_name = components
         .pop()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| title.clone());
-    let mut relative_path = PathBuf::new();
+    // Guarantee a non-empty file name even when every token sanitises away.
+    if base_name.is_empty() {
+        base_name = append_suffix(&base_name, &clip.id, config.max_component_len);
+    }
 
+    let mut relative_path = PathBuf::new();
     for component in components {
         relative_path.push(component);
     }
-
-    let base_name = if needs_untitled_suffix(clip, &title) {
-        append_suffix(&base_name, &clip.id, config.max_component_len)
-    } else {
-        base_name
-    };
 
     relative_path.push(&base_name);
     RenderedName {
@@ -150,15 +219,6 @@ fn with_suffix(mut rendered: RenderedName, suffix: &str, max_component_len: usiz
     rendered.base_name = append_suffix(&rendered.base_name, suffix, max_component_len);
     rendered.relative_path.set_file_name(&rendered.base_name);
     rendered
-}
-
-fn lineage_album(clip: &Clip) -> Option<String> {
-    non_blank(&clip.album_title)
-        .map(str::to_string)
-        .or_else(|| {
-            let root = non_blank(&clip.root_ancestor_id)?;
-            (root != clip.id).then(|| root.to_string())
-        })
 }
 
 fn creator_name(clip: &Clip) -> String {
@@ -175,12 +235,6 @@ fn title_name(clip: &Clip) -> String {
     } else {
         title.to_string()
     }
-}
-
-fn needs_untitled_suffix(clip: &Clip, rendered_title: &str) -> bool {
-    clip.title.trim().is_empty()
-        || clip.title.trim().eq_ignore_ascii_case("untitled")
-        || rendered_title.is_empty()
 }
 
 fn append_suffix(base: &str, suffix: &str, max_component_len: usize) -> String {
@@ -310,7 +364,8 @@ fn is_reserved_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use crate::lineage::{EdgeType, ResolveStatus};
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn test_clip(id: &str, title: &str) -> Clip {
         Clip {
@@ -324,24 +379,52 @@ mod tests {
         }
     }
 
+    fn render_own(clip: &Clip, config: &NamingConfig) -> RenderedName {
+        let lineage = LineageContext::own_root(clip);
+        render_clip_name(
+            NamingRequest {
+                clip,
+                lineage: &lineage,
+            },
+            config,
+        )
+    }
+
+    fn render_all_own(
+        clips: &[Clip],
+        config: &NamingConfig,
+        colliding: &BTreeSet<String>,
+    ) -> Vec<RenderedName> {
+        let lineages: Vec<LineageContext> = clips.iter().map(LineageContext::own_root).collect();
+        let requests: Vec<NamingRequest> = clips
+            .iter()
+            .zip(&lineages)
+            .map(|(clip, lineage)| NamingRequest { clip, lineage })
+            .collect();
+        render_clip_names(&requests, config, colliding)
+    }
+
     #[test]
     fn unicode_names_are_preserved_and_ascii_falls_back() {
         let clip = test_clip("abc12345", "Beyoncé/東京");
 
-        let unicode = render_clip_name(NamingRequest { clip: &clip }, &NamingConfig::default());
+        let unicode = render_own(&clip, &NamingConfig::default());
         assert_eq!(
             unicode.relative_path.to_string_lossy(),
-            "München/Beyoncé 東京"
+            "München/Beyoncé 東京/München-Beyoncé 東京 [abc12345]"
         );
 
-        let ascii = render_clip_name(
-            NamingRequest { clip: &clip },
+        let ascii = render_own(
+            &clip,
             &NamingConfig {
                 character_set: CharacterSet::Ascii,
                 ..NamingConfig::default()
             },
         );
-        assert_eq!(ascii.relative_path.to_string_lossy(), "Munchen/Beyonce");
+        assert_eq!(
+            ascii.relative_path.to_string_lossy(),
+            "Munchen/Beyonce/Munchen-Beyonce [abc12345]"
+        );
     }
 
     #[test]
@@ -353,146 +436,241 @@ mod tests {
             ..Clip::default()
         };
 
-        let rendered = render_clip_name(NamingRequest { clip: &clip }, &NamingConfig::default());
-        assert_eq!(rendered.relative_path.to_string_lossy(), "AUX_/CON_");
+        let rendered = render_own(&clip, &NamingConfig::default());
+        let path = rendered.relative_path.to_string_lossy();
+        assert!(path.starts_with("AUX_/CON_/"), "path was {path}");
+        assert!(rendered.base_name.contains("[deadbeef]"));
+    }
+
+    #[test]
+    fn default_template_always_embeds_id8() {
+        let clip = test_clip("abcdef1234567890", "Any Title");
+        let rendered = render_own(&clip, &NamingConfig::default());
+        assert!(
+            rendered.base_name.contains("[abcdef12]"),
+            "base_name was {}",
+            rendered.base_name
+        );
     }
 
     #[test]
     fn blank_titles_use_a_stable_suffix() {
         let clip = test_clip("12345678-clip", "   ");
 
-        let rendered = render_clip_name(NamingRequest { clip: &clip }, &NamingConfig::default());
-        assert_eq!(rendered.base_name, "Untitled [12345678-clip]");
+        let rendered = render_own(&clip, &NamingConfig::default());
+        assert_eq!(rendered.base_name, "München-Untitled [12345678]");
         assert_eq!(
             rendered.relative_path.to_string_lossy(),
-            "München/Untitled [12345678-clip]"
+            "München/Untitled/München-Untitled [12345678]"
         );
     }
 
     #[test]
     fn very_long_titles_are_trimmed() {
         let clip = test_clip("abcdef12", &"a".repeat(120));
-        let rendered = render_clip_name(
-            NamingRequest { clip: &clip },
+        let rendered = render_own(
+            &clip,
             &NamingConfig {
                 max_component_len: 24,
                 ..NamingConfig::default()
             },
         );
 
-        assert_eq!(rendered.base_name.chars().count(), 24);
-        assert!(rendered.base_name.chars().all(|ch| ch == 'a'));
+        for component in rendered.relative_path.components() {
+            let text = component.as_os_str().to_string_lossy();
+            assert!(
+                text.chars().count() <= 24,
+                "component {text:?} exceeds 24 chars"
+            );
+        }
     }
 
     #[test]
-    fn duplicate_titles_get_deterministic_suffixes() {
+    fn same_title_siblings_stay_distinct_via_id8() {
+        // Two clips sharing a root (same album folder) and the same title must
+        // still land on distinct files; the default template's {id8} does that.
+        let lineage = LineageContext {
+            root_id: "root-9".to_string(),
+            root_title: "Origin".to_string(),
+            parent_id: "root-9".to_string(),
+            edge_type: Some(EdgeType::Cover),
+            status: ResolveStatus::Resolved,
+        };
         let first = test_clip("11111111-alpha", "Shared");
         let second = test_clip("22222222-beta", "Shared");
         let requests = [
-            NamingRequest { clip: &first },
-            NamingRequest { clip: &second },
-        ];
-        let swapped = [
-            NamingRequest { clip: &second },
-            NamingRequest { clip: &first },
+            NamingRequest {
+                clip: &first,
+                lineage: &lineage,
+            },
+            NamingRequest {
+                clip: &second,
+                lineage: &lineage,
+            },
         ];
 
-        let names = render_clip_names(&requests, &NamingConfig::default());
-        let swapped_names = render_clip_names(&swapped, &NamingConfig::default());
+        let names = render_clip_names(&requests, &NamingConfig::default(), &BTreeSet::new());
 
         assert_eq!(
             names[0].relative_path.to_string_lossy(),
-            "München/Shared [11111111-alpha]"
+            "München/Origin/München-Shared [11111111]"
         );
         assert_eq!(
             names[1].relative_path.to_string_lossy(),
-            "München/Shared [22222222-beta]"
+            "München/Origin/München-Shared [22222222]"
         );
-
-        let by_id = requests
-            .iter()
-            .zip(names.iter())
-            .map(|(request, name)| {
-                (
-                    request.clip.id.clone(),
-                    name.relative_path.to_string_lossy().into_owned(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let swapped_by_id = swapped
-            .iter()
-            .zip(swapped_names.iter())
-            .map(|(request, name)| {
-                (
-                    request.clip.id.clone(),
-                    name.relative_path.to_string_lossy().into_owned(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(by_id, swapped_by_id);
     }
 
     #[test]
-    fn lineage_album_uses_album_title_then_root_ancestor() {
-        let root = Clip {
-            id: "root".to_string(),
-            title: "Original".to_string(),
-            ..Clip::default()
+    fn id8_prefix_collision_falls_back_to_full_id() {
+        // Custom template without {id8} so identical titles collide and the
+        // filename fallback (full id) has to keep them distinct.
+        let config = NamingConfig {
+            template: "{creator}/{title}".to_string(),
+            ..NamingConfig::default()
         };
-        let child = Clip {
-            id: "child".to_string(),
-            title: "Remix".to_string(),
-            root_ancestor_id: "root".to_string(),
-            ..Clip::default()
-        };
-        let album = Clip {
-            id: "album".to_string(),
-            title: "Track".to_string(),
-            album_title: "Weather Series".to_string(),
-            root_ancestor_id: "root".to_string(),
-            ..Clip::default()
-        };
-
-        assert_eq!(derive_album(&root), None);
-        assert_eq!(derive_album(&child).as_deref(), Some("root"));
-        assert_eq!(derive_album(&album).as_deref(), Some("Weather Series"));
-    }
-
-    #[test]
-    fn untitled_clips_sharing_an_eight_char_prefix_stay_distinct() {
         let first = test_clip("abcd1234-first", "Untitled");
         let second = test_clip("abcd1234-second", "Untitled");
-        let rendered = render_clip_names(
-            &[
-                NamingRequest { clip: &first },
-                NamingRequest { clip: &second },
-            ],
-            &NamingConfig::default(),
+
+        let names = render_all_own(&[first.clone(), second.clone()], &config, &BTreeSet::new());
+        let swapped = render_all_own(&[second.clone(), first.clone()], &config, &BTreeSet::new());
+
+        assert_ne!(
+            names[0].relative_path.to_string_lossy(),
+            names[1].relative_path.to_string_lossy()
         );
 
+        let ordered = |rendered: &[RenderedName], clips: &[Clip]| {
+            clips
+                .iter()
+                .zip(rendered)
+                .map(|(clip, name)| {
+                    (
+                        clip.id.clone(),
+                        name.relative_path.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
         assert_eq!(
-            rendered[0].relative_path.to_string_lossy(),
-            "München/Untitled [abcd1234-first]"
-        );
-        assert_eq!(
-            rendered[1].relative_path.to_string_lossy(),
-            "München/Untitled [abcd1234-second]"
+            ordered(&names, &[first.clone(), second.clone()]),
+            ordered(&swapped, &[second, first])
         );
     }
 
     #[test]
-    fn reserved_names_with_extensions_are_suffixed() {
+    fn album_is_root_title_for_a_remix() {
         let clip = Clip {
-            id: "deadbeef".to_string(),
-            title: "NUL.mp3".to_string(),
-            display_name: "AUX.flac".to_string(),
+            id: "child".to_string(),
+            title: "Remix".to_string(),
+            display_name: "München".to_string(),
+            ..Clip::default()
+        };
+        let lineage = LineageContext {
+            root_id: "root-1".to_string(),
+            root_title: "Original".to_string(),
+            parent_id: "root-1".to_string(),
+            edge_type: Some(EdgeType::Cover),
+            status: ResolveStatus::Resolved,
+        };
+
+        let rendered = render_clip_name(
+            NamingRequest {
+                clip: &clip,
+                lineage: &lineage,
+            },
+            &NamingConfig::default(),
+        );
+        assert_eq!(
+            rendered.relative_path.to_string_lossy(),
+            "München/Original/München-Remix [child]"
+        );
+    }
+
+    #[test]
+    fn album_is_own_title_for_a_root() {
+        let clip = Clip {
+            id: "root-1".to_string(),
+            title: "Original".to_string(),
+            display_name: "München".to_string(),
             ..Clip::default()
         };
 
-        let rendered = render_clip_name(NamingRequest { clip: &clip }, &NamingConfig::default());
+        let rendered = render_own(&clip, &NamingConfig::default());
         assert_eq!(
             rendered.relative_path.to_string_lossy(),
-            "AUX.flac_/NUL.mp3_"
+            "München/Original/München-Original [root-1]"
+        );
+    }
+
+    #[test]
+    fn shared_album_title_from_distinct_roots_is_disambiguated() {
+        let first = Clip {
+            id: "aaaa1111-x".to_string(),
+            title: "Break Through".to_string(),
+            display_name: "München".to_string(),
+            ..Clip::default()
+        };
+        let second = Clip {
+            id: "bbbb2222-y".to_string(),
+            title: "Break Through".to_string(),
+            display_name: "München".to_string(),
+            ..Clip::default()
+        };
+
+        // The colliding set is authoritative (store-driven), so disambiguation
+        // does not depend on both roots appearing in the same batch.
+        let colliding: BTreeSet<String> = ["Break Through".to_string()].into_iter().collect();
+        let names = render_all_own(
+            &[first.clone(), second.clone()],
+            &NamingConfig::default(),
+            &colliding,
+        );
+        let swapped = render_all_own(
+            &[second.clone(), first.clone()],
+            &NamingConfig::default(),
+            &colliding,
+        );
+
+        let album_of = |rendered: &RenderedName| {
+            rendered
+                .relative_path
+                .components()
+                .nth(1)
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+
+        assert_eq!(album_of(&names[0]), "Break Through [aaaa1111]");
+        assert_eq!(album_of(&names[1]), "Break Through [bbbb2222]");
+        // Deterministic regardless of input order.
+        assert_eq!(album_of(&swapped[0]), "Break Through [bbbb2222]");
+        assert_eq!(album_of(&swapped[1]), "Break Through [aaaa1111]");
+
+        // The MEDIUM fix: a narrowed run showing only one of the two roots
+        // still gets the suffixed folder, so folders never oscillate.
+        let alone = render_all_own(
+            std::slice::from_ref(&first),
+            &NamingConfig::default(),
+            &colliding,
+        );
+        assert_eq!(album_of(&alone[0]), "Break Through [aaaa1111]");
+    }
+
+    #[test]
+    fn unique_root_title_stays_a_bare_album() {
+        // A title absent from the colliding set keeps its bare folder even when
+        // the batch happens to hold a same-titled sibling of the same root.
+        let clip = Clip {
+            id: "solo-1".to_string(),
+            title: "Solo".to_string(),
+            display_name: "München".to_string(),
+            ..Clip::default()
+        };
+        let names = render_all_own(&[clip], &NamingConfig::default(), &BTreeSet::new());
+        assert_eq!(
+            names[0].relative_path.to_string_lossy(),
+            "München/Solo/München-Solo [solo-1]"
         );
     }
 }

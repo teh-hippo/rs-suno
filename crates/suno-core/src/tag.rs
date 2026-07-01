@@ -11,6 +11,7 @@ use id3::TagLike;
 use id3::frame::{Comment, ExtendedText, Lyrics, Picture, PictureType};
 
 use crate::error::{Error, Result};
+use crate::lineage::{EdgeType, LineageContext};
 use crate::model::Clip;
 
 const COVER_MIME: &str = "image/jpeg";
@@ -31,20 +32,22 @@ pub struct TrackMetadata {
     pub model: String,
     pub handle: String,
     pub parent: String,
+    pub root: String,
     pub lineage: String,
 }
 
 impl TrackMetadata {
-    /// Map a [`Clip`] to its tag set, mirroring `ha-suno`'s `to_track_metadata`.
+    /// Map a [`Clip`] plus its resolved [`LineageContext`] to its tag set,
+    /// mirroring `ha-suno`'s `to_track_metadata`.
     ///
-    /// `artist` and `album_artist` fall back to `"Suno"`, `album` falls back to
-    /// the title, and `date` is the `YYYY-MM-DD` prefix of `created_at`. The
+    /// `artist` and `album_artist` fall back to `"Suno"`, and `date` is the
+    /// `YYYY-MM-DD` prefix of `created_at`. The `album`, `parent`, `root`, and
+    /// `lineage` tags come from the resolved context, never the now-defunct
+    /// `album_title`/`edited_clip_id`/`root_ancestor_id` feed fields. The
     /// `lyrics` tag carries the clip's prompt, matching the reference.
-    pub fn from_clip(clip: &Clip) -> TrackMetadata {
+    pub fn from_clip(clip: &Clip, lineage: &LineageContext) -> TrackMetadata {
         let artist = non_empty(&clip.display_name).unwrap_or("Suno").to_owned();
-        let album = non_empty(&clip.album_title)
-            .unwrap_or(&clip.title)
-            .to_owned();
+        let album = lineage.album(&clip.title);
         TrackMetadata {
             title: clip.title.clone(),
             artist: artist.clone(),
@@ -57,19 +60,21 @@ impl TrackMetadata {
             style_summary: clip.gpt_description_prompt.clone(),
             model: model_label(clip),
             handle: clip.handle.clone(),
-            parent: clip.edited_clip_id.clone(),
-            lineage: lineage(clip),
+            parent: lineage.parent_id.clone(),
+            root: lineage.root_id.clone(),
+            lineage: lineage_summary(clip, lineage),
         }
     }
 
     /// The Suno-specific fields, paired with their tag description/key.
-    fn suno_fields(&self) -> [(&'static str, &str); 6] {
+    fn suno_fields(&self) -> [(&'static str, &str); 7] {
         [
             ("SUNO_STYLE", &self.style),
             ("SUNO_STYLE_SUMMARY", &self.style_summary),
             ("SUNO_MODEL", &self.model),
             ("SUNO_HANDLE", &self.handle),
             ("SUNO_PARENT", &self.parent),
+            ("SUNO_ROOT", &self.root),
             ("SUNO_LINEAGE", &self.lineage),
         ]
     }
@@ -162,7 +167,7 @@ pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Res
 }
 
 /// The Vorbis comment fields, in `(KEY, value)` order.
-fn flac_fields(meta: &TrackMetadata) -> [(&'static str, &str); 13] {
+fn flac_fields(meta: &TrackMetadata) -> [(&'static str, &str); 14] {
     [
         ("TITLE", &meta.title),
         ("ARTIST", &meta.artist),
@@ -176,6 +181,7 @@ fn flac_fields(meta: &TrackMetadata) -> [(&'static str, &str); 13] {
         ("SUNO_MODEL", &meta.model),
         ("SUNO_HANDLE", &meta.handle),
         ("SUNO_PARENT", &meta.parent),
+        ("SUNO_ROOT", &meta.root),
         ("SUNO_LINEAGE", &meta.lineage),
     ]
 }
@@ -191,26 +197,31 @@ fn model_label(clip: &Clip) -> String {
     }
 }
 
-/// Formatted edit lineage, ported from `ha-suno`'s `suno_lineage`.
+/// The compact, typed lineage summary embedded as `SUNO_LINEAGE`.
 ///
-/// The engine's [`Clip`] has no `is_remix` or `history`, so this covers the
-/// `edited_clip_id`, `lineage_status`, and `root_ancestor_id` branches; the
-/// remix-versus-derived distinction and per-edit infill notes are out of scope.
-fn lineage(clip: &Clip) -> String {
+/// Derived purely from the resolved [`LineageContext`], never the defunct feed
+/// fields. Emits up to two lines:
+///
+/// - when the clip has a parent: `"<edge label> <parent8>"` (the edge's
+///   [`EdgeType::label`], or `"Derived from"` when the edge is unknown);
+/// - when the clip is not its own root: `"Root <root8> (<root title>)"`.
+///
+/// A pure root (no parent, its own root) yields an empty string.
+fn lineage_summary(clip: &Clip, lineage: &LineageContext) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if !clip.edited_clip_id.is_empty() {
-        parts.push(format!(
-            "Derived from {}",
-            first_chars(&clip.edited_clip_id, 8)
-        ));
+    if !lineage.parent_id.is_empty() {
+        let label = lineage
+            .edge_type
+            .map(EdgeType::label)
+            .unwrap_or("Derived from");
+        parts.push(format!("{label} {}", first_chars(&lineage.parent_id, 8)));
     }
-    if clip.lineage_status == "unavailable" {
-        parts.push("Lineage unavailable".to_owned());
-    } else if !clip.root_ancestor_id.is_empty()
-        && clip.root_ancestor_id != clip.id
-        && clip.root_ancestor_id != clip.edited_clip_id
-    {
-        parts.push(format!("Root {}", first_chars(&clip.root_ancestor_id, 8)));
+    if !lineage.root_id.is_empty() && lineage.root_id != clip.id {
+        parts.push(format!(
+            "Root {} ({})",
+            first_chars(&lineage.root_id, 8),
+            lineage.root_title
+        ));
     }
     parts.join("\n")
 }
@@ -228,6 +239,7 @@ fn first_chars(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lineage::ResolveStatus;
 
     fn full_clip() -> Clip {
         Clip {
@@ -249,9 +261,21 @@ mod tests {
         }
     }
 
+    /// A resolved context for [`full_clip`]: an extension whose root carries the
+    /// "Weather Series" album title.
+    fn full_lineage() -> LineageContext {
+        LineageContext {
+            root_id: "rootid567890".to_owned(),
+            root_title: "Weather Series".to_owned(),
+            parent_id: "parentid1234".to_owned(),
+            edge_type: Some(EdgeType::Extend),
+            status: ResolveStatus::Resolved,
+        }
+    }
+
     #[test]
     fn maps_full_clip() {
-        let meta = TrackMetadata::from_clip(&full_clip());
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
         assert_eq!(meta.title, "Electric Storm");
         assert_eq!(meta.artist, "alice");
         assert_eq!(meta.album, "Weather Series");
@@ -264,14 +288,16 @@ mod tests {
         assert_eq!(meta.model, "chirp-v4 (v4)");
         assert_eq!(meta.handle, "alice");
         assert_eq!(meta.parent, "parentid1234");
+        assert_eq!(meta.root, "rootid567890");
     }
 
     #[test]
     fn falls_back_when_fields_are_empty() {
-        let meta = TrackMetadata::from_clip(&Clip {
+        let clip = Clip {
             title: "Just A Title".to_owned(),
             ..Clip::default()
-        });
+        };
+        let meta = TrackMetadata::from_clip(&clip, &LineageContext::own_root(&clip));
         assert_eq!(meta.artist, "Suno");
         assert_eq!(meta.album_artist, "Suno");
         assert_eq!(meta.album, "Just A Title");
@@ -281,73 +307,96 @@ mod tests {
     }
 
     #[test]
-    fn album_prefers_album_title_over_title() {
-        let meta = TrackMetadata::from_clip(&Clip {
+    fn album_uses_root_title() {
+        let clip = Clip {
+            id: "child-01".to_owned(),
             title: "Track".to_owned(),
-            album_title: "The Album".to_owned(),
             ..Clip::default()
-        });
+        };
+        let lineage = LineageContext {
+            root_id: "root-01".to_owned(),
+            root_title: "The Album".to_owned(),
+            parent_id: "root-01".to_owned(),
+            edge_type: Some(EdgeType::Cover),
+            status: ResolveStatus::Resolved,
+        };
+        let meta = TrackMetadata::from_clip(&clip, &lineage);
         assert_eq!(meta.album, "The Album");
     }
 
     #[test]
     fn model_label_uses_name_only_without_version() {
-        let meta = TrackMetadata::from_clip(&Clip {
+        let clip = Clip {
             model_name: "chirp-v3".to_owned(),
             ..Clip::default()
-        });
+        };
+        let meta = TrackMetadata::from_clip(&clip, &LineageContext::own_root(&clip));
         assert_eq!(meta.model, "chirp-v3");
     }
 
     #[test]
     fn model_label_is_empty_without_name() {
-        let meta = TrackMetadata::from_clip(&Clip {
+        let clip = Clip {
             major_model_version: "v4".to_owned(),
             ..Clip::default()
-        });
+        };
+        let meta = TrackMetadata::from_clip(&clip, &LineageContext::own_root(&clip));
         assert_eq!(meta.model, "");
     }
 
     #[test]
     fn date_is_truncated_to_ten_characters() {
-        let meta = TrackMetadata::from_clip(&Clip {
+        let clip = Clip {
             created_at: "2024-12-31T23:59:59Z".to_owned(),
             ..Clip::default()
-        });
+        };
+        let meta = TrackMetadata::from_clip(&clip, &LineageContext::own_root(&clip));
         assert_eq!(meta.date, "2024-12-31");
     }
 
     #[test]
     fn lineage_reports_derivation_and_root() {
-        let meta = TrackMetadata::from_clip(&full_clip());
-        assert_eq!(meta.lineage, "Derived from parentid\nRoot rootid56");
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+        assert_eq!(
+            meta.lineage,
+            "Extended from parentid\nRoot rootid56 (Weather Series)"
+        );
     }
 
     #[test]
-    fn lineage_reports_unavailable_status() {
-        let meta = TrackMetadata::from_clip(&Clip {
+    fn lineage_defaults_to_derived_from_when_edge_unknown() {
+        let clip = Clip {
             id: "self-0001".to_owned(),
-            edited_clip_id: "parent-9999".to_owned(),
-            root_ancestor_id: "root-7777".to_owned(),
-            lineage_status: "unavailable".to_owned(),
             ..Clip::default()
-        });
-        assert_eq!(meta.lineage, "Derived from parent-9\nLineage unavailable");
+        };
+        let lineage = LineageContext {
+            root_id: "root-7777".to_owned(),
+            root_title: "Origin".to_owned(),
+            parent_id: "parent-9999".to_owned(),
+            edge_type: None,
+            status: ResolveStatus::Resolved,
+        };
+        let meta = TrackMetadata::from_clip(&clip, &lineage);
+        assert_eq!(
+            meta.lineage,
+            "Derived from parent-9\nRoot root-777 (Origin)"
+        );
     }
 
     #[test]
-    fn lineage_omits_root_equal_to_self() {
-        let meta = TrackMetadata::from_clip(&Clip {
+    fn lineage_is_empty_for_a_pure_root() {
+        let clip = Clip {
             id: "same-id-01".to_owned(),
-            root_ancestor_id: "same-id-01".to_owned(),
             ..Clip::default()
-        });
+        };
+        let meta = TrackMetadata::from_clip(&clip, &LineageContext::own_root(&clip));
         assert_eq!(meta.lineage, "");
+        assert_eq!(meta.parent, "");
     }
 
     #[test]
     fn mp3_round_trips_core_tags() {
-        let meta = TrackMetadata::from_clip(&full_clip());
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
         let cover = b"\xFF\xD8\xFFcover-bytes".to_vec();
         let tagged = tag_mp3(b"", &meta, Some(&cover)).unwrap();
 
@@ -357,16 +406,22 @@ mod tests {
         assert_eq!(tag.album(), Some("Weather Series"));
         assert_eq!(tag.album_artist(), Some("alice"));
 
-        let style = tag
-            .extended_texts()
-            .find(|frame| frame.description == "SUNO_STYLE")
-            .map(|frame| frame.value.as_str());
-        assert_eq!(style, Some("ambient, cinematic"));
-        let model = tag
-            .extended_texts()
-            .find(|frame| frame.description == "SUNO_MODEL")
-            .map(|frame| frame.value.as_str());
-        assert_eq!(model, Some("chirp-v4 (v4)"));
+        let extended = |desc: &str| {
+            tag.extended_texts()
+                .find(|frame| frame.description == desc)
+                .map(|frame| frame.value.clone())
+        };
+        assert_eq!(
+            extended("SUNO_STYLE").as_deref(),
+            Some("ambient, cinematic")
+        );
+        assert_eq!(extended("SUNO_MODEL").as_deref(), Some("chirp-v4 (v4)"));
+        assert_eq!(extended("SUNO_PARENT").as_deref(), Some("parentid1234"));
+        assert_eq!(extended("SUNO_ROOT").as_deref(), Some("rootid567890"));
+        assert_eq!(
+            extended("SUNO_LINEAGE").as_deref(),
+            Some("Extended from parentid\nRoot rootid56 (Weather Series)")
+        );
 
         let lyrics = tag.lyrics().next().map(|frame| frame.text.as_str());
         assert_eq!(lyrics, Some("an orchestral storm"));
@@ -379,7 +434,7 @@ mod tests {
 
     #[test]
     fn mp3_tagging_replaces_an_existing_tag() {
-        let meta = TrackMetadata::from_clip(&full_clip());
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
         let once = tag_mp3(b"audioframes", &meta, None).unwrap();
         let twice = tag_mp3(&once, &meta, None).unwrap();
 
@@ -394,7 +449,7 @@ mod tests {
     #[test]
     fn flac_round_trips_core_tags_and_preserves_audio() {
         let audio = minimal_flac();
-        let meta = TrackMetadata::from_clip(&full_clip());
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
         let cover = b"\xFF\xD8\xFFflac-cover".to_vec();
         let tagged = tag_flac(&audio, &meta, Some(&cover)).unwrap();
 
@@ -405,6 +460,12 @@ mod tests {
         assert_eq!(vorbis.get("ALBUM").unwrap(), &["Weather Series"]);
         assert_eq!(vorbis.get("ALBUMARTIST").unwrap(), &["alice"]);
         assert_eq!(vorbis.get("SUNO_MODEL").unwrap(), &["chirp-v4 (v4)"]);
+        assert_eq!(vorbis.get("SUNO_PARENT").unwrap(), &["parentid1234"]);
+        assert_eq!(vorbis.get("SUNO_ROOT").unwrap(), &["rootid567890"]);
+        assert_eq!(
+            vorbis.get("SUNO_LINEAGE").unwrap(),
+            &["Extended from parentid\nRoot rootid56 (Weather Series)"]
+        );
         assert_eq!(
             vorbis.get("DESCRIPTION").unwrap(),
             &["a moody cinematic build"]

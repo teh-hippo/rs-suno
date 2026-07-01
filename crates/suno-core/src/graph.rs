@@ -16,13 +16,14 @@
 //! (often trashed) ancestors are persisted as nodes so lineage survives Suno's
 //! ~30-day trash purge.
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Iter;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::lineage::{
-    Edge, EdgeRole, EdgeType, Resolution, ResolveStatus, RootInfo, lineage_edges,
+    Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveStatus, RootInfo,
+    immediate_parent, lineage_edges,
 };
 use crate::model::Clip;
 
@@ -150,6 +151,76 @@ impl LineageStore {
     /// The cached root resolution for `id`, if present.
     pub fn get_root(&self, id: &str) -> Option<&CacheEntry> {
         self.resolution_cache.get(id)
+    }
+
+    /// Build a [`LineageContext`] for `clip` from the durable store.
+    ///
+    /// This is the source of truth for every file-affecting lineage decision
+    /// (album folder, embedded tags, the change hash), so a dropped resolution
+    /// call never rewrites the library (HARDENING H3). The root comes from the
+    /// monotonic resolution cache (the clip's own id when the store has no
+    /// better answer) and the root title from that root's archived node, so a
+    /// transient miss keeps the last-known-good album even for a since-purged
+    /// ancestor. The parent edge is read structurally from the clip itself.
+    pub fn context_for(&self, clip: &Clip) -> LineageContext {
+        let cached = self.get_root(&clip.id);
+        let root_id = cached
+            .map(|entry| entry.root_id.clone())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| clip.id.clone());
+        let root_title = self
+            .node(&root_id)
+            .map(|node| node.title.clone())
+            .unwrap_or_else(|| clip.title.clone());
+        let (parent_id, edge_type) = match immediate_parent(clip) {
+            Some((id, edge)) => (id, Some(edge)),
+            None => (String::new(), None),
+        };
+        let status = cached
+            .map(|entry| status_from_slug(&entry.status))
+            .unwrap_or(ResolveStatus::Resolved);
+        LineageContext {
+            root_id,
+            root_title,
+            parent_id,
+            edge_type,
+            status,
+        }
+    }
+
+    /// The set of root titles shared by more than one distinct root.
+    ///
+    /// Two distinct roots must never share an album folder (two different
+    /// uploads titled "Break Through" exist), so naming appends the short root
+    /// id to the album of any clip whose root title is in this set. It is
+    /// computed from the whole archive — every distinct root in the resolution
+    /// cache paired with its node title — so the decision is stable across runs
+    /// and independent of the current batch: a `--since`/`--limit` slice that
+    /// shows only one of two same-titled roots still disambiguates, instead of
+    /// oscillating between a bare and a suffixed folder.
+    pub fn colliding_root_titles(&self) -> BTreeSet<String> {
+        let mut roots_by_title: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for entry in self.resolution_cache.values() {
+            if entry.root_id.is_empty() {
+                continue;
+            }
+            let Some(node) = self.nodes.get(&entry.root_id) else {
+                continue;
+            };
+            let title = node.title.trim();
+            if title.is_empty() {
+                continue;
+            }
+            roots_by_title
+                .entry(title.to_owned())
+                .or_default()
+                .insert(entry.root_id.clone());
+        }
+        roots_by_title
+            .into_iter()
+            .filter(|(_, roots)| roots.len() > 1)
+            .map(|(title, _)| title)
+            .collect()
     }
 
     /// Number of nodes in the graph.
@@ -306,6 +377,17 @@ fn resolve_status_slug(status: ResolveStatus) -> &'static str {
         ResolveStatus::External => "external",
         ResolveStatus::Unresolved => "unresolved",
         ResolveStatus::Cycle => "cycle",
+    }
+}
+
+/// Parse a cached status slug back into a [`ResolveStatus`], defaulting to
+/// [`Resolved`](ResolveStatus::Resolved) for the self-root/unknown case.
+fn status_from_slug(slug: &str) -> ResolveStatus {
+    match slug {
+        "external" => ResolveStatus::External,
+        "unresolved" => ResolveStatus::Unresolved,
+        "cycle" => ResolveStatus::Cycle,
+        _ => ResolveStatus::Resolved,
     }
 }
 
@@ -588,5 +670,156 @@ mod tests {
         assert_eq!(node.status, "observed");
         assert_eq!(store.edges[0].status, "active");
         assert!(store.resolution_cache.is_empty());
+    }
+
+    #[test]
+    fn context_for_roots_a_remix_at_its_stored_ancestor() {
+        let mut store = LineageStore::new();
+        store.update(&chain_clips(), &chain_resolution(), "now");
+
+        let child = &chain_clips()[0]; // "c", a cover of "b"
+        let ctx = store.context_for(child);
+        assert_eq!(ctx.root_id, "a");
+        assert_eq!(ctx.root_title, "Root");
+        assert_eq!(ctx.parent_id, "b");
+        assert_eq!(ctx.edge_type, Some(EdgeType::Cover));
+        assert_eq!(ctx.status, ResolveStatus::Resolved);
+        // The remix folders under its resolved root's album.
+        assert_eq!(ctx.album("Cover"), "Root");
+    }
+
+    #[test]
+    fn context_for_a_root_uses_its_own_title_and_has_no_parent() {
+        let mut store = LineageStore::new();
+        store.update(&chain_clips(), &chain_resolution(), "now");
+
+        let root = &chain_clips()[2]; // "a"
+        let ctx = store.context_for(root);
+        assert_eq!(ctx.root_id, "a");
+        assert_eq!(ctx.root_title, "Root");
+        assert_eq!(ctx.parent_id, "");
+        assert_eq!(ctx.edge_type, None);
+        assert_eq!(ctx.album("Root"), "Root");
+    }
+
+    #[test]
+    fn context_for_an_unknown_clip_is_self_rooted() {
+        let store = LineageStore::new();
+        let orphan = Clip {
+            id: "z".into(),
+            title: "Lonely".into(),
+            ..Default::default()
+        };
+        let ctx = store.context_for(&orphan);
+        assert_eq!(ctx.root_id, "z");
+        assert_eq!(ctx.root_title, "Lonely");
+        assert_eq!(ctx.parent_id, "");
+        assert_eq!(ctx.status, ResolveStatus::Resolved);
+    }
+
+    #[test]
+    fn context_for_retains_a_purged_ancestor_album() {
+        // The trashed ancestor arrives only via gap_filled, yet a later run
+        // whose resolver failed (modelled here by simply not re-updating) must
+        // still root the child at the archived ancestor with its stored title
+        // (HARDENING H3).
+        let child = Clip {
+            id: "c".into(),
+            title: "Cover".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "t".into(),
+            edited_clip_id: "t".into(),
+            ..Default::default()
+        };
+        let trashed = Clip {
+            id: "t".into(),
+            title: "Trashed Original".into(),
+            clip_type: "gen".into(),
+            is_trashed: true,
+            ..Default::default()
+        };
+        let mut roots = HashMap::new();
+        roots.insert(
+            "c".to_owned(),
+            RootInfo {
+                root_id: "t".into(),
+                root_title: "Trashed Original".into(),
+                status: ResolveStatus::Resolved,
+            },
+        );
+        let resolution = Resolution {
+            roots,
+            gap_filled: vec![trashed],
+        };
+        let mut store = LineageStore::new();
+        store.update(std::slice::from_ref(&child), &resolution, "now");
+
+        let ctx = store.context_for(&child);
+        assert_eq!(ctx.root_id, "t");
+        assert_eq!(ctx.root_title, "Trashed Original");
+        assert_eq!(ctx.album("Cover"), "Trashed Original");
+    }
+
+    #[test]
+    fn colliding_root_titles_flags_only_shared_distinct_roots() {
+        // Two distinct roots share the title "Break Through"; a third root is
+        // unique; a child of a shared root does not add a spurious distinct root.
+        let clips = vec![
+            Clip {
+                id: "r1".into(),
+                title: "Break Through".into(),
+                clip_type: "gen".into(),
+                ..Default::default()
+            },
+            Clip {
+                id: "r2".into(),
+                title: "Break Through".into(),
+                clip_type: "gen".into(),
+                ..Default::default()
+            },
+            Clip {
+                id: "r3".into(),
+                title: "Solo".into(),
+                clip_type: "gen".into(),
+                ..Default::default()
+            },
+            Clip {
+                id: "c1".into(),
+                title: "Break Through".into(),
+                clip_type: "gen".into(),
+                task: "cover".into(),
+                cover_clip_id: "r1".into(),
+                edited_clip_id: "r1".into(),
+                ..Default::default()
+            },
+        ];
+        let mut roots = HashMap::new();
+        for (id, root) in [("r1", "r1"), ("r2", "r2"), ("r3", "r3"), ("c1", "r1")] {
+            let title = if root == "r3" {
+                "Solo"
+            } else {
+                "Break Through"
+            };
+            roots.insert(
+                id.to_owned(),
+                RootInfo {
+                    root_id: root.into(),
+                    root_title: title.into(),
+                    status: ResolveStatus::Resolved,
+                },
+            );
+        }
+        let resolution = Resolution {
+            roots,
+            gap_filled: Vec::new(),
+        };
+        let mut store = LineageStore::new();
+        store.update(&clips, &resolution, "now");
+
+        let colliding = store.colliding_root_titles();
+        assert!(colliding.contains("Break Through"));
+        assert!(!colliding.contains("Solo"));
+        assert_eq!(colliding.len(), 1);
     }
 }

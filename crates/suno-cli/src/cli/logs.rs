@@ -21,10 +21,8 @@ use crate::download::write_atomic;
 pub const MANIFEST_NAME: &str = ".suno-manifest.json";
 /// The lineage graph store file name, kept beside the manifest.
 ///
-/// The store and its persistence are added ahead of use: the run flow wires
-/// them in a later phase (persist before execute and on interrupt, HARDENING
-/// H4), so these entry points are intentionally unreferenced for now.
-#[allow(dead_code)]
+/// The store is an append-durable archive of resolved ancestry, persisted by
+/// the run flow before execute and on interrupt (HARDENING H4).
 pub const GRAPH_NAME: &str = ".suno-lineage.json";
 const LOCK_NAME: &str = ".suno.lock";
 const FAILURES_NAME: &str = ".suno-failures.log";
@@ -81,7 +79,6 @@ pub fn save_manifest(dest: &Path, manifest: &Manifest) -> Result<()> {
 /// present-but-unparseable file is an error rather than a silent empty: treating
 /// a corrupt prior as empty would discard archived (often trashed) ancestors
 /// that cannot be re-fetched once Suno purges them, so the run must stop.
-#[allow(dead_code)]
 pub fn load_graph(dest: &Path) -> Result<LineageStore> {
     let path = dest.join(GRAPH_NAME);
     match std::fs::read(&path) {
@@ -93,7 +90,6 @@ pub fn load_graph(dest: &Path) -> Result<LineageStore> {
 }
 
 /// Save the lineage graph `store` beside `dest` atomically.
-#[allow(dead_code)]
 pub fn save_graph(dest: &Path, store: &LineageStore) -> Result<()> {
     let bytes =
         serde_json::to_vec_pretty(store).context("could not serialise the lineage store")?;

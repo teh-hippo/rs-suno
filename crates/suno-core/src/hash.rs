@@ -12,6 +12,7 @@
 
 use std::hash::Hasher;
 
+use crate::lineage::{EdgeType, LineageContext};
 use crate::model::Clip;
 
 /// A short, stable hex digest of `bytes` (FNV-1a, 64-bit).
@@ -24,22 +25,31 @@ fn digest(bytes: &[u8]) -> String {
 /// A sentinel for the clip's tag-bearing metadata and chosen art.
 ///
 /// Covers every field that affects file *content* — title, tags, the selected
-/// art URL, video cover, lineage, album, the prompt and description, and the
-/// account handle — so a change to any of them is detected as a needed retag.
+/// art URL, video cover, the prompt and description, the account handle, and the
+/// *resolved* lineage that gets embedded (immediate parent and edge, root id and
+/// title, and the album the clip folders under) — so a change to any of them is
+/// detected as a needed retag. This takes the resolved [`LineageContext`] rather
+/// than the raw feed fields precisely because those resolved values are what end
+/// up in the file (HARDENING B1: if a value is embedded, it is in the change
+/// hash), so a retitle, re-point, or album move triggers a retag.
+///
 /// Path-affecting fields such as `display_name` are excluded on purpose: a path
 /// change is a rename, detected by comparing the rendered path with the stored
 /// one. `title` is included so a title change triggers both a rename and a
 /// retag.
-pub fn meta_hash(clip: &Clip) -> String {
+pub fn meta_hash(clip: &Clip, lineage: &LineageContext) -> String {
+    let edge_label = lineage.edge_type.map(EdgeType::label).unwrap_or("");
     let fields = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         clip.title,
         clip.tags,
         clip.selected_image_url().unwrap_or(""),
         clip.video_cover_url,
-        clip.root_ancestor_id,
-        clip.lineage_status,
-        clip.album_title,
+        lineage.parent_id,
+        edge_label,
+        lineage.root_id,
+        lineage.root_title,
+        lineage.album(&clip.title),
         clip.prompt,
         clip.gpt_description_prompt,
         clip.handle,
@@ -62,6 +72,7 @@ pub fn art_hash(clip: &Clip) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lineage::ResolveStatus;
 
     fn sample() -> Clip {
         Clip {
@@ -81,14 +92,26 @@ mod tests {
         }
     }
 
+    /// The resolved lineage embedded alongside [`sample`]: an extension of a
+    /// parent under the "Weather Series" root.
+    fn sample_lineage() -> LineageContext {
+        LineageContext {
+            root_id: "root-1".to_owned(),
+            root_title: "Weather Series".to_owned(),
+            parent_id: "parent-1".to_owned(),
+            edge_type: Some(EdgeType::Extend),
+            status: ResolveStatus::Resolved,
+        }
+    }
+
     #[test]
     fn meta_hash_is_stable() {
         // Golden value: a change here means the sentinel encoding changed and
         // every existing manifest would see a spurious retag. Change with care.
-        let h = meta_hash(&sample());
-        assert_eq!(h, "e6816acf2f162bba");
+        let h = meta_hash(&sample(), &sample_lineage());
+        assert_eq!(h, "45ea84e9f71e604f");
         assert_eq!(h.len(), 16);
-        assert_eq!(h, meta_hash(&sample()));
+        assert_eq!(h, meta_hash(&sample(), &sample_lineage()));
     }
 
     #[test]
@@ -106,24 +129,37 @@ mod tests {
 
     #[test]
     fn meta_hash_ignores_path_only_fields() {
+        let lineage = sample_lineage();
         let mut other = sample();
         other.display_name = "Someone Else".to_owned();
-        assert_eq!(meta_hash(&sample()), meta_hash(&other));
+        assert_eq!(meta_hash(&sample(), &lineage), meta_hash(&other, &lineage));
     }
 
     #[test]
     fn meta_hash_changes_when_a_content_field_changes() {
-        let base = meta_hash(&sample());
+        let lineage = sample_lineage();
+        let base = meta_hash(&sample(), &lineage);
+        // Clip-side content fields.
         for mutate in [
             |c: &mut Clip| c.title = "Different".to_owned(),
             |c: &mut Clip| c.tags = "lofi".to_owned(),
-            |c: &mut Clip| c.album_title = "Other Album".to_owned(),
             |c: &mut Clip| c.image_large_url = "https://cdn1.suno.ai/new.jpeg".to_owned(),
             |c: &mut Clip| c.handle = "bob".to_owned(),
         ] {
             let mut clip = sample();
             mutate(&mut clip);
-            assert_ne!(meta_hash(&clip), base);
+            assert_ne!(meta_hash(&clip, &lineage), base);
+        }
+        // Resolved-lineage values that get embedded must also move the hash.
+        for mutate in [
+            |l: &mut LineageContext| l.parent_id = "other-parent".to_owned(),
+            |l: &mut LineageContext| l.root_id = "other-root".to_owned(),
+            |l: &mut LineageContext| l.root_title = "Other Album".to_owned(),
+            |l: &mut LineageContext| l.edge_type = Some(EdgeType::Cover),
+        ] {
+            let mut lin = sample_lineage();
+            mutate(&mut lin);
+            assert_ne!(meta_hash(&sample(), &lin), base);
         }
     }
 

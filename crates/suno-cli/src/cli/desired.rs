@@ -6,11 +6,12 @@
 //! code. Keeping these out of the IO orchestration lets the safety-critical
 //! rules be unit-tested directly, which is where the risk lives.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path};
 
 use suno_core::{
-    AudioFormat, Clip, Desired, ExecOutcome, NamingConfig, NamingRequest, RunStatus, SourceMode,
-    art_hash, meta_hash, render_clip_names,
+    AudioFormat, Clip, Desired, ExecOutcome, LineageContext, NamingConfig, NamingRequest,
+    RunStatus, SourceMode, art_hash, meta_hash, render_clip_names,
 };
 
 /// Below this manifest size the mass-deletion fraction rule does not fire; a
@@ -47,22 +48,57 @@ impl ExitCode {
 /// Naming is rendered as a batch so collisions are disambiguated, then the
 /// target format's extension is appended. `mode` is the source kind: a `sync`
 /// verb yields [`SourceMode::Mirror`], a `copy` verb [`SourceMode::Copy`].
-pub fn build_desired(clips: &[&Clip], format: AudioFormat, mode: SourceMode) -> Vec<Desired> {
+///
+/// `contexts` carries the resolved [`LineageContext`] for each clip (keyed by
+/// clip id); it drives the album component, the embedded lineage tags, and the
+/// change hash, so the same resolved values flow all the way to the executor. A
+/// clip missing from `contexts` falls back to a self-rooted context.
+///
+/// `colliding_albums` is the store's authoritative set of root titles shared by
+/// more than one distinct root; a clip whose album is in that set is folded into
+/// a `[{root_id8}]`-suffixed folder so two distinct roots never share one,
+/// regardless of which clips this batch happens to hold.
+pub fn build_desired(
+    clips: &[&Clip],
+    format: AudioFormat,
+    mode: SourceMode,
+    contexts: &HashMap<String, LineageContext>,
+    colliding_albums: &BTreeSet<String>,
+) -> Vec<Desired> {
     let config = NamingConfig::default();
-    let requests: Vec<NamingRequest<'_>> =
-        clips.iter().map(|clip| NamingRequest { clip }).collect();
-    let names = render_clip_names(&requests, &config);
+    let lineages: Vec<LineageContext> = clips
+        .iter()
+        .map(|clip| {
+            contexts
+                .get(&clip.id)
+                .cloned()
+                .unwrap_or_else(|| LineageContext::own_root(clip))
+        })
+        .collect();
+    // The requests borrow `lineages`; scope them so the borrow ends before the
+    // lineages are moved into the desired entries below.
+    let names = {
+        let requests: Vec<NamingRequest<'_>> = clips
+            .iter()
+            .zip(&lineages)
+            .map(|(clip, lineage)| NamingRequest { clip, lineage })
+            .collect();
+        render_clip_names(&requests, &config, colliding_albums)
+    };
 
     clips
         .iter()
         .zip(names)
-        .map(|(clip, name)| {
+        .zip(lineages)
+        .map(|((clip, name), lineage)| {
             let path = format!("{}.{format}", rel_to_string(&name.relative_path));
+            let meta_hash = meta_hash(clip, &lineage);
             Desired {
                 clip: (*clip).clone(),
+                lineage,
                 path,
                 format,
-                meta_hash: meta_hash(clip),
+                meta_hash,
                 art_hash: art_hash(clip),
                 modes: vec![mode],
                 trashed: false,
@@ -216,11 +252,25 @@ mod tests {
         }
     }
 
+    fn no_contexts() -> HashMap<String, LineageContext> {
+        HashMap::new()
+    }
+
+    fn no_collisions() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
     #[test]
     fn build_desired_appends_extension_and_mode() {
         let a = clip("id-a", "Song A", "alice");
         let clips = [&a];
-        let desired = build_desired(&clips, AudioFormat::Flac, SourceMode::Mirror);
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+        );
         assert_eq!(desired.len(), 1);
         assert!(
             desired[0].path.ends_with(".flac"),
@@ -231,8 +281,140 @@ mod tests {
         assert_eq!(desired[0].modes, vec![SourceMode::Mirror]);
         assert!(!desired[0].trashed);
         assert!(!desired[0].private);
-        assert_eq!(desired[0].meta_hash, meta_hash(&a));
+        let lineage = LineageContext::own_root(&a);
+        assert_eq!(desired[0].meta_hash, meta_hash(&a, &lineage));
         assert_eq!(desired[0].art_hash, art_hash(&a));
+        // A clip absent from the contexts map is treated as its own root.
+        assert_eq!(desired[0].lineage, lineage);
+    }
+
+    #[test]
+    fn build_desired_uses_supplied_lineage_context() {
+        let a = clip("child-1", "Remix", "alice");
+        let clips = [&a];
+        let lineage = LineageContext {
+            root_id: "root-1".to_owned(),
+            root_title: "Original".to_owned(),
+            parent_id: "root-1".to_owned(),
+            edge_type: None,
+            status: suno_core::ResolveStatus::Resolved,
+        };
+        let contexts: HashMap<String, LineageContext> =
+            [(a.id.clone(), lineage.clone())].into_iter().collect();
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &contexts,
+            &no_collisions(),
+        );
+        // The album folders under the root title, and the hash/lineage carry the
+        // resolved context, not a self-rooted fallback.
+        assert!(
+            desired[0].path.contains("/Original/"),
+            "path: {}",
+            desired[0].path
+        );
+        assert_eq!(desired[0].lineage, lineage);
+        assert_eq!(desired[0].meta_hash, meta_hash(&a, &lineage));
+    }
+
+    #[test]
+    fn lineage_is_stable_when_a_later_resolution_fails() {
+        // HARDENING H3: album folders and the change hash come from the durable
+        // store, not the live per-run resolution, so a second cycle whose
+        // resolver dropped (or whose ancestor was purged) must not move a file
+        // or force a retag. This drives the exact build_desired path the run
+        // flow uses, only swapping the store update for a no-op on cycle 2.
+        use suno_core::{LineageStore, Resolution, ResolveStatus, RootInfo};
+
+        let root = Clip {
+            id: "root-break".into(),
+            title: "Break Through".into(),
+            clip_type: "gen".into(),
+            handle: "alice".into(),
+            display_name: "alice".into(),
+            ..Default::default()
+        };
+        let child = Clip {
+            id: "child-remix".into(),
+            title: "Remix".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "root-break".into(),
+            edited_clip_id: "root-break".into(),
+            handle: "alice".into(),
+            display_name: "alice".into(),
+            ..Default::default()
+        };
+        let clips = [&root, &child];
+
+        let contexts_of = |store: &LineageStore| -> HashMap<String, LineageContext> {
+            clips
+                .iter()
+                .map(|c| (c.id.clone(), store.context_for(c)))
+                .collect()
+        };
+
+        // Cycle 1: the resolver succeeds and the store is updated in memory.
+        let mut roots = HashMap::new();
+        for id in ["root-break", "child-remix"] {
+            roots.insert(
+                id.to_owned(),
+                RootInfo {
+                    root_id: "root-break".into(),
+                    root_title: "Break Through".into(),
+                    status: ResolveStatus::Resolved,
+                },
+            );
+        }
+        let resolution = Resolution {
+            roots,
+            gap_filled: Vec::new(),
+        };
+        let mut store = LineageStore::new();
+        store.update(&[root.clone(), child.clone()], &resolution, "t1");
+
+        let cycle1 = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &contexts_of(&store),
+            &store.colliding_root_titles(),
+        );
+        let child1 = cycle1.iter().find(|d| d.clip.id == "child-remix").unwrap();
+        assert!(
+            child1.path.contains("/Break Through/"),
+            "the remix should folder under its root album, got {}",
+            child1.path
+        );
+
+        // Cycle 2: the resolver failed, so the persisted store is used as-is.
+        let cycle2 = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &contexts_of(&store),
+            &store.colliding_root_titles(),
+        );
+        for (a, b) in cycle1.iter().zip(&cycle2) {
+            assert_eq!(a.path, b.path, "album path drifted for {}", a.clip.id);
+            assert_eq!(
+                a.meta_hash, b.meta_hash,
+                "meta_hash drifted for {}",
+                a.clip.id
+            );
+        }
+
+        // The bug this guards against: the old own-root fallback on a dropped
+        // resolution would fold the child under its OWN title and rewrite its
+        // hash, i.e. exactly the rename/retag storm H3 forbids.
+        let own = LineageContext::own_root(&child);
+        assert_ne!(
+            meta_hash(&child, &own),
+            child1.meta_hash,
+            "own-root fallback must differ from the store-driven hash"
+        );
     }
 
     #[test]
@@ -241,7 +423,13 @@ mod tests {
         let a = clip("id-a", "Same", "alice");
         let b = clip("id-b", "Same", "alice");
         let clips = [&a, &b];
-        let desired = build_desired(&clips, AudioFormat::Mp3, SourceMode::Copy);
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Mp3,
+            SourceMode::Copy,
+            &no_contexts(),
+            &no_collisions(),
+        );
         assert_ne!(desired[0].path, desired[1].path);
         assert!(desired.iter().all(|d| d.path.ends_with(".mp3")));
         assert!(desired.iter().all(|d| d.modes == vec![SourceMode::Copy]));
@@ -251,7 +439,13 @@ mod tests {
     fn build_desired_uses_forward_slashes() {
         let a = clip("id-a", "Song A", "alice");
         let clips = [&a];
-        let desired = build_desired(&clips, AudioFormat::Flac, SourceMode::Mirror);
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+        );
         assert!(!desired[0].path.contains('\\'));
         assert!(desired[0].path.contains('/'));
     }

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use suno_core::{
-    AudioFormat, ClerkAuth, Clock, Ffmpeg, Filesystem, FlagOverrides, SunoClient, TrackMetadata,
-    tag_flac, tag_mp3,
+    AudioFormat, ClerkAuth, Clock, Ffmpeg, Filesystem, FlagOverrides, LineageContext, SunoClient,
+    TrackMetadata, tag_flac, tag_mp3,
 };
 
 use crate::cli::args::{FetchArgs, GlobalArgs};
@@ -67,7 +67,10 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
         .get_clip(&http, &id)
         .await
         .context("could not fetch the clip")?;
-    let meta = TrackMetadata::from_clip(&clip);
+    // A single-clip fetch has no resolution universe, so the clip stands as its
+    // own root: album folders under its own title and no lineage tags.
+    let lineage = LineageContext::own_root(&clip);
+    let meta = TrackMetadata::from_clip(&clip, &lineage);
     let cover = download::cover(&http, &clip).await;
 
     let fs = FsAdapter::new(&root);

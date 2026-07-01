@@ -46,14 +46,14 @@ pub use graph::{CacheEntry, LineageStore, Node, StoredEdge};
 pub use hash::{art_hash, meta_hash};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use lineage::{
-    Edge, EdgeRole, EdgeType, Resolution, ResolveOpts, ResolveStatus, RootInfo, edge_type,
-    immediate_parent, lineage_edges, resolve_roots,
+    Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveOpts, ResolveStatus, RootInfo,
+    edge_type, immediate_parent, lineage_edges, resolve_roots,
 };
 pub use manifest::{Manifest, ManifestEntry};
 pub use model::{Clip, HistoryEntry};
 pub use naming::{
-    CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, derive_album,
-    render_clip_name, render_clip_names,
+    CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,
+    render_clip_names,
 };
 pub use reconcile::{Action, Desired, LocalFile, Plan, SourceMode, SourceStatus, reconcile};
 pub use tag::{TrackMetadata, tag_flac, tag_mp3};

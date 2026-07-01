@@ -18,6 +18,7 @@ use serde_json::{Map, Value};
 use crate::auth::ClerkAuth;
 use crate::client::SunoClient;
 use crate::config::Config;
+use crate::lineage::LineageContext;
 use crate::model::Clip;
 use crate::naming::{DEFAULT_TEMPLATE, NamingConfig, NamingRequest, render_clip_name};
 use crate::select::RecencySpec;
@@ -147,7 +148,8 @@ proptest! {
             max_component_len,
             ..Default::default()
         };
-        let request = NamingRequest { clip: &clip };
+        let lineage = LineageContext::own_root(&clip);
+        let request = NamingRequest { clip: &clip, lineage: &lineage };
         let rendered = render_clip_name(request, &config);
 
         prop_assert!(rendered.relative_path.is_relative(), "the path must be relative");

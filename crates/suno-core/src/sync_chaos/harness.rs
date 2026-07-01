@@ -17,6 +17,7 @@ use crate::config::AudioFormat;
 use crate::executor::{ExecOptions, ExecOutcome, Ports, execute};
 use crate::fs::Filesystem;
 use crate::hash::{art_hash, meta_hash};
+use crate::lineage::LineageContext;
 use crate::manifest::Manifest;
 use crate::model::Clip;
 use crate::reconcile::{Action, Desired, LocalFile, Plan, SourceMode, SourceStatus, reconcile};
@@ -154,14 +155,16 @@ pub(super) fn clip_of(spec: &ClipSpec) -> Clip {
 /// sentinels so retag detection is exercised exactly as in production.
 pub(super) fn desired_of(spec: &ClipSpec) -> Desired {
     let clip = clip_of(spec);
+    let lineage = LineageContext::own_root(&clip);
     Desired {
         path: path_of(spec),
         format: spec.format,
-        meta_hash: meta_hash(&clip),
+        meta_hash: meta_hash(&clip, &lineage),
         art_hash: art_hash(&clip),
         modes: spec.modes.clone(),
         trashed: spec.trashed,
         private: spec.private,
+        lineage,
         clip,
     }
 }
