@@ -20,13 +20,14 @@ use suno_core::{
 /// rule still covers the catastrophic case.
 const MASS_DELETE_FLOOR: usize = 8;
 
-/// Process exit codes, mirroring `docs/cli-ux.md` §5.
+/// Process exit codes, mirroring the guide (docs/src/scheduling-and-exit-codes.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitCode {
     Ok = 0,
     General = 1,
     /// Reserved for argument-parsing failures, which clap emits itself; kept so
-    /// the enum mirrors the full exit-code table in `docs/cli-ux.md` §5.
+    /// the enum mirrors the full exit-code table in the guide
+    /// (docs/src/scheduling-and-exit-codes.md).
     #[allow(dead_code)]
     Usage = 2,
     Config = 3,
@@ -320,7 +321,7 @@ pub fn confirmed(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-/// Map an [`ExecOutcome`] to a process exit code (`docs/cli-ux.md` §5).
+/// Map an [`ExecOutcome`] to a process exit code (docs/src/scheduling-and-exit-codes.md).
 ///
 /// An auth abort is 4. A clean run is 0. With failures, the run is "transient
 /// exhausted" (6) when nothing at all progressed, otherwise "partial" (5).

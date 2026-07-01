@@ -36,7 +36,7 @@ pub fn ls_row(clip: &Clip) -> String {
     )
 }
 
-/// The stable per-clip NDJSON object for `lsjson` (`docs/cli-ux.md` §3).
+/// The stable per-clip NDJSON object for `lsjson` (docs/src/commands-reference.md).
 ///
 /// The field order is the on-disk order; the set is additive. Nullable fields
 /// serialise as JSON `null` when the API supplied no value.

@@ -87,10 +87,10 @@ Ports and adapters. `suno-core` is runtime-agnostic and performs no direct IO; i
 
 ## Design and contributing
 
-- The CLI surface, flags, output formats, exit codes, and help text are specified in [docs/cli-ux.md](docs/cli-ux.md). Match it; if you must diverge, say so and update it.
+- The CLI surface, flags, output formats, exit codes, and help text are documented in the user guide (`docs/src/`, published to GitHub Pages). Match it; if you must diverge, say so and update it.
 - Exit codes: `0` ok, `1` general error, `2` usage, `3` config, `4` auth, `5` partial, `6` transient-exhausted, `7` safety abort, `8` interrupted. Usage is `2` to match clap's default.
 - Keep each change tightly scoped to one module or concern. Add new modules as their own files and export them from `lib.rs`; avoid wide edits that cause integration conflicts.
-- We integrate fast-forward only (rebase onto `main`, then `git merge --ff-only`). See [docs/cloud-agents.md](docs/cloud-agents.md) for how cloud-agent work is dispatched and reviewed.
+- We integrate fast-forward only (rebase onto `main`, then `git merge --ff-only`).
 
 ## Reference
 
