@@ -275,6 +275,7 @@ mod tests {
                 art_hash: "a".to_owned(),
                 size: 10,
                 preserve: true,
+                ..Default::default()
             },
         );
         save_manifest(&dir, &manifest).unwrap();

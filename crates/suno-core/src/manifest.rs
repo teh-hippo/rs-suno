@@ -2,9 +2,10 @@
 //!
 //! The manifest is the prior on the reconcile engine: it records, per clip id,
 //! where the file lives, its format, the content hashes used to detect tag and
-//! art drift, and its size. The CLI loads and saves it; this module only models
-//! it and provides pure helpers. It is unversioned: serde round-trips it to a
-//! flat JSON object keyed by clip id with no envelope.
+//! art drift, its size, and the state of each external sidecar artifact. The CLI
+//! loads and saves it; this module only models it and provides pure helpers. It
+//! is unversioned: serde round-trips it to a flat JSON object keyed by clip id
+//! with no envelope.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Iter;
@@ -12,6 +13,19 @@ use std::collections::btree_map::Iter;
 use serde::{Deserialize, Serialize};
 
 use crate::config::AudioFormat;
+
+/// The prior known state of one external sidecar artifact for a clip.
+///
+/// Records where the sidecar lives and a hash of the content or source it was
+/// rendered from, so a later reconcile can detect drift and trigger a rewrite.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArtifactState {
+    /// Relative path of the sidecar file under the account root.
+    pub path: String,
+    /// Content/source change hash; a change triggers a rewrite.
+    pub hash: String,
+}
 
 /// One manifest record: the prior known state of a single downloaded clip.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +45,12 @@ pub struct ManifestEntry {
     /// so it must never be deleted as an orphan no matter the current selection.
     /// The caller writes this marker; the reconcile engine only reads it.
     pub preserve: bool,
+    /// Prior state of the external `cover.jpg` sidecar, when one was written.
+    #[serde(default)]
+    pub cover_jpg: Option<ArtifactState>,
+    /// Prior state of the external `cover.webp` sidecar, when one was written.
+    #[serde(default)]
+    pub cover_webp: Option<ArtifactState>,
 }
 
 /// The full prior download state, keyed by clip id.
@@ -102,6 +122,7 @@ mod tests {
             art_hash: "a".to_string(),
             size: 42,
             preserve: false,
+            ..Default::default()
         }
     }
 
@@ -163,6 +184,17 @@ mod tests {
         let mut m = Manifest::new();
         m.insert("a", entry("a.flac", AudioFormat::Flac));
         m.insert("b", entry("b.mp3", AudioFormat::Mp3));
+        // An entry carrying both sidecar artifacts must round-trip intact.
+        let mut c = entry("c.flac", AudioFormat::Flac);
+        c.cover_jpg = Some(ArtifactState {
+            path: "c/cover.jpg".to_string(),
+            hash: "jpg-hash".to_string(),
+        });
+        c.cover_webp = Some(ArtifactState {
+            path: "c/cover.webp".to_string(),
+            hash: "webp-hash".to_string(),
+        });
+        m.insert("c", c);
         let json = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(m, back);
@@ -230,5 +262,36 @@ mod tests {
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert!(back.get("a").unwrap().preserve);
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn cover_artifacts_default_to_none_when_absent() {
+        // A pre-growth manifest, written before the sidecar fields existed, must
+        // load with no artifacts and unpreserved, proving the growth is purely
+        // additive and backwards compatible.
+        let json = r#"{"clip1":{"path":"a.flac","format":"flac","meta_hash":"m","art_hash":"a","size":1}}"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        let e = m.get("clip1").unwrap();
+        assert_eq!(e.cover_jpg, None);
+        assert_eq!(e.cover_webp, None);
+        assert!(!e.preserve);
+    }
+
+    #[test]
+    fn artifact_state_defaults_and_roundtrips() {
+        let empty = ArtifactState::default();
+        assert_eq!(empty.path, "");
+        assert_eq!(empty.hash, "");
+        let json = serde_json::to_string(&empty).unwrap();
+        let back: ArtifactState = serde_json::from_str(&json).unwrap();
+        assert_eq!(empty, back);
+
+        let populated = ArtifactState {
+            path: "x/cover.webp".to_string(),
+            hash: "content-hash".to_string(),
+        };
+        let json = serde_json::to_string(&populated).unwrap();
+        let back: ArtifactState = serde_json::from_str(&json).unwrap();
+        assert_eq!(populated, back);
     }
 }

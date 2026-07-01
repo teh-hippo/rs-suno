@@ -487,6 +487,7 @@ mod tests {
             art_hash: art.to_string(),
             size: 100,
             preserve: false,
+            ..Default::default()
         }
     }
 
@@ -1455,6 +1456,7 @@ mod proptests {
                     art_hash,
                     size,
                     preserve,
+                    ..Default::default()
                 }
             })
     }

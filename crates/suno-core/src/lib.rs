@@ -49,7 +49,7 @@ pub use lineage::{
     Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveOpts, ResolveStatus, RootInfo,
     edge_type, immediate_parent, lineage_edges, resolve_roots,
 };
-pub use manifest::{Manifest, ManifestEntry};
+pub use manifest::{ArtifactState, Manifest, ManifestEntry};
 pub use model::{Clip, HistoryEntry};
 pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,

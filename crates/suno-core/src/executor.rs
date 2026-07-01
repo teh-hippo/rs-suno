@@ -688,6 +688,7 @@ fn manifest_entry(d: &Desired, size: u64) -> ManifestEntry {
         art_hash: d.art_hash.clone(),
         size,
         preserve: preserve_for(d),
+        ..Default::default()
     }
 }
 
@@ -824,6 +825,7 @@ mod tests {
             art_hash: "old-art".to_owned(),
             size: 8,
             preserve: false,
+            ..Default::default()
         }
     }
 
