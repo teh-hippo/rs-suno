@@ -93,6 +93,45 @@ do intend a mass deletion, confirm it explicitly with `--min-newest 0 --yes`. A
 stored `min_newest = 0` or a habitual `--yes` alone will not disarm the
 empty-listing guard.
 
+### The account identity guard
+
+The mass-deletion abort still has a blind spot: it is disarmed by `--min-newest
+0 --yes`, and it does not fire on a small library (below the mass-deletion
+floor). Both leave a gap where pointing one account's library at another
+account's token would make every local file look absent from the source and be
+deleted.
+
+To close that gap, each library remembers the account it belongs to. On its
+first run, `suno` pins the library to the authenticated account (trust on first
+use): a fresh, empty destination is adopted outright, and an existing library is
+adopted only when the account's listing overlaps the clips already on disk.
+Once pinned, every later `sync`, `copy`, and `check` compares the authenticated
+account against the pin and **refuses to run on a mismatch**, exiting with the
+safety code (7) and touching nothing:
+
+```text
+error: this library belongs to Alice (id user_abc) but the token authenticates
+as Bob (id user_xyz). Refusing to run to protect the library. Pass
+--allow-account-change to re-pin it to the authenticated account, or use a
+different destination.
+```
+
+If you genuinely mean to move a library to a different account, pass
+`--allow-account-change`. That run re-pins the library to the authenticated
+account and runs **additively** (it deletes nothing, like `copy`), so it can
+never wipe the previous account's files in the same step. A subsequent normal
+`sync`, now pinned to the new account, mirrors as usual. The flag applies only
+to an executing `sync` or `copy`; `check` and `--dry-run` reject it (exit 2)
+because they never persist a pin. The same flag also adopts an unpinned legacy
+library whose listing shares no clips with the files on disk, in case a genuine
+account shares nothing with an older download. The pin lives in the lineage
+store (`.suno-lineage.json`); a pin, adoption, or re-pin is recorded in
+`.suno-audit.log`.
+
+For a belt-and-braces check you can also set `account_id` in an account's config
+(see the configuration guide): the run then refuses before contacting Suno if
+the token authenticates as a different id.
+
 ### The confirmation prompt
 
 When a `sync` would delete files and you did not pass `--yes`:

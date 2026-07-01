@@ -25,10 +25,10 @@ const MASS_DELETE_FLOOR: usize = 8;
 pub enum ExitCode {
     Ok = 0,
     General = 1,
-    /// Reserved for argument-parsing failures, which clap emits itself; kept so
-    /// the enum mirrors the full exit-code table in the guide
+    /// A usage error the CLI raises itself, such as `--allow-account-change` on
+    /// a non-executing verb. clap emits its own parse failures with this code
+    /// too; kept so the enum mirrors the full exit-code table in the guide
     /// (docs/src/scheduling-and-exit-codes.md).
-    #[allow(dead_code)]
     Usage = 2,
     Config = 3,
     Auth = 4,

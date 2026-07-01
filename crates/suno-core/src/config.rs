@@ -70,6 +70,10 @@ pub struct SourceConfig {
 pub struct AccountConfig {
     pub token: Option<String>,
     pub root: Option<String>,
+    /// Optional Suno user id to assert this account authenticates as, refusing
+    /// to run on a mismatch (a belt-and-braces check alongside the on-disk
+    /// owner pin in the lineage store).
+    pub account_id: Option<String>,
     pub format: Option<AudioFormat>,
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
@@ -237,6 +241,7 @@ impl Config {
 
         Ok(EffectiveSettings {
             token,
+            account_id: acc.account_id.clone(),
             format,
             concurrency,
             retries,
@@ -309,6 +314,8 @@ pub struct FlagOverrides {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveSettings {
     pub token: Option<String>,
+    /// The optional configured account id assertion (see [`AccountConfig`]).
+    pub account_id: Option<String>,
     pub format: AudioFormat,
     pub concurrency: u32,
     pub retries: u32,
@@ -348,6 +355,23 @@ mod tests {
     }
 
     #[test]
+    fn account_id_parses_and_resolves() {
+        let toml = r#"
+            [accounts.alice]
+            token = "tok"
+            root = "/music"
+            account_id = "user_abc123"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        assert_eq!(
+            cfg.accounts["alice"].account_id.as_deref(),
+            Some("user_abc123")
+        );
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.account_id.as_deref(), Some("user_abc123"));
+    }
+
+    #[test]
     fn parse_defaults_section() {
         let toml = r#"
             [defaults]
@@ -374,6 +398,7 @@ mod tests {
             eff,
             EffectiveSettings {
                 token: None,
+                account_id: None,
                 format: AudioFormat::Flac,
                 concurrency: 4,
                 retries: 3,

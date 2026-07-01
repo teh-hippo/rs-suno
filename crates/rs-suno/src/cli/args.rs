@@ -139,6 +139,10 @@ pub struct SyncArgs {
     /// Also write an animated cover.webp from each clip's video preview.
     #[arg(long)]
     pub animated_covers: bool,
+    /// Re-pin this library to the authenticated account (use only when you
+    /// deliberately point it at a different Suno account).
+    #[arg(long)]
+    pub allow_account_change: bool,
 }
 
 /// `check` accepts every `sync` flag plus `--exit-code`.
@@ -316,6 +320,22 @@ mod tests {
         match cli.command {
             Command::Copy(args) => assert!(!args.animated_covers),
             _ => panic!("expected copy"),
+        }
+    }
+
+    #[test]
+    fn sync_parses_allow_account_change_flag() {
+        // Off by default; the flag opts into re-pinning the library owner.
+        let cli = Cli::try_parse_from(["suno", "sync", "/music"]).unwrap();
+        match cli.command {
+            Command::Sync(args) => assert!(!args.allow_account_change),
+            _ => panic!("expected sync"),
+        }
+        let cli =
+            Cli::try_parse_from(["suno", "sync", "/music", "--allow-account-change"]).unwrap();
+        match cli.command {
+            Command::Sync(args) => assert!(args.allow_account_change),
+            _ => panic!("expected sync"),
         }
     }
 

@@ -190,6 +190,22 @@ pub fn append_audit(
     append(&dest.join(AUDIT_NAME), &buf)
 }
 
+/// Append one line recording an owner-pin change to `.suno-audit.log`.
+///
+/// The full user id lands in the audit file (never printed to stderr, where
+/// only a short prefix is shown). `action` is a short verb such as `PIN`,
+/// `ADOPT`, or `REPIN`.
+pub fn append_owner_pin(
+    dest: &Path,
+    action: &str,
+    user_id: &str,
+    display_name: &str,
+) -> Result<()> {
+    let now = iso_utc(unix_now());
+    let line = format!("{now}\tOWNER\t{action}\t{user_id}\t{display_name}\n");
+    append(&dest.join(AUDIT_NAME), &line)
+}
+
 /// Append `text` to `path`, creating it if needed.
 fn append(path: &Path, text: &str) -> Result<()> {
     let mut file = OpenOptions::new()
@@ -414,6 +430,27 @@ mod tests {
         assert_eq!(back, store);
         assert!(back.node("child").is_some());
         assert_eq!(back.get_root("child").unwrap().root_id, "root");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn owner_pin_persists_across_save_and_load() {
+        // First-use adoption must be durable: a pinned owner survives the
+        // save/load roundtrip, and the audit helper records the pin.
+        let dir = temp_dir("graph-owner");
+        let mut store = LineageStore::new();
+        store.pin_owner(suno_core::Owner {
+            user_id: "user_abc123456".to_owned(),
+            display_name: "Alice".to_owned(),
+        });
+        save_graph(&dir, &store).unwrap();
+        let back = load_graph(&dir).unwrap();
+        assert_eq!(back.owner().unwrap().user_id, "user_abc123456");
+        assert_eq!(back.owner().unwrap().display_name, "Alice");
+
+        append_owner_pin(&dir, "PIN", "user_abc123456", "Alice").unwrap();
+        let log = std::fs::read_to_string(dir.join(AUDIT_NAME)).unwrap();
+        assert!(log.contains("OWNER\tPIN\tuser_abc123456\tAlice"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

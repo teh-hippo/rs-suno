@@ -67,13 +67,14 @@ format = "mp3"
 |---|---|---|---|
 | `token` | string | | The `__client` session token for the account. |
 | `root` | path | | Default destination directory. Used when a command omits `DEST`, and required by `--all`. |
+| `account_id` | string | | Optional Suno user id this account must authenticate as. When set, a run refuses (exit 7) before contacting Suno if the token belongs to a different id, a belt-and-braces check alongside the on-disk owner pin. See [deletion safety](sync-copy-and-deletion-safety.md). |
 | `format` | `mp3` \| `flac` \| `wav` | `flac` | Audio format for downloads. |
 | `retries` | integer | `3` | Download retry attempts per clip before it is logged as failed. |
 | `min_newest` | integer | `1` | Minimum newest clips kept when a recency filter would otherwise select nothing. |
 | `animated_covers` | bool | `false` | Also write animated WebP covers from clip video previews. |
 
-Any account key except `token` and `root` may also be set under `[defaults]` to
-apply to every account.
+Any account key except `token`, `root`, and `account_id` may also be set under
+`[defaults]` to apply to every account.
 
 ### Multiple accounts
 

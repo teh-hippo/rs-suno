@@ -16,10 +16,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
-    AlbumArt, AlbumDesired, ClerkAuth, Clip, Config, Error as CoreError, ExecOptions, Filesystem,
-    FlagOverrides, LineageContext, LocalFile, PlaylistDesired, PlaylistState, Ports, ResolveOpts,
-    RunStatus, SourceMode, SourceStatus, SunoClient, album_desired, deletion_allowed,
-    plan_album_artifacts, plan_playlist_artifacts, reconcile, resolve_roots,
+    AdoptDecision, AlbumArt, AlbumDesired, ClerkAuth, Clip, Config, Error as CoreError,
+    ExecOptions, Filesystem, FlagOverrides, LineageContext, LocalFile, Owner, OwnerGate,
+    PlaylistDesired, PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode, SourceStatus,
+    SunoClient, adopt_decision, album_desired, deletion_allowed, owner_gate, plan_album_artifacts,
+    plan_playlist_artifacts, reconcile, resolve_roots,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
@@ -406,6 +407,16 @@ async fn run_one(
 ) -> Result<ExitCode> {
     let verbosity = global.verbosity();
 
+    // Re-pinning is a destructive-intent override that only makes sense on an
+    // executing run: check and dry-run never persist a pin, so accepting the
+    // flag there would print a re-pin that silently never happens.
+    if args.allow_account_change && (global.dry_run || verb == Verb::Check) {
+        eprintln!(
+            "error: --allow-account-change only applies to an executing sync or copy, not check or --dry-run."
+        );
+        return Ok(ExitCode::Usage);
+    }
+
     let settings = {
         let resolved = if target.implicit {
             synthetic_config().resolve("default", None, env, flags)
@@ -438,11 +449,99 @@ async fn run_one(
     }
 
     let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
+    let dest = &target.dest;
     let mut auth = ClerkAuth::new(&token);
     if let Err(err) = auth.authenticate(&http).await {
         return Ok(report_auth_failure(&target.label, &err));
     }
     let account = auth.display_name().to_owned();
+    // Fail closed: the identity guard cannot run without an authenticated id,
+    // and proceeding would delete against an unverified account. authenticate()
+    // already errors on a missing id; this makes the invariant explicit.
+    let Some(user_id) = auth.user_id().map(str::to_owned) else {
+        eprintln!(
+            "error: could not determine the authenticated account for '{}'. Refusing to run to protect the library.",
+            target.label
+        );
+        return Ok(ExitCode::Auth);
+    };
+
+    // Load the durable store up front so the identity guard can compare the
+    // authenticated account against the account this library is pinned to,
+    // before a single feed request is made (PHASE 1, below). A mismatch aborts
+    // here so a swapped or mistyped token can never make another account's
+    // clips look absent from source and delete this library's files.
+    let mut store = logs::load_graph(dest)?;
+    let mut owner_dirty = false;
+    // A pin/adopt/re-pin that actually happens this run: its notice is printed
+    // and its audit line written only on the executing path, where the pin is
+    // persisted (F1: check/dry-run must not claim a pin they never save).
+    let mut pending_pin: Option<PendingPin> = None;
+
+    // PHASE 1: decide identity with no network via the pure gate, then apply
+    // the side-effects (pin, refresh, abort) here.
+    let gate = owner_gate(
+        store.owner(),
+        settings.account_id.as_deref(),
+        &user_id,
+        args.allow_account_change,
+    );
+    let mut force_additive = gate.is_additive();
+    match gate {
+        OwnerGate::AbortConfigMismatch => {
+            eprintln!(
+                "error: the configured account_id ({}) does not match the authenticated account (id {}). Refusing to run to protect the library.",
+                short_id(settings.account_id.as_deref().unwrap_or_default()),
+                short_id(&user_id)
+            );
+            return Ok(ExitCode::Safety);
+        }
+        OwnerGate::AbortMismatch => {
+            let pinned = store.owner().expect("mismatch implies a pinned owner");
+            eprintln!(
+                "error: this library belongs to {} (id {}) but the token authenticates as {} (id {}). Refusing to run to protect the library. Pass --allow-account-change to re-pin it to the authenticated account, or use a different destination.",
+                pinned.display_name,
+                short_id(&pinned.user_id),
+                account,
+                short_id(&user_id)
+            );
+            return Ok(ExitCode::Safety);
+        }
+        OwnerGate::Repin => {
+            let previous = store
+                .owner()
+                .map(|owner| owner.display_name.clone())
+                .unwrap_or_default();
+            store.pin_owner(Owner {
+                user_id: user_id.clone(),
+                display_name: account.clone(),
+            });
+            owner_dirty = true;
+            pending_pin = Some(PendingPin {
+                action: "REPIN",
+                notice: format!(
+                    "notice: re-pinned this library from {} to {} (id {}); this run is additive (no deletions). Run 'sync' again to mirror.",
+                    previous,
+                    account,
+                    short_id(&user_id)
+                ),
+            });
+        }
+        OwnerGate::Proceed => {
+            if store.refresh_display_name(&account) {
+                owner_dirty = true;
+            }
+            if args.allow_account_change && verbosity >= 0 {
+                eprintln!(
+                    "notice: --allow-account-change had no effect; this library already belongs to {} (id {}).",
+                    account,
+                    short_id(&user_id)
+                );
+            }
+        }
+        OwnerGate::FirstUse => {}
+    }
+
     let mut client = SunoClient::new(auth, TokioClock);
 
     let (clips, complete) = match client.list_clips(&http, false, args.limit).await {
@@ -466,17 +565,14 @@ async fn run_one(
         }
     };
 
-    let dest = &target.dest;
-
     // The durable lineage graph is the single source of truth for every
     // file-affecting decision (album folders, embedded tags, the change hash).
     // Deriving those from the live per-run resolution instead would let one
     // dropped resolution call rename and retag the whole library (HARDENING
-    // H3), so load the store, fold in this run's resolution only when it
-    // succeeded (a monotonic upsert that never downgrades a known root), and
-    // build every context from the store. When resolution failed the store is
-    // used untouched, so prior albums hold and nothing is rewritten.
-    let mut store = logs::load_graph(dest)?;
+    // H3), so fold in this run's resolution only when it succeeded (a monotonic
+    // upsert that never downgrades a known root), and build every context from
+    // the store. When resolution failed the store is used untouched, so prior
+    // albums hold and nothing is rewritten.
     let graph_changed = resolution.is_some();
     if let Some(resolution) = &resolution {
         store.update(&clips, resolution, &now_rfc3339());
@@ -484,6 +580,92 @@ async fn run_one(
     let colliding_albums = store.colliding_root_titles();
     let narrowed = is_narrowed(args.limit, args.since.as_deref());
     let enumerated = fully_enumerated(complete, narrowed);
+
+    // PHASE 2: first-use adoption, now the listing is known. Only a library
+    // that PHASE 1 left unpinned (FirstUse) reaches here; identity is confirmed
+    // from the overlap between this account's listing and the clips already
+    // owned. The manifest is read before the lock deliberately: only the
+    // empty-vs-non-empty and overlap facts matter, so a concurrent write cannot
+    // flip the decision unsafely.
+    if gate == OwnerGate::FirstUse {
+        let owned = logs::load_manifest(dest)?;
+        let owned_ids: BTreeSet<&str> = owned.entries.keys().map(String::as_str).collect();
+        let listed_ids: Vec<&str> = clips.iter().map(|clip| clip.id.as_str()).collect();
+        let decision = adopt_decision(
+            &listed_ids,
+            &owned_ids,
+            enumerated,
+            args.allow_account_change,
+        );
+        force_additive = force_additive || decision.is_additive();
+        match decision {
+            AdoptDecision::PinFresh => {
+                store.pin_owner(Owner {
+                    user_id: user_id.clone(),
+                    display_name: account.clone(),
+                });
+                owner_dirty = true;
+                pending_pin = Some(PendingPin {
+                    action: "PIN",
+                    notice: format!(
+                        "notice: pinned this library to {} (id {}).",
+                        account,
+                        short_id(&user_id)
+                    ),
+                });
+            }
+            AdoptDecision::PinAdopt => {
+                store.pin_owner(Owner {
+                    user_id: user_id.clone(),
+                    display_name: account.clone(),
+                });
+                owner_dirty = true;
+                pending_pin = Some(PendingPin {
+                    action: "ADOPT",
+                    notice: format!(
+                        "notice: adopted this existing library for {} (id {}).",
+                        account,
+                        short_id(&user_id)
+                    ),
+                });
+            }
+            AdoptDecision::AdoptForced => {
+                store.pin_owner(Owner {
+                    user_id: user_id.clone(),
+                    display_name: account.clone(),
+                });
+                owner_dirty = true;
+                pending_pin = Some(PendingPin {
+                    action: "ADOPT",
+                    notice: format!(
+                        "notice: adopted this library for {} (id {}) despite no overlap; this run is additive (no deletions). Run 'sync' again to mirror.",
+                        account,
+                        short_id(&user_id)
+                    ),
+                });
+            }
+            AdoptDecision::Abort => {
+                eprintln!(
+                    "error: none of the authenticated account's clips ({}, id {}) match this library at {}. Refusing to run in case the token authenticates as a different Suno account. Pass --allow-account-change to adopt it, or use a different destination.",
+                    account,
+                    short_id(&user_id),
+                    dest.display()
+                );
+                return Ok(ExitCode::Safety);
+            }
+            AdoptDecision::SkipPin => {}
+        }
+    }
+
+    // A re-pin run (Mismatch + --allow-account-change) must never delete the
+    // previous account's files this invocation, so it runs additively (Copy
+    // semantics) regardless of the verb; a subsequent normal sync, now pinned
+    // to the new account, will mirror.
+    let mode = if force_additive {
+        SourceMode::Copy
+    } else {
+        verb.mode()
+    };
 
     let since = match args.since.as_deref().map(RecencySpec::parse).transpose() {
         Ok(since) => since,
@@ -507,7 +689,7 @@ async fn run_one(
     let desired = build_desired(
         &selected,
         settings.format,
-        verb.mode(),
+        mode,
         &contexts,
         &colliding_albums,
         settings.animated_covers,
@@ -562,7 +744,7 @@ async fn run_one(
             &stored_playlists,
             enumerated,
             playlists_enumerated,
-            verb,
+            mode,
         )?;
         if verbosity >= 1 {
             let no_failures = HashSet::new();
@@ -596,19 +778,30 @@ async fn run_one(
         &stored_playlists,
         enumerated,
         playlists_enumerated,
-        verb,
+        mode,
     )?;
 
     // Persist the lineage graph *before* execute (durability H4), under the same
-    // lock as the manifest, but only when this run refreshed it — a failed
-    // resolution leaves the on-disk store untouched, so there is nothing new to
-    // write. The interrupt path is already covered because the graph lands on
-    // disk before any download begins.
-    if graph_changed {
+    // lock as the manifest. This run refreshed it when it folded in a fresh
+    // resolution (`graph_changed`) or when the identity guard pinned or updated
+    // the owner (`owner_dirty`); an owner-only change must persist even when
+    // resolution failed, so a first-use adoption is durable.
+    if graph_changed || owner_dirty {
         logs::save_graph(dest, &store)?;
     }
+    // Announce and audit an actual pin only now, on the executing path, so a
+    // notice is never printed for a pin that check/dry-run would not persist
+    // (F1). The full id goes to the audit file, never to stderr.
+    if let Some(pin) = &pending_pin {
+        if verbosity >= -1 {
+            eprintln!("{}", pin.notice);
+        }
+        if let Some(owner) = store.owner() {
+            logs::append_owner_pin(dest, pin.action, &owner.user_id, &owner.display_name)?;
+        }
+    }
 
-    let is_sync = verb == Verb::Sync;
+    let is_sync = verb == Verb::Sync && !force_additive;
     // The mass-delete cap counts every destructive action, audio and sidecar
     // alike (HARDENING B2), so a run that would mass-delete artifacts aborts too.
     let delete_count = plan.deletes() + plan.artifact_deletes();
@@ -921,12 +1114,12 @@ fn load_and_reconcile(
     playlists: &BTreeMap<String, PlaylistState>,
     enumerated: bool,
     playlists_enumerated: bool,
-    verb: Verb,
+    mode: SourceMode,
 ) -> Result<(suno_core::Manifest, suno_core::Plan)> {
     let manifest = logs::load_manifest(dest)?;
     let local = stat_manifest(dest, &manifest);
     let sources = vec![SourceStatus {
-        mode: verb.mode(),
+        mode,
         fully_enumerated: enumerated,
     }];
     let can_delete = deletion_allowed(&sources);
@@ -1036,6 +1229,21 @@ fn synthetic_config() -> Config {
 /// Pick the more severe of two exit codes (`Ok` is least severe).
 fn worse(a: ExitCode, b: ExitCode) -> ExitCode {
     if b.code() >= a.code() { b } else { a }
+}
+
+/// The first eight characters of an id, for user-facing messages. The full id
+/// (and never the token) may go to the audit file, but only a short prefix is
+/// ever printed.
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+/// A pin/adopt/re-pin that this run will apply: its audit action (`PIN`,
+/// `ADOPT`, or `REPIN`) and the stderr notice, both deferred to the executing
+/// path so they are emitted only when the pin is actually persisted.
+struct PendingPin {
+    action: &'static str,
+    notice: String,
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -1165,7 +1373,7 @@ mod tests {
             &BTreeMap::new(),
             false,
             false,
-            Verb::Sync,
+            SourceMode::Mirror,
         )
         .unwrap();
         assert!(manifest.is_empty());
@@ -1335,5 +1543,71 @@ mod tests {
             ],
         };
         assert_eq!(deletion_paths(&plan), vec!["a.flac", "a/cover.jpg"]);
+    }
+
+    #[tokio::test]
+    async fn allow_account_change_is_rejected_on_check_before_any_network() {
+        // F1: the flag re-pins, which check/dry-run never persist, so run_one
+        // must reject it up front with a usage error and never reach auth or the
+        // feed. The target points at a bogus dest with no token, proving the
+        // early return happens before any listing.
+        let global = GlobalArgs::default();
+        let args = SyncArgs {
+            allow_account_change: true,
+            ..Default::default()
+        };
+        let target = TargetSpec {
+            label: "alice".to_owned(),
+            dest: PathBuf::from("/nonexistent-check-guard"),
+            implicit: false,
+        };
+        let flags = FlagOverrides::default();
+        let env = HashMap::new();
+        let code = run_one(
+            Verb::Check,
+            &global,
+            &args,
+            &target,
+            None,
+            &flags,
+            &env,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, ExitCode::Usage);
+    }
+
+    #[tokio::test]
+    async fn allow_account_change_is_rejected_on_dry_run() {
+        // The same rejection applies to any verb under --dry-run.
+        let global = GlobalArgs {
+            dry_run: true,
+            ..Default::default()
+        };
+        let args = SyncArgs {
+            allow_account_change: true,
+            ..Default::default()
+        };
+        let target = TargetSpec {
+            label: "alice".to_owned(),
+            dest: PathBuf::from("/nonexistent-dryrun-guard"),
+            implicit: false,
+        };
+        let flags = FlagOverrides::default();
+        let env = HashMap::new();
+        let code = run_one(
+            Verb::Sync,
+            &global,
+            &args,
+            &target,
+            None,
+            &flags,
+            &env,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, ExitCode::Usage);
     }
 }
