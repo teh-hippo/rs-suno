@@ -49,6 +49,23 @@ pub trait Filesystem {
     /// Remove `path`. Succeeds when the file is already absent (idempotent).
     fn remove(&self, path: &str) -> Result<(), FsError>;
 
+    /// Remove empty directories under `root`, bottom-up.
+    ///
+    /// After a rename/move or a delete empties an album directory, that now-dead
+    /// directory is a ghost. This prunes it. The contract is strictly additive
+    /// and safe:
+    ///
+    /// - it removes only directories that are genuinely empty, walking
+    ///   depth-first so an emptied parent is pruned once its last child is;
+    /// - it NEVER removes a directory holding any entry, including a hidden file
+    ///   (a `.suno-manifest.json`, `.suno-lineage.json`, or `.m3u8`); and
+    /// - it NEVER removes `root` itself, only directories strictly beneath it.
+    ///
+    /// `root` is a library-relative directory, with the empty string (or `"."`)
+    /// meaning the account root. A prune failure is never fatal: the tool
+    /// re-plans and retries on the next run, so this only ever tidies.
+    fn prune_empty_dirs(&self, root: &str) -> Result<(), FsError>;
+
     /// Read the whole file at `path`.
     fn read(&self, path: &str) -> Result<Vec<u8>, FsError>;
 

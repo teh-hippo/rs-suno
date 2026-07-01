@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
-    AlbumArt, AlbumDesired, ClerkAuth, Clip, Config, Error as CoreError, ExecOptions,
+    AlbumArt, AlbumDesired, ClerkAuth, Clip, Config, Error as CoreError, ExecOptions, Filesystem,
     FlagOverrides, LineageContext, LocalFile, PlaylistDesired, PlaylistState, Ports, ResolveOpts,
     SourceMode, SourceStatus, SunoClient, album_desired, deletion_allowed, plan_album_artifacts,
     plan_playlist_artifacts, reconcile, resolve_roots,
@@ -719,6 +719,10 @@ async fn execute_plan(
         // Folder art may have been written before the interrupt; persist the
         // album-art store so those sidecars are tracked on the next run.
         logs::save_graph(dest, store)?;
+        // A signal cancels the executor mid-flight, before its own end-of-run
+        // prune; tidy any directories emptied by moves/deletes so far. The
+        // completed path is already pruned inside `execute`.
+        let _ = fs.prune_empty_dirs("");
         eprintln!(
             "warning: interrupted -- partial run saved\n  Progress so far is recorded in the manifest; re-run to continue."
         );

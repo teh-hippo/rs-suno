@@ -8,7 +8,7 @@
 //! ([`StubFfmpeg`]), and a recording [`Clock`] ([`RecordingClock`]) that never
 //! really sleeps, so executor tests stay deterministic.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -216,8 +216,14 @@ impl Http for ScriptedHttp {
 
 /// An in-memory [`Filesystem`] double: a map of path to bytes, with optional
 /// fault injection for the executor's safety paths.
+///
+/// Directories are modelled explicitly in `dirs` (a real filesystem tracks them
+/// independently of files), so [`prune_empty_dirs`](Filesystem::prune_empty_dirs)
+/// can be exercised: a write, rename, or seed registers the target's ancestor
+/// directories, and an emptied one is a genuine prune candidate.
 pub(crate) struct MemFs {
     files: Mutex<HashMap<String, Vec<u8>>>,
+    dirs: Mutex<BTreeSet<String>>,
     fail_writes: Mutex<HashSet<String>>,
     corrupt_writes: Mutex<HashSet<String>>,
     fail_removes: Mutex<HashSet<String>>,
@@ -227,18 +233,27 @@ impl MemFs {
     pub(crate) fn new() -> Self {
         Self {
             files: Mutex::new(HashMap::new()),
+            dirs: Mutex::new(BTreeSet::new()),
             fail_writes: Mutex::new(HashSet::new()),
             corrupt_writes: Mutex::new(HashSet::new()),
             fail_removes: Mutex::new(HashSet::new()),
         }
     }
 
-    /// Pre-seed a file.
+    /// Pre-seed a file, registering its ancestor directories.
     pub(crate) fn with_file(self, path: &str, bytes: impl Into<Vec<u8>>) -> Self {
         self.files
             .lock()
             .unwrap()
             .insert(path.to_owned(), bytes.into());
+        register_parent_dirs(&mut self.dirs.lock().unwrap(), path);
+        self
+    }
+
+    /// Pre-seed an empty directory (and every ancestor), so a prune has a
+    /// genuinely empty directory to consider.
+    pub(crate) fn with_dir(self, path: &str) -> Self {
+        register_dir_chain(&mut self.dirs.lock().unwrap(), path);
         self
     }
 
@@ -276,6 +291,11 @@ impl MemFs {
         let mut paths: Vec<String> = self.files.lock().unwrap().keys().cloned().collect();
         paths.sort();
         paths
+    }
+
+    /// Whether a directory is currently modelled (present and not yet pruned).
+    pub(crate) fn has_dir(&self, path: &str) -> bool {
+        self.dirs.lock().unwrap().contains(path)
     }
 
     /// Number of stored files.
@@ -328,6 +348,7 @@ impl Filesystem for MemFs {
             bytes.to_vec()
         };
         self.files.lock().unwrap().insert(path.to_owned(), stored);
+        register_parent_dirs(&mut self.dirs.lock().unwrap(), path);
         Ok(())
     }
 
@@ -336,6 +357,7 @@ impl Filesystem for MemFs {
         match files.remove(from) {
             Some(bytes) => {
                 files.insert(to.to_owned(), bytes);
+                register_parent_dirs(&mut self.dirs.lock().unwrap(), to);
                 Ok(())
             }
             None => Err(FsError::new(format!("rename source missing: {from}"))),
@@ -348,6 +370,29 @@ impl Filesystem for MemFs {
         }
         self.files.lock().unwrap().remove(path);
         Ok(())
+    }
+
+    fn prune_empty_dirs(&self, root: &str) -> Result<(), FsError> {
+        // A directory is prunable when nothing lives strictly beneath it: no
+        // file and no surviving child directory. Removing one may empty its
+        // parent, so iterate to a fixpoint — the in-memory analogue of a
+        // bottom-up rmdir walk. `root` itself is never a candidate.
+        let file_paths: Vec<String> = self.files.lock().unwrap().keys().cloned().collect();
+        let mut dirs = self.dirs.lock().unwrap();
+        loop {
+            let snapshot: Vec<String> = dirs.iter().cloned().collect();
+            let victim = snapshot.iter().find(|d| {
+                strictly_under(d, root)
+                    && !file_paths.iter().any(|f| strictly_under(f, d))
+                    && !snapshot.iter().any(|o| strictly_under(o, d))
+            });
+            match victim {
+                Some(d) => {
+                    dirs.remove(d);
+                }
+                None => return Ok(()),
+            }
+        }
     }
 
     fn read(&self, path: &str) -> Result<Vec<u8>, FsError> {
@@ -364,6 +409,34 @@ impl Filesystem for MemFs {
             exists: true,
             size: bytes.len() as u64,
         })
+    }
+}
+
+/// Register every ancestor directory of a file `path` (e.g. `a/b/c.flac` yields
+/// `a` and `a/b`, never the file itself).
+fn register_parent_dirs(dirs: &mut BTreeSet<String>, path: &str) {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    for i in 1..parts.len() {
+        dirs.insert(parts[..i].join("/"));
+    }
+}
+
+/// Register a directory `path` and every ancestor (e.g. `a/b/c` yields `a`,
+/// `a/b`, and `a/b/c`).
+fn register_dir_chain(dirs: &mut BTreeSet<String>, path: &str) {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    for i in 1..=parts.len() {
+        dirs.insert(parts[..i].join("/"));
+    }
+}
+
+/// Whether `path` sits strictly inside directory `base`. An empty `base` is the
+/// account root, so every non-empty path is under it; `base` itself never is.
+fn strictly_under(path: &str, base: &str) -> bool {
+    if base.is_empty() {
+        !path.is_empty()
+    } else {
+        path.len() > base.len() && path.starts_with(base) && path.as_bytes()[base.len()] == b'/'
     }
 }
 

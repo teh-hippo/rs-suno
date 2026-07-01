@@ -204,11 +204,16 @@ where
                 });
                 if aborts {
                     outcome.status = RunStatus::AuthAborted;
-                    return outcome;
+                    break;
                 }
             }
         }
     }
+    // Renames and deletes can leave an album directory empty; prune those ghost
+    // directories bottom-up. This runs on both the completed and the auth-abort
+    // path, and is best-effort: a prune failure is only a missed tidy that the
+    // next run repeats, never a reason to fail the run.
+    let _ = fs.prune_empty_dirs("");
     outcome
 }
 
@@ -570,6 +575,13 @@ where
     /// [`FolderWebp`](ArtifactKind::FolderWebp)) is album-scoped: its `owner_id`
     /// is the album's stable root id, not a manifest clip, so it skips the
     /// manifest presence guard and records its state on the album store instead.
+    ///
+    /// When a title or album change moves the audio, reconcile re-emits this
+    /// write at the NEW path; this handler then removes the sidecar left at the
+    /// artifact's previously tracked path, moving it rather than orphaning it.
+    /// The removal happens only after the new file is safely written, and a
+    /// remove failure returns before the state slot advances, so the next run
+    /// re-plans the identical write and retries — self-healing, never an orphan.
     #[allow(clippy::too_many_arguments)]
     async fn write_artifact(
         &self,
@@ -588,6 +600,26 @@ where
         if is_per_clip_kind(kind) && manifest.get(owner_id).is_none() {
             return Ok(Effect::Skipped);
         }
+        // Capture the path this artifact was last tracked at, BEFORE the slot is
+        // overwritten below, so a path-changing write (a title/album rename that
+        // moves the audio) can clean up the old sidecar it left behind. Cover
+        // kinds live on the manifest, folder kinds on the album store; playlists
+        // reconcile their own old-path delete and so opt out here.
+        let old_path = match kind {
+            ArtifactKind::CoverJpg => manifest
+                .get(owner_id)
+                .and_then(|e| e.cover_jpg.as_ref())
+                .map(|s| s.path.clone()),
+            ArtifactKind::CoverWebp => manifest
+                .get(owner_id)
+                .and_then(|e| e.cover_webp.as_ref())
+                .map(|s| s.path.clone()),
+            ArtifactKind::FolderJpg | ArtifactKind::FolderWebp => albums
+                .get(owner_id)
+                .and_then(|a| a.artifact(kind))
+                .map(|s| s.path.clone()),
+            ArtifactKind::Playlist => None,
+        };
         // A generated artifact (a playlist) carries its body inline and never
         // touches the network; a fetched one pulls (and transcodes) its source.
         let bytes = match content {
@@ -595,6 +627,23 @@ where
             None => self.artifact_bytes(kind, source_url, owner_id).await?,
         };
         self.write_verify(owner_id, path, &bytes)?;
+        // The new sidecar is safely in place; only now drop a stale copy left at
+        // the previous path (the audio moved). `remove` is idempotent, so an
+        // already-absent old file is fine. On a genuine remove failure we return
+        // BEFORE updating the slot, leaving the manifest/album pointing at the
+        // old path: the next run sees the same path drift, re-plans this write,
+        // and retries the cleanup — convergent, no orphan persists.
+        if let Some(old) = old_path.as_deref()
+            && !old.is_empty()
+            && old != path
+        {
+            self.fs.remove(old).map_err(|err| {
+                permanent_fail(
+                    owner_id,
+                    format!("could not remove old sidecar {old}: {err}"),
+                )
+            })?;
+        }
         if is_album_kind(kind) {
             albums.entry(owner_id.to_owned()).or_default().set(
                 kind,
@@ -666,8 +715,9 @@ where
     ///
     /// The audio `Delete` is applied before its sidecar `DeleteArtifact`. If the
     /// sidecar removal fails after the audio is already gone, the sidecar lingers
-    /// untracked; transactional recovery of that ordering is deferred to P10
-    /// hardening.
+    /// untracked, but the design stays convergent rather than transactional: the
+    /// next run re-plans the same removal and retries, and any directory it would
+    /// have emptied is pruned once the file finally clears.
     fn delete_artifact(
         &self,
         manifest: &mut Manifest,
@@ -2741,5 +2791,305 @@ mod tests {
             !playlists.contains_key("pl1"),
             "the playlist row is cleared on delete"
         );
+    }
+
+    // ── Phase 10: old-sidecar cleanup on move + empty-dir prune ──────
+
+    #[test]
+    fn rename_move_relocates_cover_and_prunes_old_album() {
+        // A title/album change moves the audio (Rename) and re-emits the cover
+        // at the NEW path. The old cover must be removed and the now-empty old
+        // album directory pruned, leaving no orphan sidecar and no ghost dir.
+        let mut manifest = Manifest::new();
+        let mut e = entry("Creator/AlbumA/song.flac", AudioFormat::Flac);
+        e.cover_jpg = Some(ArtifactState {
+            path: "Creator/AlbumA/cover.jpg".to_owned(),
+            hash: "h1".to_owned(),
+        });
+        manifest.insert("a", e);
+        let fs = MemFs::new()
+            .with_file("Creator/AlbumA/song.flac", b"AUDIO".to_vec())
+            .with_file("Creator/AlbumA/cover.jpg", b"old-jpg".to_vec());
+        let plan = Plan {
+            actions: vec![
+                Action::Rename {
+                    from: "Creator/AlbumA/song.flac".to_owned(),
+                    to: "Creator/AlbumB/song.flac".to_owned(),
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "Creator/AlbumB/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                    hash: "h1".to_owned(),
+                    owner_id: "a".to_owned(),
+                    content: None,
+                },
+            ],
+        };
+        let http = ScriptedHttp::new().route("a/large.jpg", Reply::ok(b"new-jpg".to_vec()));
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        // Audio moved, the new cover was written, the old cover removed.
+        assert!(fs.exists("Creator/AlbumB/song.flac"));
+        assert_eq!(
+            fs.read_file("Creator/AlbumB/cover.jpg").unwrap(),
+            b"new-jpg"
+        );
+        assert!(!fs.exists("Creator/AlbumA/cover.jpg"));
+        assert!(!fs.exists("Creator/AlbumA/song.flac"));
+        // The manifest cover slot now points at the new path.
+        assert_eq!(
+            manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().path,
+            "Creator/AlbumB/cover.jpg"
+        );
+        // The emptied old album directory is pruned; the new one survives.
+        assert!(!fs.has_dir("Creator/AlbumA"));
+        assert!(fs.has_dir("Creator/AlbumB"));
+    }
+
+    #[test]
+    fn rename_move_relocates_folder_art_and_prunes_old_album() {
+        // An album rename moves folder.jpg: the old file is removed, the album
+        // store slot advanced to the new path, and the emptied dir pruned.
+        let mut manifest = Manifest::new();
+        let mut albums: BTreeMap<String, AlbumArt> = BTreeMap::new();
+        albums.insert(
+            "root".to_owned(),
+            AlbumArt {
+                folder_jpg: Some(ArtifactState {
+                    path: "Creator/AlbumA/folder.jpg".to_owned(),
+                    hash: "jh".to_owned(),
+                }),
+                folder_webp: None,
+            },
+        );
+        let fs = MemFs::new().with_file("Creator/AlbumA/folder.jpg", b"old-folder".to_vec());
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::FolderJpg,
+                path: "Creator/AlbumB/folder.jpg".to_owned(),
+                source_url: "https://art.suno.ai/root/large.jpg".to_owned(),
+                hash: "jh".to_owned(),
+                owner_id: "root".to_owned(),
+                content: None,
+            }],
+        };
+        let http = ScriptedHttp::new().route("root/large.jpg", Reply::ok(b"new-folder".to_vec()));
+
+        let outcome = run_with_albums(
+            &plan,
+            &mut manifest,
+            &mut albums,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(
+            fs.read_file("Creator/AlbumB/folder.jpg").unwrap(),
+            b"new-folder"
+        );
+        assert!(!fs.exists("Creator/AlbumA/folder.jpg"));
+        assert_eq!(
+            albums
+                .get("root")
+                .unwrap()
+                .folder_jpg
+                .as_ref()
+                .unwrap()
+                .path,
+            "Creator/AlbumB/folder.jpg"
+        );
+        assert!(!fs.has_dir("Creator/AlbumA"));
+        assert!(fs.has_dir("Creator/AlbumB"));
+    }
+
+    #[test]
+    fn prune_empty_dirs_removes_only_empty_dirs() {
+        // A direct exercise of the prune port's safety guarantees on a mixed
+        // tree: nested empties go, anything holding a file (hidden ones too)
+        // stays, and no file is touched.
+        let fs = MemFs::new()
+            .with_file("keep/full/song.flac", b"x".to_vec())
+            .with_file("hidden/.suno-manifest.json", b"{}".to_vec())
+            .with_dir("empty/leaf")
+            .with_dir("nested/a/b/c");
+
+        fs.prune_empty_dirs("").unwrap();
+
+        // Every empty directory, however deeply nested, is pruned bottom-up.
+        for gone in [
+            "empty",
+            "empty/leaf",
+            "nested",
+            "nested/a",
+            "nested/a/b",
+            "nested/a/b/c",
+        ] {
+            assert!(!fs.has_dir(gone), "empty dir {gone} should be pruned");
+        }
+        // A directory holding any file — including only a hidden dotfile — stays.
+        assert!(fs.has_dir("keep"));
+        assert!(fs.has_dir("keep/full"));
+        assert!(fs.has_dir("hidden"));
+        // No file was touched.
+        assert!(fs.exists("keep/full/song.flac"));
+        assert!(fs.exists("hidden/.suno-manifest.json"));
+    }
+
+    #[test]
+    fn prune_empty_dirs_never_removes_the_named_root() {
+        // Pruning under a named root clears its empty children but keeps the
+        // root itself, even when the root is now empty.
+        let fs = MemFs::new().with_dir("empty/leaf");
+        fs.prune_empty_dirs("empty").unwrap();
+        assert!(fs.has_dir("empty"), "the named root is never removed");
+        assert!(!fs.has_dir("empty/leaf"));
+    }
+
+    #[test]
+    fn old_sidecar_remove_failure_is_per_clip_and_converges_next_run() {
+        // If removing the old sidecar fails, the write is a per-clip failure
+        // that never aborts the run and does NOT advance the state slot, so the
+        // next identical run re-attempts the cleanup and the tree converges.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac);
+        e.cover_jpg = Some(ArtifactState {
+            path: "AlbumA/cover.jpg".to_owned(),
+            hash: "h1".to_owned(),
+        });
+        manifest.insert("a", e);
+        let fs = MemFs::new()
+            .with_file("a.flac", b"AUDIO".to_vec())
+            .with_file("AlbumA/cover.jpg", b"old".to_vec());
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::CoverJpg,
+                path: "AlbumB/cover.jpg".to_owned(),
+                source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                hash: "h1".to_owned(),
+                owner_id: "a".to_owned(),
+                content: None,
+            }],
+        };
+        let http = ScriptedHttp::new().route("a/large.jpg", Reply::ok(b"new".to_vec()));
+
+        // Run 1: the old-cover remove is forced to fail.
+        fs.arm_fail_remove("AlbumA/cover.jpg");
+        let first = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+        assert_eq!(
+            first.status,
+            RunStatus::Completed,
+            "a remove failure never aborts the run"
+        );
+        assert_eq!(first.failed(), 1);
+        // The new cover is written but the old one lingers and the slot is stale.
+        assert!(fs.exists("AlbumB/cover.jpg"));
+        assert!(fs.exists("AlbumA/cover.jpg"));
+        assert_eq!(
+            manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().path,
+            "AlbumA/cover.jpg"
+        );
+        assert!(fs.has_dir("AlbumA"), "the orphan keeps its directory alive");
+
+        // Run 2: the same plan re-runs with the fault cleared and converges.
+        fs.disarm_fail_remove("AlbumA/cover.jpg");
+        let second = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+        assert_eq!(second.failed(), 0);
+        assert!(fs.exists("AlbumB/cover.jpg"));
+        assert!(!fs.exists("AlbumA/cover.jpg"), "no orphan persists");
+        assert_eq!(
+            manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().path,
+            "AlbumB/cover.jpg"
+        );
+        assert!(!fs.has_dir("AlbumA"), "the emptied directory is pruned");
+    }
+
+    #[test]
+    fn same_path_artifact_rewrite_does_no_remove_and_prunes_nothing() {
+        // The idempotent case: a content-only cover rewrite (hash drift, path
+        // unchanged) attempts no remove and prunes no live directory. A remove
+        // failure is armed on the cover path, so any spurious remove would
+        // surface as a failure — none does.
+        let mut manifest = Manifest::new();
+        let mut e = entry("Album/a.mp3", AudioFormat::Mp3);
+        e.cover_jpg = Some(ArtifactState {
+            path: "Album/cover.jpg".to_owned(),
+            hash: "h1".to_owned(),
+        });
+        manifest.insert("a", e);
+        let fs = MemFs::new()
+            .with_file("Album/a.mp3", b"AUDIO".to_vec())
+            .with_file("Album/cover.jpg", b"old".to_vec());
+        fs.arm_fail_remove("Album/cover.jpg");
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::CoverJpg,
+                path: "Album/cover.jpg".to_owned(),
+                source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                hash: "h2".to_owned(),
+                owner_id: "a".to_owned(),
+                content: None,
+            }],
+        };
+        let http = ScriptedHttp::new().route("a/large.jpg", Reply::ok(b"new".to_vec()));
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(
+            outcome.failed(),
+            0,
+            "no remove is attempted, so the armed failure never fires"
+        );
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(fs.read_file("Album/cover.jpg").unwrap(), b"new");
+        assert_eq!(
+            manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().hash,
+            "h2"
+        );
+        // The live directory is untouched by prune.
+        assert!(fs.has_dir("Album"));
     }
 }

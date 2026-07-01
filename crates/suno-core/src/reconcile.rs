@@ -555,10 +555,12 @@ fn plan_clip_artifacts(d: &Desired, manifest: &Manifest, can_delete: bool, out: 
         }
         // A write is needed when the manifest lacks the sidecar, its bytes drift
         // (hash), or the clip moved so the sidecar belongs at a new path (audio
-        // renamed to a new album/name). Removing the OLD sidecar at the previous
-        // path on a move is deferred to P10 (RenameClip). Self-healing a sidecar
-        // that is missing on disk despite a matching manifest record is deferred
-        // beyond P7 (it needs a local-artifact presence probe, as audio has).
+        // renamed to a new album/name). On a move the executor's WriteArtifact
+        // relocates the sidecar: it writes the new path, then removes the copy
+        // left at the previously tracked path (see `Ctx::write_artifact`).
+        // Self-healing a sidecar that is missing on disk despite a matching
+        // manifest record is deferred beyond P7 (it needs a local-artifact
+        // presence probe, as audio has).
         let needs_write = match entry.and_then(|e| manifest_artifact_by_kind(e, artifact.kind)) {
             None => true,
             Some(state) => state.hash != artifact.hash || state.path != artifact.path,
@@ -1823,6 +1825,71 @@ mod tests {
         assert_eq!(plan.downloads(), 1);
     }
 
+    #[test]
+    fn delete_artifact_suppressed_when_path_aliases_rename_target() {
+        // A sidecar delete must never clobber a file a rename just produced this
+        // run. A DeleteArtifact whose path equals a Rename's `to` is downgraded
+        // to a Skip, exactly as an audio Delete is. Built directly so the
+        // collision is explicit and independent of how reconcile derives it.
+        let mut actions = vec![
+            Action::Rename {
+                from: "old/song.flac".to_string(),
+                to: "new/cover.jpg".to_string(),
+            },
+            Action::DeleteArtifact {
+                kind: ArtifactKind::CoverJpg,
+                path: "new/cover.jpg".to_string(),
+                owner_id: "a".to_string(),
+            },
+        ];
+        suppress_path_aliasing(&mut actions);
+        // The colliding delete is gone; only its Skip downgrade remains.
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::DeleteArtifact { .. })),
+            "a sidecar delete must not alias a rename target"
+        );
+        assert!(actions.contains(&Action::Skip {
+            clip_id: "a".to_string()
+        }));
+        // The rename target is untouched.
+        assert!(actions.contains(&Action::Rename {
+            from: "old/song.flac".to_string(),
+            to: "new/cover.jpg".to_string(),
+        }));
+    }
+
+    #[test]
+    fn delete_artifact_suppressed_when_path_aliases_write_artifact_target() {
+        // The same guard covers every write class: a DeleteArtifact colliding
+        // with another artifact's WriteArtifact path is downgraded too.
+        let mut actions = vec![
+            Action::WriteArtifact {
+                kind: ArtifactKind::FolderJpg,
+                path: "creator/album/folder.jpg".to_string(),
+                source_url: "https://art/large.jpg".to_string(),
+                hash: "h".to_string(),
+                owner_id: "root".to_string(),
+                content: None,
+            },
+            Action::DeleteArtifact {
+                kind: ArtifactKind::FolderJpg,
+                path: "creator/album/folder.jpg".to_string(),
+                owner_id: "root-old".to_string(),
+            },
+        ];
+        suppress_path_aliasing(&mut actions);
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::DeleteArtifact { .. }))
+        );
+        assert!(actions.contains(&Action::Skip {
+            clip_id: "root-old".to_string()
+        }));
+    }
+
     // ── Item 5: aggregation of duplicate desired ids ────────────────
 
     #[test]
@@ -2499,7 +2566,9 @@ mod tests {
     fn write_artifact_emitted_when_path_differs_even_if_hash_matches() {
         // The audio moved (new album/name) so the sidecar belongs at a new path;
         // the bytes are unchanged (same hash) but a rewrite at the new path is
-        // still required. Removing the old sidecar is deferred to P10.
+        // still required. Reconcile emits no DeleteArtifact for the old path: the
+        // executor's WriteArtifact relocates the sidecar (writes new, removes the
+        // old copy), so the plan stays a single write.
         let mut manifest = Manifest::new();
         manifest.insert("a", entry_with_cover_jpg("a", "old/cover.jpg", "h1"));
         let d = vec![desired_arts(

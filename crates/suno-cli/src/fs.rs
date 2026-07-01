@@ -74,6 +74,19 @@ impl Filesystem for FsAdapter {
         }
     }
 
+    fn prune_empty_dirs(&self, root: &str) -> Result<(), FsError> {
+        // The account root itself (empty or ".") is never resolved through the
+        // traversal guard, which rejects an empty path; everything else is a
+        // library-relative directory that must stay contained.
+        let base = if root.is_empty() || root == "." {
+            self.root.clone()
+        } else {
+            self.resolve(root)?
+        };
+        prune_dir(&base, true);
+        Ok(())
+    }
+
     fn read(&self, path: &str) -> Result<Vec<u8>, FsError> {
         std::fs::read(self.resolve(path)?).map_err(|err| FsError::new(err.to_string()))
     }
@@ -85,6 +98,29 @@ impl Filesystem for FsAdapter {
                 exists: true,
                 size: meta.len(),
             })
+    }
+}
+
+/// Remove empty directories under `dir`, depth-first (post-order).
+///
+/// Children are pruned before their parent, so an emptied parent is caught in
+/// the same pass once its last child is removed (inherently bottom-up). `dir`
+/// itself is removed only when `!is_root`; the account root is always kept.
+/// `remove_dir` succeeds only on a truly-empty directory, so any directory
+/// still holding a file (hidden ones included) or a surviving subdirectory is
+/// left intact; every failure is ignored, keeping the prune purely advisory.
+fn prune_dir(dir: &Path, is_root: bool) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            prune_dir(&path, false);
+        }
+    }
+    if !is_root {
+        let _ = std::fs::remove_dir(dir);
     }
 }
 
@@ -147,6 +183,47 @@ mod tests {
         let adapter = FsAdapter::new(root.clone());
 
         assert!(adapter.write_atomic("", b"x").is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prune_removes_only_empty_dirs_and_keeps_the_root() {
+        let root = temp_root();
+        let adapter = FsAdapter::new(root.clone());
+
+        // A kept branch holds a file; an empty branch nests only empty dirs; a
+        // hidden-file branch must survive despite holding only a dotfile.
+        adapter.write_atomic("keep/full/song.flac", b"x").unwrap();
+        std::fs::create_dir_all(root.join("empty/leaf/deeper")).unwrap();
+        std::fs::create_dir_all(root.join("hidden")).unwrap();
+        std::fs::write(root.join("hidden/.suno-manifest.json"), b"{}").unwrap();
+
+        adapter.prune_empty_dirs("").unwrap();
+
+        // The whole empty subtree is gone, bottom-up.
+        assert!(!root.join("empty").exists());
+        assert!(!root.join("empty/leaf").exists());
+        // A directory holding a file (even a hidden one) is untouched.
+        assert!(root.join("keep/full/song.flac").exists());
+        assert!(root.join("hidden/.suno-manifest.json").exists());
+        // The account root itself is never removed.
+        assert!(root.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prune_never_removes_the_named_root_even_when_empty() {
+        let root = temp_root();
+        let adapter = FsAdapter::new(root.clone());
+        std::fs::create_dir_all(root.join("album/leaf")).unwrap();
+
+        // Pruning under "album" clears its empty child but keeps "album" itself.
+        adapter.prune_empty_dirs("album").unwrap();
+
+        assert!(root.join("album").exists());
+        assert!(!root.join("album/leaf").exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }
