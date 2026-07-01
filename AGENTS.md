@@ -51,6 +51,7 @@ Ports and adapters. `suno-core` is runtime-agnostic and performs no direct IO; i
 - Formats: MP3, FLAC, and WAV; default FLAC; per-source override in TOML.
 - Auth: there is no public Suno API key. A Clerk `__client` cookie (a pasted token) mints short-lived JWTs that refresh automatically. The cookie is sent only to Clerk.
 - Deletion safety (critical): one file per account; delete only when a clip is absent from every mirror source; copy and archive always win; never delete on an empty, failed, partial, or truncated listing.
+- Account identity guard (critical): each library is pinned (trust on first use) to its owning Suno account in `.suno-lineage.json`; `sync`, `copy`, and `check` refuse (exit 7) on a token/account mismatch, closing the hole where `mass_delete_abort` is disarmed by `--yes` with `min_newest 0` or by a small library. `--allow-account-change` re-pins and runs additively.
 - A disk-full write (or transcode) is systemic, not a per-clip skip: it aborts the run like an auth failure and exits `9`, leaving the library unchanged for the failing action.
 - Album model: lineage album only.
 

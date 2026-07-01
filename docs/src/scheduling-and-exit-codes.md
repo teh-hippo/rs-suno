@@ -10,12 +10,12 @@ correctly.
 |---|---|---|
 | 0 | Success | All requested work completed. |
 | 1 | General error | An unexpected, uncategorised failure. |
-| 2 | Usage error | Unknown command, invalid flag, or missing argument. |
+| 2 | Usage error | Unknown command, invalid flag, or missing argument (for example `--allow-account-change` on `check` or `--dry-run`). |
 | 3 | Config error | Missing or invalid config, unknown account, conflicting flags. |
 | 4 | Authentication failure | The token expired or was rejected and could not be refreshed. |
 | 5 | Partial failure | Some clips failed after all retries; others succeeded. |
 | 6 | Transient failure (exhausted) | Every clip failed with transient errors; nothing progressed. |
-| 7 | Safety abort | A deletion safety rule triggered; no files were deleted. |
+| 7 | Safety abort | A deletion safety rule triggered, or the token authenticates as a different account than the library is pinned to; no files were changed. |
 | 8 | Interrupted | The run received an interrupt; partial progress is preserved. |
 | 9 | Disk full | The destination ran out of space; free space and re-run. The library is unchanged for the failing action. |
 
@@ -33,7 +33,9 @@ For a scheduled job, avoid interactive prompts:
   script.
 
 The deletion safety rules still apply under `--yes`: the fully-enumerated gate
-and the mass-deletion abort will still stop a run that looks wrong. See
+and the mass-deletion abort will still stop a run that looks wrong, and the
+account identity guard refuses a run whose token belongs to a different account
+than the library is pinned to (also exit 7). See
 [Sync, copy and deletion safety](sync-copy-and-deletion-safety.md).
 
 ### Incremental top-ups
