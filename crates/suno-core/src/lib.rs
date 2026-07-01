@@ -16,6 +16,7 @@ mod ffmpeg;
 mod fs;
 mod hash;
 mod http;
+mod lineage;
 mod manifest;
 mod model;
 mod naming;
@@ -42,6 +43,10 @@ pub use ffmpeg::{Ffmpeg, FfmpegError};
 pub use fs::{FileStat, Filesystem, FsError};
 pub use hash::{art_hash, meta_hash};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
+pub use lineage::{
+    Edge, EdgeRole, EdgeType, Resolution, ResolveOpts, ResolveStatus, RootInfo, edge_type,
+    immediate_parent, lineage_edges, resolve_roots,
+};
 pub use manifest::{Manifest, ManifestEntry};
 pub use model::{Clip, HistoryEntry};
 pub use naming::{

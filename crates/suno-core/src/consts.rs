@@ -13,3 +13,13 @@ pub(crate) const CDN_BASE_URL: &str = "https://cdn1.suno.ai";
 pub(crate) const JWT_REFRESH_BUFFER: i64 = 60;
 /// Hard cap on feed pages so a runaway `has_more` cannot loop forever.
 pub(crate) const MAX_PAGES: u32 = 100;
+
+/// The library feed endpoint. Paged for listing, or filtered with `?ids=` to
+/// gap-fill specific ancestors (including trashed ones) during lineage
+/// resolution.
+pub(crate) const FEED_V2_PATH: &str = "/api/feed/v2/";
+/// The dedicated parent-lookup endpoint: one hop up a clip's lineage.
+pub(crate) const CLIP_PARENT_PATH: &str = "/api/clips/parent";
+/// Fetch at most this many clip ids per `?ids=` request so a batch cannot build
+/// an over-long URL.
+pub(crate) const IDS_PER_REQUEST: usize = 40;

@@ -3,7 +3,9 @@
 use serde_json::Value;
 
 use crate::auth::ClerkAuth;
-use crate::consts::{MAX_PAGES, SUNO_API_BASE_URL};
+use crate::consts::{
+    CLIP_PARENT_PATH, FEED_V2_PATH, IDS_PER_REQUEST, MAX_PAGES, SUNO_API_BASE_URL,
+};
 use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
 use crate::model::Clip;
@@ -97,13 +99,52 @@ impl SunoClient {
             .map(str::to_string))
     }
 
+    /// Fetch specific clips by id through the feed's `?ids=` filter.
+    ///
+    /// Used by lineage resolution to gap-fill ancestors that are absent from a
+    /// normal listing, including trashed ones. Unlike
+    /// [`list_clips`](Self::list_clips), no `keep_clip` filtering is applied: an
+    /// ancestor may itself be an infill or context-window artefact that the
+    /// lineage walk must still traverse. Clips returned here are ancestors for
+    /// resolution only and must never be treated as download candidates. Ids are
+    /// chunked so a long list cannot build an over-long URL.
+    pub async fn get_clips_by_ids(&mut self, http: &impl Http, ids: &[&str]) -> Result<Vec<Clip>> {
+        let mut clips = Vec::new();
+        for chunk in ids.chunks(IDS_PER_REQUEST) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let joined = chunk.join(",");
+            let path = format!("{FEED_V2_PATH}?ids={joined}");
+            let body = self.api_get(http, &path).await?;
+            clips.extend(map_all_clips(&body)?);
+        }
+        Ok(clips)
+    }
+
+    /// Fetch a clip's immediate parent via the dedicated parent endpoint.
+    ///
+    /// Returns the parent clip, or `None` when the clip is a root (no parent) or
+    /// the endpoint yields no clip. Lineage resolution uses this as a fallback
+    /// when a missing ancestor cannot be retrieved by id. Only a `404` (the clip
+    /// has no parent) maps to `None`; any other failure, including a transient
+    /// `5xx`, propagates as an error rather than being mistaken for a root.
+    pub async fn get_clip_parent(&mut self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
+        let path = format!("{CLIP_PARENT_PATH}?clip_id={id}");
+        match self.api_get(http, &path).await {
+            Ok(body) => Ok(parse_clip(&body)),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Try the dedicated clip endpoint, returning `None` when it is missing or
     /// returns a body that does not yield the requested clip.
     async fn try_get_clip(&mut self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
         let path = format!("/api/clip/{id}");
         match self.api_get(http, &path).await {
             Ok(body) => Ok(parse_clip(&body).filter(|clip| clip.id == id)),
-            Err(Error::Api(_)) => Ok(None),
+            Err(Error::NotFound(_)) => Ok(None),
             Err(err) => Err(err),
         }
     }
@@ -151,6 +192,9 @@ impl SunoClient {
                     )));
                 }
                 429 => return Err(Error::RateLimited),
+                404 => {
+                    return Err(Error::NotFound(format!("Suno API returned 404: {path}")));
+                }
                 status => {
                     let preview: String = String::from_utf8_lossy(&response.body)
                         .chars()
@@ -201,6 +245,29 @@ fn parse_feed(body: &[u8]) -> Result<(Vec<Clip>, bool)> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     Ok((clips, has_more))
+}
+
+/// Map every clip in a feed-shaped body, skipping the `keep_clip` filter.
+///
+/// Accepts either a `{"clips": [...]}` wrapper or a bare array, dropping only
+/// elements that carry no id. Used for id-filtered gap-fill fetches, which must
+/// preserve trashed and artefact clips so the lineage walk can traverse them.
+fn map_all_clips(body: &[u8]) -> Result<Vec<Clip>> {
+    let data: Value = serde_json::from_slice(body)
+        .map_err(|err| Error::Api(format!("invalid feed JSON: {err}")))?;
+    let items: &[Value] = match &data {
+        Value::Array(items) => items.as_slice(),
+        Value::Object(_) => data
+            .get("clips")
+            .and_then(Value::as_array)
+            .map_or(&[][..], |arr| arr.as_slice()),
+        _ => &[],
+    };
+    Ok(items
+        .iter()
+        .map(Clip::from_json)
+        .filter(|clip| !clip.id.is_empty())
+        .collect())
 }
 
 /// Keep only finished clips that are not infills or context-window artefacts.
@@ -419,5 +486,108 @@ mod tests {
 
         let url = pollster::block_on(client.wav_url(&http, "z")).unwrap();
         assert_eq!(url, None);
+    }
+
+    #[test]
+    fn get_clips_by_ids_uses_the_ids_filter_and_keeps_all_clips() {
+        // The `?ids=` gap-fill path must not apply the listing's `keep_clip`
+        // filter: an infill ancestor and an upload root both survive.
+        let feed = serde_json::json!({
+            "clips": [
+                {
+                    "id": "p1", "title": "Infill Ancestor", "status": "complete",
+                    "metadata": {"type": "gen", "task": "infill"}
+                },
+                {
+                    "id": "p2", "title": "Uploaded Root", "status": "complete",
+                    "metadata": {"type": "upload"}
+                }
+            ]
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        // The exact substring also asserts the ids are comma-joined into the URL.
+        rules.push(Rule::new("/api/feed/v2/?ids=p1,p2", 200, feed));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["p1", "p2"])).unwrap();
+        assert_eq!(
+            clips.len(),
+            2,
+            "infill and upload ancestors must not be filtered"
+        );
+        assert_eq!(clips[0].id, "p1");
+        assert_eq!(clips[1].id, "p2");
+    }
+
+    #[test]
+    fn get_clips_by_ids_accepts_a_bare_array_body() {
+        let body = serde_json::json!([
+            {"id": "only", "title": "Bare", "status": "complete", "metadata": {"type": "gen"}}
+        ])
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/feed/v2/?ids=only", 200, body));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["only"])).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].id, "only");
+    }
+
+    #[test]
+    fn get_clip_parent_reads_the_parent_clip() {
+        let parent = serde_json::json!({
+            "id": "par", "title": "Ancestor", "status": "complete",
+            "metadata": {"type": "gen"}
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/clips/parent?clip_id=child", 200, parent));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let clip = pollster::block_on(client.get_clip_parent(&http, "child")).unwrap();
+        assert_eq!(clip.unwrap().id, "par");
+    }
+
+    #[test]
+    fn get_clip_parent_is_none_for_a_root() {
+        let mut rules = auth_rules();
+        rules.push(Rule::new(
+            "/api/clips/parent",
+            404,
+            r#"{"detail": "no parent"}"#.to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let clip = pollster::block_on(client.get_clip_parent(&http, "root")).unwrap();
+        assert!(clip.is_none());
+    }
+
+    #[test]
+    fn get_clip_parent_propagates_server_errors_instead_of_reporting_no_parent() {
+        // A transient 5xx must never be mistaken for "this clip is a root":
+        // folding it into Ok(None) would fabricate a wrong external root and let
+        // a blip rewrite lineage (HARDENING H3). Only a real 404 means no parent.
+        for status in [500u16, 503] {
+            let mut rules = auth_rules();
+            rules.push(Rule::new(
+                "/api/clips/parent",
+                status,
+                r#"{"detail": "server error"}"#.to_string(),
+            ));
+            let http = MockHttp::new(rules);
+            let mut client = authed_client(&http);
+
+            let result = pollster::block_on(client.get_clip_parent(&http, "child"));
+            assert!(
+                matches!(result, Err(Error::Api(_))),
+                "status {status} must propagate as an error, not Ok(None)"
+            );
+        }
     }
 }
