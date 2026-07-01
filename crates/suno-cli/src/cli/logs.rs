@@ -13,12 +13,19 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use suno_core::{Action, Clip, Failure, Manifest, Plan};
+use suno_core::{Action, Clip, Failure, LineageStore, Manifest, Plan};
 
 use crate::download::write_atomic;
 
 /// The manifest file name, kept beside the mirrored library.
 pub const MANIFEST_NAME: &str = ".suno-manifest.json";
+/// The lineage graph store file name, kept beside the manifest.
+///
+/// The store and its persistence are added ahead of use: the run flow wires
+/// them in a later phase (persist before execute and on interrupt, HARDENING
+/// H4), so these entry points are intentionally unreferenced for now.
+#[allow(dead_code)]
+pub const GRAPH_NAME: &str = ".suno-lineage.json";
 const LOCK_NAME: &str = ".suno.lock";
 const FAILURES_NAME: &str = ".suno-failures.log";
 const AUDIT_NAME: &str = ".suno-audit.log";
@@ -66,6 +73,31 @@ pub fn load_manifest(dest: &Path) -> Result<Manifest> {
 pub fn save_manifest(dest: &Path, manifest: &Manifest) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(manifest).context("could not serialise the manifest")?;
     write_atomic(&dest.join(MANIFEST_NAME), &bytes).context("could not write the manifest")
+}
+
+/// Load the lineage graph store beside `dest`, returning an empty one when absent.
+///
+/// Unlike the manifest, the graph store is an append-durable archive, so a
+/// present-but-unparseable file is an error rather than a silent empty: treating
+/// a corrupt prior as empty would discard archived (often trashed) ancestors
+/// that cannot be re-fetched once Suno purges them, so the run must stop.
+#[allow(dead_code)]
+pub fn load_graph(dest: &Path) -> Result<LineageStore> {
+    let path = dest.join(GRAPH_NAME);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("the lineage store at {} is corrupt", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(LineageStore::new()),
+        Err(err) => Err(err).with_context(|| format!("could not read {}", path.display())),
+    }
+}
+
+/// Save the lineage graph `store` beside `dest` atomically.
+#[allow(dead_code)]
+pub fn save_graph(dest: &Path, store: &LineageStore) -> Result<()> {
+    let bytes =
+        serde_json::to_vec_pretty(store).context("could not serialise the lineage store")?;
+    write_atomic(&dest.join(GRAPH_NAME), &bytes).context("could not write the lineage store")
 }
 
 /// An exclusive run lock, removed when dropped.
@@ -206,7 +238,7 @@ fn days_to_civil(days: u64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use suno_core::{AudioFormat, ManifestEntry};
+    use suno_core::{AudioFormat, ManifestEntry, Resolution, ResolveStatus, RootInfo};
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -335,6 +367,51 @@ mod tests {
         let dir = temp_dir("nofail");
         append_failures(&dir, &[], &HashMap::new()).unwrap();
         assert!(!dir.join(FAILURES_NAME).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_missing_graph_is_empty() {
+        let dir = temp_dir("graph-missing");
+        let store = load_graph(&dir).unwrap();
+        assert!(store.is_empty());
+        assert_eq!(store.schema_version, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_then_load_graph_roundtrips() {
+        let dir = temp_dir("graph-roundtrip");
+        let clip = Clip {
+            id: "child".to_owned(),
+            title: "Cover".to_owned(),
+            clip_type: "gen".to_owned(),
+            task: "cover".to_owned(),
+            cover_clip_id: "root".to_owned(),
+            edited_clip_id: "root".to_owned(),
+            ..Default::default()
+        };
+        let mut roots = HashMap::new();
+        roots.insert(
+            "child".to_owned(),
+            RootInfo {
+                root_id: "root".to_owned(),
+                root_title: "Original".to_owned(),
+                status: ResolveStatus::Resolved,
+            },
+        );
+        let resolution = Resolution {
+            roots,
+            gap_filled: Vec::new(),
+        };
+        let mut store = LineageStore::new();
+        store.update(&[clip], &resolution, "2024-01-01T00:00:00Z");
+
+        save_graph(&dir, &store).unwrap();
+        let back = load_graph(&dir).unwrap();
+        assert_eq!(back, store);
+        assert!(back.node("child").is_some());
+        assert_eq!(back.get_root("child").unwrap().root_id, "root");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

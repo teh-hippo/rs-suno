@@ -21,6 +21,7 @@ pub struct Clip {
     pub display_name: String,
     pub handle: String,
     pub is_liked: bool,
+    pub is_trashed: bool,
     pub has_vocal: bool,
     pub clip_type: String,
     pub prompt: String,
@@ -100,6 +101,10 @@ impl Clip {
             handle: string(raw, "handle"),
             is_liked: raw
                 .get("is_liked")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            is_trashed: raw
+                .get("is_trashed")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             has_vocal: metadata
@@ -249,6 +254,7 @@ mod tests {
         let raw = serde_json::json!({
             "id": "self",
             "title": "Lineage",
+            "is_trashed": true,
             "metadata": {
                 "task": "extend",
                 "is_remix": true,
@@ -287,6 +293,7 @@ mod tests {
 
         assert_eq!(clip.task, "extend");
         assert!(clip.is_remix);
+        assert!(clip.is_trashed);
         assert_eq!(clip.cover_clip_id, "cover-1");
         assert_eq!(clip.upsample_clip_id, "upsample-2");
         assert_eq!(clip.remaster_clip_id, "remaster-3");
@@ -363,6 +370,7 @@ mod tests {
 
         assert_eq!(clip.task, "");
         assert!(!clip.is_remix);
+        assert!(!clip.is_trashed);
         assert_eq!(clip.cover_clip_id, "");
         assert_eq!(clip.upsample_clip_id, "");
         assert_eq!(clip.remaster_clip_id, "");
