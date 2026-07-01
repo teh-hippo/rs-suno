@@ -1,0 +1,21 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: teh-hippo/common-repo-configs/.github/workflows/rust-release.yml@c931fba4d72479caec16ca097b7ce105aa56ede4 # v1
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    with:
+      binary-name: suno
+      publish-crates: '["suno-core","rs-suno"]'

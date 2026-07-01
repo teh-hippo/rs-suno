@@ -1,0 +1,15 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    uses: teh-hippo/common-repo-configs/.github/workflows/release-please.yml@b3d0a782aa320db32e090a312e42e8da717e29b5 # v1
+    secrets:
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
