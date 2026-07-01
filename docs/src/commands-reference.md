@@ -1,0 +1,267 @@
+# Commands reference
+
+```text
+suno [OPTIONS] <COMMAND>
+```
+
+| Command | Purpose |
+|---|---|
+| [`sync`](#sync) | Mirror your library to a directory, including deletions. |
+| [`copy`](#copy) | Download and update, never delete. |
+| [`check`](#check) | Report what `sync` or `copy` would change, touching nothing. |
+| [`ls`](#ls) | List clips in a readable table. |
+| [`lsjson`](#lsjson) | List clips as newline-delimited JSON. |
+| [`fetch`](#fetch) | Download one clip by ID or URL. |
+| [`config`](#config) | Create and inspect the config file. |
+| [`auth`](#auth) | Refresh and test authentication. |
+| [`version`](#version) | Print version and environment information. |
+| [`completions`](#completions) | Emit a shell completion script. |
+
+## Global options
+
+These apply to every command and may appear before or after the subcommand.
+
+| Flag | Short | Env | Description |
+|---|---|---|---|
+| `--account <LABEL>` | | `SUNO_ACCOUNT` | Run against one configured account. |
+| `--all` | | | Run every configured account in isolation (`sync`/`copy`). Conflicts with `--account`. |
+| `--config <PATH>` | | `SUNO_CONFIG` | Path to the config file. |
+| `--dry-run` | `-n` | `SUNO_DRY_RUN` | Report changes without writing to disk or deleting. |
+| `--verbose` | `-v` | | Increase verbosity. Repeatable (`-vv`). |
+| `--quiet` | `-q` | | Decrease verbosity. Repeatable (`-qq`). |
+| `--yes` | `-y` | `SUNO_YES` | Skip confirmation prompts (such as a destructive `sync`). |
+| `--token <TOKEN>` | | `SUNO_TOKEN` | The `__client` token. Never printed. Overrides config and env. |
+
+### Verbosity
+
+Verbosity is relative to the default level of 0.
+
+| Level | Flag | Output |
+|---|---|---|
+| Silent | `-qq` | Errors only. |
+| Quiet | `-q` | Per-run summary, warnings, and errors. |
+| Default | | Summary plus a single progress line. |
+| Verbose | `-v` | A line per clip as it is downloaded, tagged, renamed, skipped, or deleted. |
+
+Machine-readable output (`ls` rows and `lsjson` objects) goes to stdout;
+progress and summaries go to stderr, so a piped `lsjson` stays clean.
+
+## sync
+
+Mirror selected clips into a destination: download new clips, update tags and
+artwork, rename or re-encode changed files, and remove local files whose clips
+have left your library. Deletion is governed by strict safety rules; see
+[Sync, copy and deletion safety](sync-copy-and-deletion-safety.md).
+
+```text
+suno sync [OPTIONS] [DEST]
+```
+
+`DEST` is the local directory to mirror into. If omitted, the account's
+configured `root` is used.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--format <mp3\|flac\|wav>` | `flac` | Audio format for downloads. |
+| `--limit <N>` | | Mirror only the N most recent clips. |
+| `--since <SPEC>` | | Mirror clips newer than `7d`, `2w`, or `last-run`. |
+| `--min-newest <N>` | `1` | Newest clips always kept when a recency filter applies. |
+| `--retries <N>` | `3` | Download retry attempts per clip. |
+| `--animated-covers` | off | Also write animated WebP covers from video previews. |
+
+When `sync` would delete files and `--yes` was not passed, it lists them and
+asks for confirmation on an interactive terminal. Without a terminal it refuses
+and asks you to pass `--yes` or use `copy`.
+
+```bash
+# Mirror everything to the configured root, in FLAC:
+suno sync
+
+# Mirror the last two weeks to a specific directory, in MP3:
+suno sync /music/suno --format mp3 --since 2w
+```
+
+## copy
+
+Additive download and update: same selection and flags as `sync`, but it never
+deletes and never prompts.
+
+```bash
+suno copy /music/suno-archive
+```
+
+## check
+
+Report what `sync` or `copy` would do without writing anything. It accepts every
+`sync` flag.
+
+```text
+suno check [OPTIONS] [DEST]
+```
+
+| Flag | Description |
+|---|---|
+| `--exit-code` | Exit 1 when changes are pending, 0 when up to date (useful in CI). |
+
+```bash
+suno check /music/suno --exit-code
+```
+
+`check` never touches disk, so it is safe to run at any time.
+
+## ls
+
+List selected clips as a tab-separated table (`ID`, `DURATION`, `TITLE`,
+`TAGS`). The title is truncated to 48 characters. A header prints only to a
+terminal, so piping stays clean.
+
+```text
+suno ls [OPTIONS]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--liked` | off | List only liked clips. |
+| `--limit <N>` | | Stop after the first N clips. |
+| `--since <SPEC>` | | Show clips newer than `7d`, `2w`, or `last-run`. |
+| `--format <text\|json>` | `text` | Output format; `json` matches `lsjson`. |
+
+```bash
+suno ls --limit 20
+suno ls --liked | column -t -s $'\t'
+```
+
+## lsjson
+
+List selected clips as newline-delimited JSON (one object per line). Equivalent
+to `ls --format json`, and it accepts the same flags. The schema is stable for
+scripting: fields are only added, never removed or renamed. Every field is
+present on every object; nullable fields are `null` when Suno supplied no value.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Suno clip UUID. |
+| `title` | string | Display title; `Untitled` when blank. |
+| `status` | string | For example `complete`. |
+| `duration` | number | Seconds. |
+| `created_at` | string | ISO 8601 UTC. |
+| `is_liked` | bool | Whether the clip is liked. |
+| `has_vocal` | bool | Whether the clip has a vocal track. |
+| `clip_type` | string | For example `gen` or `edit`. |
+| `tags` | string | Comma-separated style tags. |
+| `prompt` | string \| null | User prompt. |
+| `gpt_description_prompt` | string \| null | Auto-generated description prompt. |
+| `lyrics` | string \| null | Lyrics text; null if instrumental. |
+| `model_name` | string | For example `chirp-v4`. |
+| `major_model_version` | string | For example `v4`. |
+| `display_name` | string | Account display name. |
+| `handle` | string | Account handle. |
+| `album_title` | string \| null | Lineage album title. |
+| `root_ancestor_id` | string \| null | Root clip of the lineage. |
+| `lineage_status` | string \| null | For example `root`. |
+| `edited_clip_id` | string \| null | Source clip if this is a remix. |
+| `audio_url` | string | Audio CDN URL. |
+| `image_url` | string | Cover image URL. |
+| `image_large_url` | string | Large cover image URL. |
+| `video_url` | string | Clip video URL. |
+| `video_cover_url` | string | Video cover image URL. |
+
+```bash
+# Titles of liked clips:
+suno lsjson --liked | jq -r '.title'
+```
+
+## fetch
+
+Download one clip by ID or URL to a path outside any mirrored library. The clip
+is written directly and is never tracked or reconciled, so `fetch` never affects
+a `sync` destination.
+
+```text
+suno fetch [OPTIONS] <ID_OR_URL> [DEST]
+```
+
+`ID_OR_URL` is a clip UUID or a Suno URL containing it. `DEST` defaults to the
+current directory; when it is a directory the file is named `<id>.<ext>`.
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--format <mp3\|flac\|wav>` | | `flac` | Audio format. |
+| `--output <PATH>` | `-o` | | Explicit output file path, overriding `DEST` and auto-naming. |
+
+```bash
+suno fetch 3f2a1b4c-aaaa-bbbb-cccc-ddddeeee0001
+suno fetch https://suno.com/song/3f2a1b4c-... -o track.flac
+```
+
+## config
+
+Manage the config file. See [Configuration](configuration.md) for the file
+format.
+
+```text
+suno config init                     # interactively create a config
+suno config add-account [LABEL]      # add an account to an existing config
+suno config show                     # print the config with tokens redacted
+```
+
+## auth
+
+```text
+suno auth refresh [ACCOUNT]
+```
+
+Re-mint an account's JWT to confirm its stored token still works. With no
+account it uses your single configured account, or `--all` to check every one.
+See [Authentication](authentication.md).
+
+## version
+
+```text
+suno version
+```
+
+Print the build version and target, the resolved config path, and the detected
+`ffmpeg`.
+
+## completions
+
+```text
+suno completions <SHELL>
+```
+
+Emit a shell completion script to stdout. `SHELL` is one of `bash`, `zsh`,
+`fish`, `powershell`, or `elvish`. Redirect it to the location your shell reads.
+
+```bash
+suno completions bash > ~/.local/share/bash-completion/completions/suno
+```
+
+## Summaries
+
+A `sync` or `copy` run ends with a summary on stderr:
+
+```text
+Sync complete: me
+  downloaded    12
+  tagged         3
+  renamed        1
+  deleted        2
+  skipped      129
+  failed         0
+  total        147
+Duration: 43.2s
+```
+
+A `--dry-run` or `check` run reports the pending counts instead, and makes no
+changes:
+
+```text
+Dry run: me (no changes made)
+  to download   12
+  to tag         3
+  to rename      1
+  to delete      2
+  up to date   129
+  total        147
+```

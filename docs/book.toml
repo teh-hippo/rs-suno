@@ -1,0 +1,19 @@
+[book]
+title = "rs-suno"
+authors = ["teh-hippo"]
+description = "User guide for rs-suno, a download-only CLI that mirrors your Suno.ai library."
+src = "src"
+language = "en"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/teh-hippo/rs-suno"
+edit-url-template = "https://github.com/teh-hippo/rs-suno/edit/main/docs/{path}"
+
+[output.html.search]
+enable = true
+limit-results = 30
