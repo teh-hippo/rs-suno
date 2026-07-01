@@ -7,7 +7,7 @@ Early development. Not yet usable.
 ## Workspace
 
 - `crates/suno-core` -- pure engine: selection, sync reconciliation, and tagging.
-- `crates/suno-cli` -- the `suno` binary: IO adapters and command surface.
+- `crates/rs-suno` -- the `suno` binary: IO adapters and command surface.
 
 ## Design
 

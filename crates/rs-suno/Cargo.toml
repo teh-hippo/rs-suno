@@ -1,5 +1,5 @@
 [package]
-name = "suno-cli"
+name = "rs-suno"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1058,6 +1058,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rs-suno"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "suno-core",
+ "tokio",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1354,20 +1368,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "suno-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "clap_complete",
- "reqwest",
- "serde",
- "serde_json",
- "suno-core",
- "tokio",
-]
 
 [[package]]
 name = "suno-core"

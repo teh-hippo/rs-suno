@@ -237,7 +237,7 @@ mod tests {
 
     /// Proves the real ffmpeg pipeline: a file-output FLAC carries a complete
     /// `STREAMINFO` so the duration is correct. Ignored because CI has no
-    /// ffmpeg; run locally with `cargo test -p suno-cli -- --ignored`.
+    /// ffmpeg; run locally with `cargo test -p rs-suno -- --ignored`.
     #[test]
     #[ignore = "requires ffmpeg and ffprobe"]
     fn wav_to_flac_yields_correct_duration() {
@@ -291,7 +291,7 @@ mod tests {
 
     /// Proves the real animated-WebP pipeline: a generated MP4 streams through
     /// ffmpeg over pipes and yields a non-empty RIFF/WEBP file. Ignored because
-    /// CI has no ffmpeg; run locally with `cargo test -p suno-cli -- --ignored`.
+    /// CI has no ffmpeg; run locally with `cargo test -p rs-suno -- --ignored`.
     #[test]
     #[ignore = "requires ffmpeg with libwebp_anim"]
     fn mp4_to_webp_yields_a_riff_webp() {

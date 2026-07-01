@@ -10,7 +10,7 @@ Rust (edition 2024, toolchain 1.96+) · Cargo workspace · tokio + reqwest (rust
 cargo fmt --all --check                                   # format check (CI gate)
 cargo clippy --all-targets --all-features -- -D warnings  # lint (CI gate)
 cargo test --all-features                                 # tests (CI gate)
-cargo run -p suno-cli -- ls --limit 5                     # run the CLI
+cargo run -p rs-suno -- ls --limit 5                      # run the CLI
 ```
 
 Auto-fix: `cargo fmt --all && cargo clippy --fix --all-targets`
@@ -19,7 +19,7 @@ The live integration test needs a real token, held in Bitwarden Secrets Manager 
 
 ```bash
 SUNO_TOKEN="$(bws secret list -o json | jq -r '[.[]|select(.key=="SUNO_TOKEN")][0].value')" \
-  cargo run -p suno-cli -- ls --limit 5
+  cargo run -p rs-suno -- ls --limit 5
 ```
 
 Never print the token value.
@@ -36,7 +36,7 @@ crates/
     src/consts.rs    # endpoints and tunables
     src/error.rs     # Error and Result
     src/testutil.rs  # in-memory Http double (test only)
-  suno-cli/    # thin binary `suno`
+  rs-suno/     # thin binary `suno`
     src/main.rs      # clap commands
     src/http.rs      # reqwest adapter implementing Http
 ```
