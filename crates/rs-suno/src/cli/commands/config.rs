@@ -16,9 +16,7 @@ use crate::cli::desired::ExitCode;
 use crate::cli::logs;
 use crate::download::write_atomic;
 
-#[cfg(unix)]
 const PRIVATE_CONFIG_FILE_MODE: u32 = 0o600;
-#[cfg(unix)]
 const PRIVATE_CONFIG_DIR_MODE: u32 = 0o700;
 
 /// Run a `config` subcommand.

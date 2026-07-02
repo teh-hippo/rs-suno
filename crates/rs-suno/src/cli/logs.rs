@@ -258,10 +258,15 @@ fn append(path: &Path, text: &str) -> Result<()> {
     set_private_file_permissions(path)
 }
 
+#[cfg(unix)]
 fn set_private_file_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
         .with_context(|| format!("could not set permissions on {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
