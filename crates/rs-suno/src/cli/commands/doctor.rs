@@ -18,7 +18,7 @@ use crate::cli::run;
 use crate::clock::TokioClock;
 use crate::http::ReqwestHttp;
 
-const DAY_SECS: i64 = 86_400;
+const SECS_PER_DAY: i64 = 86_400;
 
 /// Run `doctor`.
 pub async fn run_doctor(global: &GlobalArgs) -> Result<ExitCode> {
@@ -62,12 +62,12 @@ pub async fn run_doctor(global: &GlobalArgs) -> Result<ExitCode> {
                     Some(token) => {
                         let live = inspect_live(token, &http).await;
                         render_live_status(&mut out, &live);
-                        worst = worse(worst, live.exit_code);
+                        worst = max_exit_code(worst, live.exit_code);
                     }
                     None => {
                         writeln!(out, "  auth: skipped (no token resolved)").ok();
                         writeln!(out, "  credits: skipped (auth unavailable)").ok();
-                        worst = worse(worst, ExitCode::Config);
+                        worst = max_exit_code(worst, ExitCode::Config);
                     }
                 }
             }
@@ -75,7 +75,7 @@ pub async fn run_doctor(global: &GlobalArgs) -> Result<ExitCode> {
         Err(message) => {
             writeln!(out).ok();
             writeln!(out, "account selection: {message}").ok();
-            worst = worse(worst, ExitCode::Config);
+            worst = max_exit_code(worst, ExitCode::Config);
         }
     }
 
@@ -190,7 +190,7 @@ struct LiveDiagnostic {
 async fn inspect_live(token: &str, http: &ReqwestHttp) -> LiveDiagnostic {
     let mut auth = ClerkAuth::new(token);
     let now = i64::try_from(run::now_secs()).unwrap_or(i64::MAX);
-    let expiry = auth.token_expiry(now, TOKEN_EXPIRY_WARN_DAYS * DAY_SECS);
+    let expiry = auth.token_expiry(now, TOKEN_EXPIRY_WARN_DAYS * SECS_PER_DAY);
     match auth.authenticate(http).await {
         Ok(user_id) => {
             let display_name = auth.display_name().to_owned();
@@ -345,7 +345,7 @@ fn present(yes: bool) -> &'static str {
     if yes { "set" } else { "unset" }
 }
 
-fn worse(a: ExitCode, b: ExitCode) -> ExitCode {
+fn max_exit_code(a: ExitCode, b: ExitCode) -> ExitCode {
     if b.code() >= a.code() { b } else { a }
 }
 

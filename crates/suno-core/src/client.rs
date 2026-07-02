@@ -432,6 +432,8 @@ fn parse_billing_info(body: &[u8]) -> Result<BillingInfo> {
     Ok(BillingInfo { total_credits_left })
 }
 
+/// Read a numeric field that Suno may encode either as a JSON number or a
+/// decimal string.
 fn json_u64(value: &Value) -> Option<u64> {
     match value {
         Value::Number(number) => number.as_u64(),
