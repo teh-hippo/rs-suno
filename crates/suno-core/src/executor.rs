@@ -30,6 +30,7 @@
 //! destructive-sync confirmation, exit codes) is the caller's job.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -183,6 +184,44 @@ where
     } = ports;
     let by_id: HashMap<&str, &Desired> = desired.iter().map(|d| (d.clip.id.as_str(), d)).collect();
     let by_path: HashMap<&str, &Desired> = desired.iter().map(|d| (d.path.as_str(), d)).collect();
+    // Every path this run writes, so the inline old-sidecar cleanup never removes
+    // a file another action produces this run (the non-planned twin of
+    // `suppress_path_aliasing`).
+    let write_targets: BTreeSet<String> = plan
+        .actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Download { path, .. }
+            | Action::Reformat { path, .. }
+            | Action::WriteArtifact { path, .. } => Some(path.clone()),
+            Action::Rename { to, .. } => Some(to.clone()),
+            _ => None,
+        })
+        .collect();
+    // How many tracked artifact slots reference each path. The inline old-path
+    // cleanup removes a path only once nothing else holds it: each slot that
+    // moves away decrements its reference, and the removal fires only when the
+    // count reaches zero and no action writes the path this run. This keeps a
+    // live file a co-referencing slot still owns (a prior failed swap can leave
+    // two clips sharing a path) while letting the last slot to leave reclaim it,
+    // so nothing is orphaned either (#76).
+    let mut tracked_paths: HashMap<String, u32> = HashMap::new();
+    for (_, entry) in manifest.iter() {
+        for path in entry.artifact_paths() {
+            *tracked_paths.entry(path.to_owned()).or_default() += 1;
+        }
+    }
+    for art in albums.values() {
+        for state in [art.folder_jpg.as_ref(), art.folder_webp.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            *tracked_paths.entry(state.path.clone()).or_default() += 1;
+        }
+    }
+    for playlist in playlists.values() {
+        *tracked_paths.entry(playlist.path.clone()).or_default() += 1;
+    }
     let ctx = Ctx {
         http,
         fs,
@@ -191,11 +230,22 @@ where
         opts,
         by_id: &by_id,
         by_path: &by_path,
+        write_targets: &write_targets,
     };
 
     let mut outcome = ExecOutcome::default();
     for action in &plan.actions {
-        match ctx.apply(action, client, manifest, albums, playlists).await {
+        match ctx
+            .apply(
+                action,
+                client,
+                manifest,
+                albums,
+                playlists,
+                &mut tracked_paths,
+            )
+            .await
+        {
             Ok(effect) => outcome.record(effect),
             Err(fail) => {
                 let abort = abort_status(fail.class);
@@ -376,6 +426,13 @@ struct Ctx<'a, H, F, G, C> {
     opts: &'a ExecOptions,
     by_id: &'a HashMap<&'a str, &'a Desired>,
     by_path: &'a HashMap<&'a str, &'a Desired>,
+    /// Every destination path this run writes (audio downloads and reformats,
+    /// artifact writes, and rename targets). The inline old-sidecar cleanup in
+    /// [`write_artifact`](Ctx::write_artifact) skips any path in this set, so a
+    /// path swap between two clips can never delete a file the same run just
+    /// wrote. This mirrors [`suppress_path_aliasing`] for the one removal that
+    /// is not itself a planned action.
+    write_targets: &'a BTreeSet<String>,
 }
 
 impl<H, F, G, C> Ctx<'_, H, F, G, C>
@@ -393,6 +450,7 @@ where
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
         playlists: &mut BTreeMap<String, PlaylistState>,
+        tracked_paths: &mut HashMap<String, u32>,
     ) -> Result<Effect, Fail> {
         match action {
             Action::Download {
@@ -443,6 +501,7 @@ where
                     hash,
                     owner_id,
                     content.as_deref(),
+                    tracked_paths,
                 )
                 .await
             }
@@ -622,6 +681,7 @@ where
         hash: &str,
         owner_id: &str,
         content: Option<&str>,
+        tracked_paths: &mut HashMap<String, u32>,
     ) -> Result<Effect, Fail> {
         // A per-song sidecar needs its owning clip's manifest entry; album and
         // playlist kinds are keyed elsewhere and skip this guard.
@@ -677,16 +737,35 @@ where
         // BEFORE updating the slot, leaving the manifest/album pointing at the
         // old path: the next run sees the same path drift, re-plans this write,
         // and retries the cleanup — convergent, no orphan persists.
+        //
+        // The removal is gated so it can never delete a live file (#76). This
+        // slot is releasing `old`, so drop its reference in `tracked_paths`; the
+        // file is removed only once nothing else holds it — no other tracked slot
+        // still references it (count now zero) and no action writes it this run
+        // (`write_targets`, the non-planned twin of `suppress_path_aliasing`).
+        // On a path swap (A: x -> y while B: y -> x) `write_targets` keeps each
+        // freshly written file; when two slots share a path after a prior failed
+        // swap, the first to move keeps it and the last to leave reclaims it, so
+        // a co-owned file is never deleted and a vacated one is never orphaned.
         if let Some(old) = old_path.as_deref()
             && !old.is_empty()
             && old != path
         {
-            self.fs.remove(old).map_err(|err| {
-                permanent_fail(
-                    owner_id,
-                    format!("could not remove old sidecar {old}: {err}"),
-                )
-            })?;
+            let still_referenced = tracked_paths
+                .get_mut(old)
+                .map(|count| {
+                    *count = count.saturating_sub(1);
+                    *count > 0
+                })
+                .unwrap_or(false);
+            if !still_referenced && !self.write_targets.contains(old) {
+                self.fs.remove(old).map_err(|err| {
+                    permanent_fail(
+                        owner_id,
+                        format!("could not remove old sidecar {old}: {err}"),
+                    )
+                })?;
+            }
         }
         if is_album_kind(kind) {
             albums.entry(owner_id.to_owned()).or_default().set(
@@ -2617,6 +2696,198 @@ mod tests {
         assert_eq!(
             manifest.get("a").unwrap().lyrics_txt.as_ref().unwrap().path,
             "new/a.lyrics.txt"
+        );
+    }
+
+    #[test]
+    fn sidecar_path_swap_never_deletes_a_file_written_this_run() {
+        // Two clips swap sidecar paths in one run (A: x -> y while B: y -> x).
+        // Each write's inline old-path cleanup must skip a path another action
+        // writes this run, or the second write would delete the first's freshly
+        // written file (issue #76). The guard is kind-agnostic; lyrics stands in
+        // for every sidecar, including the .mp4 video.
+        let mut manifest = Manifest::new();
+        let mut a = entry("a.flac", AudioFormat::Flac);
+        a.lyrics_txt = Some(ArtifactState {
+            path: "x.lyrics.txt".to_owned(),
+            hash: "ah".to_owned(),
+        });
+        manifest.insert("a", a);
+        let mut b = entry("b.flac", AudioFormat::Flac);
+        b.lyrics_txt = Some(ArtifactState {
+            path: "y.lyrics.txt".to_owned(),
+            hash: "bh".to_owned(),
+        });
+        manifest.insert("b", b);
+        let fs = MemFs::new()
+            .with_file("a.flac", b"A".to_vec())
+            .with_file("b.flac", b"B".to_vec())
+            .with_file("x.lyrics.txt", b"A words\n".to_vec())
+            .with_file("y.lyrics.txt", b"B words\n".to_vec());
+        // A moves its sidecar x -> y; B moves its sidecar y -> x (the swap).
+        let plan = Plan {
+            actions: vec![
+                Action::WriteArtifact {
+                    kind: ArtifactKind::LyricsTxt,
+                    path: "y.lyrics.txt".to_owned(),
+                    source_url: String::new(),
+                    hash: "ah".to_owned(),
+                    owner_id: "a".to_owned(),
+                    content: Some("A words\n".to_owned()),
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::LyricsTxt,
+                    path: "x.lyrics.txt".to_owned(),
+                    source_url: String::new(),
+                    hash: "bh".to_owned(),
+                    owner_id: "b".to_owned(),
+                    content: Some("B words\n".to_owned()),
+                },
+            ],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        // Both freshly written files survive; neither cleanup clobbered the other.
+        assert_eq!(fs.read_file("y.lyrics.txt").unwrap(), b"A words\n");
+        assert_eq!(fs.read_file("x.lyrics.txt").unwrap(), b"B words\n");
+        assert_eq!(
+            manifest.get("a").unwrap().lyrics_txt.as_ref().unwrap().path,
+            "y.lyrics.txt"
+        );
+        assert_eq!(
+            manifest.get("b").unwrap().lyrics_txt.as_ref().unwrap().path,
+            "x.lyrics.txt"
+        );
+    }
+
+    #[test]
+    fn old_sidecar_kept_when_another_clip_still_references_it() {
+        // A prior failed swap can leave two clips pointing at one path (A -> y and
+        // B -> y). When B now moves y -> x, its cleanup must not delete y, which is
+        // still A's live file (#76). tracked_paths counts two references to y, so
+        // the removal is skipped even though y is not a write target this run.
+        let mut manifest = Manifest::new();
+        let mut a = entry("a.flac", AudioFormat::Flac);
+        a.lyrics_txt = Some(ArtifactState {
+            path: "y.lyrics.txt".to_owned(),
+            hash: "ah".to_owned(),
+        });
+        manifest.insert("a", a);
+        let mut b = entry("b.flac", AudioFormat::Flac);
+        b.lyrics_txt = Some(ArtifactState {
+            path: "y.lyrics.txt".to_owned(),
+            hash: "bh".to_owned(),
+        });
+        manifest.insert("b", b);
+        let fs = MemFs::new()
+            .with_file("a.flac", b"A".to_vec())
+            .with_file("b.flac", b"B".to_vec())
+            .with_file("y.lyrics.txt", b"A words\n".to_vec());
+        // Only B moves this run: y -> x. A is stable, so y is not a write target;
+        // the tracked-reference count is what protects A's file.
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::LyricsTxt,
+                path: "x.lyrics.txt".to_owned(),
+                source_url: String::new(),
+                hash: "bh".to_owned(),
+                owner_id: "b".to_owned(),
+                content: Some("B words\n".to_owned()),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        assert!(
+            fs.exists("y.lyrics.txt"),
+            "A's live sidecar must not be deleted"
+        );
+        assert_eq!(fs.read_file("x.lyrics.txt").unwrap(), b"B words\n");
+    }
+
+    #[test]
+    fn shared_old_path_is_reclaimed_when_every_referencing_clip_moves_away() {
+        // Two clips share one path (A -> s and B -> s, from a prior failed swap).
+        // When BOTH move away this run, the path is no longer live, so the last
+        // mover must reclaim it: it is neither kept as an orphan nor deleted while
+        // still referenced. The dynamic reference count drops to zero only after
+        // both moves, so exactly the final cleanup removes it (#76).
+        let mut manifest = Manifest::new();
+        let mut a = entry("a.flac", AudioFormat::Flac);
+        a.lyrics_txt = Some(ArtifactState {
+            path: "s.lyrics.txt".to_owned(),
+            hash: "ah".to_owned(),
+        });
+        manifest.insert("a", a);
+        let mut b = entry("b.flac", AudioFormat::Flac);
+        b.lyrics_txt = Some(ArtifactState {
+            path: "s.lyrics.txt".to_owned(),
+            hash: "bh".to_owned(),
+        });
+        manifest.insert("b", b);
+        let fs = MemFs::new()
+            .with_file("a.flac", b"A".to_vec())
+            .with_file("b.flac", b"B".to_vec())
+            .with_file("s.lyrics.txt", b"shared\n".to_vec());
+        let plan = Plan {
+            actions: vec![
+                Action::WriteArtifact {
+                    kind: ArtifactKind::LyricsTxt,
+                    path: "pa.lyrics.txt".to_owned(),
+                    source_url: String::new(),
+                    hash: "ah".to_owned(),
+                    owner_id: "a".to_owned(),
+                    content: Some("A words\n".to_owned()),
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::LyricsTxt,
+                    path: "pb.lyrics.txt".to_owned(),
+                    source_url: String::new(),
+                    hash: "bh".to_owned(),
+                    owner_id: "b".to_owned(),
+                    content: Some("B words\n".to_owned()),
+                },
+            ],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(fs.read_file("pa.lyrics.txt").unwrap(), b"A words\n");
+        assert_eq!(fs.read_file("pb.lyrics.txt").unwrap(), b"B words\n");
+        assert!(
+            !fs.exists("s.lyrics.txt"),
+            "the vacated shared path must be reclaimed, not orphaned"
         );
     }
 
