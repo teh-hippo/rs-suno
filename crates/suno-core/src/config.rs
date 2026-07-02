@@ -11,6 +11,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::reconcile::SourceMode;
 
 /// Audio format for downloaded clips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -49,6 +50,7 @@ impl fmt::Display for AudioFormat {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Defaults {
     pub format: Option<AudioFormat>,
+    pub mode: Option<SourceMode>,
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
@@ -62,6 +64,7 @@ pub struct Defaults {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SourceConfig {
     pub format: Option<AudioFormat>,
+    pub mode: Option<SourceMode>,
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
@@ -81,6 +84,7 @@ pub struct AccountConfig {
     /// owner pin in the lineage store).
     pub account_id: Option<String>,
     pub format: Option<AudioFormat>,
+    pub mode: Option<SourceMode>,
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
@@ -278,10 +282,13 @@ impl Config {
             .or_else(|| env.get("SUNO_TOKEN").cloned())
             .or_else(|| acc.token.clone());
 
+        let mode = src.and_then(|s| s.mode).or(acc.mode).or(self.defaults.mode);
+
         Ok(EffectiveSettings {
             token,
             account_id: acc.account_id.clone(),
             format,
+            mode,
             concurrency,
             retries,
             min_newest,
@@ -362,6 +369,10 @@ pub struct EffectiveSettings {
     /// The optional configured account id assertion (see [`AccountConfig`]).
     pub account_id: Option<String>,
     pub format: AudioFormat,
+    /// Per-source mode override. When `Some`, this takes precedence over the CLI
+    /// verb's implied mode, letting each source choose mirror or copy within a
+    /// single run.
+    pub mode: Option<SourceMode>,
     pub concurrency: u32,
     pub retries: u32,
     pub min_newest: u32,
@@ -448,6 +459,7 @@ mod tests {
                 token: None,
                 account_id: None,
                 format: AudioFormat::Flac,
+                mode: None,
                 concurrency: 4,
                 retries: 3,
                 min_newest: 1,
@@ -798,5 +810,68 @@ mod tests {
             let s = fmt.to_string();
             assert_eq!(s.parse::<AudioFormat>().unwrap(), fmt);
         }
+    }
+
+    #[test]
+    fn mode_defaults_none_when_unset() {
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.mode, None);
+    }
+
+    #[test]
+    fn mode_resolves_from_defaults() {
+        let toml = r#"
+            [defaults]
+            mode = "copy"
+
+            [accounts.alice]
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.mode, Some(SourceMode::Copy));
+    }
+
+    #[test]
+    fn mode_account_overrides_defaults() {
+        let toml = r#"
+            [defaults]
+            mode = "copy"
+
+            [accounts.alice]
+            mode = "mirror"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.mode, Some(SourceMode::Mirror));
+    }
+
+    #[test]
+    fn mode_per_source_overrides_account() {
+        let toml = r#"
+            [accounts.alice]
+            mode = "mirror"
+
+            [accounts.alice.sources.liked]
+            mode = "copy"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg
+            .resolve("alice", Some("liked"), &no_env(), &no_flags())
+            .unwrap();
+        assert_eq!(eff.mode, Some(SourceMode::Copy));
+    }
+
+    #[test]
+    fn mode_unknown_source_falls_back_to_account() {
+        let toml = r#"
+            [accounts.alice]
+            mode = "mirror"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg
+            .resolve("alice", Some("nonexistent"), &no_env(), &no_flags())
+            .unwrap();
+        assert_eq!(eff.mode, Some(SourceMode::Mirror));
     }
 }

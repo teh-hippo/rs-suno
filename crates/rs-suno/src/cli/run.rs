@@ -691,6 +691,8 @@ async fn run_one(
     // to the new account, will mirror.
     let mode = if force_additive {
         SourceMode::Copy
+    } else if let Some(configured) = settings.mode {
+        configured
     } else {
         verb.mode()
     };
