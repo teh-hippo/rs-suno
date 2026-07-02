@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/teh-hippo/rs-suno/compare/v0.11.1...v0.12.0) (2026-07-02)
+
+
+### Features
+
+* adaptive AIMD rate limiter (reactive pacing) ([ecbc15f](https://github.com/teh-hippo/rs-suno/commit/ecbc15f88220fdb73fe64e773a00486b6614b3a9))
+
 ## [0.11.1](https://github.com/teh-hippo/rs-suno/compare/v0.11.0...v0.11.1) (2026-07-02)
 
 
