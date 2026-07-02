@@ -316,6 +316,7 @@ fn is_per_clip_kind(kind: ArtifactKind) -> bool {
             | ArtifactKind::CoverWebp
             | ArtifactKind::DetailsTxt
             | ArtifactKind::LyricsTxt
+            | ArtifactKind::Lrc
     )
 }
 
@@ -648,6 +649,10 @@ where
                 .get(owner_id)
                 .and_then(|e| e.lyrics_txt.as_ref())
                 .map(|s| s.path.clone()),
+            ArtifactKind::Lrc => manifest
+                .get(owner_id)
+                .and_then(|e| e.lrc.as_ref())
+                .map(|s| s.path.clone()),
             ArtifactKind::FolderJpg | ArtifactKind::FolderWebp => albums
                 .get(owner_id)
                 .and_then(|a| a.artifact(kind))
@@ -743,10 +748,9 @@ where
             // The text sidecars are generated and always carry inline content, so
             // `write_artifact` never reaches this fetch path for them. Guard it so
             // a future miswiring fails loudly rather than fetching a URL.
-            ArtifactKind::DetailsTxt | ArtifactKind::LyricsTxt => Err(permanent_fail(
-                owner_id,
-                "text sidecar requires inline content",
-            )),
+            ArtifactKind::DetailsTxt | ArtifactKind::LyricsTxt | ArtifactKind::Lrc => Err(
+                permanent_fail(owner_id, "text sidecar requires inline content"),
+            ),
             ArtifactKind::CoverJpg | ArtifactKind::FolderJpg | ArtifactKind::Playlist => Ok(source),
         }
     }

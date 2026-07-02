@@ -241,6 +241,7 @@ impl AlbumArt {
             | ArtifactKind::CoverWebp
             | ArtifactKind::DetailsTxt
             | ArtifactKind::LyricsTxt
+            | ArtifactKind::Lrc
             | ArtifactKind::Playlist => None,
         }
     }
@@ -258,6 +259,7 @@ impl AlbumArt {
             | ArtifactKind::CoverWebp
             | ArtifactKind::DetailsTxt
             | ArtifactKind::LyricsTxt
+            | ArtifactKind::Lrc
             | ArtifactKind::Playlist => {}
         }
     }

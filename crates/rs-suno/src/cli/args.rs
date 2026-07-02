@@ -158,6 +158,10 @@ pub struct SyncArgs {
     /// maintain `.m3u8` playlists.
     #[arg(long, value_name = "ID_OR_NAME")]
     pub playlist: Vec<String>,
+    /// Also write an untimed `.lrc` sidecar next to each song (plain lyrics, no
+    /// per-line timestamps).
+    #[arg(long)]
+    pub lrc_sidecar: bool,
 }
 
 /// `check` accepts every `sync` flag plus `--exit-code`.
@@ -363,12 +367,14 @@ mod tests {
             "/music",
             "--details-sidecar",
             "--lyrics-sidecar",
+            "--lrc-sidecar",
         ])
         .unwrap();
         match cli.command {
             Command::Sync(args) => {
                 assert!(args.details_sidecar);
                 assert!(args.lyrics_sidecar);
+                assert!(args.lrc_sidecar);
             }
             _ => panic!("expected sync"),
         }
@@ -377,6 +383,7 @@ mod tests {
             Command::Sync(args) => {
                 assert!(!args.details_sidecar);
                 assert!(!args.lyrics_sidecar);
+                assert!(!args.lrc_sidecar);
             }
             _ => panic!("expected sync"),
         }

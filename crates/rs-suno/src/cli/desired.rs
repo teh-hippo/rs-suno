@@ -12,8 +12,8 @@ use std::path::{Component, Path};
 use suno_core::{
     ArtifactKind, AudioFormat, Clip, Desired, DesiredArtifact, ExecOutcome, LineageContext,
     M3u8Entry, NamingConfig, NamingRequest, Playlist, PlaylistDesired, RunStatus, SourceMode,
-    art_hash, art_url_hash, content_hash, meta_hash, render_clip_details, render_clip_lyrics,
-    render_clip_names, render_m3u8, sanitise_name,
+    art_hash, art_url_hash, content_hash, meta_hash, render_clip_details, render_clip_lrc,
+    render_clip_lyrics, render_clip_names, render_m3u8, sanitise_name,
 };
 
 /// Below this manifest size the mass-deletion fraction rule does not fire; a
@@ -50,13 +50,15 @@ impl ExitCode {
 /// The per-song sidecar toggles resolved for a run.
 ///
 /// Each mirrors one resolved setting: `animated_covers` gates the `cover.webp`,
-/// `details` the `.details.txt` dump, and `lyrics` the `.lyrics.txt` file. All
-/// default off, matching the compiled config defaults.
+/// `details` the `.details.txt` dump, `lyrics` the `.lyrics.txt` file, and `lrc`
+/// the untimed `.lrc` sidecar. All default off, matching the compiled config
+/// defaults.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ArtifactToggles {
     pub animated_covers: bool,
     pub details: bool,
     pub lyrics: bool,
+    pub lrc: bool,
 }
 
 /// Build the desired target state for one source's selected clips.
@@ -152,6 +154,7 @@ pub fn build_desired(
 /// `DetailsTxt` is always emitted when `toggles.details` is set (the render is
 /// total); `LyricsTxt` only when `toggles.lyrics` is set and the clip has
 /// non-empty lyrics (the render is partial), so no empty lyrics file is written.
+/// The untimed `Lrc` follows the same partial rule under `toggles.lrc`.
 fn clip_artifacts(
     clip: &Clip,
     base: &str,
@@ -193,6 +196,17 @@ fn clip_artifacts(
         artifacts.push(DesiredArtifact {
             kind: ArtifactKind::LyricsTxt,
             path: format!("{base}.lyrics.txt"),
+            source_url: String::new(),
+            hash: content_hash(&text),
+            content: Some(text),
+        });
+    }
+    if toggles.lrc
+        && let Some(text) = render_clip_lrc(clip, lineage)
+    {
+        artifacts.push(DesiredArtifact {
+            kind: ArtifactKind::Lrc,
+            path: format!("{base}.lrc"),
             source_url: String::new(),
             hash: content_hash(&text),
             content: Some(text),
@@ -916,6 +930,81 @@ mod tests {
         assert_eq!(lyrics.source_url, "");
         assert_eq!(lyrics.content.as_deref(), Some("la la la\n"));
         assert_eq!(lyrics.hash, content_hash("la la la\n"));
+    }
+
+    #[test]
+    fn build_desired_emits_lrc_sidecar_only_when_enabled_and_present() {
+        let with_lyrics = Clip {
+            lyrics: "la la la".to_owned(),
+            ..clip("id-a", "Song", "alice")
+        };
+        let clips = [&with_lyrics];
+
+        // Off by default: no lrc sidecar even when the clip has lyrics.
+        let off = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles::default(),
+        );
+        assert!(
+            off[0]
+                .artifacts
+                .iter()
+                .all(|art| art.kind != ArtifactKind::Lrc)
+        );
+
+        // Enabled with lyrics: an untimed Lrc is emitted next to the audio.
+        let on = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                lrc: true,
+                ..Default::default()
+            },
+        );
+        let base = on[0].path.strip_suffix(".flac").unwrap();
+        let lrc = on[0]
+            .artifacts
+            .iter()
+            .find(|art| art.kind == ArtifactKind::Lrc)
+            .expect("lrc sidecar expected");
+        assert_eq!(lrc.path, format!("{base}.lrc"));
+        assert_eq!(lrc.source_url, "");
+        let body = render_clip_lrc(&with_lyrics, &LineageContext::own_root(&with_lyrics)).unwrap();
+        assert_eq!(lrc.content.as_deref(), Some(body.as_str()));
+        assert_eq!(lrc.hash, content_hash(&body));
+        // Untimed: the body carries no per-line timestamps.
+        assert!(!body.contains("[00:"));
+    }
+
+    #[test]
+    fn build_desired_omits_lrc_sidecar_when_clip_has_no_lyrics() {
+        let no_lyrics = clip("id-a", "Song", "alice");
+        assert!(no_lyrics.lyrics.is_empty());
+        let clips = [&no_lyrics];
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                lrc: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            desired[0]
+                .artifacts
+                .iter()
+                .all(|art| art.kind != ArtifactKind::Lrc)
+        );
     }
 
     #[test]

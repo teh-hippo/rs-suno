@@ -55,6 +55,7 @@ pub struct Defaults {
     pub animated_covers: Option<bool>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
+    pub lrc_sidecar: Option<bool>,
 }
 
 /// Per-source overridable settings within an account.
@@ -67,6 +68,7 @@ pub struct SourceConfig {
     pub animated_covers: Option<bool>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
+    pub lrc_sidecar: Option<bool>,
 }
 
 /// Configuration for a single named account.
@@ -85,6 +87,7 @@ pub struct AccountConfig {
     pub animated_covers: Option<bool>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
+    pub lrc_sidecar: Option<bool>,
     #[serde(default)]
     pub sources: HashMap<String, SourceConfig>,
 }
@@ -258,6 +261,16 @@ impl Config {
             "LYRICS_SIDECAR",
         )?;
 
+        let lrc_sidecar = resolve_bool(
+            flags.lrc_sidecar,
+            env_val("LRC_SIDECAR"),
+            src.and_then(|s| s.lrc_sidecar),
+            acc.lrc_sidecar,
+            self.defaults.lrc_sidecar,
+            false,
+            "LRC_SIDECAR",
+        )?;
+
         let token = flags
             .token
             .clone()
@@ -275,6 +288,7 @@ impl Config {
             animated_covers,
             details_sidecar,
             lyrics_sidecar,
+            lrc_sidecar,
         })
     }
 }
@@ -338,6 +352,7 @@ pub struct FlagOverrides {
     pub animated_covers: Option<bool>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
+    pub lrc_sidecar: Option<bool>,
 }
 
 /// Resolved effective settings for one account/source combination.
@@ -353,6 +368,7 @@ pub struct EffectiveSettings {
     pub animated_covers: bool,
     pub details_sidecar: bool,
     pub lyrics_sidecar: bool,
+    pub lrc_sidecar: bool,
 }
 
 #[cfg(test)]
@@ -438,6 +454,7 @@ mod tests {
                 animated_covers: false,
                 details_sidecar: false,
                 lyrics_sidecar: false,
+                lrc_sidecar: false,
             }
         );
     }

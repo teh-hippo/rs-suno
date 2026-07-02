@@ -26,6 +26,7 @@ pub struct TrackMetadata {
     pub album_artist: String,
     pub date: String,
     pub lyrics: String,
+    pub prompt: String,
     pub comment: String,
     pub style: String,
     pub style_summary: String,
@@ -44,7 +45,8 @@ impl TrackMetadata {
     /// `YYYY-MM-DD` prefix of `created_at`. The `album`, `parent`, `root`, and
     /// `lineage` tags come from the resolved context, never the now-defunct
     /// `album_title`/`edited_clip_id`/`root_ancestor_id` feed fields. The
-    /// `lyrics` tag carries the clip's prompt, matching the reference.
+    /// `lyrics` tag carries the clip's real lyrics, and the generation `prompt`
+    /// is preserved in its own `SUNO_PROMPT` tag.
     pub fn from_clip(clip: &Clip, lineage: &LineageContext) -> TrackMetadata {
         let artist = non_empty(&clip.display_name).unwrap_or("Suno").to_owned();
         let album = lineage.album(&clip.title);
@@ -54,7 +56,8 @@ impl TrackMetadata {
             album,
             album_artist: artist,
             date: first_chars(&clip.created_at, 10),
-            lyrics: clip.prompt.clone(),
+            lyrics: clip.lyrics.clone(),
+            prompt: clip.prompt.clone(),
             comment: clip.gpt_description_prompt.clone(),
             style: clip.tags.clone(),
             style_summary: clip.gpt_description_prompt.clone(),
@@ -67,8 +70,9 @@ impl TrackMetadata {
     }
 
     /// The Suno-specific fields, paired with their tag description/key.
-    fn suno_fields(&self) -> [(&'static str, &str); 7] {
+    fn suno_fields(&self) -> [(&'static str, &str); 8] {
         [
+            ("SUNO_PROMPT", &self.prompt),
             ("SUNO_STYLE", &self.style),
             ("SUNO_STYLE_SUMMARY", &self.style_summary),
             ("SUNO_MODEL", &self.model),
@@ -167,7 +171,7 @@ pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Res
 }
 
 /// The Vorbis comment fields, in `(KEY, value)` order.
-fn flac_fields(meta: &TrackMetadata) -> [(&'static str, &str); 14] {
+fn flac_fields(meta: &TrackMetadata) -> [(&'static str, &str); 15] {
     [
         ("TITLE", &meta.title),
         ("ARTIST", &meta.artist),
@@ -176,6 +180,7 @@ fn flac_fields(meta: &TrackMetadata) -> [(&'static str, &str); 14] {
         ("DATE", &meta.date),
         ("LYRICS", &meta.lyrics),
         ("DESCRIPTION", &meta.comment),
+        ("SUNO_PROMPT", &meta.prompt),
         ("SUNO_STYLE", &meta.style),
         ("SUNO_STYLE_SUMMARY", &meta.style_summary),
         ("SUNO_MODEL", &meta.model),
@@ -251,6 +256,7 @@ mod tests {
             handle: "alice".to_owned(),
             prompt: "an orchestral storm".to_owned(),
             gpt_description_prompt: "a moody cinematic build".to_owned(),
+            lyrics: "thunder rolls\nover the plains".to_owned(),
             model_name: "chirp-v4".to_owned(),
             major_model_version: "v4".to_owned(),
             album_title: "Weather Series".to_owned(),
@@ -281,7 +287,8 @@ mod tests {
         assert_eq!(meta.album, "Weather Series");
         assert_eq!(meta.album_artist, "alice");
         assert_eq!(meta.date, "2024-03-10");
-        assert_eq!(meta.lyrics, "an orchestral storm");
+        assert_eq!(meta.lyrics, "thunder rolls\nover the plains");
+        assert_eq!(meta.prompt, "an orchestral storm");
         assert_eq!(meta.comment, "a moody cinematic build");
         assert_eq!(meta.style, "ambient, cinematic");
         assert_eq!(meta.style_summary, "a moody cinematic build");
@@ -416,6 +423,10 @@ mod tests {
             Some("ambient, cinematic")
         );
         assert_eq!(extended("SUNO_MODEL").as_deref(), Some("chirp-v4 (v4)"));
+        assert_eq!(
+            extended("SUNO_PROMPT").as_deref(),
+            Some("an orchestral storm")
+        );
         assert_eq!(extended("SUNO_PARENT").as_deref(), Some("parentid1234"));
         assert_eq!(extended("SUNO_ROOT").as_deref(), Some("rootid567890"));
         assert_eq!(
@@ -424,12 +435,34 @@ mod tests {
         );
 
         let lyrics = tag.lyrics().next().map(|frame| frame.text.as_str());
-        assert_eq!(lyrics, Some("an orchestral storm"));
+        assert_eq!(lyrics, Some("thunder rolls\nover the plains"));
 
         let picture = tag.pictures().next().unwrap();
         assert_eq!(picture.picture_type, PictureType::CoverFront);
         assert_eq!(picture.mime_type, COVER_MIME);
         assert_eq!(picture.data, cover);
+    }
+
+    #[test]
+    fn lyrics_and_prompt_are_distinct_and_not_swapped() {
+        let clip = Clip {
+            prompt: "the generation prompt".to_owned(),
+            lyrics: "the sung words".to_owned(),
+            ..Clip::default()
+        };
+        let meta = TrackMetadata::from_clip(&clip, &LineageContext::own_root(&clip));
+        assert_eq!(meta.lyrics, "the sung words");
+        assert_eq!(meta.prompt, "the generation prompt");
+
+        let tagged = tag_mp3(b"", &meta, None).unwrap();
+        let tag = id3::Tag::read_from2(Cursor::new(tagged)).unwrap();
+        let uslt = tag.lyrics().next().map(|frame| frame.text.clone());
+        assert_eq!(uslt.as_deref(), Some("the sung words"));
+        let prompt = tag
+            .extended_texts()
+            .find(|frame| frame.description == "SUNO_PROMPT")
+            .map(|frame| frame.value.clone());
+        assert_eq!(prompt.as_deref(), Some("the generation prompt"));
     }
 
     #[test]
@@ -460,6 +493,11 @@ mod tests {
         assert_eq!(vorbis.get("ALBUM").unwrap(), &["Weather Series"]);
         assert_eq!(vorbis.get("ALBUMARTIST").unwrap(), &["alice"]);
         assert_eq!(vorbis.get("SUNO_MODEL").unwrap(), &["chirp-v4 (v4)"]);
+        assert_eq!(vorbis.get("SUNO_PROMPT").unwrap(), &["an orchestral storm"]);
+        assert_eq!(
+            vorbis.get("LYRICS").unwrap(),
+            &["thunder rolls\nover the plains"]
+        );
         assert_eq!(vorbis.get("SUNO_PARENT").unwrap(), &["parentid1234"]);
         assert_eq!(vorbis.get("SUNO_ROOT").unwrap(), &["rootid567890"]);
         assert_eq!(

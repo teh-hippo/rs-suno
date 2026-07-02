@@ -222,7 +222,7 @@ pub fn render_clip_details(clip: &Clip, lineage: &LineageContext) -> String {
         ("Style", &meta.style),
         ("Style Summary", &meta.style_summary),
         ("Comment", &meta.comment),
-        ("Prompt", &meta.lyrics),
+        ("Prompt", &clip.prompt),
         ("Parent", &meta.parent),
         ("Root", &meta.root),
         ("Lineage", &meta.lineage),
@@ -250,6 +250,39 @@ pub fn render_clip_lyrics(clip: &Clip) -> Option<String> {
         return None;
     }
     Some(format!("{}\n", clip.lyrics.trim_end()))
+}
+
+/// Render an untimed `.lrc` sidecar for `clip`, or `None` when it has no lyrics.
+///
+/// The body carries plain lyric lines with no timestamps. The header block emits
+/// `[ti:]`, `[ar:]`, `[al:]`, and `[length:]` tags, each omitted when its value
+/// is empty or unknown, plus a constant `[re:rs-suno]` tool tag. When the lyrics
+/// are empty or whitespace-only, `None` is returned so no empty `.lrc` is
+/// written.
+pub fn render_clip_lrc(clip: &Clip, lineage: &LineageContext) -> Option<String> {
+    if clip.lyrics.trim().is_empty() {
+        return None;
+    }
+    let meta = TrackMetadata::from_clip(clip, lineage);
+    let length = format_duration(clip.duration);
+    let headers: [(&str, &str); 5] = [
+        ("ti", &meta.title),
+        ("ar", &meta.artist),
+        ("al", &meta.album),
+        ("length", &length),
+        ("re", "rs-suno"),
+    ];
+    let mut out = String::new();
+    for (tag, value) in headers {
+        if value.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "[{tag}:{}]", to_single_line(value));
+    }
+    for line in clip.lyrics.trim_end().lines() {
+        let _ = writeln!(out, "{line}");
+    }
+    Some(out)
 }
 
 /// Format a duration in seconds as `mm:ss`, or the empty string when it is
@@ -443,6 +476,54 @@ mod tests {
         let rendered = render_clip_lyrics(&clip).unwrap();
         assert!(rendered.contains("the actual sung words"));
         assert!(!rendered.contains("the generation prompt"));
+    }
+
+    #[test]
+    fn lrc_none_when_lyrics_blank() {
+        let empty = Clip::default();
+        assert_eq!(
+            render_clip_lrc(&empty, &LineageContext::own_root(&empty)),
+            None
+        );
+        let clip = Clip {
+            lyrics: "  \n\t \n".to_owned(),
+            ..Clip::default()
+        };
+        assert_eq!(
+            render_clip_lrc(&clip, &LineageContext::own_root(&clip)),
+            None
+        );
+    }
+
+    #[test]
+    fn lrc_renders_untimed_body_with_headers() {
+        let rendered = render_clip_lrc(&full_clip(), &full_lineage()).unwrap();
+        let expected = "[ti:Electric Storm]\n\
+            [ar:alice]\n\
+            [al:Weather Series]\n\
+            [length:3:32]\n\
+            [re:rs-suno]\n\
+            thunder rolls\n\
+            over the plains\n";
+        assert_eq!(rendered, expected);
+        // Untimed: no per-line `[mm:ss.xx]` timestamps.
+        assert!(!rendered.contains("[00:"));
+    }
+
+    #[test]
+    fn lrc_omits_unknown_headers() {
+        let clip = Clip {
+            title: "Bare".to_owned(),
+            lyrics: "one line".to_owned(),
+            ..Clip::default()
+        };
+        let rendered = render_clip_lrc(&clip, &LineageContext::own_root(&clip)).unwrap();
+        // No duration, so `[length:]` is omitted; artist falls back to Suno and
+        // album to the title. The constant tool tag is always present.
+        assert!(!rendered.contains("[length:"));
+        assert!(rendered.contains("[ti:Bare]\n"));
+        assert!(rendered.contains("[re:rs-suno]\n"));
+        assert!(rendered.ends_with("one line\n"));
     }
 
     #[test]

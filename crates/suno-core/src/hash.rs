@@ -36,14 +36,15 @@ pub fn content_hash(text: &str) -> String {
 
 /// A sentinel for the clip's tag-bearing metadata and chosen art.
 ///
-/// Covers every field that affects file *content* — title, tags, the selected
-/// art URL, video cover, the prompt and description, the account handle, and the
-/// *resolved* lineage that gets embedded (immediate parent and edge, root id and
-/// title, and the album the clip folders under) — so a change to any of them is
-/// detected as a needed retag. This takes the resolved [`LineageContext`] rather
-/// than the raw feed fields precisely because those resolved values are what end
-/// up in the file (HARDENING B1: if a value is embedded, it is in the change
-/// hash), so a retitle, re-point, or album move triggers a retag.
+/// Covers every field that affects file *content*: title, tags, the selected
+/// art URL, video cover, the prompt, the lyrics and description, the account
+/// handle, and the *resolved* lineage that gets embedded (immediate parent and
+/// edge, root id and title, and the album the clip folders under), so a change
+/// to any of them is detected as a needed retag. This takes the resolved
+/// [`LineageContext`] rather than the raw feed fields precisely because those
+/// resolved values are what end up in the file (HARDENING B1: if a value is
+/// embedded, it is in the change hash), so a retitle, re-point, or album move
+/// triggers a retag.
 ///
 /// Path-affecting fields such as `display_name` are excluded on purpose: a path
 /// change is a rename, detected by comparing the rendered path with the stored
@@ -52,7 +53,7 @@ pub fn content_hash(text: &str) -> String {
 pub fn meta_hash(clip: &Clip, lineage: &LineageContext) -> String {
     let edge_label = lineage.edge_type.map(EdgeType::label).unwrap_or("");
     let fields = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         clip.title,
         clip.tags,
         clip.selected_image_url().unwrap_or(""),
@@ -63,6 +64,7 @@ pub fn meta_hash(clip: &Clip, lineage: &LineageContext) -> String {
         lineage.root_title,
         lineage.album(&clip.title),
         clip.prompt,
+        clip.lyrics,
         clip.gpt_description_prompt,
         clip.handle,
     );
@@ -108,6 +110,7 @@ mod tests {
             lineage_status: "continuation".to_owned(),
             album_title: "Weather Series".to_owned(),
             prompt: "an orchestral storm".to_owned(),
+            lyrics: "thunder rolls\nover the plains".to_owned(),
             gpt_description_prompt: "stormy".to_owned(),
             handle: "alice".to_owned(),
             display_name: "Alice".to_owned(),
@@ -132,7 +135,7 @@ mod tests {
         // Golden value: a change here means the sentinel encoding changed and
         // every existing manifest would see a spurious retag. Change with care.
         let h = meta_hash(&sample(), &sample_lineage());
-        assert_eq!(h, "45ea84e9f71e604f");
+        assert_eq!(h, "25a62fac4d9e37cd");
         assert_eq!(h.len(), 16);
         assert_eq!(h, meta_hash(&sample(), &sample_lineage()));
     }
@@ -182,6 +185,7 @@ mod tests {
             |c: &mut Clip| c.tags = "lofi".to_owned(),
             |c: &mut Clip| c.image_large_url = "https://cdn1.suno.ai/new.jpeg".to_owned(),
             |c: &mut Clip| c.handle = "bob".to_owned(),
+            |c: &mut Clip| c.lyrics = "new words".to_owned(),
         ] {
             let mut clip = sample();
             mutate(&mut clip);
