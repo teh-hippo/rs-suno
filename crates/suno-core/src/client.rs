@@ -1,13 +1,15 @@
 //! The Suno API client: lists the library behind the [`Http`](crate::Http) port.
 
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 
 use crate::auth::ClerkAuth;
 use crate::backoff::{backoff_delay, retry_after};
 use crate::clock::Clock;
 use crate::consts::{
-    API_MAX_RETRIES, CLIP_PARENT_PATH, FEED_PAGE_DELAY, FEED_PAGE_SIZE, FEED_V2_PATH,
-    IDS_PER_REQUEST, MAX_PAGES, PLAYLIST_ME_PATH, PLAYLIST_PATH, SUNO_API_BASE_URL,
+    API_MAX_RETRIES, CLIP_PARENT_PATH, FEED_PAGE_DELAY, FEED_PAGE_SIZE, FEED_V3_PATH, MAX_PAGES,
+    PLAYLIST_ME_PATH, PLAYLIST_PATH, SUNO_API_BASE_URL,
 };
 use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
@@ -54,14 +56,18 @@ impl<C: Clock> SunoClient<C> {
 
     /// List clips across the whole library, or only liked clips.
     ///
-    /// Stops early once `limit` clips are collected. Paging is hard-capped at
-    /// [`MAX_PAGES`] so a runaway `has_more` can never loop forever.
+    /// Walks the cursor-paginated `POST /api/feed/v3` feed, following
+    /// `next_cursor` until the server reports the end. Stops early once `limit`
+    /// clips are collected. Paging is hard-capped at [`MAX_PAGES`] so a runaway
+    /// `has_more` can never loop forever. When `liked` is set the feed filter
+    /// scopes to liked clips (`liked: "True"`).
     ///
     /// Returns the clips paired with a `complete` flag that is `true` only when
     /// paging ended because the server reported `has_more == false` (the feed
-    /// fully drained). A `limit` stop, or exhausting [`MAX_PAGES`] while
-    /// `has_more` is still set, yields `false` so the caller can refuse to treat
-    /// a truncated listing as authoritative for deletion.
+    /// fully drained). A missing `has_more`, a `has_more == true` page with no
+    /// usable `next_cursor`, a `limit` stop, exhausting [`MAX_PAGES`], or any
+    /// transport error all yield `false` (or propagate) so the caller can refuse
+    /// to treat a truncated listing as authoritative for deletion.
     pub async fn list_clips(
         &mut self,
         http: &impl Http,
@@ -69,19 +75,28 @@ impl<C: Clock> SunoClient<C> {
         limit: Option<usize>,
     ) -> Result<(Vec<Clip>, bool)> {
         let mut clips = Vec::new();
-        let suffix = if liked { "&is_liked=true" } else { "" };
+        let mut cursor: Option<String> = None;
         let mut complete = false;
         for page in 0..MAX_PAGES {
             if page > 0 {
                 self.clock.sleep(FEED_PAGE_DELAY).await;
             }
-            let path = format!("{FEED_V2_PATH}?page={page}&page_size={FEED_PAGE_SIZE}{suffix}");
-            let body = self.api_get_retrying(http, &path).await?;
-            let (page_clips, has_more) = parse_feed(&body)?;
+            let body = feed_v3_body(liked, cursor.as_deref());
+            let response = self
+                .api_send_retrying(http, Method::Post, FEED_V3_PATH, body)
+                .await?;
+            let (page_clips, has_more, next_cursor) = parse_feed_v3(&response)?;
             clips.extend(page_clips);
-            if !has_more {
-                complete = true;
-                break;
+            match has_more {
+                Some(false) => {
+                    complete = true;
+                    break;
+                }
+                Some(true) => match next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                },
+                None => break,
             }
             if limit.is_some_and(|n| clips.len() >= n) {
                 break;
@@ -108,7 +123,8 @@ impl<C: Clock> SunoClient<C> {
     /// Ask Suno to render a clip to lossless WAV (server-side, asynchronous).
     pub async fn request_wav(&mut self, http: &impl Http, id: &str) -> Result<()> {
         let path = format!("/api/gen/{id}/convert_wav/");
-        self.api_request(http, Method::Post, &path).await?;
+        self.api_request(http, Method::Post, &path, Vec::new())
+            .await?;
         Ok(())
     }
 
@@ -125,25 +141,35 @@ impl<C: Clock> SunoClient<C> {
             .map(str::to_string))
     }
 
-    /// Fetch specific clips by id through the feed's `?ids=` filter.
+    /// Fetch specific clips by id, one `GET /api/clip/{id}` per id.
     ///
     /// Used by lineage resolution to gap-fill ancestors that are absent from a
-    /// normal listing, including trashed ones. Unlike
+    /// normal listing, including trashed ones. The v3 feed has no batch by-id
+    /// filter, so each id is fetched individually; `/api/clip/{id}` returns any
+    /// clip, trashed or artefact, with the full field set. Unlike
     /// [`list_clips`](Self::list_clips), no downloadability filter is applied: an
     /// ancestor may itself be an infill or context-window artefact that the
     /// lineage walk must still traverse. Clips returned here are ancestors for
     /// resolution only and must never be treated as download candidates. Ids are
-    /// chunked so a long list cannot build an over-long URL.
+    /// deduplicated in order, and an id that cannot be retrieved (a `404`) is
+    /// skipped so the caller can fall back to the parent endpoint.
     pub async fn get_clips_by_ids(&mut self, http: &impl Http, ids: &[&str]) -> Result<Vec<Clip>> {
         let mut clips = Vec::new();
-        for chunk in ids.chunks(IDS_PER_REQUEST) {
-            if chunk.is_empty() {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for id in ids {
+            if id.is_empty() || !seen.insert(id) {
                 continue;
             }
-            let joined = chunk.join(",");
-            let path = format!("{FEED_V2_PATH}?ids={joined}");
-            let body = self.api_get_retrying(http, &path).await?;
-            clips.extend(map_all_clips(&body)?);
+            let path = format!("/api/clip/{id}");
+            match self.api_get_retrying(http, &path).await {
+                Ok(body) => {
+                    if let Some(clip) = parse_clip(&body) {
+                        clips.push(clip);
+                    }
+                }
+                Err(Error::NotFound(_)) => continue,
+                Err(err) => return Err(err),
+            }
         }
         Ok(clips)
     }
@@ -227,23 +253,37 @@ impl<C: Clock> SunoClient<C> {
 
     /// Perform an authenticated GET, refreshing the JWT once on a 401/403.
     async fn api_get(&mut self, http: &impl Http, path: &str) -> Result<Vec<u8>> {
-        self.api_request(http, Method::Get, path).await
+        self.api_request(http, Method::Get, path, Vec::new()).await
     }
 
-    /// Like [`api_get`](Self::api_get) but rides through Suno's rate limiter,
-    /// backing off through the [`Clock`] on a `429` (honouring `Retry-After`
-    /// when present) or a transient connection failure, up to
-    /// [`API_MAX_RETRIES`] times.
+    /// A retrying GET: [`api_send_retrying`](Self::api_send_retrying) with no body.
+    async fn api_get_retrying(&mut self, http: &impl Http, path: &str) -> Result<Vec<u8>> {
+        self.api_send_retrying(http, Method::Get, path, Vec::new())
+            .await
+    }
+
+    /// Like [`api_request`](Self::api_request) but rides through Suno's rate
+    /// limiter, backing off through the [`Clock`] on a `429` (honouring
+    /// `Retry-After` when present) or a transient connection failure, up to
+    /// [`API_MAX_RETRIES`] times. Each attempt reconstructs the full request
+    /// (method, path, and body), so a throttled feed page re-POSTs the same
+    /// cursor rather than skipping ahead.
     ///
     /// The WAV render flow deliberately keeps to the plain [`api_get`](Self::api_get):
     /// the executor owns that retry so its budget and poll interval stay in one
     /// place. Library, playlist, and lineage reads use this so a full-library
     /// walk is not aborted by a single throttled page.
-    async fn api_get_retrying(&mut self, http: &impl Http, path: &str) -> Result<Vec<u8>> {
+    async fn api_send_retrying(
+        &mut self,
+        http: &impl Http,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<Vec<u8>> {
         let mut retries = 0;
         loop {
-            match self.api_get(http, path).await {
-                Ok(body) => return Ok(body),
+            match self.api_request(http, method, path, body.clone()).await {
+                Ok(response) => return Ok(response),
                 Err(Error::RateLimited { retry_after }) if retries < API_MAX_RETRIES => {
                     self.clock.sleep(backoff_delay(retries, retry_after)).await;
                     retries += 1;
@@ -258,21 +298,27 @@ impl<C: Clock> SunoClient<C> {
     }
 
     /// Perform an authenticated request, refreshing the JWT once on a 401/403.
+    ///
+    /// `body` is sent only by the adapter when non-empty, so a GET or a bodyless
+    /// POST reaches the network unchanged.
     async fn api_request(
         &mut self,
         http: &impl Http,
         method: Method,
         path: &str,
+        body: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let url = format!("{SUNO_API_BASE_URL}{path}");
         let mut auth_refreshed = false;
         loop {
             let jwt = self.auth.ensure_jwt(http).await?;
-            let request = HttpRequest {
-                method,
-                url: url.clone(),
-                headers: vec![("Authorization".to_string(), format!("Bearer {jwt}"))],
+            let mut request = match method {
+                Method::Get => HttpRequest::get(url.clone()),
+                Method::Post => HttpRequest::post(url.clone(), body.clone()),
             };
+            request
+                .headers
+                .push(("Authorization".to_string(), format!("Bearer {jwt}")));
             let response = http
                 .send(request)
                 .await
@@ -324,12 +370,38 @@ fn parse_clip(body: &[u8]) -> Option<Clip> {
     has_id.then(|| Clip::from_json(raw))
 }
 
-/// Parse a feed page body into the kept clips and the `has_more` flag.
-fn parse_feed(body: &[u8]) -> Result<(Vec<Clip>, bool)> {
+/// Build the JSON body for a `POST /api/feed/v3` page.
+///
+/// `filters.trashed` is the string `"False"` so the feed excludes trashed clips
+/// exactly as the old v2 listing did; a `liked` walk adds `filters.liked =
+/// "True"` (v3 ignores an `is_liked` key). The `cursor` is omitted on the first
+/// page and set to the previous page's `next_cursor` thereafter.
+fn feed_v3_body(liked: bool, cursor: Option<&str>) -> Vec<u8> {
+    let mut filters = serde_json::Map::new();
+    filters.insert("trashed".to_string(), Value::String("False".to_string()));
+    if liked {
+        filters.insert("liked".to_string(), Value::String("True".to_string()));
+    }
+    let mut body = serde_json::Map::new();
+    body.insert("limit".to_string(), Value::from(FEED_PAGE_SIZE));
+    body.insert("filters".to_string(), Value::Object(filters));
+    if let Some(cursor) = cursor {
+        body.insert("cursor".to_string(), Value::String(cursor.to_string()));
+    }
+    serde_json::to_vec(&Value::Object(body)).unwrap_or_default()
+}
+
+/// Parse a v3 feed page into the kept clips, the raw `has_more`, and the
+/// `next_cursor`.
+///
+/// `has_more` is [`None`] when the key is missing or not a bool, so the caller
+/// can refuse to treat an unrecognised page as a fully drained feed. An empty
+/// `next_cursor` string maps to [`None`] so it is never re-sent as a cursor.
+fn parse_feed_v3(body: &[u8]) -> Result<(Vec<Clip>, Option<bool>, Option<String>)> {
     let data: Value = serde_json::from_slice(body)
         .map_err(|err| Error::Api(format!("invalid feed JSON: {err}")))?;
     let Some(object) = data.as_object() else {
-        return Ok((Vec::new(), false));
+        return Ok((Vec::new(), None, None));
     };
     let clips = object
         .get("clips")
@@ -341,34 +413,13 @@ fn parse_feed(body: &[u8]) -> Result<(Vec<Clip>, bool)> {
                 .collect()
         })
         .unwrap_or_default();
-    let has_more = object
-        .get("has_more")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    Ok((clips, has_more))
-}
-
-/// Map every clip in a feed-shaped body, skipping the downloadability filter.
-///
-/// Accepts either a `{"clips": [...]}` wrapper or a bare array, dropping only
-/// elements that carry no id. Used for id-filtered gap-fill fetches, which must
-/// preserve trashed and artefact clips so the lineage walk can traverse them.
-fn map_all_clips(body: &[u8]) -> Result<Vec<Clip>> {
-    let data: Value = serde_json::from_slice(body)
-        .map_err(|err| Error::Api(format!("invalid feed JSON: {err}")))?;
-    let items: &[Value] = match &data {
-        Value::Array(items) => items.as_slice(),
-        Value::Object(_) => data
-            .get("clips")
-            .and_then(Value::as_array)
-            .map_or(&[][..], |arr| arr.as_slice()),
-        _ => &[],
-    };
-    Ok(items
-        .iter()
-        .map(Clip::from_json)
-        .filter(|clip| !clip.id.is_empty())
-        .collect())
+    let has_more = object.get("has_more").and_then(Value::as_bool);
+    let next_cursor = object
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .filter(|cursor| !cursor.is_empty())
+        .map(str::to_string);
+    Ok((clips, has_more, next_cursor))
 }
 
 /// Parse a `/api/playlist/me` page into playlists, dropping entries with no id.
@@ -464,13 +515,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_feed_filters_and_maps() {
-        let (clips, has_more) = parse_feed(feed_body().as_bytes()).unwrap();
-        assert!(!has_more);
+    fn parse_feed_v3_filters_and_reads_pagination() {
+        let (clips, has_more, next_cursor) = parse_feed_v3(feed_body().as_bytes()).unwrap();
+        assert_eq!(has_more, Some(false));
+        assert_eq!(next_cursor, None);
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, "a");
         assert_eq!(clips[0].tags, "rock");
         assert!((clips[0].duration - 120.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn feed_v3_body_carries_filters_and_optional_cursor() {
+        let first: Value = serde_json::from_slice(&feed_v3_body(false, None)).unwrap();
+        assert_eq!(first["filters"]["trashed"], "False");
+        assert!(first.get("cursor").is_none());
+        assert!(first["filters"].get("liked").is_none());
+
+        let liked: Value = serde_json::from_slice(&feed_v3_body(true, Some("cur42"))).unwrap();
+        assert_eq!(liked["filters"]["liked"], "True");
+        assert_eq!(liked["cursor"], "cur42");
     }
 
     #[test]
@@ -499,7 +563,7 @@ mod tests {
                 r#"{"jwt": "a.b.c"}"#.to_string(),
             ),
             Rule::new("/v1/client", 200, client_body),
-            Rule::new("/api/feed/v2", 200, feed_body()),
+            Rule::new("/api/feed/v3", 200, feed_body()),
         ]);
 
         let mut auth = ClerkAuth::new("eyJtoken");
@@ -515,10 +579,11 @@ mod tests {
     fn list_clips_reports_incomplete_when_paging_is_capped() {
         let mut rules = auth_rules();
         rules.push(Rule::new(
-            "/api/feed/v2",
+            "/api/feed/v3",
             200,
             serde_json::json!({
                 "has_more": true,
+                "next_cursor": "cur1",
                 "clips": [{
                     "id": "a", "title": "Song A", "status": "complete",
                     "audio_url": "https://cdn1.suno.ai/a.mp3",
@@ -564,22 +629,25 @@ mod tests {
         SunoClient::new(auth, clock)
     }
 
-    fn one_clip_page(id: &str, has_more: bool) -> String {
-        serde_json::json!({
-            "has_more": has_more,
+    fn one_clip_page(id: &str, next_cursor: Option<&str>) -> String {
+        let mut page = serde_json::json!({
+            "has_more": next_cursor.is_some(),
             "clips": [{
                 "id": id, "title": "Song", "status": "complete",
                 "audio_url": format!("https://cdn1.suno.ai/{id}.mp3"),
                 "metadata": {"type": "gen"}
             }]
-        })
-        .to_string()
+        });
+        if let Some(cursor) = next_cursor {
+            page["next_cursor"] = serde_json::json!(cursor);
+        }
+        page.to_string()
     }
 
     #[test]
     fn list_clips_retries_a_rate_limited_page() {
         let http = ScriptedHttp::new().with_auth().route_seq(
-            "/api/feed/v2",
+            "/api/feed/v3",
             vec![Reply::status(429), Reply::json(&feed_body())],
         );
         let clock = RecordingClock::new();
@@ -589,14 +657,14 @@ mod tests {
         assert_eq!(clips.len(), 1);
         assert!(complete);
         // The throttled page was retried once, waiting out one base backoff.
-        assert_eq!(http.count("/api/feed/v2"), 2);
+        assert_eq!(http.count("/api/feed/v3"), 2);
         assert_eq!(clock.sleeps(), vec![Duration::from_secs(1)]);
     }
 
     #[test]
     fn list_clips_honours_retry_after_on_a_throttled_page() {
         let http = ScriptedHttp::new().with_auth().route_seq(
-            "/api/feed/v2",
+            "/api/feed/v3",
             vec![
                 Reply::status(429).with_retry_after(7),
                 Reply::json(&feed_body()),
@@ -612,12 +680,14 @@ mod tests {
     }
 
     #[test]
-    fn list_clips_paces_between_pages() {
+    fn list_clips_re_posts_the_same_cursor_after_a_throttled_page() {
+        // A 429 mid-walk must re-POST the *same* cursor, not skip a page.
         let http = ScriptedHttp::new().with_auth().route_seq(
-            "/api/feed/v2",
+            "/api/feed/v3",
             vec![
-                Reply::json(&one_clip_page("a", true)),
-                Reply::json(&one_clip_page("e", false)),
+                Reply::json(&one_clip_page("a", Some("cur1"))),
+                Reply::status(429),
+                Reply::json(&one_clip_page("b", None)),
             ],
         );
         let clock = RecordingClock::new();
@@ -626,7 +696,152 @@ mod tests {
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
         assert_eq!(clips.len(), 2);
-        assert_eq!(http.count("/api/feed/v2"), 2);
+        let bodies = http.bodies();
+        let feed_bodies: Vec<&String> = bodies.iter().filter(|b| b.contains("filters")).collect();
+        assert_eq!(feed_bodies.len(), 3, "page 1, the 429 retry, then page 2");
+        // The retry (body 2) carries the SAME cursor as the throttled call (body 2 == the
+        // second feed POST), i.e. the cursor from page 1's next_cursor.
+        let retried: Value = serde_json::from_str(feed_bodies[1]).unwrap();
+        let after_retry: Value = serde_json::from_str(feed_bodies[2]).unwrap();
+        assert_eq!(retried["cursor"], "cur1");
+        assert_eq!(after_retry["cursor"], "cur1");
+    }
+
+    #[test]
+    fn list_clips_threads_the_cursor_across_pages() {
+        let http = ScriptedHttp::new().with_auth().route_seq(
+            "/api/feed/v3",
+            vec![
+                Reply::json(&one_clip_page("a", Some("cur1"))),
+                Reply::json(&one_clip_page("b", None)),
+            ],
+        );
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert!(complete);
+        assert_eq!(clips.len(), 2);
+        let bodies = http.bodies();
+        let feed_bodies: Vec<&String> = bodies.iter().filter(|b| b.contains("filters")).collect();
+        assert_eq!(feed_bodies.len(), 2);
+        let page1: Value = serde_json::from_str(feed_bodies[0]).unwrap();
+        let page2: Value = serde_json::from_str(feed_bodies[1]).unwrap();
+        // Page 1 omits the cursor; page 2 carries exactly page 1's next_cursor.
+        assert!(page1.get("cursor").is_none());
+        assert_eq!(page2["cursor"], "cur1");
+    }
+
+    #[test]
+    fn list_clips_stops_incomplete_when_has_more_but_no_cursor() {
+        // has_more == true with no usable next_cursor: a truncated feed. The walk
+        // must stop, report incomplete, and never re-POST a null cursor.
+        let page = serde_json::json!({
+            "has_more": true,
+            "clips": [{
+                "id": "a", "title": "Song", "status": "complete",
+                "audio_url": "https://cdn1.suno.ai/a.mp3", "metadata": {"type": "gen"}
+            }]
+        })
+        .to_string();
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/feed/v3", Reply::json(&page));
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert!(!complete);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(http.count("/api/feed/v3"), 1, "no re-POST of a null cursor");
+    }
+
+    #[test]
+    fn list_clips_is_incomplete_when_has_more_is_missing() {
+        // A page with no has_more key must not be read as a fully drained feed.
+        let page = serde_json::json!({
+            "clips": [{
+                "id": "a", "title": "Song", "status": "complete",
+                "audio_url": "https://cdn1.suno.ai/a.mp3", "metadata": {"type": "gen"}
+            }]
+        })
+        .to_string();
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/feed/v3", Reply::json(&page));
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert!(!complete);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(http.count("/api/feed/v3"), 1);
+    }
+
+    #[test]
+    fn list_clips_propagates_an_error_mid_walk_and_never_completes() {
+        let http = ScriptedHttp::new().with_auth().route_seq(
+            "/api/feed/v3",
+            vec![
+                Reply::json(&one_clip_page("a", Some("cur1"))),
+                Reply::status(500),
+            ],
+        );
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let result = pollster::block_on(client.list_clips(&http, false, None));
+        assert!(matches!(result, Err(Error::Api(_))));
+    }
+
+    #[test]
+    fn list_clips_is_complete_on_an_empty_drained_feed() {
+        // An empty but fully drained feed is authoritative (complete = true);
+        // deletion is separately gated by there being a mirror source.
+        let page = serde_json::json!({"has_more": false, "clips": []}).to_string();
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/feed/v3", Reply::json(&page));
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert!(complete);
+        assert!(clips.is_empty());
+    }
+
+    #[test]
+    fn list_clips_liked_scope_sends_the_liked_filter() {
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/feed/v3", Reply::json(&feed_body()));
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let _ = pollster::block_on(client.list_clips(&http, true, None)).unwrap();
+        let bodies = http.bodies();
+        let feed_body = bodies.iter().find(|b| b.contains("filters")).unwrap();
+        let value: Value = serde_json::from_str(feed_body).unwrap();
+        assert_eq!(value["filters"]["liked"], "True");
+        assert_eq!(value["filters"]["trashed"], "False");
+    }
+
+    #[test]
+    fn list_clips_paces_between_pages() {
+        let http = ScriptedHttp::new().with_auth().route_seq(
+            "/api/feed/v3",
+            vec![
+                Reply::json(&one_clip_page("a", Some("cur1"))),
+                Reply::json(&one_clip_page("e", None)),
+            ],
+        );
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert!(complete);
+        assert_eq!(clips.len(), 2);
+        assert_eq!(http.count("/api/feed/v3"), 2);
         // One inter-page pace was waited out before fetching the second page.
         assert_eq!(clock.sleeps(), vec![crate::consts::FEED_PAGE_DELAY]);
     }
@@ -635,7 +850,7 @@ mod tests {
     fn list_clips_gives_up_after_max_retries() {
         let http = ScriptedHttp::new()
             .with_auth()
-            .route("/api/feed/v2", Reply::status(429));
+            .route("/api/feed/v3", Reply::status(429));
         let clock = RecordingClock::new();
         let mut client = scripted_client(&http, clock.clone());
 
@@ -643,7 +858,7 @@ mod tests {
         assert!(matches!(result, Err(Error::RateLimited { .. })));
         let budget = crate::consts::API_MAX_RETRIES as usize;
         assert_eq!(clock.sleeps().len(), budget);
-        assert_eq!(http.count("/api/feed/v2"), budget + 1);
+        assert_eq!(http.count("/api/feed/v3"), budget + 1);
     }
 
     #[test]
@@ -685,7 +900,7 @@ mod tests {
             404,
             r#"{"detail": "not found"}"#.to_string(),
         ));
-        rules.push(Rule::new("/api/feed/v2", 200, feed_body()));
+        rules.push(Rule::new("/api/feed/v3", 200, feed_body()));
         let http = MockHttp::new(rules);
         let mut client = authed_client(&http);
 
@@ -731,25 +946,23 @@ mod tests {
     }
 
     #[test]
-    fn get_clips_by_ids_uses_the_ids_filter_and_keeps_all_clips() {
-        // The `?ids=` gap-fill path must not apply the listing's downloadability
-        // filter: an infill ancestor and an upload root both survive.
-        let feed = serde_json::json!({
-            "clips": [
-                {
-                    "id": "p1", "title": "Infill Ancestor", "status": "complete",
-                    "metadata": {"type": "gen", "task": "infill"}
-                },
-                {
-                    "id": "p2", "title": "Uploaded Root", "status": "complete",
-                    "metadata": {"type": "upload"}
-                }
-            ]
+    fn get_clips_by_ids_fetches_each_id_and_keeps_artefacts() {
+        // The per-id gap-fill path must not apply the listing's downloadability
+        // filter: an infill ancestor and an upload root both survive, fetched one
+        // `/api/clip/{id}` at a time.
+        let p1 = serde_json::json!({
+            "id": "p1", "title": "Infill Ancestor", "status": "complete",
+            "metadata": {"type": "gen", "task": "infill"}
+        })
+        .to_string();
+        let p2 = serde_json::json!({
+            "id": "p2", "title": "Uploaded Root", "status": "complete",
+            "metadata": {"type": "upload"}
         })
         .to_string();
         let mut rules = auth_rules();
-        // The exact substring also asserts the ids are comma-joined into the URL.
-        rules.push(Rule::new("/api/feed/v2/?ids=p1,p2", 200, feed));
+        rules.push(Rule::new("/api/clip/p1", 200, p1));
+        rules.push(Rule::new("/api/clip/p2", 200, p2));
         let http = MockHttp::new(rules);
         let mut client = authed_client(&http);
 
@@ -764,19 +977,44 @@ mod tests {
     }
 
     #[test]
-    fn get_clips_by_ids_accepts_a_bare_array_body() {
-        let body = serde_json::json!([
-            {"id": "only", "title": "Bare", "status": "complete", "metadata": {"type": "gen"}}
-        ])
+    fn get_clips_by_ids_returns_a_trashed_clip() {
+        // A trashed ancestor must still be retrievable by id (the v2 `?ids=`
+        // capability that per-id `/api/clip/{id}` replaces).
+        let trashed = serde_json::json!({
+            "id": "t1", "title": "Trashed Ancestor", "status": "complete",
+            "is_trashed": true, "metadata": {"type": "gen"}
+        })
         .to_string();
         let mut rules = auth_rules();
-        rules.push(Rule::new("/api/feed/v2/?ids=only", 200, body));
+        rules.push(Rule::new("/api/clip/t1", 200, trashed));
         let http = MockHttp::new(rules);
         let mut client = authed_client(&http);
 
-        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["only"])).unwrap();
+        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["t1"])).unwrap();
         assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].id, "t1");
+        assert!(clips[0].is_trashed);
+    }
+
+    #[test]
+    fn get_clips_by_ids_skips_a_not_found_id_and_dedupes() {
+        let only = serde_json::json!({
+            "id": "only", "title": "Bare", "status": "complete", "metadata": {"type": "gen"}
+        })
+        .to_string();
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/clip/gone", Reply::status(404))
+            .route("/api/clip/only", Reply::json(&only));
+        let mut client = scripted_client(&http, RecordingClock::new());
+
+        let clips =
+            pollster::block_on(client.get_clips_by_ids(&http, &["only", "gone", "only"])).unwrap();
+        assert_eq!(clips.len(), 1, "the 404 id is skipped");
         assert_eq!(clips[0].id, "only");
+        // "only" is fetched once despite appearing twice; "gone" is attempted once.
+        assert_eq!(http.count("/api/clip/only"), 1);
+        assert_eq!(http.count("/api/clip/gone"), 1);
     }
 
     #[test]

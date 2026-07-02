@@ -1228,16 +1228,14 @@ mod tests {
             edited_clip_id: "root".into(),
             ..Default::default()
         };
-        let root_feed = serde_json::json!({
-            "clips": [{
-                "id": "root", "title": "Original", "status": "complete",
-                "metadata": {"type": "gen"}
-            }]
+        let root_clip = serde_json::json!({
+            "id": "root", "title": "Original", "status": "complete",
+            "metadata": {"type": "gen"}
         })
         .to_string();
         let http = ScriptedHttp::new()
             .with_auth()
-            .route("/api/feed/v2/?ids=", Reply::json(&root_feed));
+            .route("/api/clip/root", Reply::json(&root_clip));
         let mut client = authed_client(&http);
 
         let roots = pollster::block_on(resolve_roots(
@@ -1253,11 +1251,11 @@ mod tests {
         assert_eq!(info.status, ResolveStatus::Resolved);
         assert_eq!(info.root_id, "root");
         assert_eq!(info.root_title, "Original");
-        assert_eq!(http.count("/api/feed/v2/?ids=root"), 1);
+        assert_eq!(http.count("/api/clip/root"), 1);
         assert_eq!(
             http.count("/api/clips/parent"),
             0,
-            "the parent endpoint must not be used when ?ids= succeeds"
+            "the parent endpoint must not be used when the per-id fetch succeeds"
         );
     }
 
@@ -1275,16 +1273,14 @@ mod tests {
             edited_clip_id: "root".into(),
             ..Default::default()
         };
-        let root_feed = serde_json::json!({
-            "clips": [{
-                "id": "root", "title": "Trashed Original", "status": "complete",
-                "metadata": {"type": "gen"}
-            }]
+        let root_clip = serde_json::json!({
+            "id": "root", "title": "Trashed Original", "status": "complete",
+            "metadata": {"type": "gen"}
         })
         .to_string();
         let http = ScriptedHttp::new()
             .with_auth()
-            .route("/api/feed/v2/?ids=", Reply::json(&root_feed));
+            .route("/api/clip/root", Reply::json(&root_clip));
         let mut client = authed_client(&http);
 
         let resolution = pollster::block_on(resolve_roots(
@@ -1316,9 +1312,8 @@ mod tests {
             edited_clip_id: "missing".into(),
             ..Default::default()
         };
-        // The `?ids=` route cannot return `missing`; the parent endpoint yields
-        // its parent (the root), which the walk then bridges over `missing` to.
-        let empty_feed = serde_json::json!({"clips": []}).to_string();
+        // The per-id fetch of `missing` 404s; the parent endpoint yields its
+        // parent (the root), which the walk then bridges over `missing` to.
         let parent_body = serde_json::json!({
             "id": "root", "title": "Original", "status": "complete",
             "metadata": {"type": "gen"}
@@ -1326,7 +1321,7 @@ mod tests {
         .to_string();
         let http = ScriptedHttp::new()
             .with_auth()
-            .route("/api/feed/v2/?ids=", Reply::json(&empty_feed))
+            .route("/api/clip/missing", Reply::status(404))
             .route("/api/clips/parent", Reply::json(&parent_body));
         let mut client = authed_client(&http);
 
@@ -1398,16 +1393,14 @@ mod tests {
             edited_clip_id: "m1".into(),
             ..Default::default()
         };
-        let m1_feed = serde_json::json!({
-            "clips": [{
-                "id": "m1", "title": "Middle", "status": "complete",
-                "metadata": {"type": "gen", "task": "cover", "cover_clip_id": "m2", "edited_clip_id": "m2"}
-            }]
+        let m1_clip = serde_json::json!({
+            "id": "m1", "title": "Middle", "status": "complete",
+            "metadata": {"type": "gen", "task": "cover", "cover_clip_id": "m2", "edited_clip_id": "m2"}
         })
         .to_string();
         let http = ScriptedHttp::new()
             .with_auth()
-            .route("/api/feed/v2/?ids=", Reply::json(&m1_feed));
+            .route("/api/clip/m1", Reply::json(&m1_clip));
         let mut client = authed_client(&http);
         let opts = ResolveOpts {
             max_gap_fills: 1,
@@ -1424,9 +1417,9 @@ mod tests {
             info.root_id, "m2",
             "resolution stops at the first ancestor it could not fetch"
         );
-        assert_eq!(http.count("/api/feed/v2/?ids=m1"), 1);
+        assert_eq!(http.count("/api/clip/m1"), 1);
         assert_eq!(
-            http.count("ids=m2"),
+            http.count("/api/clip/m2"),
             0,
             "the gap-fill budget must not be exceeded"
         );
@@ -1445,10 +1438,9 @@ mod tests {
             edited_clip_id: "outside".into(),
             ..Default::default()
         };
-        let empty_feed = serde_json::json!({"clips": []}).to_string();
         let http = ScriptedHttp::new()
             .with_auth()
-            .route("/api/feed/v2/?ids=", Reply::json(&empty_feed))
+            .route("/api/clip/outside", Reply::status(404))
             .route("/api/clips/parent", Reply::status(404));
         let mut client = authed_client(&http);
 
