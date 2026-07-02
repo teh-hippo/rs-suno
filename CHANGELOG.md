@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/teh-hippo/rs-suno/compare/v0.14.0...v0.15.0) (2026-07-02)
+
+
+### Features
+
+* download the standalone MP4 music video (off by default) ([#18](https://github.com/teh-hippo/rs-suno/issues/18)) ([#75](https://github.com/teh-hippo/rs-suno/issues/75)) ([b8145b9](https://github.com/teh-hippo/rs-suno/commit/b8145b94829d7d343062f358ed4fd244429f9716))
+
 ## [0.14.0](https://github.com/teh-hippo/rs-suno/compare/v0.13.0...v0.14.0) (2026-07-02)
 
 
