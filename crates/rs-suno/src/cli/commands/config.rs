@@ -314,6 +314,7 @@ fn set_private_permissions(path: &Path, mode: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn secure_private_file(path: &Path, mode: u32) -> Result<()> {
     set_permissions_or_remove(path, mode)
         .with_context(|| format!("could not set permissions on {}", path.display()))?;
