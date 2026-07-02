@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/teh-hippo/rs-suno/compare/v0.12.0...v0.13.0) (2026-07-02)
+
+
+### Features
+
+* configurable naming templates and character set ([238a074](https://github.com/teh-hippo/rs-suno/commit/238a07447e0fc62b0fcffec8035bf9455f079c3c))
+
 ## [0.12.0](https://github.com/teh-hippo/rs-suno/compare/v0.11.1...v0.12.0) (2026-07-02)
 
 
