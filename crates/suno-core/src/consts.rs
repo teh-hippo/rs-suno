@@ -35,6 +35,8 @@ pub(crate) const CLIP_PARENT_PATH: &str = "/api/clips/parent";
 /// The caller's own playlists, paged. Trashed and share-list playlists are
 /// excluded by query so the listing is the account's authoritative own set.
 pub(crate) const PLAYLIST_ME_PATH: &str = "/api/playlist/me";
+/// Billing and credit information for the authenticated account.
+pub(crate) const BILLING_INFO_PATH: &str = "/api/billing/info/";
 /// One playlist's detail, including its ordered `playlist_clips`. The id and a
 /// trailing slash are appended: `/api/playlist/{id}/`.
 pub(crate) const PLAYLIST_PATH: &str = "/api/playlist/";

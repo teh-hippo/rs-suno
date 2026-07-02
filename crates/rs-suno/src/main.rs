@@ -13,7 +13,7 @@ mod transcode;
 use clap::Parser;
 
 use crate::cli::args::{Cli, Command};
-use crate::cli::commands::{auth, completions, config, fetch, ls, version};
+use crate::cli::commands::{auth, completions, config, doctor, fetch, ls, version};
 use crate::cli::desired::ExitCode;
 use crate::cli::run;
 
@@ -47,6 +47,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Fetch(args) => fetch::run_fetch(&global, &args).await,
         Command::Config(args) => config::run_config(&global, &args),
         Command::Auth(args) => auth::run_auth(&global, &args).await,
+        Command::Doctor => doctor::run_doctor(&global).await,
         Command::Version => version::run_version(&global),
         Command::Completions(args) => Ok(completions::run_completions(&args)),
     }

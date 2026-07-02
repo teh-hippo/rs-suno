@@ -23,7 +23,13 @@ ffmpeg with animated-WebP support.
 
 ### Authentication failed (exit 4)
 
-The stored token has expired or was rejected. Confirm and re-mint it:
+The stored token has expired or was rejected. Diagnose it first:
+
+```bash
+suno doctor --account <account>
+```
+
+Then confirm and re-mint it:
 
 ```bash
 suno auth refresh <account>

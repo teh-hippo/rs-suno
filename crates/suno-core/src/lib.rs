@@ -35,7 +35,7 @@ mod testutil;
 mod sync_chaos;
 
 pub use auth::{ClerkAuth, TOKEN_EXPIRY_WARN_DAYS, TokenExpiry, classify_token_expiry};
-pub use client::{Playlist, SunoClient};
+pub use client::{BillingInfo, Playlist, SunoClient};
 pub use clock::Clock;
 pub use config::{
     AccountConfig, AreaMode, AreasConfig, AudioFormat, Config, Defaults, EffectiveSettings,

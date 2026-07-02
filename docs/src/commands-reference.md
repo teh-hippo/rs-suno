@@ -14,6 +14,7 @@ suno [OPTIONS] <COMMAND>
 | [`fetch`](#fetch) | Download one clip by ID or URL. |
 | [`config`](#config) | Create and inspect the config file. |
 | [`auth`](#auth) | Refresh and test authentication. |
+| [`doctor`](#doctor) | Diagnose environment, config, auth, and credits. |
 | [`version`](#version) | Print version and environment information. |
 | [`completions`](#completions) | Emit a shell completion script. |
 
@@ -283,6 +284,22 @@ suno auth refresh [ACCOUNT]
 Re-mint an account's JWT to confirm its stored token still works. With no
 account it uses your single configured account, or `--all` to check every one.
 See [Authentication](authentication.md).
+
+## doctor
+
+```text
+suno doctor
+```
+
+Report the current environment and config state, then for the selected account
+live-check authentication and the remaining credits balance. It prints whether
+`SUNO_CONFIG`, `SUNO_TOKEN`, and `SUNO_<ACCOUNT>_TOKEN` are set, whether the
+config parses, the resolved per-account settings with tokens redacted, and the
+detected `ffmpeg`.
+
+With `--account <label>` it checks one configured account; with `--all` it
+checks every configured account in turn. Without a config it can still diagnose
+an env-only setup using `SUNO_TOKEN` or `--token`.
 
 ## version
 
