@@ -129,6 +129,27 @@ pub enum OutputFormat {
     Json,
 }
 
+/// The per-run area mode selected by `--mode`, mapped onto [`SourceMode`].
+///
+/// `mirror` arms deletion for the selected areas; `copy` keeps them additive.
+/// Absent, scoped runs default to copy and a plain library run keeps the verb's
+/// mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum ModeArg {
+    Mirror,
+    Copy,
+}
+
+impl From<ModeArg> for suno_core::SourceMode {
+    fn from(value: ModeArg) -> Self {
+        match value {
+            ModeArg::Mirror => suno_core::SourceMode::Mirror,
+            ModeArg::Copy => suno_core::SourceMode::Copy,
+        }
+    }
+}
+
 /// Flags shared by `sync` and `copy`.
 #[derive(Args, Debug, Clone, Default)]
 pub struct SyncArgs {
@@ -166,13 +187,22 @@ pub struct SyncArgs {
     /// Also write a plain-text `.lyrics.txt` sidecar next to each song.
     #[arg(long)]
     pub lyrics_sidecar: bool,
-    /// Mirror only your liked songs. A scoped run never deletes and does not
-    /// maintain `.m3u8` playlists.
+    /// Select the mode for scoped areas: `mirror` arms deletion, `copy` stays
+    /// additive. Only meaningful with `--liked`/`--playlist` or an `[areas]`
+    /// config; without it a scoped run stays in copy (non-deleting) mode.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub mode: Option<ModeArg>,
+    /// Also select your liked songs. In copy (the scoped default) it never
+    /// deletes; pass `--mode mirror` to arm deletion of liked-exclusive files.
+    /// When a plain library `sync` is not also running, only the selected areas'
+    /// `.m3u8` playlists are maintained.
     #[arg(long)]
     pub liked: bool,
-    /// Mirror only a playlist, by id or name (repeatable). Resolves against your
-    /// own non-trashed playlists. A scoped run never deletes and does not
-    /// maintain `.m3u8` playlists.
+    /// Also select a playlist, by id or name (repeatable). Resolves against your
+    /// own non-trashed playlists. In copy (the scoped default) it never deletes;
+    /// pass `--mode mirror` to arm deletion of that playlist's exclusive files.
+    /// A mirror playlist still runs the full library as a copy protector, so
+    /// library-exclusive files are never deleted.
     #[arg(long, value_name = "ID_OR_NAME")]
     pub playlist: Vec<String>,
     /// Also write an untimed `.lrc` sidecar next to each song (plain lyrics, no

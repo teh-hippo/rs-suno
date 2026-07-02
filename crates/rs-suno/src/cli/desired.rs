@@ -6,14 +6,14 @@
 //! code. Keeping these out of the IO orchestration lets the safety-critical
 //! rules be unit-tested directly, which is where the risk lives.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path};
 
 use suno_core::{
-    ArtifactKind, AudioFormat, Clip, Desired, DesiredArtifact, ExecOutcome, LineageContext,
-    M3u8Entry, NamingConfig, NamingRequest, Playlist, PlaylistDesired, RunStatus, SourceMode,
-    art_hash, art_url_hash, content_hash, meta_hash, render_clip_details, render_clip_lrc,
-    render_clip_lyrics, render_clip_names, render_m3u8, sanitise_name,
+    AreaMode, AreasConfig, ArtifactKind, AudioFormat, Clip, Desired, DesiredArtifact, ExecOutcome,
+    LineageContext, M3u8Entry, NamingConfig, NamingRequest, Playlist, PlaylistDesired, RunStatus,
+    SourceMode, art_hash, art_url_hash, content_hash, meta_hash, render_clip_details,
+    render_clip_lrc, render_clip_lyrics, render_clip_names, render_m3u8, sanitise_name,
 };
 
 /// Below this manifest size the mass-deletion fraction rule does not fire; a
@@ -61,11 +61,20 @@ pub struct ArtifactToggles {
     pub lrc: bool,
 }
 
-/// Build the desired target state for one source's selected clips.
+/// Build the desired target state for a union of selected clips.
 ///
-/// Naming is rendered as a batch so collisions are disambiguated, then the
-/// target format's extension is appended. `mode` is the source kind: a `sync`
-/// verb yields [`SourceMode::Mirror`], a `copy` verb [`SourceMode::Copy`].
+/// Naming is rendered as a batch so collisions are disambiguated globally in one
+/// pass, then the target format's extension is appended. Each clip's `modes` is
+/// stamped from `modes_by_id`: the list of every selected area (mirror and copy
+/// alike) that currently holds that clip. A clip held by a `Mirror` and a `Copy`
+/// area at once therefore carries both, so copy-wins protection (SYNC-8) holds.
+///
+/// Every clip in `clips` must have an entry in `modes_by_id` (the caller builds
+/// the map from the same union), so `modes` is never empty; an empty `modes`
+/// would silently drop that clip's copy protection, so it trips a `debug_assert`
+/// (D6). In a release build a clip missing from the map defaults to an empty
+/// list, which reconcile then treats as unprotected, so callers must never omit
+/// a clip from the map.
 ///
 /// `contexts` carries the resolved [`LineageContext`] for each clip (keyed by
 /// clip id); it drives the album component, the embedded lineage tags, and the
@@ -83,7 +92,7 @@ pub struct ArtifactToggles {
 pub fn build_desired(
     clips: &[&Clip],
     format: AudioFormat,
-    mode: SourceMode,
+    modes_by_id: &HashMap<String, Vec<SourceMode>>,
     contexts: &HashMap<String, LineageContext>,
     colliding_albums: &BTreeSet<String>,
     toggles: ArtifactToggles,
@@ -118,6 +127,14 @@ pub fn build_desired(
             let base = rel_to_string(&name.relative_path);
             let path = format!("{base}.{format}");
             let meta_hash = meta_hash(clip, &lineage);
+            let modes = modes_by_id.get(&clip.id).cloned().unwrap_or_default();
+            // D6: an empty modes vec would silently lose SYNC-8 copy protection
+            // for this clip, so the caller must always list at least one area.
+            debug_assert!(
+                !modes.is_empty(),
+                "clip {} has no modes in the union map",
+                clip.id
+            );
             // Bind the artifacts before the struct literal so `&lineage` is
             // borrowed (for the details render) before it is moved in below.
             let artifacts = clip_artifacts(clip, &base, &lineage, toggles);
@@ -128,7 +145,7 @@ pub fn build_desired(
                 format,
                 meta_hash,
                 art_hash: art_hash(clip),
-                modes: vec![mode],
+                modes,
                 trashed: false,
                 private: false,
                 artifacts,
@@ -295,43 +312,270 @@ fn rel_to_string(path: &Path) -> String {
 }
 
 /// Whether a source counts as fully enumerated for deletion safety.
-///
-/// A source is only authoritative for deletion when its listing fully drained
-/// (`complete` — the feed reported no more pages, with no transport error or
-/// page-cap truncation) *and* no narrowing filter (`--limit` / `--since`) was
-/// applied: a partial or filtered listing omits clips that may still exist
-/// upstream, so a missing clip cannot be read as a deletion. The reconcile
-/// engine refuses every delete unless all sources report `true`.
-pub fn fully_enumerated(complete: bool, narrowed: bool) -> bool {
-    complete && !narrowed
-}
-
-/// Deduplicate clips by id, keeping the first occurrence and preserving order.
-///
-/// A clip can belong to several scopes at once (the liked feed and one or more
-/// playlists), so the scoped listing unions every source and calls this to
-/// download each clip exactly once.
-pub fn dedup_clips_by_id(clips: Vec<Clip>) -> Vec<Clip> {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    clips
-        .into_iter()
-        .filter(|clip| seen.insert(clip.id.clone()))
-        .collect()
-}
-
 /// Whether a `--limit` or `--since` filter narrows a listing.
 pub fn is_narrowed(limit: Option<usize>, since: Option<&str>) -> bool {
     limit.is_some() || since.is_some()
 }
 
-/// Whether a run is scoped to liked songs or specific playlists.
+/// The library area's plan: its mode and how it lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LibrarySpec {
+    /// How the library area treats its clips.
+    pub mode: SourceMode,
+    /// List the full feed unfiltered, ignoring `--limit`/`--since` (D2). False
+    /// only for the classic plain library run, where `--limit` narrows the
+    /// listing and disarms deletion exactly as today.
+    pub unfiltered: bool,
+    /// True when this area was injected as a copy-protector rather than
+    /// user-selected, so it lists the whole library purely to keep
+    /// library-exclusive files out of a Mirror area's deletion candidates (D1).
+    pub protector: bool,
+}
+
+/// Which playlists a run selects and how they are moded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaylistPolicy {
+    /// No playlist areas.
+    None,
+    /// Specific playlists, by CLI value or config id, each with its mode.
+    Explicit(Vec<(String, SourceMode)>),
+    /// Every one of the account's playlists at `default`, with per-id
+    /// `overrides` (config `playlists = ...` group default).
+    All {
+        default: SourceMode,
+        overrides: BTreeMap<String, SourceMode>,
+    },
+}
+
+/// The fully resolved set of areas for a run, before any network listing.
 ///
-/// A scoped run lists only a subset of the library (the liked feed and/or the
-/// named playlists), so it can never be authoritative for deletion. The caller
-/// folds this into [`fully_enumerated`] exactly like [`is_narrowed`], so a
-/// scoped run leaves every file it does not see untouched.
-pub fn is_scoped(liked: bool, playlists: &[String]) -> bool {
-    liked || !playlists.is_empty()
+/// This is a pure function of the verb, CLI scope flags, `--mode`, the account's
+/// `[areas]` config, and whether the run is force-additive (copy verb, re-pin,
+/// or first-use adoption). The caller enumerates each present area and assembles
+/// the union, `modes_by_id`, and per-area [`SourceStatus`] from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSelection {
+    /// The library area, or `None` when `library = "off"` deliberately arms
+    /// deletion of library-exclusive files (no copy-protector).
+    pub library: Option<LibrarySpec>,
+    /// The liked feed's mode, or `None` when it is not selected.
+    pub liked: Option<SourceMode>,
+    /// The playlist selection policy.
+    pub playlists: PlaylistPolicy,
+    /// True when the run was driven by transient CLI scope flags rather than
+    /// `[areas]` config, so an unresolvable `--playlist X` is a hard typo error
+    /// and a playlist-listing failure aborts (today's behaviour); config-driven
+    /// runs degrade such failures to a protected, non-deleting area instead.
+    pub cli_scoped: bool,
+}
+
+impl ResolvedSelection {
+    /// Whether any selected area is a `Mirror` (so the run can delete).
+    ///
+    /// The copy-protector is never a mirror, so a run is armed only by a
+    /// user-selected or configured Mirror library, liked feed, or playlist.
+    fn is_armed(&self) -> bool {
+        let lib_mirror = self
+            .library
+            .is_some_and(|l| l.mode == SourceMode::Mirror && !l.protector);
+        let liked_mirror = self.liked == Some(SourceMode::Mirror);
+        let pl_mirror = match &self.playlists {
+            PlaylistPolicy::None => false,
+            PlaylistPolicy::Explicit(list) => list.iter().any(|(_, m)| *m == SourceMode::Mirror),
+            PlaylistPolicy::All { default, overrides } => {
+                *default == SourceMode::Mirror
+                    || overrides.values().any(|m| *m == SourceMode::Mirror)
+            }
+        };
+        lib_mirror || liked_mirror || pl_mirror
+    }
+
+    /// The classic whole-account run: a single Library area listed at the verb's
+    /// mode (honouring `--limit`), with no scoped areas and no injected
+    /// protector. Only this shape may walk every account playlist; every scoped
+    /// or `[areas]` run instead maintains just the playlist areas it enumerated
+    /// and protects the rest, so an injected copy-protector never promotes an
+    /// unselected playlist's `.m3u8` to a deletion candidate (D3).
+    pub(crate) fn is_plain_library(&self) -> bool {
+        self.library.is_some_and(|l| !l.unfiltered && !l.protector)
+            && self.liked.is_none()
+            && matches!(self.playlists, PlaylistPolicy::None)
+            && !self.cli_scoped
+    }
+}
+
+/// Resolve the areas a run touches and their modes (pure).
+///
+/// Precedence:
+/// - CLI scope flags (`--liked`/`--playlist`) select a transient run in
+///   [`SourceMode::Copy`] unless `--mode mirror` is given; they override any
+///   `[areas]` config.
+/// - Otherwise `[areas]` config drives the run: `library`/`liked`/`playlists`
+///   and per-playlist overrides.
+/// - Otherwise the classic plain library run at the verb's mode.
+///
+/// After the base modes are set, a force-additive run (copy verb, re-pin, or
+/// adoption) rewrites every mode to [`SourceMode::Copy`], so nothing is armed
+/// and no protector is injected. Finally, when any selected area is a Mirror and
+/// the library is neither explicitly selected nor `"off"`, an implicit
+/// full-library copy-protector is injected (D1) so a Mirror area can never
+/// delete a library-exclusive file.
+pub fn resolve_selection(
+    verb_mode: SourceMode,
+    transient_mode: Option<SourceMode>,
+    cli_liked: bool,
+    cli_playlists: &[String],
+    areas_cfg: Option<&AreasConfig>,
+    force_copy: bool,
+) -> ResolvedSelection {
+    let want_liked = cli_liked || cli_playlists.iter().any(|v| v == LIKED_PLAYLIST_ID);
+    let cli_pls: Vec<&str> = cli_playlists
+        .iter()
+        .map(String::as_str)
+        .filter(|v| *v != LIKED_PLAYLIST_ID)
+        .collect();
+    let has_cli_scope = want_liked || !cli_pls.is_empty();
+
+    // `library = "off"` is expressible only via config; it suppresses the
+    // protector so library-exclusive files become deletion candidates.
+    let mut library_off = false;
+    let (mut library, mut liked, mut playlists) = if has_cli_scope {
+        // Transient scoped run: CLI flags win over config.
+        let mode = transient_mode.unwrap_or(SourceMode::Copy);
+        let liked = want_liked.then_some(mode);
+        let playlists = if cli_pls.is_empty() {
+            PlaylistPolicy::None
+        } else {
+            PlaylistPolicy::Explicit(cli_pls.iter().map(|v| ((*v).to_owned(), mode)).collect())
+        };
+        (None, liked, playlists)
+    } else if let Some(cfg) = areas_cfg {
+        // Config-driven run.
+        let library = match cfg.library {
+            Some(AreaMode::Off) => {
+                library_off = true;
+                None
+            }
+            Some(AreaMode::Mode(mode)) => Some(LibrarySpec {
+                mode,
+                unfiltered: true,
+                protector: false,
+            }),
+            None => None,
+        };
+        let liked = cfg.liked;
+        let playlists = match cfg.playlists {
+            Some(default) => PlaylistPolicy::All {
+                default,
+                overrides: cfg.playlist.clone().into_iter().collect(),
+            },
+            None if cfg.playlist.is_empty() => PlaylistPolicy::None,
+            None => PlaylistPolicy::Explicit(
+                cfg.playlist
+                    .clone()
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+        (library, liked, playlists)
+    } else {
+        // Plain library run at the verb's mode (or a --mode override).
+        let mode = transient_mode.unwrap_or(verb_mode);
+        (
+            Some(LibrarySpec {
+                mode,
+                unfiltered: false,
+                protector: false,
+            }),
+            None,
+            PlaylistPolicy::None,
+        )
+    };
+
+    if force_copy {
+        rewrite_all_copy(&mut library, &mut liked, &mut playlists);
+    }
+
+    let mut selection = ResolvedSelection {
+        library,
+        liked,
+        playlists,
+        cli_scoped: has_cli_scope,
+    };
+
+    // D1: inject the implicit full-library copy-protector whenever a Mirror area
+    // is armed and the library is neither explicitly selected nor "off".
+    if selection.is_armed() && selection.library.is_none() && !library_off {
+        selection.library = Some(LibrarySpec {
+            mode: SourceMode::Copy,
+            unfiltered: true,
+            protector: true,
+        });
+    }
+
+    selection
+}
+
+/// Rewrite every area mode to [`SourceMode::Copy`] for a force-additive run.
+fn rewrite_all_copy(
+    library: &mut Option<LibrarySpec>,
+    liked: &mut Option<SourceMode>,
+    playlists: &mut PlaylistPolicy,
+) {
+    if let Some(lib) = library {
+        lib.mode = SourceMode::Copy;
+    }
+    if liked.is_some() {
+        *liked = Some(SourceMode::Copy);
+    }
+    match playlists {
+        PlaylistPolicy::None => {}
+        PlaylistPolicy::Explicit(list) => {
+            for (_, mode) in list.iter_mut() {
+                *mode = SourceMode::Copy;
+            }
+        }
+        PlaylistPolicy::All { default, overrides } => {
+            *default = SourceMode::Copy;
+            for mode in overrides.values_mut() {
+                *mode = SourceMode::Copy;
+            }
+        }
+    }
+}
+
+/// Fold a union of per-area clip lists into `modes_by_id`, mapping each clip id
+/// to the deduplicated, canonical-order list of every area mode holding it.
+///
+/// `areas` is processed in canonical area order (Library, Liked, Playlists), and
+/// each clip's modes are normalised to `[Mirror, Copy]` order, mirroring
+/// `aggregate_desired` so a clip held by both a mirror and a copy area is
+/// copy-protected (SYNC-8).
+pub fn build_modes_by_id(areas: &[(SourceMode, Vec<String>)]) -> HashMap<String, Vec<SourceMode>> {
+    let mut map: HashMap<String, (bool, bool)> = HashMap::new();
+    for (mode, ids) in areas {
+        for id in ids {
+            let entry = map.entry(id.clone()).or_insert((false, false));
+            match mode {
+                SourceMode::Mirror => entry.0 = true,
+                SourceMode::Copy => entry.1 = true,
+            }
+        }
+    }
+    map.into_iter()
+        .map(|(id, (mirror, copy))| {
+            let mut modes = Vec::new();
+            if mirror {
+                modes.push(SourceMode::Mirror);
+            }
+            if copy {
+                modes.push(SourceMode::Copy);
+            }
+            (id, modes)
+        })
+        .collect()
 }
 
 /// Why a `--playlist` value could not be resolved to one of the account's own
@@ -523,6 +767,11 @@ mod tests {
         BTreeSet::new()
     }
 
+    /// Assign every clip a single uniform mode, mirroring an area's union map.
+    fn modes_for(clips: &[&Clip], mode: SourceMode) -> HashMap<String, Vec<SourceMode>> {
+        clips.iter().map(|c| (c.id.clone(), vec![mode])).collect()
+    }
+
     #[test]
     fn build_desired_appends_extension_and_mode() {
         let a = clip("id-a", "Song A", "alice");
@@ -530,7 +779,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
@@ -569,7 +818,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &contexts,
             &no_collisions(),
             ArtifactToggles::default(),
@@ -645,7 +894,7 @@ mod tests {
         let cycle1 = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &contexts_of(&store),
             &store.colliding_root_titles(),
             ArtifactToggles::default(),
@@ -662,7 +911,7 @@ mod tests {
         let cycle2 = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &contexts_of(&store),
             &store.colliding_root_titles(),
             ArtifactToggles::default(),
@@ -697,7 +946,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Mp3,
-            SourceMode::Copy,
+            &modes_for(&clips, SourceMode::Copy),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
@@ -715,7 +964,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
@@ -742,7 +991,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
@@ -768,7 +1017,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles {
@@ -792,7 +1041,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
@@ -806,7 +1055,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles {
@@ -831,7 +1080,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles {
@@ -857,7 +1106,7 @@ mod tests {
         let off = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
@@ -875,7 +1124,7 @@ mod tests {
         let on = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles {
@@ -909,7 +1158,7 @@ mod tests {
         let off = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
@@ -926,7 +1175,7 @@ mod tests {
         let on = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles {
@@ -959,7 +1208,7 @@ mod tests {
         let off = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
@@ -976,7 +1225,7 @@ mod tests {
         let on = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles {
@@ -1008,7 +1257,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles {
@@ -1035,7 +1284,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles {
@@ -1064,7 +1313,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&clips, SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles {
@@ -1099,22 +1348,6 @@ mod tests {
     }
 
     #[test]
-    fn fully_enumerated_requires_ok_and_unnarrowed() {
-        assert!(fully_enumerated(true, false));
-        assert!(!fully_enumerated(false, false));
-        assert!(!fully_enumerated(true, true));
-        assert!(!fully_enumerated(false, true));
-    }
-
-    #[test]
-    fn truncated_listing_is_never_authoritative_for_deletion() {
-        // A `complete == false` listing (transport error or page-cap
-        // truncation) must never be treated as fully enumerated, even with no
-        // narrowing filter, so reconcile emits no deletes against it.
-        assert!(!fully_enumerated(false, false));
-    }
-
-    #[test]
     fn is_narrowed_tracks_limit_and_since() {
         assert!(!is_narrowed(None, None));
         assert!(is_narrowed(Some(5), None));
@@ -1122,48 +1355,310 @@ mod tests {
         assert!(is_narrowed(Some(5), Some("7d")));
     }
 
+    fn areas(toml_body: &str) -> suno_core::AreasConfig {
+        let toml = format!("[accounts.a]\ntoken=\"t\"\n[accounts.a.areas]\n{toml_body}");
+        suno_core::Config::from_toml(&toml).unwrap().accounts["a"]
+            .areas
+            .clone()
+            .unwrap()
+    }
+
+    // Test 1: a bare `--playlist X` (no `--mode`, no config) is Copy, injects no
+    // protector, and arms nothing, so it can never delete.
     #[test]
-    fn is_scoped_tracks_liked_and_playlists() {
-        assert!(!is_scoped(false, &[]));
-        assert!(is_scoped(true, &[]));
-        assert!(is_scoped(false, &["set".to_owned()]));
-        assert!(is_scoped(true, &["set".to_owned()]));
+    fn resolve_bare_playlist_is_copy_and_unarmed() {
+        let sel = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &["holiday".to_owned()],
+            None,
+            false,
+        );
+        assert_eq!(
+            sel.playlists,
+            PlaylistPolicy::Explicit(vec![("holiday".to_owned(), SourceMode::Copy)])
+        );
+        assert!(sel.library.is_none());
+        assert!(!sel.is_armed());
+        assert!(sel.cli_scoped);
+    }
+
+    // Test 2: a bare `--liked` is Copy and unarmed.
+    #[test]
+    fn resolve_bare_liked_is_copy_and_unarmed() {
+        let sel = resolve_selection(SourceMode::Mirror, None, true, &[], None, false);
+        assert_eq!(sel.liked, Some(SourceMode::Copy));
+        assert!(sel.library.is_none());
+        assert!(!sel.is_armed());
+    }
+
+    // Test 3 / D1: `--playlist X --mode mirror` arms deletion and injects the
+    // implicit full-library copy protector, unfiltered.
+    #[test]
+    fn resolve_playlist_mirror_injects_unfiltered_protector() {
+        let sel = resolve_selection(
+            SourceMode::Mirror,
+            Some(SourceMode::Mirror),
+            false,
+            &["holiday".to_owned()],
+            None,
+            false,
+        );
+        assert!(sel.is_armed());
+        let lib = sel.library.expect("protector injected");
+        assert_eq!(lib.mode, SourceMode::Copy);
+        assert!(lib.protector);
+        assert!(lib.unfiltered);
+    }
+
+    // D1: a transient `--mode mirror` with no scope flags still runs the plain
+    // library as a Mirror (this is the classic full sync spelled explicitly).
+    // Test 17: the classic N=1 plain library run resolves to exactly one library
+    // area at the verb's mode, filtered (honours `--limit`/`--since`), not
+    // cli-scoped, and with no liked or playlist areas, so its data flow is
+    // byte-identical to today's single-source path.
+    #[test]
+    fn resolve_plain_library_is_backwards_compatible() {
+        let sync = resolve_selection(SourceMode::Mirror, None, false, &[], None, false);
+        let lib = sync.library.expect("library present");
+        assert_eq!(lib.mode, SourceMode::Mirror);
+        assert!(!lib.unfiltered, "plain library honours --limit/--since");
+        assert!(!lib.protector);
+        assert!(!sync.cli_scoped);
+        assert_eq!(sync.liked, None);
+        assert!(matches!(sync.playlists, PlaylistPolicy::None));
+        assert!(sync.is_armed());
+
+        let copy = resolve_selection(SourceMode::Copy, None, false, &[], None, true);
+        let lib = copy.library.expect("library present");
+        assert_eq!(lib.mode, SourceMode::Copy);
+        assert!(!copy.is_armed(), "a copy run deletes nothing");
     }
 
     #[test]
-    fn dedup_clips_by_id_keeps_first_occurrence() {
-        // A clip present in `--liked` and again in a `--playlist` is downloaded
-        // once; order follows first appearance.
-        let clips = vec![
-            Clip {
-                id: "shared".to_owned(),
-                title: "Liked copy".to_owned(),
-                ..Default::default()
-            },
-            Clip {
-                id: "only-playlist".to_owned(),
-                ..Default::default()
-            },
-            Clip {
-                id: "shared".to_owned(),
-                title: "Playlist copy".to_owned(),
-                ..Default::default()
-            },
-        ];
-        let deduped = dedup_clips_by_id(clips);
-        assert_eq!(deduped.len(), 2);
-        assert_eq!(deduped[0].id, "shared");
-        assert_eq!(deduped[0].title, "Liked copy");
-        assert_eq!(deduped[1].id, "only-playlist");
+    fn resolve_mode_mirror_no_scope_is_plain_library_mirror() {
+        let sel = resolve_selection(
+            SourceMode::Mirror,
+            Some(SourceMode::Mirror),
+            false,
+            &[],
+            None,
+            false,
+        );
+        let lib = sel.library.expect("library present");
+        assert_eq!(lib.mode, SourceMode::Mirror);
+        assert!(!lib.protector);
+        assert!(!lib.unfiltered);
+        assert!(sel.is_armed());
     }
 
+    // Only the classic whole-account run walks every playlist; a scoped run, an
+    // injected protector, or any `[areas]` run must not, so an unselected
+    // playlist's `.m3u8` is never promoted to a deletion candidate (D3).
     #[test]
-    fn a_scoped_run_is_never_fully_enumerated() {
-        // Even a `complete` scoped listing is a subset, so it can never be
-        // authoritative for deletion: scope folds into the narrowed flag.
-        let scoped = is_scoped(true, &[]);
-        assert!(scoped);
-        assert!(!fully_enumerated(true, is_narrowed(None, None) || scoped));
+    fn is_plain_library_only_for_the_whole_account_run() {
+        let plain_sync = resolve_selection(SourceMode::Mirror, None, false, &[], None, false);
+        assert!(
+            plain_sync.is_plain_library(),
+            "plain sync walks all playlists"
+        );
+
+        let plain_copy = resolve_selection(SourceMode::Copy, None, false, &[], None, true);
+        assert!(
+            plain_copy.is_plain_library(),
+            "plain copy walks all playlists"
+        );
+
+        let explicit_mirror = resolve_selection(
+            SourceMode::Mirror,
+            Some(SourceMode::Mirror),
+            false,
+            &[],
+            None,
+            false,
+        );
+        assert!(
+            explicit_mirror.is_plain_library(),
+            "`--mode mirror` with no scope is the classic full sync"
+        );
+
+        // A scoped Mirror injects a protector but selects only its playlist.
+        let scoped_mirror = resolve_selection(
+            SourceMode::Mirror,
+            Some(SourceMode::Mirror),
+            false,
+            &["holiday".to_owned()],
+            None,
+            false,
+        );
+        assert!(scoped_mirror.library.unwrap().protector);
+        assert!(!scoped_mirror.is_plain_library());
+
+        // A bare scoped Copy selects one playlist and no library at all.
+        let scoped_copy = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &["holiday".to_owned()],
+            None,
+            false,
+        );
+        assert!(!scoped_copy.is_plain_library());
+
+        // Config that mirrors playlists injects the protector but is area-driven.
+        let config_playlists = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &[],
+            Some(&areas("playlists = \"mirror\"\n")),
+            false,
+        );
+        assert!(!config_playlists.is_plain_library());
+
+        // An explicit library mirror lists unfiltered, so it is area-driven too.
+        let config_library = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &[],
+            Some(&areas("library = \"mirror\"\n")),
+            false,
+        );
+        assert!(!config_library.is_plain_library());
+    }
+
+    // Test 4: an armed config playlist with no `library` key injects the Copy
+    // protector; `library="off"` suppresses it and leaves no library area.
+    #[test]
+    fn resolve_config_playlists_mirror_protector_and_off() {
+        let with = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &[],
+            Some(&areas("playlists = \"mirror\"\n")),
+            false,
+        );
+        let lib = with.library.expect("protector injected");
+        assert!(lib.protector);
+        assert_eq!(lib.mode, SourceMode::Copy);
+
+        let off = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &[],
+            Some(&areas("library = \"off\"\nplaylists = \"mirror\"\n")),
+            false,
+        );
+        assert!(off.library.is_none(), "library=off leaves no library area");
+        assert!(off.is_armed());
+    }
+
+    // Test 10: a copy verb rewrites every configured mode to Copy and never arms.
+    #[test]
+    fn resolve_copy_verb_rewrites_all_to_copy() {
+        let sel = resolve_selection(
+            SourceMode::Copy,
+            None,
+            false,
+            &[],
+            Some(&areas(
+                "library = \"mirror\"\nliked = \"mirror\"\nplaylists = \"mirror\"\n",
+            )),
+            true,
+        );
+        assert_eq!(sel.library.unwrap().mode, SourceMode::Copy);
+        assert_eq!(sel.liked, Some(SourceMode::Copy));
+        match sel.playlists {
+            PlaylistPolicy::All { default, .. } => assert_eq!(default, SourceMode::Copy),
+            other => panic!("expected All, got {other:?}"),
+        }
+        assert!(!sel.is_armed());
+    }
+
+    // CLI scope flags win over `[areas]` config.
+    #[test]
+    fn resolve_cli_scope_overrides_areas_config() {
+        let sel = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &["holiday".to_owned()],
+            Some(&areas("library = \"mirror\"\n")),
+            false,
+        );
+        // The library mirror from config is ignored; only the CLI playlist (Copy)
+        // is selected, so nothing is armed.
+        assert!(sel.library.is_none());
+        assert!(!sel.is_armed());
+    }
+
+    // Config per-playlist overrides ride on the `All` group default.
+    #[test]
+    fn resolve_config_playlist_overrides() {
+        let sel = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &[],
+            Some(&areas(
+                "playlists = \"copy\"\n[accounts.a.areas.playlist]\n\"pl_1\" = \"mirror\"\n",
+            )),
+            false,
+        );
+        match &sel.playlists {
+            PlaylistPolicy::All { default, overrides } => {
+                assert_eq!(*default, SourceMode::Copy);
+                assert_eq!(overrides["pl_1"], SourceMode::Mirror);
+            }
+            other => panic!("expected All, got {other:?}"),
+        }
+        // A mirror override arms the run, so the protector is injected.
+        assert!(sel.is_armed());
+        assert!(sel.library.unwrap().protector);
+    }
+
+    // Test 7 (SYNC-8): a clip held by a Mirror and a Copy area is stamped
+    // `[Mirror, Copy]`, so build_desired carries the Copy protection.
+    #[test]
+    fn build_modes_by_id_copy_wins_and_dedups() {
+        let map = build_modes_by_id(&[
+            (SourceMode::Mirror, vec!["a".to_owned(), "b".to_owned()]),
+            (SourceMode::Copy, vec!["b".to_owned(), "c".to_owned()]),
+        ]);
+        assert_eq!(map["a"], vec![SourceMode::Mirror]);
+        assert_eq!(map["b"], vec![SourceMode::Mirror, SourceMode::Copy]);
+        assert_eq!(map["c"], vec![SourceMode::Copy]);
+    }
+
+    // Test 11: two distinct clips from two areas render two distinct paths in one
+    // build_desired pass (global disambiguation), each carrying its area's modes.
+    #[test]
+    fn build_desired_one_pass_disambiguates_and_stamps_modes() {
+        let a = clip("lib-1", "Song", "alice");
+        let b = clip("pl-1", "Song", "alice");
+        let clips = [&a, &b];
+        let mut modes = HashMap::new();
+        modes.insert("lib-1".to_owned(), vec![SourceMode::Copy]);
+        modes.insert(
+            "pl-1".to_owned(),
+            vec![SourceMode::Mirror, SourceMode::Copy],
+        );
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            &modes,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles::default(),
+            &NamingConfig::default(),
+        );
+        assert_eq!(desired.len(), 2);
+        assert_ne!(desired[0].path, desired[1].path);
+        assert_eq!(desired[1].modes, vec![SourceMode::Mirror, SourceMode::Copy]);
     }
 
     fn playlist(id: &str, name: &str) -> Playlist {
@@ -1217,13 +1712,24 @@ mod tests {
 
     #[test]
     fn a_scoped_run_never_deletes_orphans() {
-        // THE deletion-safety guard: a scoped run reports fully_enumerated=false,
-        // so reconciling it against a manifest full of orphans yields zero
-        // deletes. This single boolean is the whole safety story for scoping.
+        // THE deletion-safety guard: a bare `--playlist X` resolves to Copy (no
+        // `--mode`), so no source is a Mirror and reconciling it against a
+        // manifest full of orphans yields zero deletes.
         use suno_core::{LocalFile, Manifest, ManifestEntry, SourceMode, SourceStatus, reconcile};
-        let scoped = is_scoped(false, &["holiday".to_owned()]);
-        let enumerated = fully_enumerated(true, is_narrowed(None, None) || scoped);
-        assert!(!enumerated);
+        let selection = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &["holiday".to_owned()],
+            None,
+            false,
+        );
+        assert_eq!(
+            selection.playlists,
+            PlaylistPolicy::Explicit(vec![("holiday".to_owned(), SourceMode::Copy)])
+        );
+        assert!(selection.library.is_none(), "no protector without a mirror");
+        assert!(!selection.is_armed());
 
         let mut manifest = Manifest::new();
         for i in 0..5 {
@@ -1238,12 +1744,12 @@ mod tests {
                 },
             );
         }
+        // The one playlist source is Copy, so deletion is never allowed.
         let sources = vec![SourceStatus {
-            mode: SourceMode::Mirror,
-            fully_enumerated: enumerated,
+            mode: SourceMode::Copy,
+            fully_enumerated: true,
         }];
         let local: HashMap<String, LocalFile> = HashMap::new();
-        // No desired entries: every manifest clip is an orphan for this scope.
         let plan = reconcile(&manifest, &[], &local, &sources);
         assert_eq!(plan.deletes(), 0);
     }
@@ -1540,7 +2046,7 @@ mod tests {
         let desired = build_desired(
             &[&a, &b],
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&[&a, &b], SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
@@ -1580,7 +2086,7 @@ mod tests {
         let desired = build_desired(
             &[&a],
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &modes_for(&[&a], SourceMode::Mirror),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
@@ -1629,7 +2135,7 @@ mod tests {
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
-            SourceMode::Mirror,
+            &HashMap::from([("abcdefgh-1234".to_owned(), vec![SourceMode::Mirror])]),
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),

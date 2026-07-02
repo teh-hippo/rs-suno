@@ -228,7 +228,19 @@ impl<C: Clock> SunoClient<C> {
     /// downloadability filter is applied: a playlist may legitimately contain any
     /// clip. Each entry's `clip` object is mapped (falling back to the entry
     /// itself), and only clips with a non-empty id are kept.
-    pub async fn get_playlist_clips(&mut self, http: &impl Http, id: &str) -> Result<Vec<Clip>> {
+    ///
+    /// The returned `bool` is a completeness signal for deletion authority: the
+    /// endpoint reports `num_total_results` (the playlist's full member count)
+    /// alongside `playlist_clips[]`, so `true` means every member came back on
+    /// this single page (`returned == num_total_results`). A short page (a
+    /// paginated or partially-listed playlist) returns `false`, so a Mirror
+    /// playlist area under `library = "off"` is never treated as authoritative
+    /// unless its whole member set was seen (D5).
+    pub async fn get_playlist_clips(
+        &mut self,
+        http: &impl Http,
+        id: &str,
+    ) -> Result<(Vec<Clip>, bool)> {
         let path = format!("{PLAYLIST_PATH}{id}/");
         let body = self.api_get_retrying(http, &path).await?;
         parse_playlist_clips(&body)
@@ -476,7 +488,8 @@ fn parse_playlist_item(raw: &Value) -> Option<Playlist> {
     })
 }
 
-/// Parse a `/api/playlist/{id}/` body into its ordered member clips.
+/// Parse a `/api/playlist/{id}/` body into its ordered member clips plus a
+/// completeness flag.
 ///
 /// Each `playlist_clips[]` entry wraps the clip under `clip`; the wrapper is
 /// unwrapped (falling back to the entry itself), order is preserved exactly, and
@@ -485,12 +498,18 @@ fn parse_playlist_item(raw: &Value) -> Option<Playlist> {
 /// reconciled as comment lines by the caller, not dropped here. The scoped-sync
 /// path applies [`is_downloadable`](crate::is_downloadable) itself when it fetches
 /// members as download candidates.
-fn parse_playlist_clips(body: &[u8]) -> Result<Vec<Clip>> {
+///
+/// The completeness flag is `true` when the number of raw `playlist_clips[]`
+/// entries equals the response's `num_total_results`, i.e. the whole member set
+/// arrived on this single page. It gates a Mirror playlist area's deletion
+/// authority (D5): a short or paginated page cannot be authoritative for
+/// deletion, so it returns `false`.
+fn parse_playlist_clips(body: &[u8]) -> Result<(Vec<Clip>, bool)> {
     let data: Value = serde_json::from_slice(body)
         .map_err(|err| Error::Api(format!("invalid playlist JSON: {err}")))?;
-    Ok(data
-        .get("playlist_clips")
-        .and_then(Value::as_array)
+    let raw = data.get("playlist_clips").and_then(Value::as_array);
+    let raw_len = raw.map(|a| a.len()).unwrap_or(0);
+    let clips: Vec<Clip> = raw
         .map(|raw| {
             raw.iter()
                 .map(|entry| {
@@ -503,7 +522,17 @@ fn parse_playlist_clips(body: &[u8]) -> Result<Vec<Clip>> {
                 .filter(|clip| !clip.id.is_empty())
                 .collect()
         })
-        .unwrap_or_default())
+        .unwrap_or_default();
+    // Completeness compares the raw entry count (before the empty-id filter)
+    // against the reported total: a full single page has them equal. A missing
+    // or malformed total is never treated as complete, so a page whose size
+    // cannot be verified fails safe toward "not authoritative" and a Mirror area
+    // can never delete from it.
+    let complete = data
+        .get("num_total_results")
+        .and_then(Value::as_u64)
+        .is_some_and(|total| raw_len as u64 == total);
+    Ok((clips, complete))
 }
 
 #[cfg(test)]
@@ -1171,6 +1200,7 @@ mod tests {
         // Members arrive wrapped under `clip`, in playlist order, already
         // non-trashed. Order is preserved and no downloadability filter is applied.
         let body = serde_json::json!({
+            "num_total_results": 2,
             "playlist_clips": [
                 {"clip": {
                     "id": "second", "title": "Second", "status": "complete",
@@ -1188,10 +1218,39 @@ mod tests {
         let http = MockHttp::new(rules);
         let mut client = authed_client(&http);
 
-        let clips = pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
+        let (clips, complete) =
+            pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
         assert_eq!(clips.len(), 2, "an infill member is not filtered out");
         assert_eq!(clips[0].id, "second");
         assert_eq!(clips[1].id, "first");
+        assert!(
+            complete,
+            "returned == num_total_results is fully enumerated"
+        );
+    }
+
+    #[test]
+    fn get_playlist_clips_short_page_is_not_complete() {
+        // A page with fewer entries than num_total_results is not authoritative.
+        let body = serde_json::json!({
+            "num_total_results": 5,
+            "playlist_clips": [
+                {"clip": {
+                    "id": "only", "title": "Only", "status": "complete",
+                    "metadata": {"duration": 60.0, "type": "gen"}
+                }}
+            ]
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/playlist/pl1/", 200, body));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let (clips, complete) =
+            pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert!(!complete, "a short page is not fully enumerated");
     }
 
     #[test]
@@ -1200,12 +1259,37 @@ mod tests {
         rules.push(Rule::new(
             "/api/playlist/empty/",
             200,
+            r#"{"num_total_results": 0, "playlist_clips": []}"#.to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let (clips, complete) =
+            pollster::block_on(client.get_playlist_clips(&http, "empty")).unwrap();
+        assert!(clips.is_empty());
+        assert!(
+            complete,
+            "an empty playlist reporting zero total is complete"
+        );
+    }
+
+    #[test]
+    fn get_playlist_clips_missing_total_is_not_complete() {
+        // A body without num_total_results cannot be verified as whole, so it is
+        // never authoritative -- an empty or malformed page must not let a Mirror
+        // area delete from it (D5).
+        let mut rules = auth_rules();
+        rules.push(Rule::new(
+            "/api/playlist/pl1/",
+            200,
             r#"{"playlist_clips": []}"#.to_string(),
         ));
         let http = MockHttp::new(rules);
         let mut client = authed_client(&http);
 
-        let clips = pollster::block_on(client.get_playlist_clips(&http, "empty")).unwrap();
+        let (clips, complete) =
+            pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
         assert!(clips.is_empty());
+        assert!(!complete, "a missing total is never fully enumerated");
     }
 }
