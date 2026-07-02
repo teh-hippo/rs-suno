@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/teh-hippo/rs-suno/compare/v0.15.1...v0.16.0) (2026-07-02)
+
+
+### Features
+
+* parallelise the executor with bounded download concurrency ([#72](https://github.com/teh-hippo/rs-suno/issues/72)) ([42bcd2c](https://github.com/teh-hippo/rs-suno/commit/42bcd2c5373cf2dfd96ce4ca9e8468c04c7fc7be))
+
 ## [0.15.1](https://github.com/teh-hippo/rs-suno/compare/v0.15.0...v0.15.1) (2026-07-02)
 
 
