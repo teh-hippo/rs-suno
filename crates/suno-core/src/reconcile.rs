@@ -1494,6 +1494,32 @@ mod tests {
     // ── SYNC-12: trashed and private ────────────────────────────────
 
     #[test]
+    fn trashed_but_complete_clip_is_downloadable_yet_still_deletes() {
+        // A trashed clip is complete and carries no excluded type or task, so it
+        // passes `is_downloadable` (downloadability never screens on trashed).
+        // A full run still schedules its deletion, proving the two concerns stay
+        // decoupled: the download filter does not suppress the delete signal.
+        let mut trashed = clip("a");
+        trashed.status = "complete".to_string();
+        trashed.is_trashed = true;
+        assert!(crate::is_downloadable(&trashed));
+
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+        d.clip = trashed;
+        d.trashed = true;
+        let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+        assert_eq!(
+            plan.actions,
+            vec![Action::Delete {
+                path: "a.flac".to_string(),
+                clip_id: "a".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn trashed_clip_deletes_local_file() {
         let mut manifest = Manifest::new();
         manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));

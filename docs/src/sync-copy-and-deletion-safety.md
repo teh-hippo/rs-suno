@@ -75,6 +75,9 @@ no truncation, and no narrowing filter was applied. In practice this means:
 - A network or listing error disables deletion for that run.
 - `--limit` and `--since` narrow the listing, so a run using either **never
   deletes**. Use them freely for quick top-ups without any deletion risk.
+- `--liked` and `--playlist` scope a run to a subset of your library, so a scoped
+  run **never deletes** either. Scoped runs also skip `.m3u8` playlist
+  maintenance, though they may still write folder art for the albums they touch.
 
 A missing clip in a partial or filtered listing might still exist upstream, so it
 is never read as a deletion.

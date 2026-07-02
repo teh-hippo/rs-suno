@@ -38,6 +38,8 @@ Preview any run without touching disk using `suno check` or `--dry-run`.
 
 - Mirrors your whole library, liked songs, and playlists as tagged audio.
 - Two verbs: `sync` mirrors with deletion, `copy` is additive.
+- Scope a run to your liked songs or specific playlists with `--liked` and
+  `--playlist`; a scoped run never deletes.
 - MP3, FLAC, or WAV output (FLAC by default).
 - Rich tags: title, artist, album, date, style, model, creator, and remix
   lineage, plus embedded and folder cover art and unsynced lyrics.

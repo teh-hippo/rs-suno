@@ -19,15 +19,15 @@ use suno_core::{
     AdoptDecision, AlbumArt, AlbumDesired, ClerkAuth, Clip, Config, Error as CoreError,
     ExecOptions, Filesystem, FlagOverrides, LineageContext, LocalFile, Owner, OwnerGate,
     PlaylistDesired, PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode, SourceStatus,
-    SunoClient, adopt_decision, album_desired, deletion_allowed, owner_gate, plan_album_artifacts,
-    plan_playlist_artifacts, reconcile, resolve_roots,
+    SunoClient, adopt_decision, album_desired, deletion_allowed, is_downloadable, owner_gate,
+    plan_album_artifacts, plan_playlist_artifacts, reconcile, resolve_roots,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
 use crate::cli::desired::{
     ArtifactToggles, Confirm, ExitCode, LIKED_PLAYLIST_ID, PlaylistInput, build_desired,
-    build_playlist_desired, confirm_decision, confirmed, fully_enumerated, is_narrowed,
-    mass_delete_abort, run_exit_code,
+    build_playlist_desired, confirm_decision, confirmed, dedup_clips_by_id, fully_enumerated,
+    is_narrowed, is_scoped, mass_delete_abort, resolve_playlist, run_exit_code,
 };
 use crate::cli::logs;
 use crate::cli::output;
@@ -548,9 +548,28 @@ async fn run_one(
 
     let mut client = SunoClient::new(auth, TokioClock);
 
-    let (clips, complete) = match client.list_clips(&http, false, args.limit).await {
-        Ok(result) => result,
-        Err(err) => return Ok(report_listing_failure(&target.label, &err)),
+    // A scoped run (`--liked` and/or `--playlist`) lists only a subset of the
+    // library, so it can never delete: `enumerated` below folds `scoped` into the
+    // same not-fully-enumerated verdict a `--limit`/`--since` narrowing uses.
+    let scoped = is_scoped(args.liked, &args.playlist);
+    let (clips, complete) = if scoped {
+        match list_scoped_clips(&mut client, &http, &target.label, args, verbosity).await {
+            ScopedListing::Clips(clips) => (clips, false),
+            ScopedListing::Empty => {
+                if verbosity >= -1 {
+                    eprintln!(
+                        "notice: nothing to do; the requested scope holds no downloadable clips."
+                    );
+                }
+                return Ok(ExitCode::Ok);
+            }
+            ScopedListing::Failed(code) => return Ok(code),
+        }
+    } else {
+        match client.list_clips(&http, false, args.limit).await {
+            Ok(result) => result,
+            Err(err) => return Ok(report_listing_failure(&target.label, &err)),
+        }
     };
 
     // Resolve every listed clip's root ancestor (roots need the whole set as
@@ -583,7 +602,7 @@ async fn run_one(
     }
     let colliding_albums = store.colliding_root_titles();
     let narrowed = is_narrowed(args.limit, args.since.as_deref());
-    let enumerated = fully_enumerated(complete, narrowed);
+    let enumerated = fully_enumerated(complete, narrowed || scoped);
 
     // PHASE 2: first-use adoption, now the listing is known. Only a library
     // that PHASE 1 left unpinned (FirstUse) reaches here; identity is confirmed
@@ -1024,6 +1043,103 @@ async fn execute_plan(
     }
 
     Ok(run_exit_code(&outcome))
+}
+
+/// The outcome of listing a scoped run's clips.
+enum ScopedListing {
+    /// The deduplicated union of every scoped source's downloadable clips.
+    Clips(Vec<Clip>),
+    /// The scope resolved but held no downloadable clips (an empty or
+    /// fully-filtered playlist). The caller prints a notice and exits `Ok`; it
+    /// must never fall through to a full-feed sync.
+    Empty,
+    /// A listing or resolution failure. Carries the exit code to return.
+    Failed(ExitCode),
+}
+
+/// List the clips for a scoped run: the liked feed and/or named playlists.
+///
+/// `--liked` (and the `--playlist liked` alias) contributes the liked feed;
+/// every other `--playlist` value is resolved against the account's own
+/// non-trashed playlists ([`resolve_playlist`]) and its members are filtered
+/// through [`is_downloadable`], since raw playlist members can include
+/// streaming, infill, and artefact clips the feed path already screens out. The
+/// sources are unioned and deduplicated by clip id, so a clip that appears in
+/// several scopes is downloaded once.
+///
+/// An unknown or ambiguous `--playlist` value prints the resolution error and
+/// the account's visible playlists, then fails with [`ExitCode::Config`] rather
+/// than silently widening the run. An empty resolved scope returns
+/// [`ScopedListing::Empty`] so a typo can never become a full sync.
+async fn list_scoped_clips(
+    client: &mut SunoClient<TokioClock>,
+    http: &ReqwestHttp,
+    label: &str,
+    args: &SyncArgs,
+    verbosity: i8,
+) -> ScopedListing {
+    // The `--playlist liked` alias unifies with the `--liked` synthetic source.
+    let mut want_liked = args.liked;
+    let mut playlist_values: Vec<&str> = Vec::new();
+    for value in &args.playlist {
+        if value == LIKED_PLAYLIST_ID {
+            want_liked = true;
+        } else {
+            playlist_values.push(value.as_str());
+        }
+    }
+
+    let mut union: Vec<Clip> = Vec::new();
+
+    if want_liked {
+        match client.list_clips(http, true, None).await {
+            Ok((liked, _complete)) => union.extend(liked),
+            Err(err) => return ScopedListing::Failed(report_listing_failure(label, &err)),
+        }
+    }
+
+    if !playlist_values.is_empty() {
+        let playlists = match client.get_playlists(http).await {
+            Ok(playlists) => playlists,
+            Err(err) => return ScopedListing::Failed(report_listing_failure(label, &err)),
+        };
+        for value in &playlist_values {
+            let playlist = match resolve_playlist(value, &playlists) {
+                Ok(playlist) => playlist,
+                Err(err) => {
+                    eprintln!("error: {err}.");
+                    print_visible_playlists(&playlists, verbosity);
+                    return ScopedListing::Failed(ExitCode::Config);
+                }
+            };
+            match client.get_playlist_clips(http, &playlist.id).await {
+                Ok(members) => union.extend(members.into_iter().filter(is_downloadable)),
+                Err(err) => return ScopedListing::Failed(report_listing_failure(label, &err)),
+            }
+        }
+    }
+
+    let union = dedup_clips_by_id(union);
+    if union.is_empty() {
+        ScopedListing::Empty
+    } else {
+        ScopedListing::Clips(union)
+    }
+}
+
+/// Print the account's own playlists to help a user correct a `--playlist` typo.
+fn print_visible_playlists(playlists: &[suno_core::Playlist], verbosity: i8) {
+    if verbosity < -1 {
+        return;
+    }
+    if playlists.is_empty() {
+        eprintln!("no playlists are visible for this account.");
+        return;
+    }
+    eprintln!("visible playlists:");
+    for playlist in playlists {
+        eprintln!("  {} ({})", playlist.name, playlist.id);
+    }
 }
 
 /// Fetch this run's playlists best-effort and build their desired `.m3u8`
