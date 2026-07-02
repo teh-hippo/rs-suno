@@ -61,11 +61,12 @@ impl FfmpegError {
 /// Encoder settings for the animated WebP cover derived from a clip's MP4
 /// preview.
 ///
-/// The [`Default`] targets a small, broadly compatible file: a couple of
-/// megabytes, well under the 25 MB ceiling some players (e.g. Symfonium) place
-/// on embedded/sidecar art. A single hardcoded default is used this phase behind
-/// one `--animated-covers` toggle; per-knob tuning is deliberately not surfaced
-/// on the CLI.
+/// The [`Default`] turns encoder effort off so a full-resolution clip encodes
+/// well under the ffmpeg timeout, since full effort can take minutes. The file
+/// is larger as a result, but stays under the 25 MB ceiling some players such
+/// as Symfonium place on embedded/sidecar art. A single hardcoded default is
+/// used this phase behind one `--animated-covers` toggle; per-knob tuning is
+/// deliberately not surfaced on the CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebpEncodeSettings {
     /// Lossy encoder quality, 0-100 (higher is better and larger). Ignored when
@@ -73,13 +74,15 @@ pub struct WebpEncodeSettings {
     pub quality: u8,
     /// Cap on the output frame rate; a faster source is downsampled to this.
     pub max_fps: u32,
-    /// Cap on the output width in pixels; a wider source scales down keeping its
-    /// aspect ratio, and a narrower one is never upscaled.
-    pub max_width: u32,
+    /// Optional cap on the output width in pixels: `Some(w)` scales a wider
+    /// source down keeping its aspect ratio (never upscaling), while `None`
+    /// keeps the source resolution.
+    pub max_width: Option<u32>,
     /// Encode losslessly (much larger); off by default.
     pub lossless: bool,
-    /// Spend extra effort compressing (smaller file, slower encode); on by
-    /// default.
+    /// Spend extra encoder effort: a smaller file, but far slower. Off by
+    /// default, because `libwebp_anim` at full effort can take minutes on a
+    /// full-resolution clip and exceed the transcode timeout.
     pub compression: bool,
 }
 
@@ -88,9 +91,9 @@ impl Default for WebpEncodeSettings {
         Self {
             quality: 70,
             max_fps: 24,
-            max_width: 720,
+            max_width: None,
             lossless: false,
-            compression: true,
+            compression: false,
         }
     }
 }
