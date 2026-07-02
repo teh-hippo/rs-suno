@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/teh-hippo/rs-suno/compare/v0.9.0...v0.10.0) (2026-07-02)
+
+
+### Features
+
+* migrate Clerk auth host to auth.suno.com ([0e822ce](https://github.com/teh-hippo/rs-suno/commit/0e822ce1b890971c53c1aa9814a5bb31b2de9916))
+
 ## [0.9.0](https://github.com/teh-hippo/rs-suno/compare/v0.8.0...v0.9.0) (2026-07-02)
 
 
