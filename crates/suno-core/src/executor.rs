@@ -34,6 +34,9 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use futures_util::lock::Mutex as AsyncMutex;
+use futures_util::stream::{self, StreamExt};
+
 use crate::backoff::{backoff_delay, retry_after};
 use crate::client::SunoClient;
 use crate::clock::Clock;
@@ -49,6 +52,12 @@ use crate::model::Clip;
 use crate::reconcile::{Action, ArtifactKind, Desired, Plan, SourceMode, set_manifest_artifact};
 use crate::tag::{TrackMetadata, tag_flac, tag_mp3};
 
+/// The shared Suno client behind an async mutex, so concurrent audio work can
+/// serialise its order-sensitive API calls (JWT refresh, adaptive limiter)
+/// without a runtime-specific lock. Held only for the brief WAV-render calls;
+/// the heavy CDN/transcode/tag work runs unlocked.
+type ClientLock<'a, C> = AsyncMutex<&'a mut SunoClient<C>>;
+
 /// Tunables for one [`execute`] run.
 #[derive(Debug, Clone)]
 pub struct ExecOptions {
@@ -58,6 +67,9 @@ pub struct ExecOptions {
     pub wav_poll_attempts: u32,
     /// How long to wait between WAV render polls.
     pub wav_poll_interval: Duration,
+    /// How many clips' audio to fetch, transcode, and tag concurrently. Clamped
+    /// to at least one, so a zero collapses to sequential rather than stalling.
+    pub concurrency: u32,
 }
 
 impl Default for ExecOptions {
@@ -66,6 +78,7 @@ impl Default for ExecOptions {
             max_retries: 3,
             wav_poll_attempts: 24,
             wav_poll_interval: Duration::from_secs(5),
+            concurrency: 4,
         }
     }
 }
@@ -160,6 +173,20 @@ pub struct Ports<'a, H, F, G, C> {
 /// the network, disk, transcode, and backoff ports. A single clip's failure
 /// never aborts the run, except an auth failure or a full disk, which stop it
 /// with [`RunStatus::AuthAborted`] or [`RunStatus::DiskFull`].
+///
+/// The audio-producing actions ([`Download`](Action::Download) and
+/// [`Reformat`](Action::Reformat)) run concurrently, bounded by
+/// [`ExecOptions::concurrency`]: their slow parts (WAV render, CDN download,
+/// transcode, tag) overlap while the order-sensitive Suno API calls are
+/// serialised behind an async mutex over the shared [`SunoClient`], keeping the
+/// adaptive limiter and JWT refresh correct. The remaining actions (retag,
+/// rename, delete, and artifact writes/deletes) then run serially in plan order.
+///
+/// The outcome is deterministic regardless of completion order: concurrent audio
+/// results are committed to the manifest in plan-index order, so the same plan
+/// always yields the same manifest and counts whatever the concurrency level. A
+/// per-clip failure is recorded and the run continues; only an auth failure or a
+/// full disk aborts, and it does so promptly by stopping further audio work.
 pub async fn execute<H, F, G, C>(
     plan: &Plan,
     manifest: &mut Manifest,
@@ -234,18 +261,54 @@ where
     };
 
     let mut outcome = ExecOutcome::default();
+
+    // The audio-producing actions ([`Download`](Action::Download) /
+    // [`Reformat`](Action::Reformat)) render concurrently, but their work is
+    // deliberately split so that NO destination write, file removal, or manifest
+    // update happens off the plan's order:
+    //
+    // - the parallel producers ([`prepare_audio`](Ctx::prepare_audio)) do only
+    //   the slow, side-effect-free work (fetch the CDN/WAV bytes, transcode, and
+    //   tag), returning the tagged bytes; and
+    // - a single serial committer below writes those bytes to the destination,
+    //   removes any superseded file, and records the manifest entry, in strict
+    //   plan-index order, interleaved with the non-audio actions.
+    //
+    // The shared client is the only `&mut` port and its API calls must stay
+    // ordered, so it rides behind an async mutex; each producer locks it only for
+    // the brief WAV-render calls and runs the heavy work unlocked. Renders are
+    // yielded in plan order and bounded to `concurrency` in flight (and buffered),
+    // so at most about `concurrency` tagged payloads are ever held in memory -
+    // never the whole library.
+    let client_lock = AsyncMutex::new(client);
+    let concurrency = opts.concurrency.max(1) as usize;
+    let ctx_ref = &ctx;
+    let client_lock_ref = &client_lock;
+    let mut renders = stream::iter(
+        plan.actions
+            .iter()
+            .filter(|action| is_audio_action(action))
+            .map(|action| async move { ctx_ref.prepare_audio(client_lock_ref, action).await }),
+    )
+    .buffered(concurrency);
+
     for action in &plan.actions {
-        match ctx
-            .apply(
-                action,
-                client,
-                manifest,
-                albums,
-                playlists,
-                &mut tracked_paths,
-            )
-            .await
-        {
+        // Audio actions pull their pre-rendered bytes (yielded in plan order) and
+        // commit them here; every other action applies its own effect. Both the
+        // audio commit and the non-audio apply run serially, so all destination
+        // and manifest effects keep the plan's order exactly as the sequential
+        // executor did.
+        let result = if is_audio_action(action) {
+            match renders.next().await {
+                Some(Ok(rendered)) => ctx.commit_audio(manifest, rendered),
+                Some(Err(fail)) => Err(fail),
+                None => unreachable!("buffered yields one result per audio action"),
+            }
+        } else {
+            ctx.apply(action, manifest, albums, playlists, &mut tracked_paths)
+                .await
+        };
+        match result {
             Ok(effect) => outcome.record(effect),
             Err(fail) => {
                 let abort = abort_status(fail.class);
@@ -254,18 +317,48 @@ where
                     reason: fail.reason,
                 });
                 if let Some(status) = abort {
+                    // A systemic abort stops the run. Dropping the render stream
+                    // cancels any in-flight or completed-but-uncommitted producer;
+                    // because producers touch nothing on disk, the destination and
+                    // manifest are left exactly as the committed prefix wrote them,
+                    // with no untracked files and no removed-but-referenced file.
                     outcome.status = status;
                     break;
                 }
             }
         }
     }
+    drop(renders);
+
     // Renames and deletes can leave an album directory empty; prune those ghost
     // directories bottom-up. This runs on both the completed and the aborted
     // paths, and is best-effort: a prune failure is only a missed tidy that the
     // next run repeats, never a reason to fail the run.
     let _ = fs.prune_empty_dirs("");
     outcome
+}
+
+/// Whether an action produces audio: it fetches, transcodes, and tags a clip's
+/// file. Its slow render runs in the concurrent phase; its destination write and
+/// manifest update are committed serially in plan order. Everything else touches
+/// the manifest, album, or playlist stores directly and runs serially.
+fn is_audio_action(action: &Action) -> bool {
+    matches!(action, Action::Download { .. } | Action::Reformat { .. })
+}
+
+/// A rendered-but-uncommitted audio result: the tagged bytes plus what the serial
+/// committer needs to place them. Produced concurrently and side-effect-free (no
+/// destination write, no removal, no manifest touch); [`commit_audio`] applies
+/// all of those in plan order.
+struct RenderedAudio {
+    clip_id: String,
+    path: String,
+    format: AudioFormat,
+    /// The superseded file to remove after the new one lands (a [`Reformat`]),
+    /// or `None` for a plain [`Download`].
+    from_path: Option<String>,
+    effect: Effect,
+    bytes: Vec<u8>,
 }
 
 /// What an applied action did, for the outcome counters.
@@ -442,35 +535,22 @@ where
     G: Ffmpeg,
     C: Clock,
 {
-    /// Apply one action, returning what it did or why it failed.
+    /// Apply one non-audio action, returning what it did or why it failed.
+    ///
+    /// Audio actions ([`Download`](Action::Download) /
+    /// [`Reformat`](Action::Reformat)) run in the concurrent phase through
+    /// [`prepare_audio`](Self::prepare_audio) and never reach here.
     async fn apply(
         &self,
         action: &Action,
-        client: &mut SunoClient<C>,
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
         playlists: &mut BTreeMap<String, PlaylistState>,
         tracked_paths: &mut HashMap<String, u32>,
     ) -> Result<Effect, Fail> {
         match action {
-            Action::Download {
-                clip,
-                lineage,
-                path,
-                format,
-            } => {
-                self.download(client, manifest, clip, lineage, path, *format)
-                    .await
-            }
-            Action::Reformat {
-                clip,
-                path,
-                from_path,
-                from: _,
-                to,
-            } => {
-                self.reformat(client, manifest, clip, path, from_path, *to)
-                    .await
+            Action::Download { .. } | Action::Reformat { .. } => {
+                unreachable!("audio actions are applied in the concurrent phase")
             }
             Action::Retag {
                 clip,
@@ -513,48 +593,97 @@ where
         }
     }
 
-    /// Fetch, tag, and write a new file, then record the manifest entry.
-    async fn download(
+    /// Render one audio action's tagged bytes, side-effect-free.
+    ///
+    /// This is the concurrent part: it fetches, transcodes, and tags the file
+    /// (through shared ports, plus the client behind `client_lock`), then returns
+    /// the bytes and where they must go. It deliberately writes nothing, removes
+    /// nothing, and never touches `manifest`, so many run at once and an aborted
+    /// run can drop them with no destination or manifest effect. The serial
+    /// [`commit_audio`](Self::commit_audio) applies those effects in plan order.
+    async fn prepare_audio(
         &self,
-        client: &mut SunoClient<C>,
-        manifest: &mut Manifest,
-        clip: &Clip,
-        lineage: &LineageContext,
-        path: &str,
-        format: AudioFormat,
-    ) -> Result<Effect, Fail> {
-        let tagged = self.produce_audio(client, clip, lineage, format).await?;
-        let size = self.write_verify(&clip.id, path, &tagged)?;
-        manifest.insert(clip.id.clone(), self.entry(&clip.id, path, format, size));
-        Ok(Effect::Downloaded)
+        client_lock: &ClientLock<'_, C>,
+        action: &Action,
+    ) -> Result<RenderedAudio, Fail> {
+        match action {
+            Action::Download {
+                clip,
+                lineage,
+                path,
+                format,
+            } => {
+                let bytes = self
+                    .produce_audio(client_lock, clip, lineage, *format)
+                    .await?;
+                Ok(RenderedAudio {
+                    clip_id: clip.id.clone(),
+                    path: path.clone(),
+                    format: *format,
+                    from_path: None,
+                    effect: Effect::Downloaded,
+                    bytes,
+                })
+            }
+            Action::Reformat {
+                clip,
+                path,
+                from_path,
+                from: _,
+                to,
+            } => {
+                // A Reformat action carries no lineage, so recover it from the
+                // desired set (the same context that drove naming and the hash),
+                // falling back to a self-rooted context when the clip is not in
+                // the current selection.
+                let lineage = self
+                    .by_id
+                    .get(clip.id.as_str())
+                    .map(|d| d.lineage.clone())
+                    .unwrap_or_else(|| LineageContext::own_root(clip));
+                let bytes = self.produce_audio(client_lock, clip, &lineage, *to).await?;
+                Ok(RenderedAudio {
+                    clip_id: clip.id.clone(),
+                    path: path.clone(),
+                    format: *to,
+                    from_path: Some(from_path.clone()),
+                    effect: Effect::Reformatted,
+                    bytes,
+                })
+            }
+            _ => unreachable!("prepare_audio only handles audio actions"),
+        }
     }
 
-    /// Re-encode to a new format at the new path, then remove the old file.
-    async fn reformat(
+    /// Commit one rendered audio result serially, in plan order.
+    ///
+    /// Writes the tagged bytes to the destination, then, for a [`Reformat`], drops
+    /// the superseded file, then records the manifest entry. Ordering the write
+    /// before the removal keeps a crash from losing both copies; keeping all of
+    /// this off the concurrent phase preserves the sequential executor's plan-order
+    /// guarantee for every destination and manifest effect.
+    fn commit_audio(
         &self,
-        client: &mut SunoClient<C>,
         manifest: &mut Manifest,
-        clip: &Clip,
-        path: &str,
-        from_path: &str,
-        to: AudioFormat,
+        rendered: RenderedAudio,
     ) -> Result<Effect, Fail> {
-        // A Reformat action carries no lineage, so recover it from the desired
-        // set (the same context that drove naming and the hash), falling back to
-        // a self-rooted context when the clip is not in the current selection.
-        let lineage = self
-            .by_id
-            .get(clip.id.as_str())
-            .map(|d| d.lineage.clone())
-            .unwrap_or_else(|| LineageContext::own_root(clip));
-        let tagged = self.produce_audio(client, clip, &lineage, to).await?;
-        let size = self.write_verify(&clip.id, path, &tagged)?;
-        // The new file is safely in place; only now drop the old rendering.
-        self.fs
-            .remove(from_path)
-            .map_err(|err| permanent_fail(&clip.id, format!("could not remove old file: {err}")))?;
-        manifest.insert(clip.id.clone(), self.entry(&clip.id, path, to, size));
-        Ok(Effect::Reformatted)
+        let RenderedAudio {
+            clip_id,
+            path,
+            format,
+            from_path,
+            effect,
+            bytes,
+        } = rendered;
+        let size = self.write_verify(&clip_id, &path, &bytes)?;
+        if let Some(from) = from_path {
+            // The new file is safely in place; only now drop the old rendering.
+            self.fs.remove(&from).map_err(|err| {
+                permanent_fail(&clip_id, format!("could not remove old file: {err}"))
+            })?;
+        }
+        manifest.insert(clip_id.clone(), self.entry(&clip_id, &path, format, size));
+        Ok(effect)
     }
 
     /// Re-tag the existing file in place to match current metadata and art.
@@ -886,7 +1015,7 @@ where
     /// Download (and transcode/tag) the audio for `clip` in `format`.
     async fn produce_audio(
         &self,
-        client: &mut SunoClient<C>,
+        client_lock: &ClientLock<'_, C>,
         clip: &Clip,
         lineage: &LineageContext,
         format: AudioFormat,
@@ -904,7 +1033,7 @@ where
                     .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
             AudioFormat::Flac => {
-                let wav = self.fetch_wav(client, clip).await?;
+                let wav = self.fetch_wav(client_lock, clip).await?;
                 let flac = self.ffmpeg.wav_to_flac(&wav).await.map_err(|err| {
                     if err.is_out_of_space() {
                         disk_fail(&clip.id, "disk full: no space left to transcode")
@@ -916,13 +1045,17 @@ where
                 tag_flac(&flac, &meta, cover.as_deref())
                     .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
-            AudioFormat::Wav => self.fetch_wav(client, clip).await,
+            AudioFormat::Wav => self.fetch_wav(client_lock, clip).await,
         }
     }
 
     /// Resolve the rendered WAV URL and download it.
-    async fn fetch_wav(&self, client: &mut SunoClient<C>, clip: &Clip) -> Result<Vec<u8>, Fail> {
-        let url = match self.resolve_wav_url(client, &clip.id).await? {
+    async fn fetch_wav(
+        &self,
+        client_lock: &ClientLock<'_, C>,
+        clip: &Clip,
+    ) -> Result<Vec<u8>, Fail> {
+        let url = match self.resolve_wav_url(client_lock, &clip.id).await? {
             Some(url) => url,
             None => return Err(transient_fail(&clip.id, "WAV render was not ready")),
         };
@@ -935,18 +1068,22 @@ where
     ///
     /// `None` means the render did not become ready within the poll budget; the
     /// caller treats that as a non-fatal transient failure, never a silent skip.
+    ///
+    /// Each client call briefly locks `client_lock`; the poll waits happen
+    /// unlocked, so concurrent clips interleave their WAV renders rather than
+    /// serialising behind one clip's whole poll budget.
     async fn resolve_wav_url(
         &self,
-        client: &mut SunoClient<C>,
+        client_lock: &ClientLock<'_, C>,
         id: &str,
     ) -> Result<Option<String>, Fail> {
-        if let Some(url) = self.wav_url_retrying(client, id).await? {
+        if let Some(url) = self.wav_url_retrying(client_lock, id).await? {
             return Ok(Some(url));
         }
-        self.request_wav_retrying(client, id).await?;
+        self.request_wav_retrying(client_lock, id).await?;
         for _ in 0..self.opts.wav_poll_attempts {
             self.clock.sleep(self.opts.wav_poll_interval).await;
-            if let Some(url) = self.wav_url_retrying(client, id).await? {
+            if let Some(url) = self.wav_url_retrying(client_lock, id).await? {
                 return Ok(Some(url));
             }
         }
@@ -957,12 +1094,16 @@ where
     /// (SYNC-16/17), so the default FLAC path is as resilient as the CDN path.
     async fn wav_url_retrying(
         &self,
-        client: &mut SunoClient<C>,
+        client_lock: &ClientLock<'_, C>,
         id: &str,
     ) -> Result<Option<String>, Fail> {
         let mut attempt: u32 = 0;
         loop {
-            match client.wav_url(self.http, id).await {
+            let result = {
+                let mut client = client_lock.lock().await;
+                client.wav_url(self.http, id).await
+            };
+            match result {
                 Ok(url) => return Ok(url),
                 Err(err) => match self.retry_core(id, err, &mut attempt).await {
                     Some(fail) => return Err(fail),
@@ -973,10 +1114,18 @@ where
     }
 
     /// Ask Suno to render a WAV, retrying transient API failures with backoff.
-    async fn request_wav_retrying(&self, client: &mut SunoClient<C>, id: &str) -> Result<(), Fail> {
+    async fn request_wav_retrying(
+        &self,
+        client_lock: &ClientLock<'_, C>,
+        id: &str,
+    ) -> Result<(), Fail> {
         let mut attempt: u32 = 0;
         loop {
-            match client.request_wav(self.http, id).await {
+            let result = {
+                let mut client = client_lock.lock().await;
+                client.request_wav(self.http, id).await
+            };
+            match result {
                 Ok(()) => return Ok(()),
                 Err(err) => match self.retry_core(id, err, &mut attempt).await {
                     Some(fail) => return Err(fail),
@@ -1323,6 +1472,7 @@ mod tests {
             max_retries: 3,
             wav_poll_attempts: 2,
             wav_poll_interval: Duration::from_secs(5),
+            concurrency: 4,
         }
     }
 
@@ -3795,5 +3945,698 @@ mod tests {
         );
         // The live directory is untouched by prune.
         assert!(fs.has_dir("Album"));
+    }
+
+    // ── Concurrency (issue #22) ─────────────────────────────────────
+
+    mod concurrency {
+        use super::*;
+        use crate::ffmpeg::FfmpegError;
+        use crate::fs::{FileStat, FsError};
+        use crate::http::{HttpRequest, TransportError};
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll};
+
+        /// A future that pends exactly once before resolving, waking itself so a
+        /// single-threaded executor re-polls. It forces the [`Http`] port to
+        /// yield, so [`buffer_unordered`](futures_util::stream::StreamExt) parks
+        /// each in-flight request and the true overlap becomes observable.
+        #[derive(Default)]
+        struct YieldOnce {
+            yielded: bool,
+        }
+
+        impl Future for YieldOnce {
+            type Output = ();
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                if self.yielded {
+                    Poll::Ready(())
+                } else {
+                    self.yielded = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }
+
+        /// An [`Http`] double that wraps [`ScriptedHttp`] and records the peak
+        /// number of concurrently in-flight requests. Each `send` bumps a live
+        /// counter, yields once (so peers can start), then delegates.
+        struct GatedHttp {
+            inner: ScriptedHttp,
+            inflight: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+
+        impl GatedHttp {
+            fn new(inner: ScriptedHttp) -> Self {
+                Self {
+                    inner,
+                    inflight: Arc::new(AtomicUsize::new(0)),
+                    peak: Arc::new(AtomicUsize::new(0)),
+                }
+            }
+
+            fn peak(&self) -> usize {
+                self.peak.load(Ordering::SeqCst)
+            }
+        }
+
+        impl Http for GatedHttp {
+            async fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+                let now = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                YieldOnce::default().await;
+                let out = self.inner.send(request).await;
+                self.inflight.fetch_sub(1, Ordering::SeqCst);
+                out
+            }
+        }
+
+        fn download(id: &str, format: AudioFormat) -> (Clip, Desired, Action) {
+            let c = clip(id);
+            let d = desired(c.clone(), format);
+            let action = Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format,
+            };
+            (c, d, action)
+        }
+
+        fn opts_with(concurrency: u32) -> ExecOptions {
+            ExecOptions {
+                concurrency,
+                ..small_poll()
+            }
+        }
+
+        #[test]
+        fn concurrency_never_exceeds_the_configured_bound() {
+            let count = 6;
+            let concurrency = 3;
+            let mut scripted = ScriptedHttp::new().with_auth();
+            let mut actions = Vec::new();
+            let mut desireds = Vec::new();
+            for i in 0..count {
+                let id = format!("c{i}");
+                scripted = scripted.route(&format!("{id}.mp3"), Reply::ok(b"mp3-body".to_vec()));
+                let (_c, d, action) = download(&id, AudioFormat::Mp3);
+                actions.push(action);
+                desireds.push(d);
+            }
+            let http = GatedHttp::new(scripted);
+            let fs = MemFs::new();
+            let plan = Plan { actions };
+            let mut manifest = Manifest::new();
+
+            let outcome = run_gated_fs(
+                &plan,
+                &mut manifest,
+                &desireds,
+                &http,
+                &fs,
+                &opts_with(concurrency),
+            );
+
+            assert_eq!(outcome.downloaded, count);
+            assert!(
+                http.peak() <= concurrency as usize,
+                "peak {} exceeded the bound {concurrency}",
+                http.peak()
+            );
+            assert_eq!(
+                http.peak(),
+                concurrency as usize,
+                "expected the run to saturate the bound"
+            );
+        }
+
+        /// Run a gated plan against a caller-supplied [`MemFs`], returning the
+        /// outcome. The client is built here so the limiter can be inspected by
+        /// the caller-facing variant below.
+        fn run_gated_fs(
+            plan: &Plan,
+            manifest: &mut Manifest,
+            desired: &[Desired],
+            http: &GatedHttp,
+            fs: &MemFs,
+            opts: &ExecOptions,
+        ) -> ExecOutcome {
+            let ffmpeg = StubFfmpeg::flac();
+            let clock = RecordingClock::new();
+            let mut albums = BTreeMap::new();
+            let mut playlists = BTreeMap::new();
+            let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+            pollster::block_on(execute(
+                plan,
+                manifest,
+                &mut albums,
+                &mut playlists,
+                desired,
+                Ports {
+                    client: &mut client,
+                    http,
+                    fs,
+                    ffmpeg: &ffmpeg,
+                    clock: &clock,
+                },
+                opts,
+            ))
+        }
+
+        #[test]
+        fn a_failing_clip_does_not_abort_the_others() {
+            let mut scripted = ScriptedHttp::new().with_auth();
+            scripted = scripted
+                .route("ok1.mp3", Reply::ok(b"one".to_vec()))
+                .route("bad.mp3", Reply::status(404))
+                .route("ok2.mp3", Reply::ok(b"two".to_vec()));
+            let (_a, d1, a1) = download("ok1", AudioFormat::Mp3);
+            let (_b, d2, a2) = download("bad", AudioFormat::Mp3);
+            let (_c, d3, a3) = download("ok2", AudioFormat::Mp3);
+            let http = GatedHttp::new(scripted);
+            let fs = MemFs::new();
+            let plan = Plan {
+                actions: vec![a1, a2, a3],
+            };
+            let mut manifest = Manifest::new();
+
+            let outcome = run_gated_fs(
+                &plan,
+                &mut manifest,
+                &[d1, d2, d3],
+                &http,
+                &fs,
+                &opts_with(3),
+            );
+
+            assert_eq!(outcome.downloaded, 2);
+            assert_eq!(outcome.failed(), 1);
+            assert_eq!(outcome.status, RunStatus::Completed);
+            assert_eq!(outcome.failures[0].clip_id, "bad");
+            assert!(manifest.get("ok1").is_some());
+            assert!(manifest.get("ok2").is_some());
+            assert!(manifest.get("bad").is_none());
+        }
+
+        #[test]
+        fn outcome_is_identical_across_concurrency_levels() {
+            // A plan mixing successful and failing downloads with serial phase-2
+            // actions (a skip and a delete), so both phases contribute.
+            fn build() -> (Plan, Vec<Desired>) {
+                let mut actions = Vec::new();
+                let mut desireds = Vec::new();
+                for id in ["a", "b", "c", "d"] {
+                    let (_c, d, action) = download(id, AudioFormat::Mp3);
+                    actions.push(action);
+                    desireds.push(d);
+                }
+                // A failing download in the middle of the audio set.
+                let (_e, de, ae) = download("fail", AudioFormat::Mp3);
+                actions.insert(2, ae);
+                desireds.push(de);
+                // Phase-2 actions.
+                actions.push(Action::Skip {
+                    clip_id: "gone".to_owned(),
+                });
+                actions.push(Action::Delete {
+                    path: "old.mp3".to_owned(),
+                    clip_id: "old".to_owned(),
+                });
+                (Plan { actions }, desireds)
+            }
+
+            fn http() -> ScriptedHttp {
+                ScriptedHttp::new()
+                    .with_auth()
+                    .route("a.mp3", Reply::ok(b"a".to_vec()))
+                    .route("b.mp3", Reply::ok(b"b".to_vec()))
+                    .route("c.mp3", Reply::ok(b"c".to_vec()))
+                    .route("d.mp3", Reply::ok(b"d".to_vec()))
+                    .route("fail.mp3", Reply::status(404))
+            }
+
+            fn seed_manifest() -> Manifest {
+                let mut m = Manifest::new();
+                m.insert("old".to_owned(), entry("old.mp3", AudioFormat::Mp3));
+                m
+            }
+
+            let (plan, desireds) = build();
+
+            let mut m1 = seed_manifest();
+            let fs1 = MemFs::new().with_file("old.mp3", b"x".to_vec());
+            let out1 = run_gated_fs(
+                &plan,
+                &mut m1,
+                &desireds,
+                &GatedHttp::new(http()),
+                &fs1,
+                &opts_with(1),
+            );
+
+            let mut m8 = seed_manifest();
+            let fs8 = MemFs::new().with_file("old.mp3", b"x".to_vec());
+            let out8 = run_gated_fs(
+                &plan,
+                &mut m8,
+                &desireds,
+                &GatedHttp::new(http()),
+                &fs8,
+                &opts_with(8),
+            );
+
+            assert_eq!(out1, out8, "outcome must not depend on concurrency");
+            assert_eq!(m1, m8, "final manifest must not depend on concurrency");
+            assert_eq!(out8.downloaded, 4);
+            assert_eq!(out8.deleted, 1);
+            assert_eq!(out8.skipped, 1);
+            assert_eq!(out8.failed(), 1);
+        }
+
+        #[test]
+        fn a_systemic_disk_full_aborts_promptly() {
+            let count = 8;
+            let concurrency = 2;
+            let mut scripted = ScriptedHttp::new().with_auth();
+            let mut actions = Vec::new();
+            let mut desireds = Vec::new();
+            for i in 0..count {
+                let id = format!("d{i}");
+                scripted = scripted.route(&format!("{id}.mp3"), Reply::ok(b"mp3-body".to_vec()));
+                let (_c, d, action) = download(&id, AudioFormat::Mp3);
+                actions.push(action);
+                desireds.push(d);
+            }
+            // The very first clip's write hits ENOSPC, a systemic failure.
+            let fs = MemFs::new().fail_write_out_of_space("d0.mp3");
+            let http = GatedHttp::new(scripted);
+            let plan = Plan { actions };
+            let mut manifest = Manifest::new();
+
+            let outcome = run_gated_fs(
+                &plan,
+                &mut manifest,
+                &desireds,
+                &http,
+                &fs,
+                &opts_with(concurrency),
+            );
+
+            assert_eq!(outcome.status, RunStatus::DiskFull);
+            assert!(
+                outcome.downloaded < count,
+                "a systemic abort must stop remaining work, downloaded {}",
+                outcome.downloaded
+            );
+        }
+
+        #[test]
+        fn limiter_records_a_rate_limit_under_concurrent_calls() {
+            // Three concurrent FLAC renders; exactly one clip is throttled once
+            // on its wav_file read. The shared limiter must record that single
+            // 429 (halving 2.0 -> 1.0) with no lost or duplicated update, proving
+            // the mutex keeps the AIMD state correct under concurrency.
+            let scripted = ScriptedHttp::new()
+                .with_auth()
+                .route_seq(
+                    "/gen/x/wav_file/",
+                    vec![
+                        Reply::status(429),
+                        Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/x.wav"}"#),
+                    ],
+                )
+                .route(
+                    "/gen/y/wav_file/",
+                    Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/y.wav"}"#),
+                )
+                .route(
+                    "/gen/z/wav_file/",
+                    Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/z.wav"}"#),
+                )
+                .route("x.wav", Reply::ok(b"wav-x".to_vec()))
+                .route("y.wav", Reply::ok(b"wav-y".to_vec()))
+                .route("z.wav", Reply::ok(b"wav-z".to_vec()));
+
+            let mut actions = Vec::new();
+            let mut desireds = Vec::new();
+            for id in ["x", "y", "z"] {
+                let (_c, d, action) = download(id, AudioFormat::Flac);
+                actions.push(action);
+                desireds.push(d);
+            }
+            let plan = Plan { actions };
+            let fs = MemFs::new();
+            let ffmpeg = StubFfmpeg::flac();
+            let clock = RecordingClock::new();
+            let mut albums = BTreeMap::new();
+            let mut playlists = BTreeMap::new();
+            let mut manifest = Manifest::new();
+            let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+
+            let outcome = pollster::block_on(execute(
+                &plan,
+                &mut manifest,
+                &mut albums,
+                &mut playlists,
+                &desireds,
+                Ports {
+                    client: &mut client,
+                    http: &scripted,
+                    fs: &fs,
+                    ffmpeg: &ffmpeg,
+                    clock: &clock,
+                },
+                &opts_with(3),
+            ));
+
+            assert_eq!(outcome.downloaded, 3);
+            assert_eq!(outcome.failed(), 0);
+            assert!(
+                (client.limiter_rate() - 1.0).abs() < 1e-9,
+                "one 429 must halve the rate to 1.0, got {}",
+                client.limiter_rate()
+            );
+        }
+
+        #[test]
+        fn a_download_is_committed_in_plan_order_around_a_rename() {
+            // Plan order: rename "orig" away from shared.mp3 first, then download
+            // a new clip into shared.mp3. A parallel executor that performed the
+            // download's destination write off plan order would write shared.mp3
+            // before the rename ran, letting the rename carry those fresh bytes
+            // to moved.mp3 and stranding shared.mp3 - corrupting both clips.
+            // Committing every destination effect serially in plan order keeps
+            // moved.mp3 = the original and shared.mp3 = the new download.
+            let c_new = clip("new");
+            let mut d_new = desired(c_new.clone(), AudioFormat::Mp3);
+            d_new.path = "shared.mp3".to_owned();
+            let plan = Plan {
+                actions: vec![
+                    Action::Rename {
+                        from: "shared.mp3".to_owned(),
+                        to: "moved.mp3".to_owned(),
+                    },
+                    Action::Download {
+                        clip: c_new.clone(),
+                        lineage: LineageContext::own_root(&c_new),
+                        path: "shared.mp3".to_owned(),
+                        format: AudioFormat::Mp3,
+                    },
+                ],
+            };
+            let scripted = ScriptedHttp::new()
+                .with_auth()
+                .route("new.mp3", Reply::ok(b"NEW-BODY".to_vec()));
+            let http = GatedHttp::new(scripted);
+            let fs = MemFs::new().with_file("shared.mp3", b"ORIGINAL".to_vec());
+            let mut manifest = Manifest::new();
+            manifest.insert("orig", entry("shared.mp3", AudioFormat::Mp3));
+
+            let outcome = run_gated_fs(&plan, &mut manifest, &[d_new], &http, &fs, &opts_with(4));
+
+            assert_eq!(outcome.renamed, 1);
+            assert_eq!(outcome.downloaded, 1);
+            assert_eq!(
+                fs.read_file("moved.mp3").as_deref(),
+                Some(&b"ORIGINAL"[..]),
+                "the rename must carry the original bytes, untouched by the download"
+            );
+            let landed = fs.read_file("shared.mp3").expect("new download must land");
+            assert_ne!(
+                landed, b"ORIGINAL",
+                "the new download must replace the moved original, not corrupt it"
+            );
+            assert_eq!(manifest.get("orig").unwrap().path, "moved.mp3");
+            assert_eq!(manifest.get("new").unwrap().path, "shared.mp3");
+        }
+
+        #[test]
+        fn an_aborted_reformat_leaves_the_old_file_and_manifest_consistent() {
+            // A systemic disk-full abort strikes the download committed before the
+            // reformat. Because the reformat's slow render is side-effect-free and
+            // its destination write + old-file removal only happen in the serial
+            // commit (which the abort skips), the old file survives and the
+            // manifest still points at it: no removed-but-referenced file.
+            let boom = clip("boom");
+            let mut d_boom = desired(boom.clone(), AudioFormat::Mp3);
+            d_boom.path = "boom.mp3".to_owned();
+            let reformer = clip("r");
+            let d_reformer = desired(reformer.clone(), AudioFormat::Mp3);
+            let plan = Plan {
+                actions: vec![
+                    Action::Download {
+                        clip: boom.clone(),
+                        lineage: LineageContext::own_root(&boom),
+                        path: "boom.mp3".to_owned(),
+                        format: AudioFormat::Mp3,
+                    },
+                    Action::Reformat {
+                        clip: reformer.clone(),
+                        path: "r_new.mp3".to_owned(),
+                        from_path: "r_old.flac".to_owned(),
+                        from: AudioFormat::Flac,
+                        to: AudioFormat::Mp3,
+                    },
+                ],
+            };
+            let scripted = ScriptedHttp::new()
+                .with_auth()
+                .route("boom.mp3", Reply::ok(b"boom-body".to_vec()))
+                .route("r.mp3", Reply::ok(b"reformatted".to_vec()));
+            let http = GatedHttp::new(scripted);
+            // The download's write hits ENOSPC, a systemic abort.
+            let fs = MemFs::new()
+                .with_file("r_old.flac", b"OLD-FLAC".to_vec())
+                .fail_write_out_of_space("boom.mp3");
+            let mut manifest = Manifest::new();
+            manifest.insert("r", entry("r_old.flac", AudioFormat::Flac));
+
+            let outcome = run_gated_fs(
+                &plan,
+                &mut manifest,
+                &[d_boom, d_reformer],
+                &http,
+                &fs,
+                &opts_with(4),
+            );
+
+            assert_eq!(outcome.status, RunStatus::DiskFull);
+            assert!(
+                fs.exists("r_old.flac"),
+                "the old file must survive the abort"
+            );
+            assert!(
+                !fs.exists("r_new.mp3"),
+                "no reformatted file may be written"
+            );
+            let still = manifest.get("r").expect("the manifest must still track r");
+            assert_eq!(
+                still.path, "r_old.flac",
+                "the manifest must still point at the surviving old file"
+            );
+            assert_eq!(still.format, AudioFormat::Flac);
+        }
+
+        #[test]
+        fn a_systemic_abort_leaves_no_untracked_destination_files() {
+            // Two clips commit, the third's write hits ENOSPC (a systemic abort),
+            // and the rest never commit. Every file remaining on disk must be one
+            // the manifest tracks: producers write nothing, so an abort cannot
+            // strand an untracked file from an in-flight or buffered render.
+            let mut scripted = ScriptedHttp::new().with_auth();
+            let mut actions = Vec::new();
+            let mut desireds = Vec::new();
+            for id in ["a0", "a1", "boom", "a3", "a4"] {
+                scripted = scripted.route(&format!("{id}.mp3"), Reply::ok(b"body".to_vec()));
+                let (_c, d, action) = download(id, AudioFormat::Mp3);
+                actions.push(action);
+                desireds.push(d);
+            }
+            let http = GatedHttp::new(scripted);
+            let fs = MemFs::new().fail_write_out_of_space("boom.mp3");
+            let plan = Plan { actions };
+            let mut manifest = Manifest::new();
+
+            let outcome = run_gated_fs(&plan, &mut manifest, &desireds, &http, &fs, &opts_with(2));
+
+            assert_eq!(outcome.status, RunStatus::DiskFull);
+            let tracked: std::collections::BTreeSet<String> = manifest
+                .entries
+                .values()
+                .map(|entry| entry.path.clone())
+                .collect();
+            for path in fs.paths() {
+                assert!(
+                    tracked.contains(&path),
+                    "found an untracked destination file: {path}"
+                );
+            }
+            assert!(
+                !fs.exists("a3.mp3"),
+                "uncommitted renders must not be on disk"
+            );
+            assert!(
+                !fs.exists("a4.mp3"),
+                "uncommitted renders must not be on disk"
+            );
+        }
+
+        /// An [`Ffmpeg`] double that counts how many rendered FLAC payloads are
+        /// live: it bumps a shared counter (tracking the peak) when a transcode
+        /// yields bytes, and [`CountingFs`] drops it back on the committing write.
+        /// The [transcode, write] window is a superset of the true in-memory hold,
+        /// so the observed peak upper-bounds the real one.
+        struct CountingFfmpeg {
+            inner: StubFfmpeg,
+            held: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+
+        impl Ffmpeg for CountingFfmpeg {
+            fn wav_to_flac(
+                &self,
+                wav: &[u8],
+            ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
+                let fut = self.inner.wav_to_flac(wav);
+                let held = self.held.clone();
+                let peak = self.peak.clone();
+                async move {
+                    let out = fut.await;
+                    if out.is_ok() {
+                        let now = held.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                    }
+                    out
+                }
+            }
+
+            fn mp4_to_webp(
+                &self,
+                mp4: &[u8],
+                settings: WebpEncodeSettings,
+            ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
+                self.inner.mp4_to_webp(mp4, settings)
+            }
+        }
+
+        /// A [`Filesystem`] double wrapping [`MemFs`] that decrements the live
+        /// payload counter on each committing write, closing the window opened by
+        /// [`CountingFfmpeg`].
+        struct CountingFs {
+            inner: MemFs,
+            held: Arc<AtomicUsize>,
+        }
+
+        impl Filesystem for CountingFs {
+            fn write_atomic(&self, path: &str, bytes: &[u8]) -> Result<(), FsError> {
+                let out = self.inner.write_atomic(path, bytes);
+                self.held.fetch_sub(1, Ordering::SeqCst);
+                out
+            }
+
+            fn rename(&self, from: &str, to: &str) -> Result<(), FsError> {
+                self.inner.rename(from, to)
+            }
+
+            fn remove(&self, path: &str) -> Result<(), FsError> {
+                self.inner.remove(path)
+            }
+
+            fn prune_empty_dirs(&self, root: &str) -> Result<(), FsError> {
+                self.inner.prune_empty_dirs(root)
+            }
+
+            fn read(&self, path: &str) -> Result<Vec<u8>, FsError> {
+                self.inner.read(path)
+            }
+
+            fn metadata(&self, path: &str) -> Option<FileStat> {
+                self.inner.metadata(path)
+            }
+        }
+
+        #[test]
+        fn rendered_payloads_in_memory_stay_bounded_by_concurrency() {
+            // Far more FLAC clips than the concurrency bound. The ordered buffered
+            // render keeps at most about `concurrency` transcoded payloads live at
+            // once (never the whole library), so peak held <= concurrency + 1.
+            let count = 12;
+            let concurrency = 3;
+            let mut scripted = ScriptedHttp::new().with_auth();
+            let mut actions = Vec::new();
+            let mut desireds = Vec::new();
+            for i in 0..count {
+                let id = format!("f{i}");
+                scripted = scripted
+                    .route(
+                        &format!("/gen/{id}/wav_file/"),
+                        Reply::json(&format!(
+                            r#"{{"wav_file_url": "https://cdn1.suno.ai/{id}.wav"}}"#
+                        )),
+                    )
+                    .route(&format!("{id}.wav"), Reply::ok(b"wav-body".to_vec()));
+                let (_c, d, action) = download(&id, AudioFormat::Flac);
+                actions.push(action);
+                desireds.push(d);
+            }
+            let http = GatedHttp::new(scripted);
+            let held = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let ffmpeg = CountingFfmpeg {
+                inner: StubFfmpeg::flac(),
+                held: held.clone(),
+                peak: peak.clone(),
+            };
+            let fs = CountingFs {
+                inner: MemFs::new(),
+                held: held.clone(),
+            };
+            let clock = RecordingClock::new();
+            let mut albums = BTreeMap::new();
+            let mut playlists = BTreeMap::new();
+            let mut manifest = Manifest::new();
+            let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+            let plan = Plan { actions };
+
+            let outcome = pollster::block_on(execute(
+                &plan,
+                &mut manifest,
+                &mut albums,
+                &mut playlists,
+                &desireds,
+                Ports {
+                    client: &mut client,
+                    http: &http,
+                    fs: &fs,
+                    ffmpeg: &ffmpeg,
+                    clock: &clock,
+                },
+                &opts_with(concurrency),
+            ));
+
+            assert_eq!(outcome.downloaded, count as usize);
+            assert_eq!(
+                held.load(Ordering::SeqCst),
+                0,
+                "every payload must be committed"
+            );
+            assert!(
+                peak.load(Ordering::SeqCst) <= concurrency as usize + 1,
+                "peak live payloads {} exceeded the bound {}",
+                peak.load(Ordering::SeqCst),
+                concurrency + 1
+            );
+            assert!(
+                peak.load(Ordering::SeqCst) >= 2,
+                "the render should genuinely overlap, peak was {}",
+                peak.load(Ordering::SeqCst)
+            );
+        }
     }
 }

@@ -1375,6 +1375,7 @@ version = "0.15.1"
 dependencies = [
  "base64",
  "fnv",
+ "futures-util",
  "id3",
  "metaflac",
  "pollster",
