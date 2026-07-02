@@ -38,3 +38,5 @@ pub(crate) const PLAYLIST_ME_PATH: &str = "/api/playlist/me";
 /// One playlist's detail, including its ordered `playlist_clips`. The id and a
 /// trailing slash are appended: `/api/playlist/{id}/`.
 pub(crate) const PLAYLIST_PATH: &str = "/api/playlist/";
+/// The billing/credits endpoint: returns the caller's credit balance and plan.
+pub(crate) const BILLING_INFO_PATH: &str = "/api/billing/info/";

@@ -8,8 +8,8 @@ use crate::auth::ClerkAuth;
 use crate::backoff::{backoff_delay, retry_after};
 use crate::clock::Clock;
 use crate::consts::{
-    API_MAX_RETRIES, CLIP_PARENT_PATH, FEED_INITIAL_RATE, FEED_PAGE_SIZE, FEED_V3_PATH, MAX_PAGES,
-    PLAYLIST_ME_PATH, PLAYLIST_PATH, SUNO_API_BASE_URL,
+    API_MAX_RETRIES, BILLING_INFO_PATH, CLIP_PARENT_PATH, FEED_INITIAL_RATE, FEED_PAGE_SIZE,
+    FEED_V3_PATH, MAX_PAGES, PLAYLIST_ME_PATH, PLAYLIST_PATH, SUNO_API_BASE_URL,
 };
 use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
@@ -232,6 +232,12 @@ impl<C: Clock> SunoClient<C> {
         let path = format!("{PLAYLIST_PATH}{id}/");
         let body = self.api_get_retrying(http, &path).await?;
         parse_playlist_clips(&body)
+    }
+
+    /// Fetch the caller's billing/credits info from `/api/billing/info/`.
+    pub async fn billing_info(&mut self, http: &impl Http) -> Result<BillingInfo> {
+        let body = self.api_get(http, BILLING_INFO_PATH).await?;
+        parse_billing_info(&body)
     }
 
     /// Try the dedicated clip endpoint, returning `None` when it is missing or
@@ -504,6 +510,48 @@ fn parse_playlist_clips(body: &[u8]) -> Result<Vec<Clip>> {
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// Billing/credits information returned by the Suno API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingInfo {
+    /// Remaining credits on the account.
+    pub total_credits_left: u64,
+    /// Monthly credits renewing each billing cycle.
+    pub monthly_limit: u64,
+    /// Monthly credits already used in the current period.
+    pub monthly_usage: u64,
+    /// The subscription plan id (e.g. "pro", "free", "premier").
+    pub plan: String,
+}
+
+fn parse_billing_info(body: &[u8]) -> Result<BillingInfo> {
+    let data: Value = serde_json::from_slice(body)
+        .map_err(|err| Error::Api(format!("invalid billing JSON: {err}")))?;
+    let total_credits_left = data
+        .get("total_credits_left")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let monthly_limit = data
+        .get("monthly_limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let monthly_usage = data
+        .get("monthly_usage")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let plan = data
+        .get("sub_type")
+        .or_else(|| data.get("plan"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    Ok(BillingInfo {
+        total_credits_left,
+        monthly_limit,
+        monthly_usage,
+        plan,
+    })
 }
 
 #[cfg(test)]
@@ -1207,5 +1255,45 @@ mod tests {
 
         let clips = pollster::block_on(client.get_playlist_clips(&http, "empty")).unwrap();
         assert!(clips.is_empty());
+    }
+
+    #[test]
+    fn parse_billing_info_extracts_fields() {
+        let body = serde_json::json!({
+            "total_credits_left": 500,
+            "monthly_limit": 2500,
+            "monthly_usage": 2000,
+            "sub_type": "pro"
+        })
+        .to_string();
+        let info = parse_billing_info(body.as_bytes()).unwrap();
+        assert_eq!(info.total_credits_left, 500);
+        assert_eq!(info.monthly_limit, 2500);
+        assert_eq!(info.monthly_usage, 2000);
+        assert_eq!(info.plan, "pro");
+    }
+
+    #[test]
+    fn parse_billing_info_defaults_missing_fields() {
+        let body = b"{}";
+        let info = parse_billing_info(body).unwrap();
+        assert_eq!(info.total_credits_left, 0);
+        assert_eq!(info.monthly_limit, 0);
+        assert_eq!(info.monthly_usage, 0);
+        assert_eq!(info.plan, "unknown");
+    }
+
+    #[test]
+    fn parse_billing_info_prefers_sub_type_over_plan() {
+        let body = serde_json::json!({"sub_type": "premier", "plan": "fallback"}).to_string();
+        let info = parse_billing_info(body.as_bytes()).unwrap();
+        assert_eq!(info.plan, "premier");
+    }
+
+    #[test]
+    fn parse_billing_info_falls_back_to_plan_field() {
+        let body = serde_json::json!({"plan": "free"}).to_string();
+        let info = parse_billing_info(body.as_bytes()).unwrap();
+        assert_eq!(info.plan, "free");
     }
 }

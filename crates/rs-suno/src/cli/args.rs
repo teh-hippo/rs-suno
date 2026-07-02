@@ -78,6 +78,8 @@ pub enum Command {
     Config(ConfigArgs),
     /// Manage authentication.
     Auth(AuthArgs),
+    /// Diagnose environment, config, auth, and credits.
+    Doctor,
     /// Print version and environment information.
     Version,
     /// Emit a shell completion script.
