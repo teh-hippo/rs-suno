@@ -8,12 +8,13 @@ use crate::auth::ClerkAuth;
 use crate::backoff::{backoff_delay, retry_after};
 use crate::clock::Clock;
 use crate::consts::{
-    API_MAX_RETRIES, CLIP_PARENT_PATH, FEED_PAGE_DELAY, FEED_PAGE_SIZE, FEED_V3_PATH, MAX_PAGES,
+    API_MAX_RETRIES, CLIP_PARENT_PATH, FEED_INITIAL_RATE, FEED_PAGE_SIZE, FEED_V3_PATH, MAX_PAGES,
     PLAYLIST_ME_PATH, PLAYLIST_PATH, SUNO_API_BASE_URL,
 };
 use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
 use crate::is_downloadable;
+use crate::limiter::{AdaptiveLimiter, retry_after_delay};
 use crate::model::Clip;
 
 /// One of the account's own playlists, as listed by `/api/playlist/me`.
@@ -37,16 +38,23 @@ pub struct Playlist {
 /// The [`Clock`] is held so [`api_request`](Self::api_request) can back off
 /// through the port on a `429` or transient failure, and paged listings can
 /// pace themselves under Suno's rate limiter — the engine still sleeps nowhere
-/// itself.
+/// itself. The [`AdaptiveLimiter`] discovers that rate: it is halved on a `429`
+/// and ramped after a run of clean successes, so pacing tracks Suno's real
+/// limit rather than a fixed constant.
 pub struct SunoClient<C> {
     auth: ClerkAuth,
     clock: C,
+    limiter: AdaptiveLimiter,
 }
 
 impl<C: Clock> SunoClient<C> {
     /// Create a client from a fresh or already-authenticated [`ClerkAuth`].
     pub fn new(auth: ClerkAuth, clock: C) -> Self {
-        Self { auth, clock }
+        Self {
+            auth,
+            clock,
+            limiter: AdaptiveLimiter::new(FEED_INITIAL_RATE),
+        }
     }
 
     /// Borrow the underlying authenticator.
@@ -78,10 +86,7 @@ impl<C: Clock> SunoClient<C> {
         let mut clips = Vec::new();
         let mut cursor: Option<String> = None;
         let mut complete = false;
-        for page in 0..MAX_PAGES {
-            if page > 0 {
-                self.clock.sleep(FEED_PAGE_DELAY).await;
-            }
+        for _ in 0..MAX_PAGES {
             let body = feed_v3_body(liked, cursor.as_deref());
             let response = self
                 .api_send_retrying(http, Method::Post, FEED_V3_PATH, body)
@@ -204,9 +209,6 @@ impl<C: Clock> SunoClient<C> {
     pub async fn get_playlists(&mut self, http: &impl Http) -> Result<Vec<Playlist>> {
         let mut playlists = Vec::new();
         for page in 1..=MAX_PAGES {
-            if page > 1 {
-                self.clock.sleep(FEED_PAGE_DELAY).await;
-            }
             let path =
                 format!("{PLAYLIST_ME_PATH}?page={page}&show_trashed=false&show_sharelist=false");
             let body = self.api_get_retrying(http, &path).await?;
@@ -264,11 +266,18 @@ impl<C: Clock> SunoClient<C> {
     }
 
     /// Like [`api_request`](Self::api_request) but rides through Suno's rate
-    /// limiter, backing off through the [`Clock`] on a `429` (honouring
-    /// `Retry-After` when present) or a transient connection failure, up to
+    /// limiter, pacing each request to the adaptive rate and backing off through
+    /// the [`Clock`] on a `429` (honouring `Retry-After` when present, defaulting
+    /// to 5s and capped at 60s) or a transient connection failure, up to
     /// [`API_MAX_RETRIES`] times. Each attempt reconstructs the full request
     /// (method, path, and body), so a throttled feed page re-POSTs the same
     /// cursor rather than skipping ahead.
+    ///
+    /// Pacing lives here, at the single per-request layer, rather than in any
+    /// paged walk, so it composes with whatever listing calls it: a page or a
+    /// cursor walk pace identically. The [`AdaptiveLimiter`] leaves the first
+    /// request free, then paces every later one, and widens that pace as the
+    /// rate is halved by a `429`.
     ///
     /// The WAV render flow deliberately keeps to the plain [`api_get`](Self::api_get):
     /// the executor owns that retry so its budget and poll interval stay in one
@@ -281,12 +290,16 @@ impl<C: Clock> SunoClient<C> {
         path: &str,
         body: Vec<u8>,
     ) -> Result<Vec<u8>> {
+        let pace = self.limiter.pace();
+        if !pace.is_zero() {
+            self.clock.sleep(pace).await;
+        }
         let mut retries = 0;
         loop {
             match self.api_request(http, method, path, body.clone()).await {
                 Ok(response) => return Ok(response),
                 Err(Error::RateLimited { retry_after }) if retries < API_MAX_RETRIES => {
-                    self.clock.sleep(backoff_delay(retries, retry_after)).await;
+                    self.clock.sleep(retry_after_delay(retry_after)).await;
                     retries += 1;
                 }
                 Err(Error::Connection(_)) if retries < API_MAX_RETRIES => {
@@ -325,7 +338,10 @@ impl<C: Clock> SunoClient<C> {
                 .await
                 .map_err(|err| Error::Connection(err.to_string()))?;
             match response.status {
-                200..=299 => return Ok(response.body),
+                200..=299 => {
+                    self.limiter.on_success();
+                    return Ok(response.body);
+                }
                 401 | 403 if !auth_refreshed => {
                     self.auth.invalidate_jwt();
                     auth_refreshed = true;
@@ -337,6 +353,7 @@ impl<C: Clock> SunoClient<C> {
                     )));
                 }
                 429 => {
+                    self.limiter.on_rate_limit();
                     return Err(Error::RateLimited {
                         retry_after: retry_after(&response),
                     });
@@ -657,9 +674,9 @@ mod tests {
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
         assert!(complete);
-        // The throttled page was retried once, waiting out one base backoff.
+        // The throttled page was retried once, waiting the default post-429 wait.
         assert_eq!(http.count("/api/feed/v3"), 2);
-        assert_eq!(clock.sleeps(), vec![Duration::from_secs(1)]);
+        assert_eq!(clock.sleeps(), vec![Duration::from_secs(5)]);
     }
 
     #[test]
@@ -676,7 +693,7 @@ mod tests {
 
         let (clips, _complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
-        // The server's Retry-After floors the backoff above the 1s base.
+        // The server's Retry-After is honoured directly as the post-429 wait.
         assert_eq!(clock.sleeps(), vec![Duration::from_secs(7)]);
     }
 
@@ -844,7 +861,31 @@ mod tests {
         assert_eq!(clips.len(), 2);
         assert_eq!(http.count("/api/feed/v3"), 2);
         // One inter-page pace was waited out before fetching the second page.
-        assert_eq!(clock.sleeps(), vec![crate::consts::FEED_PAGE_DELAY]);
+        assert_eq!(clock.sleeps(), vec![Duration::from_millis(500)]);
+    }
+
+    #[test]
+    fn list_clips_slows_its_pace_after_a_throttled_page() {
+        let http = ScriptedHttp::new().with_auth().route_seq(
+            "/api/feed/v3",
+            vec![
+                Reply::status(429),
+                Reply::json(&one_clip_page("a", Some("cur1"))),
+                Reply::json(&one_clip_page("e", None)),
+            ],
+        );
+        let clock = RecordingClock::new();
+        let mut client = scripted_client(&http, clock.clone());
+
+        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert!(complete);
+        assert_eq!(clips.len(), 2);
+        // The 429 halved the rate, so the default post-429 wait is followed by a
+        // doubled inter-page pace (500ms to 1s) for the next page.
+        assert_eq!(
+            clock.sleeps(),
+            vec![Duration::from_secs(5), Duration::from_secs(1)]
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod fs;
 mod graph;
 mod hash;
 mod http;
+mod limiter;
 mod lineage;
 mod manifest;
 mod model;
