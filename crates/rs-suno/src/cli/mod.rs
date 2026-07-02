@@ -12,3 +12,4 @@ pub mod expiry;
 pub mod logs;
 pub mod output;
 pub mod run;
+pub mod token_cmd;

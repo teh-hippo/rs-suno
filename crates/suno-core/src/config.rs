@@ -59,6 +59,7 @@ pub struct Defaults {
     pub lrc_sidecar: Option<bool>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
+    pub token_command: Option<String>,
 }
 
 /// Per-source overridable settings within an account.
@@ -95,6 +96,7 @@ pub struct AccountConfig {
     pub lrc_sidecar: Option<bool>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
+    pub token_command: Option<String>,
     #[serde(default)]
     pub sources: HashMap<String, SourceConfig>,
 }
@@ -306,8 +308,16 @@ impl Config {
             .or_else(|| env.get("SUNO_TOKEN").cloned())
             .or_else(|| acc.token.clone());
 
+        let token_command = env
+            .get(&format!("SUNO_{label_env}_TOKEN_COMMAND"))
+            .or_else(|| env.get("SUNO_TOKEN_COMMAND"))
+            .cloned()
+            .or_else(|| acc.token_command.clone())
+            .or_else(|| self.defaults.token_command.clone());
+
         Ok(EffectiveSettings {
             token,
+            token_command,
             account_id: acc.account_id.clone(),
             format,
             concurrency,
@@ -391,6 +401,9 @@ pub struct FlagOverrides {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveSettings {
     pub token: Option<String>,
+    /// The resolved token command, if any. The CLI executes this and uses its
+    /// trimmed stdout as the token when `token` is `None`.
+    pub token_command: Option<String>,
     /// The optional configured account id assertion (see [`AccountConfig`]).
     pub account_id: Option<String>,
     pub format: AudioFormat,
@@ -480,6 +493,7 @@ mod tests {
             eff,
             EffectiveSettings {
                 token: None,
+                token_command: None,
                 account_id: None,
                 format: AudioFormat::Flac,
                 concurrency: 4,
@@ -914,5 +928,74 @@ mod tests {
             .into_iter()
             .collect();
         assert!(cfg.resolve("alice", None, &env, &no_flags()).is_err());
+    }
+
+    #[test]
+    fn token_command_follows_precedence() {
+        // Compiled default: none.
+        let toml = "[accounts.alice]\n";
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.token_command, None);
+
+        // File defaults level.
+        let toml = r#"
+            [defaults]
+            token_command = "default-cmd"
+
+            [accounts.alice]
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.token_command.as_deref(), Some("default-cmd"));
+
+        // Per-account overrides defaults.
+        let toml = r#"
+            [defaults]
+            token_command = "default-cmd"
+
+            [accounts.alice]
+            token_command = "alice-cmd"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.token_command.as_deref(), Some("alice-cmd"));
+
+        // Global env overrides file.
+        let toml = r#"
+            [accounts.alice]
+            token_command = "file-cmd"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let env: HashMap<String, String> = [("SUNO_TOKEN_COMMAND".into(), "env-cmd".into())]
+            .into_iter()
+            .collect();
+        let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
+        assert_eq!(eff.token_command.as_deref(), Some("env-cmd"));
+
+        // Per-account env overrides global env.
+        let env: HashMap<String, String> = [
+            ("SUNO_TOKEN_COMMAND".into(), "global-env".into()),
+            ("SUNO_ALICE_TOKEN_COMMAND".into(), "alice-env".into()),
+        ]
+        .into_iter()
+        .collect();
+        let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
+        assert_eq!(eff.token_command.as_deref(), Some("alice-env"));
+    }
+
+    #[test]
+    fn token_command_does_not_override_token() {
+        // When both token and token_command are set, token takes priority
+        // (the CLI is responsible for this; core just resolves both).
+        let toml = r#"
+            [accounts.alice]
+            token = "direct-token"
+            token_command = "should-not-run"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.token.as_deref(), Some("direct-token"));
+        assert_eq!(eff.token_command.as_deref(), Some("should-not-run"));
     }
 }

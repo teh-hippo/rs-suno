@@ -34,12 +34,14 @@ value like a password. Anyone with it can access your library.
 
 ## Provide the token
 
-You can supply the token three ways, in order of precedence:
+You can supply the token four ways, in order of precedence:
 
 1. The `--token <TOKEN>` flag.
 2. The `SUNO_TOKEN` environment variable (or the per-account
    `SUNO_<LABEL>_TOKEN`).
-3. The `token` field in your [config file](configuration.md), which is the usual
+3. The `token_command` config field (runs a shell command whose trimmed stdout
+   is used as the token).
+4. The `token` field in your [config file](configuration.md), which is the usual
    place for it.
 
 The interactive setup writes it to the config for you:
@@ -50,6 +52,31 @@ suno config init
 
 See [Configuration](configuration.md) for the file format and for running
 multiple accounts.
+
+## Using a secrets manager (`token_command`)
+
+Instead of storing the token directly in the config file, you can point
+`rs-suno` at a command that retrieves it at runtime. Set `token_command` in
+your config and `rs-suno` runs it through the system shell (`sh -c` on Unix,
+`cmd /C` on Windows), using the trimmed stdout as the token. The command is
+only invoked when no higher-precedence source (`--token`, env) already provides
+a token.
+
+```toml
+[accounts.me]
+root = "/home/alice/music/suno"
+token_command = "bws secret get <secret-id> | jq -r .value"
+```
+
+Any program that prints a token to stdout works: Bitwarden Secrets Manager
+(`bws`), 1Password (`op`), HashiCorp Vault, `pass`, a KeePassXC query, or a
+plain script.
+
+You can also set it via the `SUNO_TOKEN_COMMAND` environment variable (or the
+per-account `SUNO_<LABEL>_TOKEN_COMMAND`).
+
+If the command exits non-zero or produces empty output, `rs-suno` reports a
+clear error and exits. The command's output is never logged or printed.
 
 ## Check and refresh a token
 

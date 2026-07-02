@@ -73,6 +73,7 @@ needed. These modes are not applied on non-Unix platforms.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `token` | string | | The `__client` session token for the account. |
+| `token_command` | string | | Shell command whose trimmed stdout is used as the token. Only runs when no `--token` or `SUNO_TOKEN` provides one. See [authentication](authentication.md#using-a-secrets-manager-token_command). |
 | `root` | path | | Default destination directory. Used when a command omits `DEST`, and required by `--all`. |
 | `account_id` | string | | Optional Suno user id this account must authenticate as. When set, a run refuses (exit 7) before contacting Suno if the token belongs to a different id, a belt-and-braces check alongside the on-disk owner pin. See [deletion safety](sync-copy-and-deletion-safety.md). |
 | `format` | `mp3` \| `flac` \| `wav` | `flac` | Audio format for downloads. |
@@ -84,7 +85,8 @@ needed. These modes are not applied on non-Unix platforms.
 | `lrc_sidecar` | bool | `false` | Also write an untimed `<song>.lrc` beside each audio file, holding the song's lyrics with a small tag header (plain lyrics, no per-line timestamps). A song with no lyrics gets no file. |
 
 Any account key except `token`, `root`, and `account_id` may also be set under
-`[defaults]` to apply to every account.
+`[defaults]` to apply to every account. `token_command` may also appear under
+`[defaults]` as a fallback for accounts that do not set their own.
 
 ### Multiple accounts
 
@@ -111,6 +113,7 @@ For every setting, the first value found wins, in this order:
 | Variable | Equivalent | Notes |
 |---|---|---|
 | `SUNO_TOKEN` | `--token` | Also `SUNO_<LABEL>_TOKEN` for one account. |
+| `SUNO_TOKEN_COMMAND` | `token_command` | Also `SUNO_<LABEL>_TOKEN_COMMAND`. Runs the command and uses its stdout as the token. |
 | `SUNO_ACCOUNT` | `--account` | |
 | `SUNO_CONFIG` | `--config` | |
 | `SUNO_DRY_RUN` | `--dry-run` | |

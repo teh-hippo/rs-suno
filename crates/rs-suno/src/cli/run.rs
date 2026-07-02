@@ -236,7 +236,9 @@ async fn run(
     exit_code: bool,
 ) -> Result<ExitCode> {
     let env: HashMap<String, String> = std::env::vars().collect();
-    let token_available = global.token.is_some() || env.contains_key("SUNO_TOKEN");
+    let token_available = global.token.is_some()
+        || env.contains_key("SUNO_TOKEN")
+        || env.contains_key("SUNO_TOKEN_COMMAND");
 
     let config = match load_config(global.config.as_deref())? {
         ConfigState::Loaded(cfg) => Some(cfg),
@@ -315,7 +317,9 @@ pub(crate) fn single_account(
     flags: &FlagOverrides,
     env: &HashMap<String, String>,
 ) -> std::result::Result<(String, suno_core::EffectiveSettings), String> {
-    let token_available = global.token.is_some() || env.contains_key("SUNO_TOKEN");
+    let token_available = global.token.is_some()
+        || env.contains_key("SUNO_TOKEN")
+        || env.contains_key("SUNO_TOKEN_COMMAND");
     let (label, implicit) = if global.all {
         return Err(
             "this command runs a single account; pass --account instead of --all".to_owned(),
@@ -444,12 +448,19 @@ async fn run_one(
         }
     };
 
-    let Some(token) = settings.token.clone() else {
-        eprintln!(
-            "error: no token for account '{}'; pass --token or set it in config",
-            target.label
-        );
-        return Ok(ExitCode::Config);
+    let token = match resolve_token(&settings) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            eprintln!(
+                "error: no token for account '{}'; pass --token, set token_command, or set it in config",
+                target.label
+            );
+            return Ok(ExitCode::Config);
+        }
+        Err(err) => {
+            eprintln!("error: token_command failed for '{}': {err}", target.label);
+            return Ok(ExitCode::Config);
+        }
     };
 
     if settings.format == suno_core::AudioFormat::Wav && verbosity >= -1 {
@@ -1376,6 +1387,21 @@ fn synthetic_config() -> Config {
         .accounts
         .insert("default".to_owned(), suno_core::AccountConfig::default());
     config
+}
+
+/// Resolve the token from `settings`, falling back to `token_command` when
+/// `settings.token` is `None`. Returns the token string or `None` if neither
+/// source provides one.
+pub(crate) fn resolve_token(
+    settings: &suno_core::EffectiveSettings,
+) -> std::result::Result<Option<String>, anyhow::Error> {
+    if settings.token.is_some() {
+        return Ok(settings.token.clone());
+    }
+    if let Some(cmd) = &settings.token_command {
+        return Ok(Some(crate::cli::token_cmd::resolve_token(cmd)?));
+    }
+    Ok(None)
 }
 
 /// Pick the more severe of two exit codes (`Ok` is least severe).
