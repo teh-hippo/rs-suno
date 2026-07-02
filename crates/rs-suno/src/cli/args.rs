@@ -209,6 +209,10 @@ pub struct SyncArgs {
     /// per-line timestamps).
     #[arg(long)]
     pub lrc_sidecar: bool,
+    /// Also download the standalone `.mp4` music video next to each song, when
+    /// Suno provides one.
+    #[arg(long)]
+    pub video_mp4: bool,
     /// Relative path template for naming downloaded files.
     /// Placeholders: {creator}, {handle}, {album}, {title}, {id}, {id8}, {root_id8}.
     #[arg(long, value_name = "TEMPLATE")]
@@ -422,6 +426,7 @@ mod tests {
             "--details-sidecar",
             "--lyrics-sidecar",
             "--lrc-sidecar",
+            "--video-mp4",
         ])
         .unwrap();
         match cli.command {
@@ -429,6 +434,7 @@ mod tests {
                 assert!(args.details_sidecar);
                 assert!(args.lyrics_sidecar);
                 assert!(args.lrc_sidecar);
+                assert!(args.video_mp4);
             }
             _ => panic!("expected sync"),
         }
@@ -438,6 +444,7 @@ mod tests {
                 assert!(!args.details_sidecar);
                 assert!(!args.lyrics_sidecar);
                 assert!(!args.lrc_sidecar);
+                assert!(!args.video_mp4);
             }
             _ => panic!("expected sync"),
         }

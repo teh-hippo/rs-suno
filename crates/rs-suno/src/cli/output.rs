@@ -221,6 +221,7 @@ fn artifact_label(kind: ArtifactKind) -> &'static str {
         ArtifactKind::DetailsTxt => "details.txt",
         ArtifactKind::LyricsTxt => "lyrics.txt",
         ArtifactKind::Lrc => "lrc",
+        ArtifactKind::VideoMp4 => "video.mp4",
         ArtifactKind::FolderJpg => "folder.jpg",
         ArtifactKind::FolderWebp => "folder.webp",
         ArtifactKind::Playlist => "playlist",

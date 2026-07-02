@@ -60,6 +60,9 @@ pub struct ManifestEntry {
     /// Prior state of the untimed `.lrc` sidecar, when one was written.
     #[serde(default)]
     pub lrc: Option<ArtifactState>,
+    /// Prior state of the standalone `.mp4` music video, when one was written.
+    #[serde(default)]
+    pub video_mp4: Option<ArtifactState>,
 }
 
 /// The full prior download state, keyed by clip id.

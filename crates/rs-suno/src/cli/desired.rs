@@ -50,15 +50,16 @@ impl ExitCode {
 /// The per-song sidecar toggles resolved for a run.
 ///
 /// Each mirrors one resolved setting: `animated_covers` gates the `cover.webp`,
-/// `details` the `.details.txt` dump, `lyrics` the `.lyrics.txt` file, and `lrc`
-/// the untimed `.lrc` sidecar. All default off, matching the compiled config
-/// defaults.
+/// `details` the `.details.txt` dump, `lyrics` the `.lyrics.txt` file, `lrc`
+/// the untimed `.lrc` sidecar, and `video` the standalone `.mp4` music video.
+/// All default off, matching the compiled config defaults.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ArtifactToggles {
     pub animated_covers: bool,
     pub details: bool,
     pub lyrics: bool,
     pub lrc: bool,
+    pub video: bool,
 }
 
 /// Build the desired target state for a union of selected clips.
@@ -227,6 +228,15 @@ fn clip_artifacts(
             source_url: String::new(),
             hash: content_hash(&text),
             content: Some(text),
+        });
+    }
+    if toggles.video && !clip.video_url.is_empty() {
+        artifacts.push(DesiredArtifact {
+            kind: ArtifactKind::VideoMp4,
+            path: format!("{base}.mp4"),
+            source_url: clip.video_url.clone(),
+            hash: art_url_hash(&clip.video_url),
+            content: None,
         });
     }
     artifacts
@@ -1094,6 +1104,79 @@ mod tests {
                 .artifacts
                 .iter()
                 .all(|art| art.kind != ArtifactKind::CoverWebp)
+        );
+    }
+
+    #[test]
+    fn build_desired_emits_video_mp4_only_when_enabled_and_video_present() {
+        let with_video = Clip {
+            video_url: "https://cdn.suno.ai/id-a/video.mp4".to_owned(),
+            ..art_clip("id-a")
+        };
+        let clips = [&with_video];
+
+        // Off by default: no standalone video, even when the clip has one.
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            &modes_for(&clips, SourceMode::Mirror),
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles::default(),
+            &NamingConfig::default(),
+        );
+        assert!(
+            desired[0]
+                .artifacts
+                .iter()
+                .all(|art| art.kind != ArtifactKind::VideoMp4)
+        );
+
+        // Enabled with a video: a VideoMp4 joins, pathed .mp4, sourced from
+        // video_url and hashed by art_url_hash (a fetched binary, no inline body).
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            &modes_for(&clips, SourceMode::Mirror),
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                video: true,
+                ..Default::default()
+            },
+            &NamingConfig::default(),
+        );
+        let base = desired[0].path.strip_suffix(".flac").unwrap();
+        let video = desired[0]
+            .artifacts
+            .iter()
+            .find(|art| art.kind == ArtifactKind::VideoMp4)
+            .expect("video expected");
+        assert_eq!(video.path, format!("{base}.mp4"));
+        assert_eq!(video.source_url, with_video.video_url);
+        assert_eq!(video.hash, art_url_hash(&with_video.video_url));
+        assert!(video.content.is_none());
+
+        // Enabled but the clip has no video url: no VideoMp4 emitted.
+        let no_video = art_clip("id-b");
+        let clips = [&no_video];
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            &modes_for(&clips, SourceMode::Mirror),
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                video: true,
+                ..Default::default()
+            },
+            &NamingConfig::default(),
+        );
+        assert!(
+            desired[0]
+                .artifacts
+                .iter()
+                .all(|art| art.kind != ArtifactKind::VideoMp4)
         );
     }
 

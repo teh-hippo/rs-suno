@@ -242,6 +242,7 @@ impl AlbumArt {
             | ArtifactKind::DetailsTxt
             | ArtifactKind::LyricsTxt
             | ArtifactKind::Lrc
+            | ArtifactKind::VideoMp4
             | ArtifactKind::Playlist => None,
         }
     }
@@ -260,6 +261,7 @@ impl AlbumArt {
             | ArtifactKind::DetailsTxt
             | ArtifactKind::LyricsTxt
             | ArtifactKind::Lrc
+            | ArtifactKind::VideoMp4
             | ArtifactKind::Playlist => {}
         }
     }
