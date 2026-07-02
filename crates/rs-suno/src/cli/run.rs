@@ -10,8 +10,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{IsTerminal, Write};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -34,6 +32,7 @@ use crate::cli::desired::{
 use crate::cli::logs;
 use crate::cli::output;
 use crate::clock::TokioClock;
+use crate::download::set_permissions_or_remove;
 use crate::ffmpeg::FfmpegAdapter;
 use crate::fs::FsAdapter;
 use crate::http::ReqwestHttp;
@@ -1792,11 +1791,7 @@ fn read_last_run(dest: &Path) -> Option<u64> {
 fn write_last_run(dest: &Path) {
     let path = dest.join(LAST_RUN_NAME);
     if std::fs::write(&path, now_secs().to_string()).is_ok() {
-        #[cfg(unix)]
-        let _ = std::fs::set_permissions(
-            &path,
-            std::fs::Permissions::from_mode(PRIVATE_STATE_FILE_MODE),
-        );
+        let _ = set_permissions_or_remove(&path, PRIVATE_STATE_FILE_MODE);
     }
 }
 

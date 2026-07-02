@@ -14,7 +14,7 @@ use suno_core::Config;
 use crate::cli::args::{ConfigAddAccountArgs, ConfigArgs, ConfigCommand, GlobalArgs};
 use crate::cli::desired::ExitCode;
 use crate::cli::logs;
-use crate::download::write_atomic;
+use crate::download::{set_permissions_or_remove, write_atomic_private};
 
 const PRIVATE_CONFIG_FILE_MODE: u32 = 0o600;
 const PRIVATE_CONFIG_DIR_MODE: u32 = 0o700;
@@ -302,9 +302,9 @@ fn write_config(path: &Path, body: &str) -> Result<()> {
             .with_context(|| format!("could not create {}", parent.display()))?;
         set_private_permissions(parent, PRIVATE_CONFIG_DIR_MODE)?;
     }
-    write_atomic(path, body.as_bytes())
+    write_atomic_private(path, body.as_bytes())
         .with_context(|| format!("could not write {}", path.display()))?;
-    set_private_permissions(path, PRIVATE_CONFIG_FILE_MODE)
+    secure_private_file(path, PRIVATE_CONFIG_FILE_MODE)
 }
 
 #[cfg(unix)]
@@ -314,8 +314,19 @@ fn set_private_permissions(path: &Path, mode: u32) -> Result<()> {
     Ok(())
 }
 
+fn secure_private_file(path: &Path, mode: u32) -> Result<()> {
+    set_permissions_or_remove(path, mode)
+        .with_context(|| format!("could not set permissions on {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(not(unix))]
 fn set_private_permissions(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_private_file(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
