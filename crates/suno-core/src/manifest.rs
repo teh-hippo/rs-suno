@@ -65,6 +65,25 @@ pub struct ManifestEntry {
     pub video_mp4: Option<ArtifactState>,
 }
 
+impl ManifestEntry {
+    /// Every per-clip sidecar path this entry currently records. The kind list
+    /// lives here once so the executor can tell whether a path is still owned by
+    /// some artifact before it removes a stale copy.
+    pub(crate) fn artifact_paths(&self) -> impl Iterator<Item = &str> {
+        [
+            self.cover_jpg.as_ref(),
+            self.cover_webp.as_ref(),
+            self.details_txt.as_ref(),
+            self.lyrics_txt.as_ref(),
+            self.lrc.as_ref(),
+            self.video_mp4.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|state| state.path.as_str())
+    }
+}
+
 /// The full prior download state, keyed by clip id.
 ///
 /// Backed by a [`BTreeMap`] so iteration order is stable, which keeps any plan
