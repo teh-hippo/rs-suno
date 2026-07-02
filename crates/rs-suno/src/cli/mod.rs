@@ -8,6 +8,7 @@
 pub mod args;
 pub mod commands;
 pub mod desired;
+pub mod expiry;
 pub mod logs;
 pub mod output;
 pub mod run;

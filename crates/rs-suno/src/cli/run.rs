@@ -458,6 +458,7 @@ async fn run_one(
         return Ok(report_auth_failure(&target.label, &err));
     }
     let account = auth.display_name().to_owned();
+    crate::cli::expiry::warn_token_expiry(&target.label, &auth, verbosity);
     // Fail closed: the identity guard cannot run without an authenticated id,
     // and proceeding would delete against an unverified account. authenticate()
     // already errors on a missing id; this makes the invariant explicit.
