@@ -266,7 +266,6 @@ impl<C: Clock> SunoClient<C> {
     }
 
     /// Like [`api_request`](Self::api_request) but rides through Suno's rate
-    /// Like [`api_request`](Self::api_request) but rides through Suno's rate
     /// limiter, pacing each request to the adaptive rate and backing off through
     /// the [`Clock`] on a `429` (honouring `Retry-After` when present, defaulting
     /// to 5s and capped at 60s) or a transient connection failure, up to
