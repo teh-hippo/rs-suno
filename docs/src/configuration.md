@@ -64,8 +64,9 @@ root = "/home/alice/music/suno-work"
 format = "mp3"
 ```
 
-`rs-suno` writes this config file with private permissions (`0600`), and creates
-its parent config directory with private permissions (`0700`) when needed.
+On Unix, `rs-suno` writes this config file with private permissions (`0600`), and
+creates its parent config directory with private permissions (`0700`) when
+needed. These modes are not applied on non-Unix platforms.
 
 ### Account settings
 
