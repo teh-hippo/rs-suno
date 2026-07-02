@@ -36,11 +36,11 @@ pub struct Playlist {
 /// A client for the Suno library API, owning the account's [`ClerkAuth`].
 ///
 /// The [`Clock`] is held so [`api_request`](Self::api_request) can back off
-/// through the port on a `429` or transient failure, and paged listings can
-/// pace themselves under Suno's rate limiter — the engine still sleeps nowhere
-/// itself. The [`AdaptiveLimiter`] discovers that rate: it is halved on a `429`
-/// and ramped after a run of clean successes, so pacing tracks Suno's real
-/// limit rather than a fixed constant.
+/// through the port on a `429` or transient failure — the engine still sleeps
+/// nowhere itself. The [`AdaptiveLimiter`] paces reactively: an unthrottled
+/// listing waits nowhere, and only after a `429` does it space requests out,
+/// halving the rate and ramping it back after a run of clean successes so pacing
+/// tracks Suno's real limit rather than a fixed constant.
 pub struct SunoClient<C> {
     auth: ClerkAuth,
     clock: C,
@@ -266,6 +266,7 @@ impl<C: Clock> SunoClient<C> {
     }
 
     /// Like [`api_request`](Self::api_request) but rides through Suno's rate
+    /// Like [`api_request`](Self::api_request) but rides through Suno's rate
     /// limiter, pacing each request to the adaptive rate and backing off through
     /// the [`Clock`] on a `429` (honouring `Retry-After` when present, defaulting
     /// to 5s and capped at 60s) or a transient connection failure, up to
@@ -275,9 +276,9 @@ impl<C: Clock> SunoClient<C> {
     ///
     /// Pacing lives here, at the single per-request layer, rather than in any
     /// paged walk, so it composes with whatever listing calls it: a page or a
-    /// cursor walk pace identically. The [`AdaptiveLimiter`] leaves the first
-    /// request free, then paces every later one, and widens that pace as the
-    /// rate is halved by a `429`.
+    /// cursor walk pace identically. The [`AdaptiveLimiter`] paces reactively:
+    /// an unthrottled walk waits nowhere, and only after the first `429` does it
+    /// space out requests, widening that pace as the rate is halved again.
     ///
     /// The WAV render flow deliberately keeps to the plain [`api_get`](Self::api_get):
     /// the executor owns that retry so its budget and poll interval stay in one
@@ -845,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn list_clips_paces_between_pages() {
+    fn list_clips_does_not_pace_an_unthrottled_walk() {
         let http = ScriptedHttp::new().with_auth().route_seq(
             "/api/feed/v3",
             vec![
@@ -860,8 +861,8 @@ mod tests {
         assert!(complete);
         assert_eq!(clips.len(), 2);
         assert_eq!(http.count("/api/feed/v3"), 2);
-        // One inter-page pace was waited out before fetching the second page.
-        assert_eq!(clock.sleeps(), vec![Duration::from_millis(500)]);
+        // Pacing is reactive: with no 429 the whole walk waits nowhere.
+        assert!(clock.sleeps().is_empty());
     }
 
     #[test]

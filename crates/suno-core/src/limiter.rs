@@ -1,15 +1,19 @@
 //! Adaptive AIMD rate limiter: auto-discovers Suno's request rate.
 //!
-//! The listing [`SunoClient`](crate::SunoClient) paces its requests to a rate it
-//! discovers rather than a hand-tuned constant. Every request is paced to the
-//! current rate; a `429` halves the rate (multiplicative decrease) and records
-//! the rate that tripped it as a ceiling; a run of clean successes ramps the
-//! rate back up (additive-ish increase), capped below that ceiling. The maths is
-//! pure and clock-free: [`pace`](AdaptiveLimiter::pace) only returns the delay,
-//! which the caller waits out through the [`Clock`](crate::Clock) port, so the
-//! engine still sleeps nowhere itself.
+//! The listing [`SunoClient`](crate::SunoClient) discovers a safe request rate
+//! rather than pacing to a hand-tuned constant. Pacing is *reactive*: until the
+//! account is first throttled, [`pace`](AdaptiveLimiter::pace) returns
+//! [`Duration::ZERO`] so a steady-state sync pays no pacing latency. The first
+//! `429` engages AIMD pacing: it halves the rate (multiplicative decrease) and
+//! records the rate that tripped it as a ceiling; a run of clean successes then
+//! ramps the rate back up (additive-ish increase), capped below that ceiling.
+//! The maths is pure and clock-free: [`pace`](AdaptiveLimiter::pace) only returns
+//! the delay, which the caller waits out through the [`Clock`](crate::Clock)
+//! port, so the engine still sleeps nowhere itself.
 //!
-//! Mirrors the reference `AdaptiveLimiter` from `mvanhorn/printing-press-library`.
+//! Adapts the reference `AdaptiveLimiter` from `mvanhorn/printing-press-library`,
+//! whose proactive pacing suited many small requests; a cursor walk makes few,
+//! large requests, so pacing is deferred until Suno actually pushes back.
 
 use std::time::Duration;
 
@@ -37,14 +41,14 @@ pub(crate) const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// notion of wall-clock time: state advances only through
 /// [`on_success`](Self::on_success), [`on_rate_limit`](Self::on_rate_limit), and
 /// [`pace`](Self::pace), which reports the delay to wait before the next
-/// request. Integrated at the single per-request layer, it is independent of how
-/// a listing is paged, so it composes with a page or cursor walk alike.
+/// request. Pacing stays dormant until the first `429`, so it is independent of
+/// how a listing is paged and costs nothing until Suno throttles.
 pub(crate) struct AdaptiveLimiter {
     rate: f64,
     floor: f64,
     ceiling: Option<f64>,
     successes: u32,
-    primed: bool,
+    throttled: bool,
 }
 
 impl AdaptiveLimiter {
@@ -59,18 +63,17 @@ impl AdaptiveLimiter {
             floor,
             ceiling: None,
             successes: 0,
-            primed: false,
+            throttled: false,
         }
     }
 
-    /// The delay to wait before the next request at the current rate.
+    /// The delay to wait before the next request.
     ///
-    /// The first call after construction returns [`Duration::ZERO`] so a cold
-    /// start is not penalised, mirroring the reference's zero-value last-request
-    /// time; every later call returns the full inter-request delay `1 / rate`.
+    /// Returns [`Duration::ZERO`] until the first `429`, so an unthrottled sync
+    /// is never paced. Once [`on_rate_limit`](Self::on_rate_limit) has fired,
+    /// pacing engages and this returns the inter-request delay `1 / rate`.
     pub(crate) fn pace(&mut self) -> Duration {
-        if !self.primed {
-            self.primed = true;
+        if !self.throttled {
             return Duration::ZERO;
         }
         Duration::from_secs_f64(1.0 / self.rate)
@@ -98,9 +101,10 @@ impl AdaptiveLimiter {
         self.successes = 0;
     }
 
-    /// Record a `429`: halve the rate (floored), and remember the rate that
-    /// tripped it as the ceiling to ramp back under.
+    /// Record a `429`: engage pacing, halve the rate (floored), and remember the
+    /// rate that tripped it as the ceiling to ramp back under.
     pub(crate) fn on_rate_limit(&mut self) {
+        self.throttled = true;
         self.ceiling = Some(self.rate);
         self.rate = (self.rate * DECREASE_FACTOR).max(self.floor);
         self.successes = 0;
@@ -123,18 +127,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_first_request_is_free_then_paces_to_the_rate() {
+    fn pace_is_zero_until_the_first_rate_limit() {
         let mut limiter = AdaptiveLimiter::new(2.0);
         assert_eq!(limiter.pace(), Duration::ZERO);
-        assert_eq!(limiter.pace(), Duration::from_millis(500));
+        for _ in 0..100 {
+            limiter.on_success();
+            assert_eq!(limiter.pace(), Duration::ZERO);
+        }
+        limiter.on_rate_limit();
+        assert!(limiter.pace() > Duration::ZERO);
     }
 
     #[test]
-    fn a_rate_limit_halves_the_rate_and_records_a_ceiling() {
+    fn a_rate_limit_halves_the_rate_records_a_ceiling_and_engages_pacing() {
         let mut limiter = AdaptiveLimiter::new(4.0);
         limiter.on_rate_limit();
         assert_eq!(limiter.rate(), 2.0);
-        let _ = limiter.pace();
         assert_eq!(limiter.pace(), Duration::from_millis(500));
     }
 
@@ -145,7 +153,6 @@ mod tests {
             limiter.on_rate_limit();
         }
         assert_eq!(limiter.rate(), RATE_FLOOR);
-        let _ = limiter.pace();
         assert_eq!(limiter.pace(), Duration::from_secs(2));
     }
 

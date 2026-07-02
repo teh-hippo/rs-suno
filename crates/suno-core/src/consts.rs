@@ -18,9 +18,9 @@ pub(crate) const MAX_PAGES: u32 = 100;
 /// Clips requested per feed page. A larger page means fewer requests to walk a
 /// big library, so the rate limiter is tripped less often.
 pub(crate) const FEED_PAGE_SIZE: u32 = 50;
-/// Initial adaptive request rate in requests per second, before the limiter
-/// discovers Suno's real limit. Equal to a 500ms inter-request pace, matching
-/// the previous fixed inter-page delay.
+/// Initial adaptive request rate in requests per second, used once the first
+/// `429` engages pacing. Until then requests are unpaced; the first `429` then
+/// halves this to a 1 req/s first backoff step.
 pub(crate) const FEED_INITIAL_RATE: f64 = 2.0;
 /// Retry a rate-limited or transient API request this many times before failing.
 pub(crate) const API_MAX_RETRIES: u32 = 3;
