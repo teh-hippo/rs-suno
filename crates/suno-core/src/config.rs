@@ -305,8 +305,7 @@ impl Config {
             .token
             .clone()
             .or_else(|| env.get(&format!("SUNO_{label_env}_TOKEN")).cloned())
-            .or_else(|| env.get("SUNO_TOKEN").cloned())
-            .or_else(|| acc.token.clone());
+            .or_else(|| env.get("SUNO_TOKEN").cloned());
 
         let token_command = env
             .get(&format!("SUNO_{label_env}_TOKEN_COMMAND"))
@@ -318,6 +317,7 @@ impl Config {
         Ok(EffectiveSettings {
             token,
             token_command,
+            stored_token: acc.token.clone(),
             account_id: acc.account_id.clone(),
             format,
             concurrency,
@@ -400,10 +400,13 @@ pub struct FlagOverrides {
 /// Resolved effective settings for one account/source combination.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveSettings {
+    /// Token from flag or environment variable (highest precedence sources).
     pub token: Option<String>,
     /// The resolved token command, if any. The CLI executes this and uses its
     /// trimmed stdout as the token when `token` is `None`.
     pub token_command: Option<String>,
+    /// Token from the config file (lowest precedence token source).
+    pub stored_token: Option<String>,
     /// The optional configured account id assertion (see [`AccountConfig`]).
     pub account_id: Option<String>,
     pub format: AudioFormat,
@@ -494,6 +497,7 @@ mod tests {
             EffectiveSettings {
                 token: None,
                 token_command: None,
+                stored_token: None,
                 account_id: None,
                 format: AudioFormat::Flac,
                 concurrency: 4,
@@ -631,12 +635,18 @@ mod tests {
         "#;
         let cfg = Config::from_toml(toml).unwrap();
 
-        // env overrides file
+        // No flag or env: token is None, stored_token holds the file value.
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.token, None);
+        assert_eq!(eff.stored_token.as_deref(), Some("file_tok"));
+
+        // env lands in token (above stored_token in precedence)
         let env: HashMap<String, String> = [("SUNO_TOKEN".into(), "env_tok".into())]
             .into_iter()
             .collect();
         let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
         assert_eq!(eff.token.as_deref(), Some("env_tok"));
+        assert_eq!(eff.stored_token.as_deref(), Some("file_tok"));
 
         // flag overrides env
         let flags = FlagOverrides {
@@ -986,8 +996,8 @@ mod tests {
 
     #[test]
     fn token_command_does_not_override_token() {
-        // When both token and token_command are set, token takes priority
-        // (the CLI is responsible for this; core just resolves both).
+        // Core resolves both fields independently; the CLI applies precedence:
+        // flag/env token > token_command > stored_token.
         let toml = r#"
             [accounts.alice]
             token = "direct-token"
@@ -995,7 +1005,9 @@ mod tests {
         "#;
         let cfg = Config::from_toml(toml).unwrap();
         let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
-        assert_eq!(eff.token.as_deref(), Some("direct-token"));
+        // stored_token carries the config value; token is None (no flag/env).
+        assert_eq!(eff.token, None);
+        assert_eq!(eff.stored_token.as_deref(), Some("direct-token"));
         assert_eq!(eff.token_command.as_deref(), Some("should-not-run"));
     }
 }

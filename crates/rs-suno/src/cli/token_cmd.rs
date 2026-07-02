@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn empty_output_errors() {
-        let err = resolve_token("echo -n ''").unwrap_err();
+        let err = resolve_token("printf ''").unwrap_err();
         assert!(
             err.to_string().contains("empty output"),
             "unexpected error: {err}"

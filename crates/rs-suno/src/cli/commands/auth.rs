@@ -155,7 +155,7 @@ mod tests {
         .unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].0, "alice");
-        assert_eq!(targets[0].1.token.as_deref(), Some("t"));
+        assert_eq!(targets[0].1.stored_token.as_deref(), Some("t"));
     }
 
     #[test]

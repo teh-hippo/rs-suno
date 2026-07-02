@@ -40,7 +40,7 @@ You can supply the token four ways, in order of precedence:
 2. The `SUNO_TOKEN` environment variable (or the per-account
    `SUNO_<LABEL>_TOKEN`).
 3. The `token_command` config field (runs a shell command whose trimmed stdout
-   is used as the token).
+   is used as the token). See [below](#using-a-secrets-manager-token_command).
 4. The `token` field in your [config file](configuration.md), which is the usual
    place for it.
 

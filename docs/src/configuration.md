@@ -73,7 +73,7 @@ needed. These modes are not applied on non-Unix platforms.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `token` | string | | The `__client` session token for the account. |
-| `token_command` | string | | Shell command whose trimmed stdout is used as the token. Only runs when no `--token` or `SUNO_TOKEN` provides one. See [authentication](authentication.md#using-a-secrets-manager-token_command). |
+| `token_command` | string | | Shell command whose trimmed stdout is used as the token. Only runs when no `--token`, `SUNO_TOKEN` env, or `SUNO_<LABEL>_TOKEN` env provides one. Takes precedence over the `token` config field. See [authentication](authentication.md#using-a-secrets-manager-token_command). |
 | `root` | path | | Default destination directory. Used when a command omits `DEST`, and required by `--all`. |
 | `account_id` | string | | Optional Suno user id this account must authenticate as. When set, a run refuses (exit 7) before contacting Suno if the token belongs to a different id, a belt-and-braces check alongside the on-disk owner pin. See [deletion safety](sync-copy-and-deletion-safety.md). |
 | `format` | `mp3` \| `flac` \| `wav` | `flac` | Audio format for downloads. |

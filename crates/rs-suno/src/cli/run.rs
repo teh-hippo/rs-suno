@@ -1389,9 +1389,10 @@ fn synthetic_config() -> Config {
     config
 }
 
-/// Resolve the token from `settings`, falling back to `token_command` when
-/// `settings.token` is `None`. Returns the token string or `None` if neither
-/// source provides one.
+/// Resolve the token from `settings` applying the full precedence chain:
+/// flag/env token > token_command > stored config token.
+///
+/// Returns the token string or `None` if no source provides one.
 pub(crate) fn resolve_token(
     settings: &suno_core::EffectiveSettings,
 ) -> std::result::Result<Option<String>, anyhow::Error> {
@@ -1400,6 +1401,9 @@ pub(crate) fn resolve_token(
     }
     if let Some(cmd) = &settings.token_command {
         return Ok(Some(crate::cli::token_cmd::resolve_token(cmd)?));
+    }
+    if settings.stored_token.is_some() {
+        return Ok(settings.stored_token.clone());
     }
     Ok(None)
 }
