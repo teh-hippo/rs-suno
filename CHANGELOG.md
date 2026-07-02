@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/teh-hippo/rs-suno/compare/v0.10.0...v0.11.0) (2026-07-02)
+
+
+### Features
+
+* adopt /api/feed/v3 cursor pagination and retire feed v2 ([35b8940](https://github.com/teh-hippo/rs-suno/commit/35b89404939ae5bba5e480b7461d3e37facff16c))
+
 ## [0.10.0](https://github.com/teh-hippo/rs-suno/compare/v0.9.0...v0.10.0) (2026-07-02)
 
 
