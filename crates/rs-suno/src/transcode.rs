@@ -163,8 +163,9 @@ pub fn mp4_to_webp(mp4: &[u8], settings: WebpEncodeSettings) -> Result<Vec<u8>> 
     Ok(webp)
 }
 
-/// The `-vf` chain: optionally cap the width (never upscaling) keeping the
-/// aspect ratio to an even height, then cap the frame rate.
+/// The `-vf` chain: always cap the frame rate. With a width cap, also scale a
+/// wider source down (never upscaling) to an even height; `None` keeps the
+/// source resolution untouched.
 fn video_filter(settings: &WebpEncodeSettings) -> String {
     match settings.max_width {
         Some(width) => format!("scale='min({width},iw)':-2,fps={}", settings.max_fps),
