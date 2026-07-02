@@ -10,14 +10,16 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write as _;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use suno_core::{Action, Clip, Failure, LineageStore, Manifest, Plan, render_library_index};
 
-use crate::download::write_atomic;
+#[cfg(unix)]
+use crate::download::set_permissions_or_remove;
+use crate::download::{write_atomic, write_atomic_private};
 
 /// The manifest file name, kept beside the mirrored library.
 pub const MANIFEST_NAME: &str = ".suno-manifest.json";
@@ -81,7 +83,7 @@ pub fn load_manifest(dest: &Path) -> Result<Manifest> {
 pub fn save_manifest(dest: &Path, manifest: &Manifest) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(manifest).context("could not serialise the manifest")?;
     let path = dest.join(MANIFEST_NAME);
-    write_atomic(&path, &bytes).context("could not write the manifest")?;
+    write_atomic_private(&path, &bytes).context("could not write the manifest")?;
     set_private_file_permissions(&path).context("could not secure the manifest")
 }
 
@@ -106,7 +108,7 @@ pub fn save_graph(dest: &Path, store: &LineageStore) -> Result<()> {
     let bytes =
         serde_json::to_vec_pretty(store).context("could not serialise the lineage store")?;
     let path = dest.join(GRAPH_NAME);
-    write_atomic(&path, &bytes).context("could not write the lineage store")?;
+    write_atomic_private(&path, &bytes).context("could not write the lineage store")?;
     set_private_file_permissions(&path).context("could not secure the lineage store")
 }
 
@@ -260,7 +262,7 @@ fn append(path: &Path, text: &str) -> Result<()> {
 
 #[cfg(unix)]
 fn set_private_file_permissions(path: &Path) -> Result<()> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+    set_permissions_or_remove(path, PRIVATE_FILE_MODE)
         .with_context(|| format!("could not set permissions on {}", path.display()))?;
     Ok(())
 }

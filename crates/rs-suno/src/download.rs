@@ -1,6 +1,10 @@
 //! Disk and CDN helpers for the `fetch` command: public downloads, cover-art
 //! selection, and atomic file writes into the `downloads/` directory.
 
+use std::fs::OpenOptions;
+use std::io::Write as _;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,11 +40,97 @@ pub async fn cover(http: &impl Http, clip: &Clip) -> Option<Vec<u8>> {
 /// The temp name is process-unique so two concurrent writers never race on it,
 /// and a drop guard removes it if writing or the final rename fails.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_impl(path, bytes, false)
+}
+
+/// Write `bytes` to `path` atomically via a temporary file and rename.
+///
+/// On Unix the temporary file is created with private (`0600`) permissions. That
+/// mode is not applied on non-Unix platforms, where the private flag is ignored.
+pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_impl(path, bytes, true)
+}
+
+fn write_atomic_impl(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
+    write_atomic_with(path, bytes, private, replace)
+}
+
+fn write_atomic_with<F>(
+    path: &Path,
+    bytes: &[u8],
+    private: bool,
+    replace_fn: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
     let tmp = temp_sibling(path);
     let _scratch = Scratch(tmp.clone());
-    std::fs::write(&tmp, bytes)?;
-    replace(&tmp, path)?;
+    write_temp_file(&tmp, bytes, private)?;
+    replace_fn(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn write_temp_file(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    if private {
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(bytes)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_temp_file(path: &Path, bytes: &[u8], _private: bool) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    Ok(())
+}
+
+/// Apply `mode` to `path`. If hardening fails, remove the file only when its
+/// current permissions are looser than `mode`; a file already at least as
+/// restrictive as `mode` is kept so a transient chmod failure never discards it.
+#[cfg(unix)]
+pub fn set_permissions_or_remove(path: &Path, mode: u32) -> std::io::Result<()> {
+    set_permissions_or_remove_with(path, mode, |path| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    })
+}
+
+#[cfg(unix)]
+fn set_permissions_or_remove_with<F>(
+    path: &Path,
+    mode: u32,
+    set_permissions: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    let Err(err) = set_permissions(path) else {
+        return Ok(());
+    };
+    // Hardening failed. Keep the file when its permissions are already at least
+    // as restrictive as the target (they grant nothing beyond `mode`); only
+    // remove it when leaving it could expose it more widely than intended.
+    if let Ok(meta) = std::fs::metadata(path) {
+        let current = meta.permissions().mode() & 0o777;
+        if current & !(mode & 0o777) == 0 {
+            return Ok(());
+        }
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Err(err),
+        Err(remove_err) => Err(std::io::Error::new(
+            err.kind(),
+            format!(
+                "{err}; also could not remove insecure file {}: {remove_err}",
+                path.display()
+            ),
+        )),
+    }
 }
 
 /// Rename `from` onto `to`, replacing any existing destination without ever
@@ -108,6 +198,8 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn write_atomic_replaces_and_leaves_no_temp() {
@@ -148,6 +240,98 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["dest.bin".to_owned()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_private_uses_owner_only_permissions() {
+        let dir = Path::new("target").join(format!("write-atomic-private-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.bin");
+
+        write_atomic_private(&path, b"secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["secret.bin".to_owned()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_permissions_or_remove_cleans_up_on_failure() {
+        let dir = Path::new("target").join(format!("write-atomic-cleanup-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.bin");
+        std::fs::write(&path, b"secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = set_permissions_or_remove_with(&path, 0o600, |_path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "no chmod",
+            ))
+        })
+        .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_permissions_or_remove_keeps_already_restrictive_file() {
+        let dir = Path::new("target").join(format!("write-atomic-keep-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.bin");
+        std::fs::write(&path, b"secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        set_permissions_or_remove_with(&path, 0o600, |_path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "no chmod",
+            ))
+        })
+        .unwrap();
+
+        assert!(path.exists());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_private_cleans_up_temp_on_rename_failure() {
+        let dir = Path::new("target").join(format!("write-atomic-private-fail-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.bin");
+        assert!(
+            write_atomic_with(&path, b"secret", true, |_tmp, _path| {
+                Err(std::io::Error::other("rename failed"))
+            })
+            .is_err()
+        );
+
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.is_empty());
+        assert!(!path.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
