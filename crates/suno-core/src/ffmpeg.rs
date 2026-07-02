@@ -61,11 +61,13 @@ impl FfmpegError {
 /// Encoder settings for the animated WebP cover derived from a clip's MP4
 /// preview.
 ///
-/// The [`Default`] targets a small, broadly compatible file: a couple of
-/// megabytes, well under the 25 MB ceiling some players (e.g. Symfonium) place
-/// on embedded/sidecar art. A single hardcoded default is used this phase behind
-/// one `--animated-covers` toggle; per-knob tuning is deliberately not surfaced
-/// on the CLI.
+/// The [`Default`] keeps the source resolution and frame rate and turns encoder
+/// effort off. This trades a larger file (still comfortably under the 25 MB
+/// ceiling some players such as Symfonium place on embedded/sidecar art) for an
+/// encode that stays well under the ffmpeg timeout, since full effort can take
+/// minutes on a full-resolution clip. A single hardcoded default is used this
+/// phase behind one `--animated-covers` toggle; per-knob tuning is deliberately
+/// not surfaced on the CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebpEncodeSettings {
     /// Lossy encoder quality, 0-100 (higher is better and larger). Ignored when
