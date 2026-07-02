@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/teh-hippo/rs-suno/compare/v0.15.0...v0.15.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* never delete a sidecar path another action writes this run ([#76](https://github.com/teh-hippo/rs-suno/issues/76)) ([#78](https://github.com/teh-hippo/rs-suno/issues/78)) ([063d266](https://github.com/teh-hippo/rs-suno/commit/063d2664ca639c4954b31efc0fa746b7cd3676e3))
+
 ## [0.15.0](https://github.com/teh-hippo/rs-suno/compare/v0.14.0...v0.15.0) (2026-07-02)
 
 
