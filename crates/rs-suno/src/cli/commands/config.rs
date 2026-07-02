@@ -213,6 +213,12 @@ fn render_show(config: &Config) -> String {
             let src = &acc.sources[name];
             out.push_str(&format!("  [accounts.{label}.sources.{name}]\n"));
             push_opt(&mut out, "    format", src.format.map(|f| f.to_string()));
+            push_opt(&mut out, "    naming_template", src.naming_template.clone());
+            push_opt(
+                &mut out,
+                "    character_set",
+                src.character_set.map(|v| v.to_string()),
+            );
         }
         out.push('\n');
     }
