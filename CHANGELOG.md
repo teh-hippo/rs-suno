@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/teh-hippo/rs-suno/compare/v0.13.0...v0.14.0) (2026-07-02)
+
+
+### Features
+
+* per-area sync/copy mode selection ([#21](https://github.com/teh-hippo/rs-suno/issues/21)) ([#73](https://github.com/teh-hippo/rs-suno/issues/73)) ([61d8814](https://github.com/teh-hippo/rs-suno/commit/61d88144fe8250b3ff7ed821bcc9b975d03c85a5))
+
 ## [0.13.0](https://github.com/teh-hippo/rs-suno/compare/v0.12.0...v0.13.0) (2026-07-02)
 
 
