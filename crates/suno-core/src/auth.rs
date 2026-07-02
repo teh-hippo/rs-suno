@@ -5,7 +5,7 @@
 use base64::Engine;
 use serde_json::Value;
 
-use crate::consts::{CLERK_BASE_URL, CLERK_JS_VERSION, CLERK_TOKEN_JS_VERSION, JWT_REFRESH_BUFFER};
+use crate::consts::{CLERK_BASE_URL, CLERK_JS_VERSION, JWT_REFRESH_BUFFER};
 use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
 
@@ -257,7 +257,7 @@ impl ClerkAuth {
             .ok_or_else(|| Error::Auth("no Clerk session".into()))?;
         let cookie = self.cookie.clone();
         let url = format!(
-            "{CLERK_BASE_URL}/v1/client/sessions/{session_id}/tokens?_clerk_js_version={CLERK_TOKEN_JS_VERSION}"
+            "{CLERK_BASE_URL}/v1/client/sessions/{session_id}/tokens?_clerk_js_version={CLERK_JS_VERSION}"
         );
         let data = clerk_request_json(http, &cookie, Method::Post, url).await?;
         let jwt = parse_token_response(&data)?;
