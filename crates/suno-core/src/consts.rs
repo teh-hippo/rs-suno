@@ -24,10 +24,11 @@ pub(crate) const FEED_PAGE_DELAY: std::time::Duration = std::time::Duration::fro
 /// Retry a rate-limited or transient API request this many times before failing.
 pub(crate) const API_MAX_RETRIES: u32 = 3;
 
-/// The library feed endpoint. Paged for listing, or filtered with `?ids=` to
-/// gap-fill specific ancestors (including trashed ones) during lineage
-/// resolution.
-pub(crate) const FEED_V2_PATH: &str = "/api/feed/v2/";
+/// The library feed endpoint: a cursor-paginated `POST` taking
+/// `{limit, cursor, filters}` and returning `{clips, has_more, next_cursor}`.
+/// The `filters` carry `trashed: "False"` so the listing excludes trashed clips
+/// exactly as the old v2 feed did; the `--liked` scope adds `liked: "True"`.
+pub(crate) const FEED_V3_PATH: &str = "/api/feed/v3";
 /// The dedicated parent-lookup endpoint: one hop up a clip's lineage.
 pub(crate) const CLIP_PARENT_PATH: &str = "/api/clips/parent";
 /// The caller's own playlists, paged. Trashed and share-list playlists are
@@ -36,6 +37,3 @@ pub(crate) const PLAYLIST_ME_PATH: &str = "/api/playlist/me";
 /// One playlist's detail, including its ordered `playlist_clips`. The id and a
 /// trailing slash are appended: `/api/playlist/{id}/`.
 pub(crate) const PLAYLIST_PATH: &str = "/api/playlist/";
-/// Fetch at most this many clip ids per `?ids=` request so a batch cannot build
-/// an over-long URL.
-pub(crate) const IDS_PER_REQUEST: usize = 40;

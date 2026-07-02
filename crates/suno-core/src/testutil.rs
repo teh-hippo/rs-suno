@@ -128,6 +128,7 @@ struct Route {
 pub(crate) struct ScriptedHttp {
     routes: Mutex<Vec<Route>>,
     log: Mutex<Vec<String>>,
+    bodies: Mutex<Vec<Vec<u8>>>,
 }
 
 impl ScriptedHttp {
@@ -135,6 +136,7 @@ impl ScriptedHttp {
         Self {
             routes: Mutex::new(Vec::new()),
             log: Mutex::new(Vec::new()),
+            bodies: Mutex::new(Vec::new()),
         }
     }
 
@@ -172,6 +174,18 @@ impl ScriptedHttp {
         self.log.lock().unwrap().clone()
     }
 
+    /// The request bodies sent so far, in order, decoded as UTF-8 (empty for a
+    /// GET or a bodyless POST). Feed pages all share one URL, so only the body
+    /// proves the cursor was threaded from one page's `next_cursor` to the next.
+    pub(crate) fn bodies(&self) -> Vec<String> {
+        self.bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|body| String::from_utf8_lossy(body).into_owned())
+            .collect()
+    }
+
     /// How many requested URLs contained `needle`.
     pub(crate) fn count(&self, needle: &str) -> usize {
         self.log
@@ -189,6 +203,7 @@ impl Http for ScriptedHttp {
         request: HttpRequest,
     ) -> impl Future<Output = Result<HttpResponse, TransportError>> + Send {
         self.log.lock().unwrap().push(request.url.clone());
+        self.bodies.lock().unwrap().push(request.body.clone());
         let reply = {
             let mut routes = self.routes.lock().unwrap();
             routes

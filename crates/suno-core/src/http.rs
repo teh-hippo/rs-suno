@@ -14,11 +14,16 @@ pub enum Method {
 }
 
 /// A request the engine wants an adapter to perform.
+///
+/// `body` is empty for GET and for bodyless POSTs (the Clerk token mint). An
+/// adapter sends it only when non-empty, so a bodyless request stays on the
+/// wire exactly as before.
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
     pub method: Method,
     pub url: String,
     pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
 }
 
 impl HttpRequest {
@@ -28,6 +33,17 @@ impl HttpRequest {
             method: Method::Get,
             url: url.into(),
             headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    /// A POST carrying `body` (an empty `body` is a bodyless POST).
+    pub fn post(url: impl Into<String>, body: Vec<u8>) -> Self {
+        Self {
+            method: Method::Post,
+            url: url.into(),
+            headers: Vec::new(),
+            body,
         }
     }
 }

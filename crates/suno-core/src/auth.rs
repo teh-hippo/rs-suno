@@ -277,6 +277,7 @@ async fn clerk_request_json(
         method,
         url,
         headers: vec![("Cookie".to_string(), cookie.to_string())],
+        body: Vec::new(),
     };
     let response = http
         .send(request)

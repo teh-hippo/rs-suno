@@ -34,6 +34,11 @@ impl Http for ReqwestHttp {
             for (name, value) in &request.headers {
                 builder = builder.header(name, value);
             }
+            if !request.body.is_empty() {
+                builder = builder
+                    .header("content-type", "application/json")
+                    .body(request.body);
+            }
             let response = builder
                 .send()
                 .await

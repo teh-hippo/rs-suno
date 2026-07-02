@@ -101,7 +101,7 @@ proptest! {
     fn list_clips_survives_arbitrary_feed_bytes(body in any::<Vec<u8>>()) {
         let http = ChaosHttp::new()
             .with_auth()
-            .program("/api/feed/v2/", vec![Outcome::ok(body)]);
+            .program("/api/feed/v3", vec![Outcome::ok(body)]);
         let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let _ = pollster::block_on(client.list_clips(&http, false, Some(3)));
     }
@@ -114,7 +114,7 @@ proptest! {
         let body = serde_json::to_vec(&value).expect("arb_json is serialisable");
         let http = ChaosHttp::new()
             .with_auth()
-            .program("/api/feed/v2/", vec![Outcome::ok(body)]);
+            .program("/api/feed/v3", vec![Outcome::ok(body)]);
         let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let _ = pollster::block_on(client.list_clips(&http, true, Some(3)));
     }
