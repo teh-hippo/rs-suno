@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/teh-hippo/rs-suno/compare/v0.6.0...v0.7.0) (2026-07-02)
+
+
+### Features
+
+* warn when the __client cookie is nearing expiry ([#47](https://github.com/teh-hippo/rs-suno/issues/47)) ([0661777](https://github.com/teh-hippo/rs-suno/commit/066177727cab2e471255a778897ee799a49b5cd4))
+
 ## [0.6.0](https://github.com/teh-hippo/rs-suno/compare/v0.5.0...v0.6.0) (2026-07-02)
 
 
