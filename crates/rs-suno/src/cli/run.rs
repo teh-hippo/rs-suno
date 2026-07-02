@@ -399,6 +399,7 @@ fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
         details_sidecar: args.details_sidecar.then_some(true),
         lyrics_sidecar: args.lyrics_sidecar.then_some(true),
         lrc_sidecar: args.lrc_sidecar.then_some(true),
+        video_mp4: args.video_mp4.then_some(true),
         naming_template: args.naming_template.clone(),
         character_set: args.character_set.map(Into::into),
     }
@@ -778,6 +779,7 @@ async fn run_one(
             details: settings.details_sidecar,
             lyrics: settings.lyrics_sidecar,
             lrc: settings.lrc_sidecar,
+            video: settings.video_mp4,
         },
         &NamingConfig {
             template: settings.naming_template.clone(),

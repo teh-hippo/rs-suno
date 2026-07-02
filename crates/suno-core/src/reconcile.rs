@@ -46,10 +46,10 @@ use crate::model::Clip;
 /// The reconcile engine keeps a single pair of artifact actions
 /// ([`Action::WriteArtifact`] / [`Action::DeleteArtifact`]) rather than one
 /// variant per class; the `kind` distinguishes them so the executor and the
-/// manifest can route each to the right slot. `VideoMp4` is deferred and
-/// intentionally absent. Per-clip classes ([`CoverJpg`](ArtifactKind::CoverJpg),
-/// [`CoverWebp`](ArtifactKind::CoverWebp), [`DetailsTxt`](ArtifactKind::DetailsTxt),
-/// [`LyricsTxt`](ArtifactKind::LyricsTxt), and [`Lrc`](ArtifactKind::Lrc)) map to
+/// manifest can route each to the right slot. Per-clip classes
+/// ([`CoverJpg`](ArtifactKind::CoverJpg), [`CoverWebp`](ArtifactKind::CoverWebp),
+/// [`DetailsTxt`](ArtifactKind::DetailsTxt), [`LyricsTxt`](ArtifactKind::LyricsTxt),
+/// [`Lrc`](ArtifactKind::Lrc), and [`VideoMp4`](ArtifactKind::VideoMp4)) map to
 /// a manifest entry field; the album/library classes are reconciled by later
 /// phases and have no per-clip manifest slot yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -64,6 +64,9 @@ pub enum ArtifactKind {
     LyricsTxt,
     /// The per-song untimed `.lrc` lyrics file (generated, inline content).
     Lrc,
+    /// The per-song standalone music video, fetched from `video_url` (off by
+    /// default). A large binary, removed only alongside its own audio.
+    VideoMp4,
     /// The album folder's static cover (album-scoped, later phase).
     FolderJpg,
     /// The album folder's animated cover (album-scoped, later phase).
@@ -488,6 +491,7 @@ fn is_per_clip_kind(kind: ArtifactKind) -> bool {
             | ArtifactKind::DetailsTxt
             | ArtifactKind::LyricsTxt
             | ArtifactKind::Lrc
+            | ArtifactKind::VideoMp4
     )
 }
 
@@ -511,12 +515,18 @@ fn is_per_clip_kind(kind: ArtifactKind) -> bool {
 /// OR a transient empty-lyrics read); it opts out cover-style, so turning the
 /// lyrics feature off leaves existing `.lyrics.txt` files in place. The untimed
 /// [`Lrc`](ArtifactKind::Lrc) sidecar is partial the same way and opts out too.
+///
+/// [`VideoMp4`](ArtifactKind::VideoMp4) also opts out: `video_url` can be
+/// transiently absent, and the video is a large binary a user would not expect
+/// a run to delete merely because the feature was switched off. Like a cover, it
+/// is removed only when its owning audio is deleted.
 fn removed_kind_delete_eligible(kind: ArtifactKind) -> bool {
     match kind {
         ArtifactKind::CoverJpg
         | ArtifactKind::CoverWebp
         | ArtifactKind::LyricsTxt
-        | ArtifactKind::Lrc => false,
+        | ArtifactKind::Lrc
+        | ArtifactKind::VideoMp4 => false,
         ArtifactKind::DetailsTxt
         | ArtifactKind::FolderJpg
         | ArtifactKind::FolderWebp
@@ -535,6 +545,7 @@ fn manifest_artifact_by_kind(entry: &ManifestEntry, kind: ArtifactKind) -> Optio
         ArtifactKind::DetailsTxt => entry.details_txt.as_ref(),
         ArtifactKind::LyricsTxt => entry.lyrics_txt.as_ref(),
         ArtifactKind::Lrc => entry.lrc.as_ref(),
+        ArtifactKind::VideoMp4 => entry.video_mp4.as_ref(),
         ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => None,
     }
 }
@@ -558,6 +569,9 @@ fn manifest_artifacts(entry: &ManifestEntry) -> Vec<(ArtifactKind, &ArtifactStat
     if let Some(state) = &entry.lrc {
         out.push((ArtifactKind::Lrc, state));
     }
+    if let Some(state) = &entry.video_mp4 {
+        out.push((ArtifactKind::VideoMp4, state));
+    }
     out
 }
 
@@ -578,6 +592,7 @@ pub(crate) fn set_manifest_artifact(
         ArtifactKind::DetailsTxt => entry.details_txt = state,
         ArtifactKind::LyricsTxt => entry.lyrics_txt = state,
         ArtifactKind::Lrc => entry.lrc = state,
+        ArtifactKind::VideoMp4 => entry.video_mp4 = state,
         ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => {}
     }
 }
@@ -1098,6 +1113,7 @@ fn album_desires_kind(d: &AlbumDesired, kind: ArtifactKind) -> bool {
         | ArtifactKind::DetailsTxt
         | ArtifactKind::LyricsTxt
         | ArtifactKind::Lrc
+        | ArtifactKind::VideoMp4
         | ArtifactKind::Playlist => false,
     }
 }
@@ -2716,6 +2732,51 @@ mod tests {
     }
 
     #[test]
+    fn video_mp4_removed_kind_is_kept_not_deleted() {
+        // VideoMp4 opts out of removed-kind deletion like a cover: a large binary
+        // is never deleted merely because the video feature is off this run (or
+        // the URL was transiently absent). Only a co-delete removes it.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.video_mp4 = Some(cover("a.mp4", "vid-hash"));
+        manifest.insert("a", e);
+        let d = vec![desired_arts("a", vec![])];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert_eq!(plan.deletes(), 0);
+    }
+
+    #[test]
+    fn video_mp4_written_when_manifest_lacks_it() {
+        // A desired VideoMp4 with no manifest slot is written as a fetched binary
+        // (no inline content), proving the new kind flows through per-clip planning.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::VideoMp4,
+                "a/song.mp4",
+                "https://cdn/a/video.mp4",
+                "vid-hash",
+            )],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 1);
+        assert_eq!(
+            write_artifacts(&plan)[0],
+            &Action::WriteArtifact {
+                kind: ArtifactKind::VideoMp4,
+                path: "a/song.mp4".to_string(),
+                source_url: "https://cdn/a/video.mp4".to_string(),
+                hash: "vid-hash".to_string(),
+                owner_id: "a".to_string(),
+                content: None,
+            }
+        );
+    }
+
+    #[test]
     fn details_removed_kind_not_deleted_on_incomplete_listing() {
         // The removed-kind delete still obeys the enumeration gate: an incomplete
         // mirror forbids removing the stale details sidecar.
@@ -2759,15 +2820,17 @@ mod tests {
         e.details_txt = Some(cover("gone.details.txt", &content_hash("Title: G\n")));
         e.lyrics_txt = Some(cover("gone.lyrics.txt", &content_hash("words\n")));
         e.lrc = Some(cover("gone.lrc", &content_hash("[re:rs-suno]\nwords\n")));
+        e.video_mp4 = Some(cover("gone/song.mp4", "vid-hash"));
         manifest.insert("gone", e);
         let plan = reconcile(&manifest, &[], &HashMap::new(), &mirror_ok());
         assert_eq!(plan.deletes(), 1);
-        assert_eq!(plan.artifact_deletes(), 4);
+        assert_eq!(plan.artifact_deletes(), 5);
         for (kind, path) in [
             (ArtifactKind::CoverJpg, "gone/cover.jpg"),
             (ArtifactKind::DetailsTxt, "gone.details.txt"),
             (ArtifactKind::LyricsTxt, "gone.lyrics.txt"),
             (ArtifactKind::Lrc, "gone.lrc"),
+            (ArtifactKind::VideoMp4, "gone/song.mp4"),
         ] {
             assert!(
                 plan.actions.contains(&Action::DeleteArtifact {

@@ -71,6 +71,7 @@ configured `root` is used.
 | `--min-newest <N>` | `1` | Newest clips always kept when a recency filter applies. |
 | `--retries <N>` | `3` | Download retry attempts per clip. |
 | `--animated-covers` | off | Also write animated WebP covers from video previews. |
+| `--video-mp4` | off | Also download the standalone `.mp4` music video beside each song, when available. |
 
 When `sync` would delete files and `--yes` was not passed, it lists them and
 asks for confirmation on an interactive terminal. Without a terminal it refuses

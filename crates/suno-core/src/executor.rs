@@ -317,6 +317,7 @@ fn is_per_clip_kind(kind: ArtifactKind) -> bool {
             | ArtifactKind::DetailsTxt
             | ArtifactKind::LyricsTxt
             | ArtifactKind::Lrc
+            | ArtifactKind::VideoMp4
     )
 }
 
@@ -653,6 +654,10 @@ where
                 .get(owner_id)
                 .and_then(|e| e.lrc.as_ref())
                 .map(|s| s.path.clone()),
+            ArtifactKind::VideoMp4 => manifest
+                .get(owner_id)
+                .and_then(|e| e.video_mp4.as_ref())
+                .map(|s| s.path.clone()),
             ArtifactKind::FolderJpg | ArtifactKind::FolderWebp => albums
                 .get(owner_id)
                 .and_then(|a| a.artifact(kind))
@@ -751,7 +756,10 @@ where
             ArtifactKind::DetailsTxt | ArtifactKind::LyricsTxt | ArtifactKind::Lrc => Err(
                 permanent_fail(owner_id, "text sidecar requires inline content"),
             ),
-            ArtifactKind::CoverJpg | ArtifactKind::FolderJpg | ArtifactKind::Playlist => Ok(source),
+            ArtifactKind::CoverJpg
+            | ArtifactKind::FolderJpg
+            | ArtifactKind::Playlist
+            | ArtifactKind::VideoMp4 => Ok(source),
         }
     }
 

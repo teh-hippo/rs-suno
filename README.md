@@ -45,6 +45,7 @@ Preview any run without touching disk using `suno check` or `--dry-run`.
   lineage, plus embedded and folder cover art and unsynced lyrics.
 - Lineage albums that group a song with its remixes and edits.
 - Optional animated WebP covers (`--animated-covers`).
+- Optional standalone music-video download (`--video-mp4`).
 - M3U8 playlists, including a synthetic "Liked Songs" list.
 - Careful deletion safety: it never deletes on an empty, failed, partial, or
   truncated listing, and aborts a suspicious mass deletion.

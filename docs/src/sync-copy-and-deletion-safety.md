@@ -223,6 +223,10 @@ off:
   lyrics, exactly like `.lyrics.txt`, so it opts out of removal the same way.
   Turning `lrc_sidecar` off leaves existing `.lrc` files in place. The lyrics
   carry no per-line timestamps.
+- **Music video (`.mp4`).** The standalone video is a large binary and its source
+  URL can be transiently absent, so it opts out of removal the same way covers do.
+  Turning `video_mp4` off leaves existing `.mp4` videos in place; a video is only
+  removed when its whole song leaves every source and the audio is deleted with it.
 
 Whichever the case, a sidecar is only ever deleted through the shared gate, so
 an incomplete listing or a preserved (private or copy-held) song never loses

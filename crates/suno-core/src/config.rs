@@ -58,6 +58,7 @@ pub struct Defaults {
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
+    pub video_mp4: Option<bool>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
 }
@@ -73,6 +74,7 @@ pub struct SourceConfig {
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
+    pub video_mp4: Option<bool>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
 }
@@ -94,6 +96,7 @@ pub struct AccountConfig {
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
+    pub video_mp4: Option<bool>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
     #[serde(default)]
@@ -331,6 +334,16 @@ impl Config {
             "LRC_SIDECAR",
         )?;
 
+        let video_mp4 = resolve_bool(
+            flags.video_mp4,
+            env_val("VIDEO_MP4"),
+            src.and_then(|s| s.video_mp4),
+            acc.video_mp4,
+            self.defaults.video_mp4,
+            false,
+            "VIDEO_MP4",
+        )?;
+
         let naming_template_from_env = env_val("NAMING_TEMPLATE").map(str::to_owned);
         let naming_template = flags
             .naming_template
@@ -370,6 +383,7 @@ impl Config {
             details_sidecar,
             lyrics_sidecar,
             lrc_sidecar,
+            video_mp4,
             naming_template,
             character_set,
             areas: acc.areas.clone(),
@@ -437,6 +451,7 @@ pub struct FlagOverrides {
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
+    pub video_mp4: Option<bool>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
 }
@@ -455,6 +470,7 @@ pub struct EffectiveSettings {
     pub details_sidecar: bool,
     pub lyrics_sidecar: bool,
     pub lrc_sidecar: bool,
+    pub video_mp4: bool,
     pub naming_template: String,
     pub character_set: CharacterSet,
     /// The per-account `[areas]` selection table, if configured.
@@ -545,6 +561,7 @@ mod tests {
                 details_sidecar: false,
                 lyrics_sidecar: false,
                 lrc_sidecar: false,
+                video_mp4: false,
                 naming_template: crate::naming::DEFAULT_TEMPLATE.to_owned(),
                 character_set: CharacterSet::Unicode,
                 areas: None,
@@ -757,6 +774,53 @@ mod tests {
         };
         let eff = cfg.resolve("alice", Some("liked"), &env, &flags).unwrap();
         assert!(!eff.animated_covers);
+    }
+
+    #[test]
+    fn video_mp4_defaults_off_and_follows_precedence() {
+        // Compiled default is off.
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert!(!eff.video_mp4);
+
+        // File default on; per-source off; env on; flag off — flag wins.
+        let toml = r#"
+            [defaults]
+            video_mp4 = true
+
+            [accounts.alice.sources.liked]
+            video_mp4 = false
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        assert!(
+            cfg.resolve("alice", None, &no_env(), &no_flags())
+                .unwrap()
+                .video_mp4
+        );
+        assert!(
+            !cfg.resolve("alice", Some("liked"), &no_env(), &no_flags())
+                .unwrap()
+                .video_mp4
+        );
+
+        let env: HashMap<String, String> = [("SUNO_VIDEO_MP4".into(), "true".into())]
+            .into_iter()
+            .collect();
+        assert!(
+            cfg.resolve("alice", Some("liked"), &env, &no_flags())
+                .unwrap()
+                .video_mp4
+        );
+
+        let flags = FlagOverrides {
+            video_mp4: Some(false),
+            ..Default::default()
+        };
+        assert!(
+            !cfg.resolve("alice", Some("liked"), &env, &flags)
+                .unwrap()
+                .video_mp4
+        );
     }
 
     #[test]

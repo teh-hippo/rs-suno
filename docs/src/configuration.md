@@ -53,6 +53,7 @@ animated_covers = false
 details_sidecar = false
 lyrics_sidecar = false
 lrc_sidecar = false
+video_mp4 = false
 
 [accounts.me]
 token = "<your __client token>"
@@ -82,6 +83,7 @@ needed. These modes are not applied on non-Unix platforms.
 | `details_sidecar` | bool | `false` | Also write a plain-text `<song>.details.txt` beside each audio file, dumping the same metadata that is embedded in the tags plus the song id, duration, and canonical `suno.com` URL. |
 | `lyrics_sidecar` | bool | `false` | Also write a plain-text `<song>.lyrics.txt` beside each audio file, holding the song's lyrics verbatim. A song with no lyrics gets no file. |
 | `lrc_sidecar` | bool | `false` | Also write an untimed `<song>.lrc` beside each audio file, holding the song's lyrics with a small tag header (plain lyrics, no per-line timestamps). A song with no lyrics gets no file. |
+| `video_mp4` | bool | `false` | Also download the standalone `<song>.mp4` music video beside each audio file, when Suno provides one. A song with no video gets no file. Turning this off leaves existing videos in place; a video is only removed alongside its own audio. |
 
 Any account key except `token`, `root`, and `account_id` may also be set under
 `[defaults]` to apply to every account.
@@ -154,6 +156,7 @@ For every setting, the first value found wins, in this order:
 | `SUNO_DETAILS_SIDECAR` | `--details-sidecar` | `true` or `false`. |
 | `SUNO_LYRICS_SIDECAR` | `--lyrics-sidecar` | `true` or `false`. |
 | `SUNO_LRC_SIDECAR` | `--lrc-sidecar` | `true` or `false`. |
+| `SUNO_VIDEO_MP4` | `--video-mp4` | `true` or `false`. |
 
 Per-account variants use the account label upper-cased with hyphens turned into
 underscores, so account `my-lib` reads `SUNO_MY_LIB_TOKEN`,
