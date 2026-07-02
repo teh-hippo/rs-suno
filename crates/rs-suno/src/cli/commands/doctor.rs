@@ -101,10 +101,18 @@ fn print_config(global: &GlobalArgs) -> Option<Config> {
 }
 
 /// A resolved account label and its token, ready for the auth/credits check.
-#[derive(Debug)]
 struct Target {
     label: String,
     token: Option<String>,
+}
+
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Target")
+            .field("label", &self.label)
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 /// Check auth and credits for each resolved account.

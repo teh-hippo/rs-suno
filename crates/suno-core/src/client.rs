@@ -236,7 +236,7 @@ impl<C: Clock> SunoClient<C> {
 
     /// Fetch the caller's billing/credits info from `/api/billing/info/`.
     pub async fn billing_info(&mut self, http: &impl Http) -> Result<BillingInfo> {
-        let body = self.api_get(http, BILLING_INFO_PATH).await?;
+        let body = self.api_get_retrying(http, BILLING_INFO_PATH).await?;
         parse_billing_info(&body)
     }
 
@@ -1316,5 +1316,11 @@ mod tests {
         let body = serde_json::json!({"plan": "free"}).to_string();
         let info = parse_billing_info(body.as_bytes()).unwrap();
         assert_eq!(info.plan, "free");
+    }
+
+    #[test]
+    fn parse_billing_info_rejects_malformed_json() {
+        let err = parse_billing_info(b"not json").unwrap_err();
+        assert!(matches!(err, Error::Api(_)));
     }
 }
