@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/teh-hippo/rs-suno/compare/v0.4.0...v0.5.0) (2026-07-02)
+
+
+### Features
+
+* write a machine-readable library index for scripting ([#43](https://github.com/teh-hippo/rs-suno/issues/43)) ([0314cd4](https://github.com/teh-hippo/rs-suno/commit/0314cd427807ea93a861e0886e3dd9ad401046c3)), closes [#16](https://github.com/teh-hippo/rs-suno/issues/16)
+
 ## [0.4.0](https://github.com/teh-hippo/rs-suno/compare/v0.3.0...v0.4.0) (2026-07-01)
 
 
