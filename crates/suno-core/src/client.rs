@@ -8,8 +8,8 @@ use crate::auth::ClerkAuth;
 use crate::backoff::{backoff_delay, retry_after};
 use crate::clock::Clock;
 use crate::consts::{
-    API_MAX_RETRIES, CLIP_PARENT_PATH, FEED_INITIAL_RATE, FEED_PAGE_SIZE, FEED_V3_PATH, MAX_PAGES,
-    PLAYLIST_ME_PATH, PLAYLIST_PATH, SUNO_API_BASE_URL,
+    API_MAX_RETRIES, BILLING_INFO_PATH, CLIP_PARENT_PATH, FEED_INITIAL_RATE, FEED_PAGE_SIZE,
+    FEED_V3_PATH, MAX_PAGES, PLAYLIST_ME_PATH, PLAYLIST_PATH, SUNO_API_BASE_URL,
 };
 use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
@@ -31,6 +31,13 @@ pub struct Playlist {
     pub name: String,
     /// The number of clips Suno reports in the playlist.
     pub num_clips: u64,
+}
+
+/// The authenticated account's current remaining credit balance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingInfo {
+    /// Credits remaining in the current billing state.
+    pub total_credits_left: u64,
 }
 
 /// A client for the Suno library API, owning the account's [`ClerkAuth`].
@@ -254,6 +261,12 @@ impl<C: Clock> SunoClient<C> {
         parse_playlist_clips(&body)
     }
 
+    /// Read the authenticated account's billing information.
+    pub async fn get_billing_info(&mut self, http: &impl Http) -> Result<BillingInfo> {
+        let body = self.api_get_retrying(http, BILLING_INFO_PATH).await?;
+        parse_billing_info(&body)
+    }
+
     /// Try the dedicated clip endpoint, returning `None` when it is missing or
     /// returns a body that does not yield the requested clip.
     async fn try_get_clip(&mut self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
@@ -406,6 +419,27 @@ fn parse_clip(body: &[u8]) -> Option<Clip> {
         .and_then(Value::as_str)
         .is_some_and(|id| !id.is_empty());
     has_id.then(|| Clip::from_json(raw))
+}
+
+/// Parse `/api/billing/info/` into the remaining credits we report in `doctor`.
+fn parse_billing_info(body: &[u8]) -> Result<BillingInfo> {
+    let data: Value = serde_json::from_slice(body)
+        .map_err(|err| Error::Api(format!("invalid billing JSON: {err}")))?;
+    let total_credits_left = data
+        .get("total_credits_left")
+        .and_then(json_u64)
+        .ok_or_else(|| Error::Api("invalid billing JSON: missing total_credits_left".into()))?;
+    Ok(BillingInfo { total_credits_left })
+}
+
+/// Read a numeric field that Suno may encode either as a JSON number or a
+/// decimal string.
+fn json_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => text.parse().ok(),
+        _ => None,
+    }
 }
 
 /// Build the JSON body for a `POST /api/feed/v3` page.
@@ -676,6 +710,36 @@ mod tests {
         let mut auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(http)).unwrap();
         SunoClient::new(auth, RecordingClock::new())
+    }
+
+    #[test]
+    fn get_billing_info_reads_remaining_credits() {
+        let mut rules = auth_rules();
+        rules.push(Rule::new(
+            BILLING_INFO_PATH,
+            200,
+            r#"{"total_credits_left":500,"monthly_limit":1000,"monthly_usage":500}"#.to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let billing = pollster::block_on(client.get_billing_info(&http)).unwrap();
+        assert_eq!(billing.total_credits_left, 500);
+    }
+
+    #[test]
+    fn get_billing_info_rejects_missing_balance() {
+        let mut rules = auth_rules();
+        rules.push(Rule::new(
+            BILLING_INFO_PATH,
+            200,
+            r#"{"monthly_usage":12}"#.to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let err = pollster::block_on(client.get_billing_info(&http)).unwrap_err();
+        assert!(err.to_string().contains("total_credits_left"));
     }
 
     fn scripted_client(http: &ScriptedHttp, clock: RecordingClock) -> SunoClient<RecordingClock> {

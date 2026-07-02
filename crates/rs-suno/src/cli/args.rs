@@ -78,6 +78,8 @@ pub enum Command {
     Config(ConfigArgs),
     /// Manage authentication.
     Auth(AuthArgs),
+    /// Report environment, config, auth, and credits diagnostics.
+    Doctor,
     /// Print version and environment information.
     Version,
     /// Emit a shell completion script.
@@ -524,6 +526,12 @@ mod tests {
             }
             _ => panic!("expected lsjson"),
         }
+    }
+
+    #[test]
+    fn doctor_parses_without_args() {
+        let cli = Cli::try_parse_from(["suno", "doctor"]).unwrap();
+        assert!(matches!(cli.command, Command::Doctor));
     }
 
     #[test]
