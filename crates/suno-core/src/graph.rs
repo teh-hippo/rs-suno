@@ -237,7 +237,11 @@ impl AlbumArt {
         match kind {
             ArtifactKind::FolderJpg => self.folder_jpg.as_ref(),
             ArtifactKind::FolderWebp => self.folder_webp.as_ref(),
-            ArtifactKind::CoverJpg | ArtifactKind::CoverWebp | ArtifactKind::Playlist => None,
+            ArtifactKind::CoverJpg
+            | ArtifactKind::CoverWebp
+            | ArtifactKind::DetailsTxt
+            | ArtifactKind::LyricsTxt
+            | ArtifactKind::Playlist => None,
         }
     }
 
@@ -250,7 +254,11 @@ impl AlbumArt {
         match kind {
             ArtifactKind::FolderJpg => self.folder_jpg = state,
             ArtifactKind::FolderWebp => self.folder_webp = state,
-            ArtifactKind::CoverJpg | ArtifactKind::CoverWebp | ArtifactKind::Playlist => {}
+            ArtifactKind::CoverJpg
+            | ArtifactKind::CoverWebp
+            | ArtifactKind::DetailsTxt
+            | ArtifactKind::LyricsTxt
+            | ArtifactKind::Playlist => {}
         }
     }
 

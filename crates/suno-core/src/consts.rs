@@ -8,6 +8,9 @@ pub(crate) const CLERK_BASE_URL: &str = "https://clerk.suno.com";
 pub(crate) const CLERK_JS_VERSION: &str = "4.72.1";
 pub(crate) const CLERK_TOKEN_JS_VERSION: &str = "4.72.0-snapshot.vc141245";
 pub(crate) const CDN_BASE_URL: &str = "https://cdn1.suno.ai";
+/// Canonical public web URL base for a song page (`<base>/<clip id>`). Used in
+/// the plain-text details sidecar so a human can open the song in a browser.
+pub(crate) const SUNO_SONG_BASE_URL: &str = "https://suno.com/song";
 
 /// Refresh a JWT this many seconds before it expires.
 pub(crate) const JWT_REFRESH_BUFFER: i64 = 60;

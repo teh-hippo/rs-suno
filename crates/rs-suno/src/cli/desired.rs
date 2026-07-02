@@ -12,7 +12,8 @@ use std::path::{Component, Path};
 use suno_core::{
     ArtifactKind, AudioFormat, Clip, Desired, DesiredArtifact, ExecOutcome, LineageContext,
     M3u8Entry, NamingConfig, NamingRequest, PlaylistDesired, RunStatus, SourceMode, art_hash,
-    art_url_hash, content_hash, meta_hash, render_clip_names, render_m3u8, sanitise_name,
+    art_url_hash, content_hash, meta_hash, render_clip_details, render_clip_lyrics,
+    render_clip_names, render_m3u8, sanitise_name,
 };
 
 /// Below this manifest size the mass-deletion fraction rule does not fire; a
@@ -46,6 +47,18 @@ impl ExitCode {
     }
 }
 
+/// The per-song sidecar toggles resolved for a run.
+///
+/// Each mirrors one resolved setting: `animated_covers` gates the `cover.webp`,
+/// `details` the `.details.txt` dump, and `lyrics` the `.lyrics.txt` file. All
+/// default off, matching the compiled config defaults.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ArtifactToggles {
+    pub animated_covers: bool,
+    pub details: bool,
+    pub lyrics: bool,
+}
+
 /// Build the desired target state for one source's selected clips.
 ///
 /// Naming is rendered as a batch so collisions are disambiguated, then the
@@ -62,16 +75,16 @@ impl ExitCode {
 /// a `[{root_id8}]`-suffixed folder so two distinct roots never share one,
 /// regardless of which clips this batch happens to hold.
 ///
-/// `animated_covers` mirrors the resolved `--animated-covers` setting: when set,
-/// a clip with a video preview also gains a `cover.webp` sidecar (see
-/// [`clip_artifacts`]).
+/// `toggles` carries the resolved per-song sidecar switches (animated cover,
+/// details text, lyrics text); each gates the matching sidecar in
+/// [`clip_artifacts`].
 pub fn build_desired(
     clips: &[&Clip],
     format: AudioFormat,
     mode: SourceMode,
     contexts: &HashMap<String, LineageContext>,
     colliding_albums: &BTreeSet<String>,
-    animated_covers: bool,
+    toggles: ArtifactToggles,
 ) -> Vec<Desired> {
     let config = NamingConfig::default();
     let lineages: Vec<LineageContext> = clips
@@ -103,6 +116,9 @@ pub fn build_desired(
             let base = rel_to_string(&name.relative_path);
             let path = format!("{base}.{format}");
             let meta_hash = meta_hash(clip, &lineage);
+            // Bind the artifacts before the struct literal so `&lineage` is
+            // borrowed (for the details render) before it is moved in below.
+            let artifacts = clip_artifacts(clip, &base, &lineage, toggles);
             Desired {
                 clip: (*clip).clone(),
                 lineage,
@@ -113,23 +129,35 @@ pub fn build_desired(
                 modes: vec![mode],
                 trashed: false,
                 private: false,
-                artifacts: clip_artifacts(clip, &base, animated_covers),
+                artifacts,
             }
         })
         .collect()
 }
 
-/// The per-clip cover sidecars desired alongside `base`, the extensionless audio
-/// path (so `cover.jpg` and `cover.webp` sit next to the audio file).
+/// The per-clip sidecars desired alongside `base`, the extensionless audio path
+/// (so each sidecar sits next to the audio file).
 ///
 /// A static `CoverJpg` is emitted whenever the clip has non-empty selected art;
-/// an animated `CoverWebp` only when `animated_covers` is set and the clip
-/// carries a video preview. An empty art URL emits NO `CoverJpg`: reconcile
+/// an animated `CoverWebp` only when `toggles.animated_covers` is set and the
+/// clip carries a video preview. An empty art URL emits NO `CoverJpg`: reconcile
 /// reads a desired that simply lacks a cover as UNKNOWN => KEEP, never a delete,
 /// so a transient empty URL cannot strand or remove an existing cover. The
 /// `CoverJpg` hash tracks the art URL (`art_hash`); the `CoverWebp` hash tracks
 /// the video URL, so a changed source re-transcodes.
-fn clip_artifacts(clip: &Clip, base: &str, animated_covers: bool) -> Vec<DesiredArtifact> {
+///
+/// The generated text sidecars carry their body inline (`content`) and a
+/// per-sidecar `content_hash`, so a change to what the file holds (a retitle for
+/// details, or edited lyrics) rewrites it even when `meta_hash` is unchanged.
+/// `DetailsTxt` is always emitted when `toggles.details` is set (the render is
+/// total); `LyricsTxt` only when `toggles.lyrics` is set and the clip has
+/// non-empty lyrics (the render is partial), so no empty lyrics file is written.
+fn clip_artifacts(
+    clip: &Clip,
+    base: &str,
+    lineage: &LineageContext,
+    toggles: ArtifactToggles,
+) -> Vec<DesiredArtifact> {
     let mut artifacts = Vec::new();
     if let Some(url) = clip.selected_image_url().filter(|u| !u.is_empty()) {
         artifacts.push(DesiredArtifact {
@@ -137,14 +165,37 @@ fn clip_artifacts(clip: &Clip, base: &str, animated_covers: bool) -> Vec<Desired
             path: format!("{base}.jpg"),
             source_url: url.to_owned(),
             hash: art_hash(clip),
+            content: None,
         });
     }
-    if animated_covers && !clip.video_cover_url.is_empty() {
+    if toggles.animated_covers && !clip.video_cover_url.is_empty() {
         artifacts.push(DesiredArtifact {
             kind: ArtifactKind::CoverWebp,
             path: format!("{base}.webp"),
             source_url: clip.video_cover_url.clone(),
             hash: art_url_hash(&clip.video_cover_url),
+            content: None,
+        });
+    }
+    if toggles.details {
+        let text = render_clip_details(clip, lineage);
+        artifacts.push(DesiredArtifact {
+            kind: ArtifactKind::DetailsTxt,
+            path: format!("{base}.details.txt"),
+            source_url: String::new(),
+            hash: content_hash(&text),
+            content: Some(text),
+        });
+    }
+    if toggles.lyrics
+        && let Some(text) = render_clip_lyrics(clip)
+    {
+        artifacts.push(DesiredArtifact {
+            kind: ArtifactKind::LyricsTxt,
+            path: format!("{base}.lyrics.txt"),
+            source_url: String::new(),
+            hash: content_hash(&text),
+            content: Some(text),
         });
     }
     artifacts
@@ -385,7 +436,7 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
-            false,
+            ArtifactToggles::default(),
         );
         assert_eq!(desired.len(), 1);
         assert!(
@@ -423,7 +474,7 @@ mod tests {
             SourceMode::Mirror,
             &contexts,
             &no_collisions(),
-            false,
+            ArtifactToggles::default(),
         );
         // The album folders under the root title, and the hash/lineage carry the
         // resolved context, not a self-rooted fallback.
@@ -498,7 +549,7 @@ mod tests {
             SourceMode::Mirror,
             &contexts_of(&store),
             &store.colliding_root_titles(),
-            false,
+            ArtifactToggles::default(),
         );
         let child1 = cycle1.iter().find(|d| d.clip.id == "child-remix").unwrap();
         assert!(
@@ -514,7 +565,7 @@ mod tests {
             SourceMode::Mirror,
             &contexts_of(&store),
             &store.colliding_root_titles(),
-            false,
+            ArtifactToggles::default(),
         );
         for (a, b) in cycle1.iter().zip(&cycle2) {
             assert_eq!(a.path, b.path, "album path drifted for {}", a.clip.id);
@@ -548,7 +599,7 @@ mod tests {
             SourceMode::Copy,
             &no_contexts(),
             &no_collisions(),
-            false,
+            ArtifactToggles::default(),
         );
         assert_ne!(desired[0].path, desired[1].path);
         assert!(desired.iter().all(|d| d.path.ends_with(".mp3")));
@@ -565,7 +616,7 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
-            false,
+            ArtifactToggles::default(),
         );
         assert!(!desired[0].path.contains('\\'));
         assert!(desired[0].path.contains('/'));
@@ -591,7 +642,7 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
-            false,
+            ArtifactToggles::default(),
         );
         let base = desired[0].path.strip_suffix(".flac").unwrap();
         assert_eq!(desired[0].artifacts.len(), 1);
@@ -616,7 +667,10 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
-            true,
+            ArtifactToggles {
+                animated_covers: true,
+                ..Default::default()
+            },
         );
         assert!(desired[0].artifacts.is_empty());
     }
@@ -636,7 +690,7 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
-            false,
+            ArtifactToggles::default(),
         );
         assert_eq!(desired[0].artifacts.len(), 1);
         assert_eq!(desired[0].artifacts[0].kind, ArtifactKind::CoverJpg);
@@ -649,7 +703,10 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
-            true,
+            ArtifactToggles {
+                animated_covers: true,
+                ..Default::default()
+            },
         );
         let base = desired[0].path.strip_suffix(".flac").unwrap();
         let webp = desired[0]
@@ -670,13 +727,182 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
-            true,
+            ArtifactToggles {
+                animated_covers: true,
+                ..Default::default()
+            },
         );
         assert!(
             desired[0]
                 .artifacts
                 .iter()
                 .all(|art| art.kind != ArtifactKind::CoverWebp)
+        );
+    }
+
+    #[test]
+    fn build_desired_emits_details_sidecar_only_when_enabled() {
+        let a = clip("id-a", "Song", "alice");
+        let clips = [&a];
+
+        // Off by default: no details sidecar.
+        let off = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles::default(),
+        );
+        assert!(
+            off[0]
+                .artifacts
+                .iter()
+                .all(|art| art.kind != ArtifactKind::DetailsTxt)
+        );
+
+        // Enabled: a DetailsTxt is emitted next to the audio, with inline content
+        // and a content hash, and never a source URL.
+        let on = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                details: true,
+                ..Default::default()
+            },
+        );
+        let base = on[0].path.strip_suffix(".flac").unwrap();
+        let details = on[0]
+            .artifacts
+            .iter()
+            .find(|art| art.kind == ArtifactKind::DetailsTxt)
+            .expect("details sidecar expected");
+        assert_eq!(details.path, format!("{base}.details.txt"));
+        assert_eq!(details.source_url, "");
+        let body = render_clip_details(&a, &LineageContext::own_root(&a));
+        assert_eq!(details.content.as_deref(), Some(body.as_str()));
+        assert_eq!(details.hash, content_hash(&body));
+    }
+
+    #[test]
+    fn build_desired_emits_lyrics_sidecar_only_when_enabled_and_present() {
+        let with_lyrics = Clip {
+            lyrics: "la la la".to_owned(),
+            ..clip("id-a", "Song", "alice")
+        };
+        let clips = [&with_lyrics];
+
+        // Off by default: no lyrics sidecar even when the clip has lyrics.
+        let off = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles::default(),
+        );
+        assert!(
+            off[0]
+                .artifacts
+                .iter()
+                .all(|art| art.kind != ArtifactKind::LyricsTxt)
+        );
+
+        // Enabled with lyrics: a LyricsTxt is emitted with the verbatim lyrics.
+        let on = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                lyrics: true,
+                ..Default::default()
+            },
+        );
+        let base = on[0].path.strip_suffix(".flac").unwrap();
+        let lyrics = on[0]
+            .artifacts
+            .iter()
+            .find(|art| art.kind == ArtifactKind::LyricsTxt)
+            .expect("lyrics sidecar expected");
+        assert_eq!(lyrics.path, format!("{base}.lyrics.txt"));
+        assert_eq!(lyrics.source_url, "");
+        assert_eq!(lyrics.content.as_deref(), Some("la la la\n"));
+        assert_eq!(lyrics.hash, content_hash("la la la\n"));
+    }
+
+    #[test]
+    fn build_desired_omits_lyrics_sidecar_when_clip_has_no_lyrics() {
+        // Enabled but the clip has empty lyrics: no LyricsTxt, so no empty file
+        // is ever written. The render is partial, so absence is legitimate.
+        let no_lyrics = clip("id-a", "Song", "alice");
+        assert!(no_lyrics.lyrics.is_empty());
+        let clips = [&no_lyrics];
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                lyrics: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            desired[0]
+                .artifacts
+                .iter()
+                .all(|art| art.kind != ArtifactKind::LyricsTxt)
+        );
+    }
+
+    #[test]
+    fn build_desired_text_sidecars_are_independent() {
+        // Both toggles on with art and lyrics present: cover, details and lyrics
+        // sidecars all appear, each at its own `<stem>.*` path.
+        let full = Clip {
+            lyrics: "words".to_owned(),
+            ..art_clip("id-a")
+        };
+        let clips = [&full];
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                details: true,
+                lyrics: true,
+                ..Default::default()
+            },
+        );
+        let base = desired[0].path.strip_suffix(".flac").unwrap();
+        let kinds: BTreeSet<ArtifactKind> = desired[0].artifacts.iter().map(|a| a.kind).collect();
+        assert!(kinds.contains(&ArtifactKind::CoverJpg));
+        assert!(kinds.contains(&ArtifactKind::DetailsTxt));
+        assert!(kinds.contains(&ArtifactKind::LyricsTxt));
+        let path_of = |k: ArtifactKind| {
+            desired[0]
+                .artifacts
+                .iter()
+                .find(|a| a.kind == k)
+                .unwrap()
+                .path
+                .clone()
+        };
+        assert_eq!(
+            path_of(ArtifactKind::DetailsTxt),
+            format!("{base}.details.txt")
+        );
+        assert_eq!(
+            path_of(ArtifactKind::LyricsTxt),
+            format!("{base}.lyrics.txt")
         );
     }
 
@@ -999,7 +1225,7 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
-            false,
+            ArtifactToggles::default(),
         );
         // A playlist with b, then a clip absent from the library, then a.
         let missing = clip("id-x", "Missing Song", "bob");
@@ -1038,7 +1264,7 @@ mod tests {
             SourceMode::Mirror,
             &no_contexts(),
             &no_collisions(),
-            false,
+            ArtifactToggles::default(),
         );
         let members = vec![a.clone()];
         let inputs = vec![

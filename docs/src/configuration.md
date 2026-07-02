@@ -50,6 +50,8 @@ format = "flac"
 retries = 3
 min_newest = 1
 animated_covers = false
+details_sidecar = false
+lyrics_sidecar = false
 
 [accounts.me]
 token = "<your __client token>"
@@ -72,6 +74,8 @@ format = "mp3"
 | `retries` | integer | `3` | Download retry attempts per clip before it is logged as failed. |
 | `min_newest` | integer | `1` | Minimum newest clips kept when a recency filter would otherwise select nothing. |
 | `animated_covers` | bool | `false` | Also write animated WebP covers from clip video previews. |
+| `details_sidecar` | bool | `false` | Also write a plain-text `<song>.details.txt` beside each audio file, dumping the same metadata that is embedded in the tags plus the song id, duration, and canonical `suno.com` URL. |
+| `lyrics_sidecar` | bool | `false` | Also write a plain-text `<song>.lyrics.txt` beside each audio file, holding the song's lyrics verbatim. A song with no lyrics gets no file. |
 
 Any account key except `token`, `root`, and `account_id` may also be set under
 `[defaults]` to apply to every account.
@@ -109,6 +113,8 @@ For every setting, the first value found wins, in this order:
 | `SUNO_RETRIES` | `--retries` | |
 | `SUNO_MIN_NEWEST` | `--min-newest` | |
 | `SUNO_ANIMATED_COVERS` | `--animated-covers` | `true` or `false`. |
+| `SUNO_DETAILS_SIDECAR` | `--details-sidecar` | `true` or `false`. |
+| `SUNO_LYRICS_SIDECAR` | `--lyrics-sidecar` | `true` or `false`. |
 
 Per-account variants use the account label upper-cased with hyphens turned into
 underscores, so account `my-lib` reads `SUNO_MY_LIB_TOKEN`,

@@ -310,7 +310,13 @@ fn is_playlist_kind(kind: ArtifactKind) -> bool {
 /// the owning clip's manifest entry. Album and playlist kinds are keyed by a
 /// root/playlist id that is deliberately absent from the manifest.
 fn is_per_clip_kind(kind: ArtifactKind) -> bool {
-    matches!(kind, ArtifactKind::CoverJpg | ArtifactKind::CoverWebp)
+    matches!(
+        kind,
+        ArtifactKind::CoverJpg
+            | ArtifactKind::CoverWebp
+            | ArtifactKind::DetailsTxt
+            | ArtifactKind::LyricsTxt
+    )
 }
 
 /// Recover a playlist's display name from its `.m3u8` path's file stem.
@@ -634,6 +640,14 @@ where
                 .get(owner_id)
                 .and_then(|e| e.cover_webp.as_ref())
                 .map(|s| s.path.clone()),
+            ArtifactKind::DetailsTxt => manifest
+                .get(owner_id)
+                .and_then(|e| e.details_txt.as_ref())
+                .map(|s| s.path.clone()),
+            ArtifactKind::LyricsTxt => manifest
+                .get(owner_id)
+                .and_then(|e| e.lyrics_txt.as_ref())
+                .map(|s| s.path.clone()),
             ArtifactKind::FolderJpg | ArtifactKind::FolderWebp => albums
                 .get(owner_id)
                 .and_then(|a| a.artifact(kind))
@@ -726,7 +740,14 @@ where
                         permanent_fail(owner_id, format!("cover transcode failed: {err}"))
                     }
                 }),
-            _ => Ok(source),
+            // The text sidecars are generated and always carry inline content, so
+            // `write_artifact` never reaches this fetch path for them. Guard it so
+            // a future miswiring fails loudly rather than fetching a URL.
+            ArtifactKind::DetailsTxt | ArtifactKind::LyricsTxt => Err(permanent_fail(
+                owner_id,
+                "text sidecar requires inline content",
+            )),
+            ArtifactKind::CoverJpg | ArtifactKind::FolderJpg | ArtifactKind::Playlist => Ok(source),
         }
     }
 
@@ -2497,6 +2518,128 @@ mod tests {
                 hash: "h1".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn write_text_sidecar_records_slot_with_no_network_fetch() {
+        // A generated text sidecar carries its body inline, so it is written
+        // verbatim with NO HTTP fetch and the details slot records its state.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::DetailsTxt,
+                path: "a.details.txt".to_owned(),
+                source_url: String::new(),
+                hash: "dh".to_owned(),
+                owner_id: "a".to_owned(),
+                content: Some("Title: A\n".to_owned()),
+            }],
+        };
+        // An empty HTTP script: any fetch would fail, proving none happens.
+        let http = ScriptedHttp::new();
+        let fs = MemFs::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(fs.read_file("a.details.txt").unwrap(), b"Title: A\n");
+        assert_eq!(
+            manifest.get("a").unwrap().details_txt,
+            Some(ArtifactState {
+                path: "a.details.txt".to_owned(),
+                hash: "dh".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn write_lyrics_sidecar_relocation_removes_old_file() {
+        // The audio moved, so the lyrics sidecar is re-emitted at the new path;
+        // the executor writes the new file and prunes the stale one.
+        let mut manifest = Manifest::new();
+        let mut e = entry("old/a.flac", AudioFormat::Flac);
+        e.lyrics_txt = Some(ArtifactState {
+            path: "old/a.lyrics.txt".to_owned(),
+            hash: "lh".to_owned(),
+        });
+        manifest.insert("a", e);
+        let fs = MemFs::new()
+            .with_file("old/a.flac", b"AUDIO".to_vec())
+            .with_file("old/a.lyrics.txt", b"old words\n".to_vec());
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::LyricsTxt,
+                path: "new/a.lyrics.txt".to_owned(),
+                source_url: String::new(),
+                hash: "lh".to_owned(),
+                owner_id: "a".to_owned(),
+                content: Some("new words\n".to_owned()),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(fs.read_file("new/a.lyrics.txt").unwrap(), b"new words\n");
+        assert!(!fs.exists("old/a.lyrics.txt"));
+        assert_eq!(
+            manifest.get("a").unwrap().lyrics_txt.as_ref().unwrap().path,
+            "new/a.lyrics.txt"
+        );
+    }
+
+    #[test]
+    fn write_text_sidecar_skipped_when_owner_audio_absent() {
+        // A text sidecar for a clip with no manifest entry (its audio download
+        // failed) must be skipped, never writing an untracked file.
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::DetailsTxt,
+                path: "gone.details.txt".to_owned(),
+                source_url: String::new(),
+                hash: "dh".to_owned(),
+                owner_id: "gone".to_owned(),
+                content: Some("Title: Gone\n".to_owned()),
+            }],
+        };
+        let fs = MemFs::new();
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 0);
+        assert_eq!(outcome.skipped, 1);
+        assert!(!fs.exists("gone.details.txt"));
+        assert!(manifest.get("gone").is_none());
     }
 
     #[test]

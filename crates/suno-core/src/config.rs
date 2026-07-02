@@ -53,6 +53,8 @@ pub struct Defaults {
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
     pub animated_covers: Option<bool>,
+    pub details_sidecar: Option<bool>,
+    pub lyrics_sidecar: Option<bool>,
 }
 
 /// Per-source overridable settings within an account.
@@ -63,6 +65,8 @@ pub struct SourceConfig {
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
     pub animated_covers: Option<bool>,
+    pub details_sidecar: Option<bool>,
+    pub lyrics_sidecar: Option<bool>,
 }
 
 /// Configuration for a single named account.
@@ -79,6 +83,8 @@ pub struct AccountConfig {
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
     pub animated_covers: Option<bool>,
+    pub details_sidecar: Option<bool>,
+    pub lyrics_sidecar: Option<bool>,
     #[serde(default)]
     pub sources: HashMap<String, SourceConfig>,
 }
@@ -232,6 +238,26 @@ impl Config {
             "ANIMATED_COVERS",
         )?;
 
+        let details_sidecar = resolve_bool(
+            flags.details_sidecar,
+            env_val("DETAILS_SIDECAR"),
+            src.and_then(|s| s.details_sidecar),
+            acc.details_sidecar,
+            self.defaults.details_sidecar,
+            false,
+            "DETAILS_SIDECAR",
+        )?;
+
+        let lyrics_sidecar = resolve_bool(
+            flags.lyrics_sidecar,
+            env_val("LYRICS_SIDECAR"),
+            src.and_then(|s| s.lyrics_sidecar),
+            acc.lyrics_sidecar,
+            self.defaults.lyrics_sidecar,
+            false,
+            "LYRICS_SIDECAR",
+        )?;
+
         let token = flags
             .token
             .clone()
@@ -247,6 +273,8 @@ impl Config {
             retries,
             min_newest,
             animated_covers,
+            details_sidecar,
+            lyrics_sidecar,
         })
     }
 }
@@ -308,6 +336,8 @@ pub struct FlagOverrides {
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
     pub animated_covers: Option<bool>,
+    pub details_sidecar: Option<bool>,
+    pub lyrics_sidecar: Option<bool>,
 }
 
 /// Resolved effective settings for one account/source combination.
@@ -321,6 +351,8 @@ pub struct EffectiveSettings {
     pub retries: u32,
     pub min_newest: u32,
     pub animated_covers: bool,
+    pub details_sidecar: bool,
+    pub lyrics_sidecar: bool,
 }
 
 #[cfg(test)]
@@ -404,6 +436,8 @@ mod tests {
                 retries: 3,
                 min_newest: 1,
                 animated_covers: false,
+                details_sidecar: false,
+                lyrics_sidecar: false,
             }
         );
     }
@@ -613,6 +647,56 @@ mod tests {
         };
         let eff = cfg.resolve("alice", Some("liked"), &env, &flags).unwrap();
         assert!(!eff.animated_covers);
+    }
+
+    #[test]
+    fn text_sidecars_default_off_and_follow_precedence() {
+        // Both compiled defaults are off.
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert!(!eff.details_sidecar);
+        assert!(!eff.lyrics_sidecar);
+
+        let toml = r#"
+            [defaults]
+            details_sidecar = true
+
+            [accounts.alice.sources.liked]
+            details_sidecar = false
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+
+        // File default turns details on for an unscoped resolve; lyrics stays off.
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert!(eff.details_sidecar);
+        assert!(!eff.lyrics_sidecar);
+
+        // Per-source file setting overrides the file default.
+        let eff = cfg
+            .resolve("alice", Some("liked"), &no_env(), &no_flags())
+            .unwrap();
+        assert!(!eff.details_sidecar);
+
+        // Env overrides file (both flags), and the flag overrides env.
+        let env: HashMap<String, String> = [
+            ("SUNO_DETAILS_SIDECAR".into(), "true".into()),
+            ("SUNO_LYRICS_SIDECAR".into(), "true".into()),
+        ]
+        .into_iter()
+        .collect();
+        let eff = cfg
+            .resolve("alice", Some("liked"), &env, &no_flags())
+            .unwrap();
+        assert!(eff.details_sidecar);
+        assert!(eff.lyrics_sidecar);
+
+        let flags = FlagOverrides {
+            lyrics_sidecar: Some(false),
+            ..Default::default()
+        };
+        let eff = cfg.resolve("alice", Some("liked"), &env, &flags).unwrap();
+        assert!(eff.details_sidecar);
+        assert!(!eff.lyrics_sidecar);
     }
 
     #[test]
