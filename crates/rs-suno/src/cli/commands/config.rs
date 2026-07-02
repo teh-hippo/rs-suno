@@ -14,7 +14,7 @@ use suno_core::Config;
 use crate::cli::args::{ConfigAddAccountArgs, ConfigArgs, ConfigCommand, GlobalArgs};
 use crate::cli::desired::ExitCode;
 use crate::cli::logs;
-use crate::download::write_atomic;
+use crate::download::write_atomic_private;
 
 #[cfg(unix)]
 const PRIVATE_CONFIG_FILE_MODE: u32 = 0o600;
@@ -239,9 +239,13 @@ fn write_config(path: &Path, body: &str) -> Result<()> {
             .with_context(|| format!("could not create {}", parent.display()))?;
         set_private_permissions(parent, PRIVATE_CONFIG_DIR_MODE)?;
     }
-    write_atomic(path, body.as_bytes())
+    write_atomic_private(path, body.as_bytes())
         .with_context(|| format!("could not write {}", path.display()))?;
-    set_private_permissions(path, PRIVATE_CONFIG_FILE_MODE)
+    if let Err(err) = set_private_permissions(path, PRIVATE_CONFIG_FILE_MODE) {
+        let _ = std::fs::remove_file(path);
+        return Err(err);
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

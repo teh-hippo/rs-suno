@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use suno_core::{Action, Clip, Failure, LineageStore, Manifest, Plan, render_library_index};
 
-use crate::download::write_atomic;
+use crate::download::{write_atomic, write_atomic_private};
 
 /// The manifest file name, kept beside the mirrored library.
 pub const MANIFEST_NAME: &str = ".suno-manifest.json";
@@ -81,8 +81,12 @@ pub fn load_manifest(dest: &Path) -> Result<Manifest> {
 pub fn save_manifest(dest: &Path, manifest: &Manifest) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(manifest).context("could not serialise the manifest")?;
     let path = dest.join(MANIFEST_NAME);
-    write_atomic(&path, &bytes).context("could not write the manifest")?;
-    set_private_file_permissions(&path).context("could not secure the manifest")
+    write_atomic_private(&path, &bytes).context("could not write the manifest")?;
+    if let Err(err) = set_private_file_permissions(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(err).context("could not secure the manifest");
+    }
+    Ok(())
 }
 
 /// Load the lineage graph store beside `dest`, returning an empty one when absent.
@@ -106,8 +110,12 @@ pub fn save_graph(dest: &Path, store: &LineageStore) -> Result<()> {
     let bytes =
         serde_json::to_vec_pretty(store).context("could not serialise the lineage store")?;
     let path = dest.join(GRAPH_NAME);
-    write_atomic(&path, &bytes).context("could not write the lineage store")?;
-    set_private_file_permissions(&path).context("could not secure the lineage store")
+    write_atomic_private(&path, &bytes).context("could not write the lineage store")?;
+    if let Err(err) = set_private_file_permissions(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(err).context("could not secure the lineage store");
+    }
+    Ok(())
 }
 
 /// Render and write the library index at `dest` atomically.
@@ -148,6 +156,7 @@ pub fn acquire_lock(dest: &Path) -> Result<LockGuard> {
         Ok(mut file) => {
             let _ = writeln!(file, "{}", std::process::id());
             if let Err(err) = set_private_file_permissions(&path) {
+                let _ = std::fs::remove_file(&path);
                 return Err(err)
                     .with_context(|| format!("could not secure lock {}", path.display()));
             }

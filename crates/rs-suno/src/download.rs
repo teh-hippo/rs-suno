@@ -1,6 +1,9 @@
 //! Disk and CDN helpers for the `fetch` command: public downloads, cover-art
 //! selection, and atomic file writes into the `downloads/` directory.
 
+use std::io::Write as _;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,6 +43,29 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let _scratch = Scratch(tmp.clone());
     std::fs::write(&tmp, bytes)?;
     replace(&tmp, path)?;
+    Ok(())
+}
+
+/// Like [`write_atomic`], but creates the temporary file with mode `0600` so
+/// sensitive data (tokens, engine state) is never world-readable, even briefly.
+///
+/// On non-Unix the temp inherits the normal umask, same as [`write_atomic`].
+pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = temp_sibling(path);
+    let _scratch = Scratch(tmp.clone());
+    write_private(&tmp, bytes)?;
+    replace(&tmp, path)?;
+    Ok(())
+}
+
+/// Write bytes to a file created with mode `0600` (Unix) or default (other).
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut file = opts.open(path)?;
+    file.write_all(bytes)?;
     Ok(())
 }
 
@@ -148,6 +174,44 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["dest.bin".to_owned()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_private_replaces_and_leaves_no_temp() {
+        let dir = Path::new("target").join(format!("write-atomic-priv-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+
+        write_atomic_private(&path, b"first").unwrap();
+        write_atomic_private(&path, b"second").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["state.json".to_owned()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_private_creates_file_with_restricted_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = Path::new("target").join(format!("write-atomic-priv-mode-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.toml");
+
+        write_atomic_private(&path, b"token = secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
