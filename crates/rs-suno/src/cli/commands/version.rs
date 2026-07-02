@@ -29,7 +29,7 @@ pub fn run_version(global: &GlobalArgs) -> Result<ExitCode> {
 }
 
 /// The detected ffmpeg `(version, path)`, or `None` when it is not runnable.
-fn ffmpeg_version() -> Option<(String, String)> {
+pub(crate) fn ffmpeg_version() -> Option<(String, String)> {
     let path = find_in_path("ffmpeg")?;
     let output = Command::new(&path).arg("-version").output().ok()?;
     if !output.status.success() {
