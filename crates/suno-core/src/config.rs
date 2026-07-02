@@ -729,6 +729,19 @@ mod tests {
     }
 
     #[test]
+    fn stored_token_is_populated_from_config_when_no_override_exists() {
+        let toml = r#"
+            [accounts.alice]
+            token = "file_tok"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.token, None);
+        assert_eq!(eff.stored_token.as_deref(), Some("file_tok"));
+        assert_eq!(eff.token_command, None);
+    }
+
+    #[test]
     fn per_account_token_env_overrides_global() {
         let toml = "[accounts.alice]\n";
         let cfg = Config::from_toml(toml).unwrap();

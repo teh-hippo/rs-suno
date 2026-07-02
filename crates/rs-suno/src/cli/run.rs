@@ -386,8 +386,11 @@ fn run_token_command(label: &str, command: &str) -> std::result::Result<String, 
             exit_status_summary(output.status)
         ));
     }
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|_| format!("token_command for account '{label}' produced non-UTF-8 output"))?;
+    let stdout = String::from_utf8(output.stdout).map_err(|_| {
+        format!(
+            "token_command for account '{label}' produced non-UTF-8 output; stdout must be UTF-8"
+        )
+    })?;
     let token = stdout.trim();
     if token.is_empty() {
         return Err(format!(
@@ -1950,12 +1953,17 @@ mod tests {
 
     #[cfg(unix)]
     fn success_command(token: &str) -> String {
-        format!("printf '%s\\n' '{token}'")
+        format!("printf '%s\\n' {}", shell_single_quote(token))
     }
 
     #[cfg(unix)]
     fn fail_command(output: &str) -> String {
-        format!("printf '%s' '{output}'; exit 23")
+        format!("printf '%s' {}; exit 23", shell_single_quote(output))
+    }
+
+    #[cfg(unix)]
+    fn shell_single_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 
     #[cfg(unix)]
