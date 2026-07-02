@@ -8,7 +8,7 @@ from there.
 ## How it works
 
 - You supply your `__client` session token (a long string).
-- On each run, `rs-suno` sends that token to Clerk (`clerk.suno.com`) and mints a
+- On each run, `rs-suno` sends that token to Clerk (`auth.suno.com`) and mints a
   short-lived JSON Web Token (JWT).
 - It refreshes the JWT automatically, shortly before it expires, so long runs do
   not stall.
