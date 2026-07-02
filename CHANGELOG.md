@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/teh-hippo/rs-suno/compare/v0.11.0...v0.11.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* compile config permission consts on all platforms ([68fbebd](https://github.com/teh-hippo/rs-suno/commit/68fbebdec816fe799da8ae37e4377333471b9d9f))
+
 ## [0.11.0](https://github.com/teh-hippo/rs-suno/compare/v0.10.0...v0.11.0) (2026-07-02)
 
 
