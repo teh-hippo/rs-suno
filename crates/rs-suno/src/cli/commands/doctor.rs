@@ -189,7 +189,8 @@ struct LiveDiagnostic {
 
 async fn inspect_live(token: &str, http: &ReqwestHttp) -> LiveDiagnostic {
     let mut auth = ClerkAuth::new(token);
-    let expiry = auth.token_expiry(run::now_secs() as i64, TOKEN_EXPIRY_WARN_DAYS * DAY_SECS);
+    let now = i64::try_from(run::now_secs()).unwrap_or(i64::MAX);
+    let expiry = auth.token_expiry(now, TOKEN_EXPIRY_WARN_DAYS * DAY_SECS);
     match auth.authenticate(http).await {
         Ok(user_id) => {
             let display_name = auth.display_name().to_owned();
