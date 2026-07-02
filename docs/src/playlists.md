@@ -48,4 +48,8 @@ the member's own title. The rest of the playlist stays valid and in order.
 
 Playlists are regular mirror artefacts: they are rewritten when their name,
 order, or any member's path, title, or duration changes, and kept in step by
-every `sync` or `copy`.
+every full `sync` or `copy`.
+
+A scoped run (`--liked` or `--playlist`) lists only part of your library, so it
+does not maintain `.m3u8` files: existing playlist files are left untouched, and
+no new ones are written. Run a full `sync` or `copy` to refresh your playlists.

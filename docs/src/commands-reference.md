@@ -65,6 +65,8 @@ configured `root` is used.
 | `--format <mp3\|flac\|wav>` | `flac` | Audio format for downloads. |
 | `--limit <N>` | | Mirror only the N most recent clips. |
 | `--since <SPEC>` | | Mirror clips newer than `7d`, `2w`, or `last-run`. |
+| `--liked` | off | Scope the run to your liked songs only. |
+| `--playlist <ID_OR_NAME>` | | Scope the run to a playlist, by id or name (repeatable). |
 | `--min-newest <N>` | `1` | Newest clips always kept when a recency filter applies. |
 | `--retries <N>` | `3` | Download retry attempts per clip. |
 | `--animated-covers` | off | Also write animated WebP covers from video previews. |
@@ -72,6 +74,30 @@ configured `root` is used.
 When `sync` would delete files and `--yes` was not passed, it lists them and
 asks for confirmation on an interactive terminal. Without a terminal it refuses
 and asks you to pass `--yes` or use `copy`.
+
+### Scoped runs (`--liked` and `--playlist`)
+
+`--liked` and `--playlist` narrow a run to a subset of your library. `--playlist`
+takes a playlist id or name, is repeatable, and resolves against your own
+non-trashed playlists (shared and trashed playlists are not visible); an unknown
+or ambiguous value fails and prints the visible playlists. `--playlist liked` is
+an alias for `--liked`. Clips that appear in more than one scope are downloaded
+once.
+
+A scoped run only ever lists part of your library, so, like `--limit` and
+`--since`, it never deletes: no file, folder art, or `.m3u8` is removed on a
+scoped run. Scoped runs also do not maintain `.m3u8` playlists, but they may
+still write and rewrite folder art for the albums they touch. `--liked` and
+`--playlist` are command-line flags only for now; there is no per-source scope in
+the config file yet.
+
+```bash
+# Mirror only your liked songs:
+suno sync /music/suno --liked
+
+# Mirror two playlists by name and id:
+suno sync /music/suno --playlist "Neon Nights" --playlist 6f1e...c3
+```
 
 ```bash
 # Mirror everything to the configured root, in FLAC:

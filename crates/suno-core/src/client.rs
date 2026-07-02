@@ -11,10 +11,8 @@ use crate::consts::{
 };
 use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
+use crate::is_downloadable;
 use crate::model::Clip;
-
-const EXCLUDED_TASKS: [&str; 2] = ["infill", "fixed_infill"];
-const EXCLUDED_TYPES: [&str; 1] = ["rendered_context_window"];
 
 /// One of the account's own playlists, as listed by `/api/playlist/me`.
 ///
@@ -131,7 +129,7 @@ impl<C: Clock> SunoClient<C> {
     ///
     /// Used by lineage resolution to gap-fill ancestors that are absent from a
     /// normal listing, including trashed ones. Unlike
-    /// [`list_clips`](Self::list_clips), no `keep_clip` filtering is applied: an
+    /// [`list_clips`](Self::list_clips), no downloadability filter is applied: an
     /// ancestor may itself be an infill or context-window artefact that the
     /// lineage walk must still traverse. Clips returned here are ancestors for
     /// resolution only and must never be treated as download candidates. Ids are
@@ -197,10 +195,10 @@ impl<C: Clock> SunoClient<C> {
     /// Fetch one playlist's clips in Suno order via `/api/playlist/{id}/`.
     ///
     /// The response's `playlist_clips[]` is already ordered and trashed members
-    /// are excluded by Suno, so the order is preserved exactly and no `keep_clip`
-    /// filtering is applied — a playlist may legitimately contain any clip. Each
-    /// entry's `clip` object is mapped (falling back to the entry itself), and
-    /// only clips with a non-empty id are kept.
+    /// are excluded by Suno, so the order is preserved exactly and no
+    /// downloadability filter is applied: a playlist may legitimately contain any
+    /// clip. Each entry's `clip` object is mapped (falling back to the entry
+    /// itself), and only clips with a non-empty id are kept.
     pub async fn get_playlist_clips(&mut self, http: &impl Http, id: &str) -> Result<Vec<Clip>> {
         let path = format!("{PLAYLIST_PATH}{id}/");
         let body = self.api_get_retrying(http, &path).await?;
@@ -338,8 +336,8 @@ fn parse_feed(body: &[u8]) -> Result<(Vec<Clip>, bool)> {
         .and_then(Value::as_array)
         .map(|raw| {
             raw.iter()
-                .filter(|clip| keep_clip(clip))
                 .map(Clip::from_json)
+                .filter(is_downloadable)
                 .collect()
         })
         .unwrap_or_default();
@@ -350,7 +348,7 @@ fn parse_feed(body: &[u8]) -> Result<(Vec<Clip>, bool)> {
     Ok((clips, has_more))
 }
 
-/// Map every clip in a feed-shaped body, skipping the `keep_clip` filter.
+/// Map every clip in a feed-shaped body, skipping the downloadability filter.
 ///
 /// Accepts either a `{"clips": [...]}` wrapper or a bare array, dropping only
 /// elements that carry no id. Used for id-filtered gap-fill fetches, which must
@@ -413,9 +411,11 @@ fn parse_playlist_item(raw: &Value) -> Option<Playlist> {
 ///
 /// Each `playlist_clips[]` entry wraps the clip under `clip`; the wrapper is
 /// unwrapped (falling back to the entry itself), order is preserved exactly, and
-/// only clips with a non-empty id survive. No `keep_clip` filter is applied: a
-/// playlist may hold any clip, and members absent from the local library are
-/// reconciled as comment lines by the caller, not dropped here.
+/// only clips with a non-empty id survive. No downloadability filter is applied:
+/// a playlist may hold any clip, and members absent from the local library are
+/// reconciled as comment lines by the caller, not dropped here. The scoped-sync
+/// path applies [`is_downloadable`](crate::is_downloadable) itself when it fetches
+/// members as download candidates.
 fn parse_playlist_clips(body: &[u8]) -> Result<Vec<Clip>> {
     let data: Value = serde_json::from_slice(body)
         .map_err(|err| Error::Api(format!("invalid playlist JSON: {err}")))?;
@@ -435,20 +435,6 @@ fn parse_playlist_clips(body: &[u8]) -> Result<Vec<Clip>> {
                 .collect()
         })
         .unwrap_or_default())
-}
-
-/// Keep only finished clips that are not infills or context-window artefacts.
-fn keep_clip(raw: &Value) -> bool {
-    if raw.get("status").and_then(Value::as_str) != Some("complete") {
-        return false;
-    }
-    let metadata = raw.get("metadata");
-    let clip_type = metadata.and_then(|m| m.get("type")).and_then(Value::as_str);
-    if clip_type.is_some_and(|t| EXCLUDED_TYPES.contains(&t)) {
-        return false;
-    }
-    let task = metadata.and_then(|m| m.get("task")).and_then(Value::as_str);
-    !task.is_some_and(|t| EXCLUDED_TASKS.contains(&t))
 }
 
 #[cfg(test)]
@@ -746,7 +732,7 @@ mod tests {
 
     #[test]
     fn get_clips_by_ids_uses_the_ids_filter_and_keeps_all_clips() {
-        // The `?ids=` gap-fill path must not apply the listing's `keep_clip`
+        // The `?ids=` gap-fill path must not apply the listing's downloadability
         // filter: an infill ancestor and an upload root both survive.
         let feed = serde_json::json!({
             "clips": [
@@ -903,7 +889,7 @@ mod tests {
     #[test]
     fn get_playlist_clips_preserves_order_and_unwraps_clip() {
         // Members arrive wrapped under `clip`, in playlist order, already
-        // non-trashed. Order is preserved and no keep_clip filter is applied.
+        // non-trashed. Order is preserved and no downloadability filter is applied.
         let body = serde_json::json!({
             "playlist_clips": [
                 {"clip": {

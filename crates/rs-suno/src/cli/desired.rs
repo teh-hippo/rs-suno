@@ -11,8 +11,8 @@ use std::path::{Component, Path};
 
 use suno_core::{
     ArtifactKind, AudioFormat, Clip, Desired, DesiredArtifact, ExecOutcome, LineageContext,
-    M3u8Entry, NamingConfig, NamingRequest, PlaylistDesired, RunStatus, SourceMode, art_hash,
-    art_url_hash, content_hash, meta_hash, render_clip_details, render_clip_lyrics,
+    M3u8Entry, NamingConfig, NamingRequest, Playlist, PlaylistDesired, RunStatus, SourceMode,
+    art_hash, art_url_hash, content_hash, meta_hash, render_clip_details, render_clip_lyrics,
     render_clip_names, render_m3u8, sanitise_name,
 };
 
@@ -292,9 +292,92 @@ pub fn fully_enumerated(complete: bool, narrowed: bool) -> bool {
     complete && !narrowed
 }
 
+/// Deduplicate clips by id, keeping the first occurrence and preserving order.
+///
+/// A clip can belong to several scopes at once (the liked feed and one or more
+/// playlists), so the scoped listing unions every source and calls this to
+/// download each clip exactly once.
+pub fn dedup_clips_by_id(clips: Vec<Clip>) -> Vec<Clip> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    clips
+        .into_iter()
+        .filter(|clip| seen.insert(clip.id.clone()))
+        .collect()
+}
+
 /// Whether a `--limit` or `--since` filter narrows a listing.
 pub fn is_narrowed(limit: Option<usize>, since: Option<&str>) -> bool {
     limit.is_some() || since.is_some()
+}
+
+/// Whether a run is scoped to liked songs or specific playlists.
+///
+/// A scoped run lists only a subset of the library (the liked feed and/or the
+/// named playlists), so it can never be authoritative for deletion. The caller
+/// folds this into [`fully_enumerated`] exactly like [`is_narrowed`], so a
+/// scoped run leaves every file it does not see untouched.
+pub fn is_scoped(liked: bool, playlists: &[String]) -> bool {
+    liked || !playlists.is_empty()
+}
+
+/// Why a `--playlist` value could not be resolved to one of the account's own
+/// playlists. Both variants map to [`ExitCode::Config`] at the call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaylistResolveError {
+    /// No playlist matched the value by id or name.
+    NotFound(String),
+    /// The value matched more than one playlist by name.
+    Ambiguous(String),
+}
+
+impl std::fmt::Display for PlaylistResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlaylistResolveError::NotFound(value) => {
+                write!(f, "no playlist matches '{value}'")
+            }
+            PlaylistResolveError::Ambiguous(value) => {
+                write!(
+                    f,
+                    "'{value}' matches more than one playlist; use the playlist id instead"
+                )
+            }
+        }
+    }
+}
+
+/// Resolve a `--playlist` value to one of the account's own playlists.
+///
+/// Matching is tried in order: exact id, then exact name, then case-insensitive
+/// name. Because `get_playlists` already excludes shared and trashed playlists,
+/// the search space is the user's own non-trashed playlists, so a raw id that is
+/// not listed is rejected rather than fetched behind the scenes. An unknown
+/// value, or one that matches more than one playlist by name, is an error.
+pub fn resolve_playlist<'a>(
+    value: &str,
+    playlists: &'a [Playlist],
+) -> std::result::Result<&'a Playlist, PlaylistResolveError> {
+    if let Some(hit) = playlists.iter().find(|playlist| playlist.id == value) {
+        return Ok(hit);
+    }
+    let exact: Vec<&Playlist> = playlists
+        .iter()
+        .filter(|playlist| playlist.name == value)
+        .collect();
+    match exact.as_slice() {
+        [one] => return Ok(one),
+        [_, _, ..] => return Err(PlaylistResolveError::Ambiguous(value.to_owned())),
+        [] => {}
+    }
+    let ci: Vec<&Playlist> = playlists
+        .iter()
+        .filter(|playlist| playlist.name.eq_ignore_ascii_case(value))
+        .collect();
+    match ci.as_slice() {
+        [one] => Ok(one),
+        [_, _, ..] => Err(PlaylistResolveError::Ambiguous(value.to_owned())),
+        [] => Err(PlaylistResolveError::NotFound(value.to_owned())),
+    }
 }
 
 /// The belt-and-suspenders empty-listing / mass-deletion abort (exit 7).
@@ -928,6 +1011,132 @@ mod tests {
         assert!(is_narrowed(Some(5), None));
         assert!(is_narrowed(None, Some("7d")));
         assert!(is_narrowed(Some(5), Some("7d")));
+    }
+
+    #[test]
+    fn is_scoped_tracks_liked_and_playlists() {
+        assert!(!is_scoped(false, &[]));
+        assert!(is_scoped(true, &[]));
+        assert!(is_scoped(false, &["set".to_owned()]));
+        assert!(is_scoped(true, &["set".to_owned()]));
+    }
+
+    #[test]
+    fn dedup_clips_by_id_keeps_first_occurrence() {
+        // A clip present in `--liked` and again in a `--playlist` is downloaded
+        // once; order follows first appearance.
+        let clips = vec![
+            Clip {
+                id: "shared".to_owned(),
+                title: "Liked copy".to_owned(),
+                ..Default::default()
+            },
+            Clip {
+                id: "only-playlist".to_owned(),
+                ..Default::default()
+            },
+            Clip {
+                id: "shared".to_owned(),
+                title: "Playlist copy".to_owned(),
+                ..Default::default()
+            },
+        ];
+        let deduped = dedup_clips_by_id(clips);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].id, "shared");
+        assert_eq!(deduped[0].title, "Liked copy");
+        assert_eq!(deduped[1].id, "only-playlist");
+    }
+
+    #[test]
+    fn a_scoped_run_is_never_fully_enumerated() {
+        // Even a `complete` scoped listing is a subset, so it can never be
+        // authoritative for deletion: scope folds into the narrowed flag.
+        let scoped = is_scoped(true, &[]);
+        assert!(scoped);
+        assert!(!fully_enumerated(true, is_narrowed(None, None) || scoped));
+    }
+
+    fn playlist(id: &str, name: &str) -> Playlist {
+        Playlist {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            num_clips: 0,
+        }
+    }
+
+    #[test]
+    fn resolve_playlist_matches_by_id_first() {
+        let playlists = vec![playlist("id-1", "Chill"), playlist("id-2", "id-1")];
+        // The literal id wins even though another playlist is named "id-1".
+        assert_eq!(resolve_playlist("id-1", &playlists).unwrap().name, "Chill");
+    }
+
+    #[test]
+    fn resolve_playlist_matches_by_exact_name() {
+        let playlists = vec![playlist("id-1", "Chill"), playlist("id-2", "Focus")];
+        assert_eq!(resolve_playlist("Focus", &playlists).unwrap().id, "id-2");
+    }
+
+    #[test]
+    fn resolve_playlist_matches_case_insensitively() {
+        let playlists = vec![playlist("id-1", "Chill Beats")];
+        assert_eq!(
+            resolve_playlist("chill beats", &playlists).unwrap().id,
+            "id-1"
+        );
+    }
+
+    #[test]
+    fn resolve_playlist_rejects_an_unknown_value() {
+        let playlists = vec![playlist("id-1", "Chill")];
+        assert_eq!(
+            resolve_playlist("missing", &playlists),
+            Err(PlaylistResolveError::NotFound("missing".to_owned()))
+        );
+    }
+
+    #[test]
+    fn resolve_playlist_rejects_an_ambiguous_name() {
+        let playlists = vec![playlist("id-1", "Mix"), playlist("id-2", "mix")];
+        // Two playlists collide case-insensitively and neither id was given.
+        assert_eq!(
+            resolve_playlist("MIX", &playlists),
+            Err(PlaylistResolveError::Ambiguous("MIX".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_scoped_run_never_deletes_orphans() {
+        // THE deletion-safety guard: a scoped run reports fully_enumerated=false,
+        // so reconciling it against a manifest full of orphans yields zero
+        // deletes. This single boolean is the whole safety story for scoping.
+        use suno_core::{LocalFile, Manifest, ManifestEntry, SourceMode, SourceStatus, reconcile};
+        let scoped = is_scoped(false, &["holiday".to_owned()]);
+        let enumerated = fully_enumerated(true, is_narrowed(None, None) || scoped);
+        assert!(!enumerated);
+
+        let mut manifest = Manifest::new();
+        for i in 0..5 {
+            let id = format!("orphan-{i}");
+            manifest.insert(
+                &id,
+                ManifestEntry {
+                    path: format!("{id}.flac"),
+                    format: AudioFormat::Flac,
+                    size: 100,
+                    ..Default::default()
+                },
+            );
+        }
+        let sources = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: enumerated,
+        }];
+        let local: HashMap<String, LocalFile> = HashMap::new();
+        // No desired entries: every manifest clip is an orphan for this scope.
+        let plan = reconcile(&manifest, &[], &local, &sources);
+        assert_eq!(plan.deletes(), 0);
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod client;
 mod clock;
 pub mod config;
 mod consts;
+mod downloadable;
 mod error;
 mod executor;
 mod extras;
@@ -38,6 +39,7 @@ pub use clock::Clock;
 pub use config::{
     AccountConfig, AudioFormat, Config, Defaults, EffectiveSettings, FlagOverrides, SourceConfig,
 };
+pub use downloadable::is_downloadable;
 pub use error::{Error, Result};
 pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute};
 pub use extras::{

@@ -149,6 +149,15 @@ pub struct SyncArgs {
     /// Also write a plain-text `.lyrics.txt` sidecar next to each song.
     #[arg(long)]
     pub lyrics_sidecar: bool,
+    /// Mirror only your liked songs. A scoped run never deletes and does not
+    /// maintain `.m3u8` playlists.
+    #[arg(long)]
+    pub liked: bool,
+    /// Mirror only a playlist, by id or name (repeatable). Resolves against your
+    /// own non-trashed playlists. A scoped run never deletes and does not
+    /// maintain `.m3u8` playlists.
+    #[arg(long, value_name = "ID_OR_NAME")]
+    pub playlist: Vec<String>,
 }
 
 /// `check` accepts every `sync` flag plus `--exit-code`.
@@ -370,6 +379,52 @@ mod tests {
                 assert!(!args.lyrics_sidecar);
             }
             _ => panic!("expected sync"),
+        }
+    }
+
+    #[test]
+    fn sync_parses_scope_flags() {
+        // --liked and repeatable --playlist both land on the sync args; absent
+        // leaves the scope empty (a full-account run).
+        let cli = Cli::try_parse_from([
+            "suno",
+            "sync",
+            "/music",
+            "--liked",
+            "--playlist",
+            "Chill",
+            "--playlist",
+            "id-42",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Sync(args) => {
+                assert!(args.liked);
+                assert_eq!(args.playlist, vec!["Chill".to_owned(), "id-42".to_owned()]);
+            }
+            _ => panic!("expected sync"),
+        }
+        let cli = Cli::try_parse_from(["suno", "copy", "/music"]).unwrap();
+        match cli.command {
+            Command::Copy(args) => {
+                assert!(!args.liked);
+                assert!(args.playlist.is_empty());
+            }
+            _ => panic!("expected copy"),
+        }
+    }
+
+    #[test]
+    fn check_flattens_scope_flags() {
+        let cli =
+            Cli::try_parse_from(["suno", "check", "/music", "--liked", "--playlist", "Focus"])
+                .unwrap();
+        match cli.command {
+            Command::Check(args) => {
+                assert!(args.sync.liked);
+                assert_eq!(args.sync.playlist, vec!["Focus".to_owned()]);
+            }
+            _ => panic!("expected check"),
         }
     }
 
