@@ -163,13 +163,13 @@ pub fn mp4_to_webp(mp4: &[u8], settings: WebpEncodeSettings) -> Result<Vec<u8>> 
     Ok(webp)
 }
 
-/// The `-vf` chain: cap the width (never upscaling) keeping the aspect ratio to
-/// an even height, then cap the frame rate.
+/// The `-vf` chain: optionally cap the width (never upscaling) keeping the
+/// aspect ratio to an even height, then cap the frame rate.
 fn video_filter(settings: &WebpEncodeSettings) -> String {
-    format!(
-        "scale='min({},iw)':-2,fps={}",
-        settings.max_width, settings.max_fps
-    )
+    match settings.max_width {
+        Some(width) => format!("scale='min({width},iw)':-2,fps={}", settings.max_fps),
+        None => format!("fps={}", settings.max_fps),
+    }
 }
 
 /// The quality flags: a lossless switch, or the lossy `-q:v` scale.
@@ -238,16 +238,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_webp_filter_caps_width_and_fps() {
-        let filter = video_filter(&WebpEncodeSettings::default());
-        assert_eq!(filter, "scale='min(720,iw)':-2,fps=24");
+    fn default_webp_filter_keeps_native_width_and_caps_fps() {
+        // The default keeps the source resolution: only the fps cap applies.
+        assert_eq!(video_filter(&WebpEncodeSettings::default()), "fps=24");
+        // An explicit width cap scales a wider source down to an even height.
+        let capped = WebpEncodeSettings {
+            max_width: Some(720),
+            ..Default::default()
+        };
+        assert_eq!(video_filter(&capped), "scale='min(720,iw)':-2,fps=24");
     }
 
     #[test]
-    fn lossy_quality_uses_q_scale_and_compression_effort() {
+    fn lossy_quality_uses_q_scale_and_default_compression_effort() {
         let settings = WebpEncodeSettings::default();
         assert_eq!(quality_args(&settings), vec!["-q:v", "70"]);
-        assert_eq!(compression_args(&settings), vec!["-compression_level", "6"]);
+        // Effort is off by default (level 0): full effort is too slow at native
+        // resolution. Turning it on selects full effort (level 6).
+        assert_eq!(compression_args(&settings), vec!["-compression_level", "0"]);
+        let full_effort = WebpEncodeSettings {
+            compression: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            compression_args(&full_effort),
+            vec!["-compression_level", "6"]
+        );
     }
 
     #[test]
