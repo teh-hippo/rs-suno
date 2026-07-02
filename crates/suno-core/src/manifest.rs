@@ -57,6 +57,9 @@ pub struct ManifestEntry {
     /// Prior state of the plain-text `.lyrics.txt` sidecar, when one was written.
     #[serde(default)]
     pub lyrics_txt: Option<ArtifactState>,
+    /// Prior state of the untimed `.lrc` sidecar, when one was written.
+    #[serde(default)]
+    pub lrc: Option<ArtifactState>,
 }
 
 /// The full prior download state, keyed by clip id.
@@ -208,6 +211,10 @@ mod tests {
             path: "c.lyrics.txt".to_string(),
             hash: "lyrics-hash".to_string(),
         });
+        c.lrc = Some(ArtifactState {
+            path: "c.lrc".to_string(),
+            hash: "lrc-hash".to_string(),
+        });
         m.insert("c", c);
         let json = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&json).unwrap();
@@ -290,6 +297,7 @@ mod tests {
         assert_eq!(e.cover_webp, None);
         assert_eq!(e.details_txt, None);
         assert_eq!(e.lyrics_txt, None);
+        assert_eq!(e.lrc, None);
         assert!(!e.preserve);
     }
 

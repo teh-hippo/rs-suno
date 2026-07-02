@@ -49,9 +49,9 @@ use crate::model::Clip;
 /// manifest can route each to the right slot. `VideoMp4` is deferred and
 /// intentionally absent. Per-clip classes ([`CoverJpg`](ArtifactKind::CoverJpg),
 /// [`CoverWebp`](ArtifactKind::CoverWebp), [`DetailsTxt`](ArtifactKind::DetailsTxt),
-/// and [`LyricsTxt`](ArtifactKind::LyricsTxt)) map to a manifest entry field;
-/// the album/library classes are reconciled by later phases and have no per-clip
-/// manifest slot yet.
+/// [`LyricsTxt`](ArtifactKind::LyricsTxt), and [`Lrc`](ArtifactKind::Lrc)) map to
+/// a manifest entry field; the album/library classes are reconciled by later
+/// phases and have no per-clip manifest slot yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ArtifactKind {
     /// The per-song external cover, sourced from `image_large_url`.
@@ -62,6 +62,8 @@ pub enum ArtifactKind {
     DetailsTxt,
     /// The per-song plain-text lyrics file (generated, inline content).
     LyricsTxt,
+    /// The per-song untimed `.lrc` lyrics file (generated, inline content).
+    Lrc,
     /// The album folder's static cover (album-scoped, later phase).
     FolderJpg,
     /// The album folder's animated cover (album-scoped, later phase).
@@ -485,6 +487,7 @@ fn is_per_clip_kind(kind: ArtifactKind) -> bool {
             | ArtifactKind::CoverWebp
             | ArtifactKind::DetailsTxt
             | ArtifactKind::LyricsTxt
+            | ArtifactKind::Lrc
     )
 }
 
@@ -506,10 +509,14 @@ fn is_per_clip_kind(kind: ArtifactKind) -> bool {
 /// shared gate. [`render_clip_lyrics`](crate::render_clip_lyrics) is PARTIAL
 /// (`None` on empty lyrics), so an absent `LyricsTxt` is ambiguous (feature off
 /// OR a transient empty-lyrics read); it opts out cover-style, so turning the
-/// lyrics feature off leaves existing `.lyrics.txt` files in place.
+/// lyrics feature off leaves existing `.lyrics.txt` files in place. The untimed
+/// [`Lrc`](ArtifactKind::Lrc) sidecar is partial the same way and opts out too.
 fn removed_kind_delete_eligible(kind: ArtifactKind) -> bool {
     match kind {
-        ArtifactKind::CoverJpg | ArtifactKind::CoverWebp | ArtifactKind::LyricsTxt => false,
+        ArtifactKind::CoverJpg
+        | ArtifactKind::CoverWebp
+        | ArtifactKind::LyricsTxt
+        | ArtifactKind::Lrc => false,
         ArtifactKind::DetailsTxt
         | ArtifactKind::FolderJpg
         | ArtifactKind::FolderWebp
@@ -527,6 +534,7 @@ fn manifest_artifact_by_kind(entry: &ManifestEntry, kind: ArtifactKind) -> Optio
         ArtifactKind::CoverWebp => entry.cover_webp.as_ref(),
         ArtifactKind::DetailsTxt => entry.details_txt.as_ref(),
         ArtifactKind::LyricsTxt => entry.lyrics_txt.as_ref(),
+        ArtifactKind::Lrc => entry.lrc.as_ref(),
         ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => None,
     }
 }
@@ -547,6 +555,9 @@ fn manifest_artifacts(entry: &ManifestEntry) -> Vec<(ArtifactKind, &ArtifactStat
     if let Some(state) = &entry.lyrics_txt {
         out.push((ArtifactKind::LyricsTxt, state));
     }
+    if let Some(state) = &entry.lrc {
+        out.push((ArtifactKind::Lrc, state));
+    }
     out
 }
 
@@ -566,6 +577,7 @@ pub(crate) fn set_manifest_artifact(
         ArtifactKind::CoverWebp => entry.cover_webp = state,
         ArtifactKind::DetailsTxt => entry.details_txt = state,
         ArtifactKind::LyricsTxt => entry.lyrics_txt = state,
+        ArtifactKind::Lrc => entry.lrc = state,
         ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => {}
     }
 }
@@ -1085,6 +1097,7 @@ fn album_desires_kind(d: &AlbumDesired, kind: ArtifactKind) -> bool {
         | ArtifactKind::CoverWebp
         | ArtifactKind::DetailsTxt
         | ArtifactKind::LyricsTxt
+        | ArtifactKind::Lrc
         | ArtifactKind::Playlist => false,
     }
 }
@@ -2538,6 +2551,35 @@ mod tests {
     }
 
     #[test]
+    fn lrc_sidecar_written_with_inline_content_when_slot_absent() {
+        // The audio is unchanged (Skip) but no lrc slot exists, so the generated
+        // sidecar is written and carries its body inline. This is the guard that
+        // the type system cannot provide: dropping Lrc from is_per_clip_kind
+        // would silently never write the file, and only this test would catch it.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let body = "[re:rs-suno]\nla la\n";
+        let d = vec![desired_arts(
+            "a",
+            vec![text_art(ArtifactKind::Lrc, "a.lrc", body)],
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 1);
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert_eq!(
+            write_artifacts(&plan)[0],
+            &Action::WriteArtifact {
+                kind: ArtifactKind::Lrc,
+                path: "a.lrc".to_string(),
+                source_url: String::new(),
+                hash: content_hash(body),
+                owner_id: "a".to_string(),
+                content: Some(body.to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn text_sidecars_skipped_when_hash_and_path_match() {
         // Present with a matching content hash and path: no write, no delete.
         let mut manifest = Manifest::new();
@@ -2580,8 +2622,9 @@ mod tests {
 
     #[test]
     fn lyrics_rewritten_when_content_hash_differs_though_meta_unchanged() {
-        // The per-sidecar content hash keys on the rendered lyrics, which
-        // meta_hash omits, so edited lyrics rewrite the file with no audio retag.
+        // The per-sidecar content hash keys on the rendered lyrics independently
+        // of the audio's stored meta_hash, so editing the sidecar body rewrites
+        // the file with no audio retag even when the meta_hash slot is unchanged.
         let mut manifest = Manifest::new();
         let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
         e.lyrics_txt = Some(cover("a.lyrics.txt", &content_hash("old words\n")));
@@ -2659,6 +2702,20 @@ mod tests {
     }
 
     #[test]
+    fn lrc_removed_kind_is_kept_not_deleted() {
+        // Lrc is partial like LyricsTxt, so it opts out of removed-kind deletion:
+        // an existing `.lrc` is KEPT when no lrc sidecar is desired this run.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.lrc = Some(cover("a.lrc", &content_hash("[re:rs-suno]\nwords\n")));
+        manifest.insert("a", e);
+        let d = vec![desired_arts("a", vec![])];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert_eq!(plan.deletes(), 0);
+    }
+
+    #[test]
     fn details_removed_kind_not_deleted_on_incomplete_listing() {
         // The removed-kind delete still obeys the enumeration gate: an incomplete
         // mirror forbids removing the stale details sidecar.
@@ -2701,14 +2758,16 @@ mod tests {
         e.cover_jpg = Some(cover("gone/cover.jpg", "h1"));
         e.details_txt = Some(cover("gone.details.txt", &content_hash("Title: G\n")));
         e.lyrics_txt = Some(cover("gone.lyrics.txt", &content_hash("words\n")));
+        e.lrc = Some(cover("gone.lrc", &content_hash("[re:rs-suno]\nwords\n")));
         manifest.insert("gone", e);
         let plan = reconcile(&manifest, &[], &HashMap::new(), &mirror_ok());
         assert_eq!(plan.deletes(), 1);
-        assert_eq!(plan.artifact_deletes(), 3);
+        assert_eq!(plan.artifact_deletes(), 4);
         for (kind, path) in [
             (ArtifactKind::CoverJpg, "gone/cover.jpg"),
             (ArtifactKind::DetailsTxt, "gone.details.txt"),
             (ArtifactKind::LyricsTxt, "gone.lyrics.txt"),
+            (ArtifactKind::Lrc, "gone.lrc"),
         ] {
             assert!(
                 plan.actions.contains(&Action::DeleteArtifact {

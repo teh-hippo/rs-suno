@@ -176,6 +176,10 @@ off:
   deleting real lyrics on a transient empty read, lyrics opt out of removal the
   same way covers do. Turning `lyrics_sidecar` off leaves existing `.lyrics.txt`
   files in place; delete them by hand if you want them gone.
+- **Untimed lyrics (`.lrc`).** The `.lrc` sidecar is written only when a song has
+  lyrics, exactly like `.lyrics.txt`, so it opts out of removal the same way.
+  Turning `lrc_sidecar` off leaves existing `.lrc` files in place. The lyrics
+  carry no per-line timestamps.
 
 Whichever the case, a sidecar is only ever deleted through the shared gate, so
 an incomplete listing or a preserved (private or copy-held) song never loses

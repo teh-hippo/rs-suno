@@ -20,6 +20,7 @@ uses Vorbis comments.
 **Suno tags**
 
 - Style (the clip's style tags) and a style summary
+- The generation prompt (as a `SUNO_PROMPT` tag)
 - Model (name and version, for example `chirp-v4`)
 - Creator handle
 - Parent clip, root clip, and a compact lineage summary
@@ -27,7 +28,8 @@ uses Vorbis comments.
 **Lyrics**
 
 Unsynced lyrics (plain text, without timestamps) are embedded when the clip has
-them.
+them. You can also write them beside the audio as an optional `.lyrics.txt` or an
+untimed `.lrc` sidecar.
 
 ## Cover art
 

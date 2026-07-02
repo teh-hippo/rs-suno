@@ -394,6 +394,7 @@ fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
         animated_covers: args.animated_covers.then_some(true),
         details_sidecar: args.details_sidecar.then_some(true),
         lyrics_sidecar: args.lyrics_sidecar.then_some(true),
+        lrc_sidecar: args.lrc_sidecar.then_some(true),
     }
 }
 
@@ -719,6 +720,7 @@ async fn run_one(
             animated_covers: settings.animated_covers,
             details: settings.details_sidecar,
             lyrics: settings.lyrics_sidecar,
+            lrc: settings.lrc_sidecar,
         },
     );
     // Folder-level album art is keyed on the stable root id and chosen purely

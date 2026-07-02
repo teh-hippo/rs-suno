@@ -43,8 +43,8 @@ pub use downloadable::is_downloadable;
 pub use error::{Error, Result};
 pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute};
 pub use extras::{
-    INDEX_SCHEMA_VERSION, M3u8Entry, render_clip_details, render_clip_lyrics, render_library_index,
-    render_m3u8,
+    INDEX_SCHEMA_VERSION, M3u8Entry, render_clip_details, render_clip_lrc, render_clip_lyrics,
+    render_library_index, render_m3u8,
 };
 pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind, WebpEncodeSettings};
 pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
