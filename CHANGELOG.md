@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/teh-hippo/rs-suno/compare/v0.5.0...v0.6.0) (2026-07-02)
+
+
+### Features
+
+* optional per-song details and lyrics sidecar files ([#45](https://github.com/teh-hippo/rs-suno/issues/45)) ([8d403fc](https://github.com/teh-hippo/rs-suno/commit/8d403fc25500c54b7432a9d0d9bb1bf5b2788516)), closes [#15](https://github.com/teh-hippo/rs-suno/issues/15)
+
 ## [0.5.0](https://github.com/teh-hippo/rs-suno/compare/v0.4.0...v0.5.0) (2026-07-02)
 
 
