@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/teh-hippo/rs-suno/compare/v0.16.0...v0.16.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* stop animated-cover transcode timing out ([#86](https://github.com/teh-hippo/rs-suno/issues/86)) ([fdfdee1](https://github.com/teh-hippo/rs-suno/commit/fdfdee1d5a5e2516c0cbc47247dfaa8fb1b2468d))
+
 ## [0.16.0](https://github.com/teh-hippo/rs-suno/compare/v0.15.1...v0.16.0) (2026-07-02)
 
 

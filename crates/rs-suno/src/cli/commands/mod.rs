@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod completions;
 pub mod config;
+pub mod doctor;
 pub mod fetch;
 pub mod ls;
 pub mod version;

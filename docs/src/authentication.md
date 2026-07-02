@@ -75,8 +75,15 @@ Confirm a stored token still works by re-minting its JWT:
 suno auth refresh <account>
 ```
 
+Or run the fuller diagnostics command:
+
+```bash
+suno doctor --account <account>
+```
+
 On success it prints the account and its display name. If the account label is
 omitted, it uses your single configured account, or `--all` to check every one.
+`doctor` also reports token-expiry state and the remaining credits balance.
 
 When a token stops working (you logged out, or Suno rotated the session), update
 it:
