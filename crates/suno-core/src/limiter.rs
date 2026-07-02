@@ -57,6 +57,11 @@ impl AdaptiveLimiter {
     /// The floor is [`RATE_FLOOR`], or `initial_rate` when that is already below
     /// the floor, so a deliberately slow start is never overridden upward.
     pub(crate) fn new(initial_rate: f64) -> Self {
+        let initial_rate = if initial_rate.is_finite() && initial_rate > 0.0 {
+            initial_rate
+        } else {
+            RATE_FLOOR
+        };
         let floor = RATE_FLOOR.min(initial_rate);
         Self {
             rate: initial_rate.max(floor),
