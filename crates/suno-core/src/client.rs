@@ -1258,6 +1258,27 @@ mod tests {
     }
 
     #[test]
+    fn billing_info_fetches_through_authed_client() {
+        let billing_body = serde_json::json!({
+            "total_credits_left": 100,
+            "monthly_limit": 500,
+            "monthly_usage": 400,
+            "sub_type": "pro"
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/billing/info/", 200, billing_body));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let info = pollster::block_on(client.billing_info(&http)).unwrap();
+        assert_eq!(info.total_credits_left, 100);
+        assert_eq!(info.monthly_limit, 500);
+        assert_eq!(info.monthly_usage, 400);
+        assert_eq!(info.plan, "pro");
+    }
+
+    #[test]
     fn parse_billing_info_extracts_fields() {
         let body = serde_json::json!({
             "total_credits_left": 500,

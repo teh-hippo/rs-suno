@@ -155,7 +155,7 @@ async fn check_auth_and_credits(global: &GlobalArgs, config: Option<&Config>) ->
         // Auth check (network).
         match auth.authenticate(&http).await {
             Ok(user_id) => {
-                let short_id = &user_id[..user_id.len().min(12)];
+                let short_id: String = user_id.chars().take(12).collect();
                 println!(
                     "  [{label}] auth: ok (user: {}, id: {short_id}...)",
                     auth.display_name()
@@ -210,40 +210,16 @@ fn resolve_doctor_targets(
     }
     if global.all {
         let cfg = config.ok_or_else(|| "--all requires a config file".to_owned())?;
-        let mut labels: Vec<String> = cfg.accounts.keys().cloned().collect();
-        labels.sort();
-        if labels.is_empty() {
+        if cfg.accounts.is_empty() {
             return Err("no accounts are configured".to_owned());
         }
-        return labels
-            .into_iter()
-            .map(|label| {
-                cfg.resolve(&label, None, env, flags)
-                    .map(|settings| Target {
-                        label,
-                        token: settings.token,
-                    })
-                    .map_err(|err| err.to_string())
-            })
-            .collect();
+        return resolve_all(cfg, env, flags);
     }
     // Default: try all accounts in config, or fall back to env/flags token.
     if let Some(cfg) = config
         && !cfg.accounts.is_empty()
     {
-        let mut labels: Vec<String> = cfg.accounts.keys().cloned().collect();
-        labels.sort();
-        return labels
-            .into_iter()
-            .map(|label| {
-                cfg.resolve(&label, None, env, flags)
-                    .map(|settings| Target {
-                        label,
-                        token: settings.token,
-                    })
-                    .map_err(|err| err.to_string())
-            })
-            .collect();
+        return resolve_all(cfg, env, flags);
     }
     // No config accounts: try env/flags token alone.
     let token = flags
@@ -257,6 +233,27 @@ fn resolve_doctor_targets(
         }]);
     }
     Ok(vec![])
+}
+
+/// Resolve every account in `cfg` into a sorted target list.
+fn resolve_all(
+    cfg: &Config,
+    env: &HashMap<String, String>,
+    flags: &FlagOverrides,
+) -> std::result::Result<Vec<Target>, String> {
+    let mut labels: Vec<String> = cfg.accounts.keys().cloned().collect();
+    labels.sort();
+    labels
+        .into_iter()
+        .map(|label| {
+            cfg.resolve(&label, None, env, flags)
+                .map(|settings| Target {
+                    label,
+                    token: settings.token,
+                })
+                .map_err(|err| err.to_string())
+        })
+        .collect()
 }
 
 fn worse(a: ExitCode, b: ExitCode) -> ExitCode {
