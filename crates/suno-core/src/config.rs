@@ -11,6 +11,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::naming::CharacterSet;
 
 /// Audio format for downloaded clips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -56,6 +57,8 @@ pub struct Defaults {
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
+    pub naming_template: Option<String>,
+    pub character_set: Option<CharacterSet>,
 }
 
 /// Per-source overridable settings within an account.
@@ -69,6 +72,8 @@ pub struct SourceConfig {
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
+    pub naming_template: Option<String>,
+    pub character_set: Option<CharacterSet>,
 }
 
 /// Configuration for a single named account.
@@ -88,6 +93,8 @@ pub struct AccountConfig {
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
+    pub naming_template: Option<String>,
+    pub character_set: Option<CharacterSet>,
     #[serde(default)]
     pub sources: HashMap<String, SourceConfig>,
 }
@@ -271,6 +278,27 @@ impl Config {
             "LRC_SIDECAR",
         )?;
 
+        let naming_template_from_env = env_val("NAMING_TEMPLATE").map(str::to_owned);
+        let naming_template = flags
+            .naming_template
+            .clone()
+            .or(naming_template_from_env)
+            .or_else(|| src.and_then(|s| s.naming_template.clone()))
+            .or_else(|| acc.naming_template.clone())
+            .or_else(|| self.defaults.naming_template.clone())
+            .unwrap_or_else(|| crate::naming::DEFAULT_TEMPLATE.to_owned());
+
+        let character_set_from_env = env_val("CHARACTER_SET")
+            .map(str::parse::<CharacterSet>)
+            .transpose()?;
+        let character_set = flags
+            .character_set
+            .or(character_set_from_env)
+            .or_else(|| src.and_then(|s| s.character_set))
+            .or(acc.character_set)
+            .or(self.defaults.character_set)
+            .unwrap_or(CharacterSet::Unicode);
+
         let token = flags
             .token
             .clone()
@@ -289,6 +317,8 @@ impl Config {
             details_sidecar,
             lyrics_sidecar,
             lrc_sidecar,
+            naming_template,
+            character_set,
         })
     }
 }
@@ -353,6 +383,8 @@ pub struct FlagOverrides {
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
+    pub naming_template: Option<String>,
+    pub character_set: Option<CharacterSet>,
 }
 
 /// Resolved effective settings for one account/source combination.
@@ -369,6 +401,8 @@ pub struct EffectiveSettings {
     pub details_sidecar: bool,
     pub lyrics_sidecar: bool,
     pub lrc_sidecar: bool,
+    pub naming_template: String,
+    pub character_set: CharacterSet,
 }
 
 #[cfg(test)]
@@ -455,6 +489,8 @@ mod tests {
                 details_sidecar: false,
                 lyrics_sidecar: false,
                 lrc_sidecar: false,
+                naming_template: crate::naming::DEFAULT_TEMPLATE.to_owned(),
+                character_set: CharacterSet::Unicode,
             }
         );
     }
@@ -798,5 +834,85 @@ mod tests {
             let s = fmt.to_string();
             assert_eq!(s.parse::<AudioFormat>().unwrap(), fmt);
         }
+    }
+
+    #[test]
+    fn naming_template_follows_precedence() {
+        let toml = r#"
+            [defaults]
+            naming_template = "{title}"
+
+            [accounts.alice]
+            naming_template = "{creator}/{title}"
+
+            [accounts.alice.sources.liked]
+            naming_template = "{handle}/{title} [{id8}]"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+
+        // Per-source wins over account.
+        let eff = cfg
+            .resolve("alice", Some("liked"), &no_env(), &no_flags())
+            .unwrap();
+        assert_eq!(eff.naming_template, "{handle}/{title} [{id8}]");
+
+        // Account wins over defaults.
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.naming_template, "{creator}/{title}");
+
+        // Env overrides file.
+        let env: HashMap<String, String> = [("SUNO_NAMING_TEMPLATE".into(), "{id}".into())]
+            .into_iter()
+            .collect();
+        let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
+        assert_eq!(eff.naming_template, "{id}");
+
+        // Flag overrides env.
+        let flags = FlagOverrides {
+            naming_template: Some("{title}/{id8}".into()),
+            ..Default::default()
+        };
+        let eff = cfg.resolve("alice", None, &env, &flags).unwrap();
+        assert_eq!(eff.naming_template, "{title}/{id8}");
+    }
+
+    #[test]
+    fn character_set_follows_precedence() {
+        let toml = r#"
+            [defaults]
+            character_set = "ascii"
+
+            [accounts.alice]
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+
+        // File default applies.
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.character_set, CharacterSet::Ascii);
+
+        // Env overrides file.
+        let env: HashMap<String, String> = [("SUNO_CHARACTER_SET".into(), "unicode".into())]
+            .into_iter()
+            .collect();
+        let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
+        assert_eq!(eff.character_set, CharacterSet::Unicode);
+
+        // Flag overrides env.
+        let flags = FlagOverrides {
+            character_set: Some(CharacterSet::Ascii),
+            ..Default::default()
+        };
+        let eff = cfg.resolve("alice", None, &env, &flags).unwrap();
+        assert_eq!(eff.character_set, CharacterSet::Ascii);
+    }
+
+    #[test]
+    fn invalid_character_set_env_errors() {
+        let toml = "[accounts.alice]\n";
+        let cfg = Config::from_toml(toml).unwrap();
+        let env: HashMap<String, String> = [("SUNO_CHARACTER_SET".into(), "utf8".into())]
+            .into_iter()
+            .collect();
+        assert!(cfg.resolve("alice", None, &env, &no_flags()).is_err());
     }
 }

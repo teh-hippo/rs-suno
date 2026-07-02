@@ -1,9 +1,14 @@
 //! Pure naming and relative path rendering for [`Clip`] values.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
 
 use crate::Clip;
+use crate::error::{Error, Result};
 use crate::lineage::LineageContext;
 
 /// The default relative path template.
@@ -21,11 +26,35 @@ const DEFAULT_MAX_COMPONENT_LEN: usize = 80;
 
 const MIN_BASE_CHARS_WITH_SUFFIX: usize = 1;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CharacterSet {
     #[default]
     Unicode,
     Ascii,
+}
+
+impl FromStr for CharacterSet {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "unicode" => Ok(Self::Unicode),
+            "ascii" => Ok(Self::Ascii),
+            other => Err(Error::Config(format!(
+                "unknown character_set '{other}'; expected 'unicode' or 'ascii'"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for CharacterSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unicode => f.write_str("unicode"),
+            Self::Ascii => f.write_str("ascii"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
