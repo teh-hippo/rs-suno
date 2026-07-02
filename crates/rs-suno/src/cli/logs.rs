@@ -13,12 +13,18 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use suno_core::{Action, Clip, Failure, LineageStore, Manifest, Plan};
+use suno_core::{Action, Clip, Failure, LineageStore, Manifest, Plan, render_library_index};
 
 use crate::download::write_atomic;
 
 /// The manifest file name, kept beside the mirrored library.
 pub const MANIFEST_NAME: &str = ".suno-manifest.json";
+/// The library index file name, written at the library root for scripting.
+///
+/// Unlike the dot-prefixed engine state files, this is a visible file: it is a
+/// regenerable, machine-readable catalogue of the mirrored library meant to be
+/// discovered and consumed by external scripts.
+pub const INDEX_NAME: &str = "suno-index.json";
 /// The lineage graph store file name, kept beside the manifest.
 ///
 /// The store is an append-durable archive of resolved ancestry, persisted by
@@ -94,6 +100,22 @@ pub fn save_graph(dest: &Path, store: &LineageStore) -> Result<()> {
     let bytes =
         serde_json::to_vec_pretty(store).context("could not serialise the lineage store")?;
     write_atomic(&dest.join(GRAPH_NAME), &bytes).context("could not write the lineage store")
+}
+
+/// Render and write the library index at `dest` atomically.
+///
+/// The index is a regenerable scripting artefact rendered purely from the
+/// `manifest`, the archived `store`, and this run's live `clips`, so the caller
+/// treats a write failure as best-effort and never fails the mirror over it.
+pub fn save_index(
+    dest: &Path,
+    manifest: &Manifest,
+    store: &LineageStore,
+    clips: &HashMap<&str, &Clip>,
+) -> Result<()> {
+    let contents = render_library_index(manifest, store, clips);
+    write_atomic(&dest.join(INDEX_NAME), contents.as_bytes())
+        .context("could not write the library index")
 }
 
 /// An exclusive run lock, removed when dropped.
@@ -451,6 +473,44 @@ mod tests {
         append_owner_pin(&dir, "PIN", "user_abc123456", "Alice").unwrap();
         let log = std::fs::read_to_string(dir.join(AUDIT_NAME)).unwrap();
         assert!(log.contains("OWNER\tPIN\tuser_abc123456\tAlice"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_index_writes_visible_parseable_json() {
+        let dir = temp_dir("index");
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "clip",
+            ManifestEntry {
+                path: "Album/Song.flac".to_owned(),
+                format: AudioFormat::Flac,
+                size: 123,
+                ..Default::default()
+            },
+        );
+        let store = LineageStore::new();
+        let clip = Clip {
+            id: "clip".to_owned(),
+            title: "Song".to_owned(),
+            display_name: "alice".to_owned(),
+            ..Default::default()
+        };
+        let mut clips: HashMap<&str, &Clip> = HashMap::new();
+        clips.insert("clip", &clip);
+
+        save_index(&dir, &manifest, &store, &clips).unwrap();
+
+        let path = dir.join(INDEX_NAME);
+        assert_eq!(INDEX_NAME, "suno-index.json");
+        // A visible file, not a dotfile.
+        assert!(!INDEX_NAME.starts_with('.'));
+        let bytes = std::fs::read(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["clips"][0]["id"], "clip");
+        assert_eq!(value["clips"][0]["path"], "Album/Song.flac");
+        assert_eq!(value["clips"][0]["artist"], "alice");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

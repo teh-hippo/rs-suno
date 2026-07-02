@@ -502,6 +502,38 @@ impl LineageStore {
         }
     }
 
+    /// The canonical logical album title for a clip identified only by `id`.
+    ///
+    /// The store-side counterpart of `context_for(clip).album(clip.title)` for a
+    /// clip that is not part of the current run (so no live [`Clip`] is on hand).
+    /// The clip's own title and its root come from the archived nodes and the
+    /// monotonic resolution cache, then the same [`LineageContext::album`] rule
+    /// decides whether the clip folders under its root's album or its own title.
+    /// A clip absent from the store folds to a self-root with an empty title.
+    pub fn album_for_id(&self, id: &str) -> String {
+        let own_title = self
+            .node(id)
+            .map(|node| node.title.clone())
+            .unwrap_or_default();
+        let root_id = self
+            .get_root(id)
+            .map(|entry| entry.root_id.clone())
+            .filter(|root| !root.is_empty())
+            .unwrap_or_else(|| id.to_owned());
+        let root_title = self
+            .node(&root_id)
+            .map(|node| node.title.clone())
+            .unwrap_or_else(|| own_title.clone());
+        let context = LineageContext {
+            root_id,
+            root_title,
+            parent_id: String::new(),
+            edge_type: None,
+            status: ResolveStatus::Resolved,
+        };
+        context.album(&own_title)
+    }
+
     /// The set of root titles shared by more than one distinct root.
     ///
     /// Two distinct roots must never share an album folder (two different
@@ -814,6 +846,25 @@ mod tests {
             assert_eq!(cached.status, "resolved");
             assert_eq!(cached.algorithm_version, 1);
         }
+    }
+
+    #[test]
+    fn album_for_id_matches_context_for_and_handles_unknown() {
+        let mut store = LineageStore::new();
+        store.update(&chain_clips(), &chain_resolution(), "now");
+
+        // A child folds under its differently-titled root, agreeing with the
+        // live-clip rule via context_for.
+        assert_eq!(store.album_for_id("c"), "Root");
+        let cover = &chain_clips()[0];
+        assert_eq!(
+            store.album_for_id("c"),
+            store.context_for(cover).album(&cover.title)
+        );
+        // The root folders under its own title.
+        assert_eq!(store.album_for_id("a"), "Root");
+        // An id absent from the store folds to an empty own title.
+        assert_eq!(store.album_for_id("missing"), "");
     }
 
     #[test]

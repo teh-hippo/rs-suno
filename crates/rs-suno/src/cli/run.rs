@@ -865,6 +865,7 @@ async fn run_one(
         &settings,
         &account,
         verbosity,
+        enumerated,
     )
     .await
 }
@@ -882,6 +883,7 @@ async fn execute_plan(
     settings: &suno_core::EffectiveSettings,
     account: &str,
     verbosity: i8,
+    enumerated: bool,
 ) -> Result<ExitCode> {
     let fs = FsAdapter::new(dest);
     let ffmpeg = FfmpegAdapter::new(dest);
@@ -962,6 +964,19 @@ async fn execute_plan(
         .iter()
         .map(|d| (d.clip.id.as_str(), &d.clip))
         .collect();
+    // Best-effort library index: a regenerable scripting artefact, so a failure
+    // to write it must never fail an otherwise-green mirror (unlike the
+    // manifest). Gated on `enumerated`, not playlist membership: a narrowed
+    // `--limit`/`--since` run sees only a window of clips live, so it would null
+    // the artist/tags/duration of every out-of-window clip and regress a richer
+    // index from a prior full run; only a full run writes, avoiding that
+    // live-field oscillation.
+    if enumerated
+        && let Err(err) = logs::save_index(dest, &manifest, store, &clips_by_id)
+        && verbosity >= -1
+    {
+        eprintln!("warning: could not write {}: {err}", logs::INDEX_NAME);
+    }
     logs::append_failures(dest, &outcome.failures, &clips_by_id)?;
     let failed: HashSet<&str> = outcome
         .failures

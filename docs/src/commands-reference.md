@@ -171,6 +171,44 @@ present on every object; nullable fields are `null` when Suno supplied no value.
 suno lsjson --liked | jq -r '.title'
 ```
 
+## suno-index.json
+
+A `sync` or `copy` that fully enumerates the library writes a single
+`suno-index.json` at the library root: a durable, machine-readable catalogue of
+every mirrored clip, for offline scripting. Unlike the streamed `lsjson` and the
+internal `.suno-manifest.json` engine state, it is a visible file that persists
+between runs and reflects the files actually on disk.
+
+The write is best-effort: a failure to write the index never fails an otherwise
+successful mirror, because it is regenerable from the manifest, the lineage
+store, and the next run. A narrowed run (`--limit` or `--since`) does not write
+it, so a rich index from a full run is never regressed to a windowed subset.
+
+The document is a pretty-printed object carrying a `schema_version` and a
+`clips` array in clip-id order. The schema is stable for scripting: fields are
+only added, never removed or renamed. Genuinely unknown live-only fields are
+`null`, never an empty string or `0`.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Suno clip UUID (the manifest key). |
+| `path` | string | Forward-slash library-relative path to the audio file. |
+| `format` | string | `flac`, `mp3`, or `wav`. |
+| `size` | number | File size in bytes. |
+| `title` | string | Live title, else the archived title, else `Untitled`. |
+| `artist` | string \| null | Live display name (`Suno` when blank); null when not seen this run. |
+| `handle` | string \| null | Live account handle; null when not seen this run. |
+| `album` | string | Raw logical album title; may differ from the sanitised album folder in `path`. |
+| `root_id` | string | Resolved lineage root id, or the clip's own id when it is a root. |
+| `created_at` | string \| null | Archived creation timestamp; null when unknown. |
+| `duration` | number \| null | Seconds; null when not seen this run. |
+| `tags` | string \| null | Comma-separated style tags; null when not seen this run. |
+
+```bash
+# Paths of every FLAC in the mirror:
+jq -r '.clips[] | select(.format == "flac") | .path' suno-index.json
+```
+
 ## fetch
 
 Download one clip by ID or URL to a path outside any mirrored library. The clip
