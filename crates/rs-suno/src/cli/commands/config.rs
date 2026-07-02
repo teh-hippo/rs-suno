@@ -161,7 +161,7 @@ fn render_show(config: &Config) -> String {
         );
         push_opt(&mut out, "retries", d.retries.map(|v| v.to_string()));
         push_opt(&mut out, "min_newest", d.min_newest.map(|v| v.to_string()));
-        push_secret(&mut out, "token_command", d.token_command.as_deref());
+        push_redacted(&mut out, "token_command", d.token_command.as_deref());
         push_opt(
             &mut out,
             "animated_covers",
@@ -185,7 +185,7 @@ fn render_show(config: &Config) -> String {
             Some(_) => "  token = [redacted]\n",
             None => "  token = [not set]\n",
         });
-        push_secret(&mut out, "token_command", acc.token_command.as_deref());
+        push_redacted(&mut out, "token_command", acc.token_command.as_deref());
         push_opt(&mut out, "root", acc.root.clone());
         push_opt(&mut out, "format", acc.format.map(|f| f.to_string()));
         push_reserved(
@@ -215,7 +215,7 @@ fn render_show(config: &Config) -> String {
         for name in sources {
             let src = &acc.sources[name];
             out.push_str(&format!("  [accounts.{label}.sources.{name}]\n"));
-            push_secret(&mut out, "    token_command", src.token_command.as_deref());
+            push_redacted(&mut out, "    token_command", src.token_command.as_deref());
             push_opt(&mut out, "    format", src.format.map(|f| f.to_string()));
             push_opt(&mut out, "    naming_template", src.naming_template.clone());
             push_opt(
@@ -290,7 +290,7 @@ fn push_reserved(out: &mut String, key: &str, value: Option<String>) {
     }
 }
 
-fn push_secret(out: &mut String, key: &str, value: Option<&str>) {
+fn push_redacted(out: &mut String, key: &str, value: Option<&str>) {
     if value.is_some() {
         out.push_str(&format!("  {key} = [redacted]\n"));
     }

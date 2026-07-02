@@ -2035,6 +2035,25 @@ mod tests {
     }
 
     #[test]
+    fn token_available_accepts_global_token_flag() {
+        let global = GlobalArgs {
+            token: Some("flag-token".to_owned()),
+            ..Default::default()
+        };
+        assert!(super::token_available(&global, &HashMap::new()));
+    }
+
+    #[test]
+    fn token_available_accepts_token_env() {
+        let global = GlobalArgs::default();
+        let env: HashMap<String, String> =
+            [("SUNO_TOKEN".to_owned(), "env-token".to_owned())]
+                .into_iter()
+                .collect();
+        assert!(super::token_available(&global, &env));
+    }
+
+    #[test]
     fn token_available_accepts_token_command_env() {
         let global = GlobalArgs::default();
         let env: HashMap<String, String> =
