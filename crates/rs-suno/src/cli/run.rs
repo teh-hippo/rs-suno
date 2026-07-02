@@ -2046,10 +2046,9 @@ mod tests {
     #[test]
     fn token_available_accepts_token_env() {
         let global = GlobalArgs::default();
-        let env: HashMap<String, String> =
-            [("SUNO_TOKEN".to_owned(), "env-token".to_owned())]
-                .into_iter()
-                .collect();
+        let env: HashMap<String, String> = [("SUNO_TOKEN".to_owned(), "env-token".to_owned())]
+            .into_iter()
+            .collect();
         assert!(super::token_available(&global, &env));
     }
 
