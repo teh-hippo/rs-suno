@@ -87,8 +87,8 @@ pub fn build_desired(
     contexts: &HashMap<String, LineageContext>,
     colliding_albums: &BTreeSet<String>,
     toggles: ArtifactToggles,
+    naming: &NamingConfig,
 ) -> Vec<Desired> {
-    let config = NamingConfig::default();
     let lineages: Vec<LineageContext> = clips
         .iter()
         .map(|clip| {
@@ -106,7 +106,7 @@ pub fn build_desired(
             .zip(&lineages)
             .map(|(clip, lineage)| NamingRequest { clip, lineage })
             .collect();
-        render_clip_names(&requests, &config, colliding_albums)
+        render_clip_names(&requests, naming, colliding_albums)
     };
 
     clips
@@ -534,6 +534,7 @@ mod tests {
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         assert_eq!(desired.len(), 1);
         assert!(
@@ -572,6 +573,7 @@ mod tests {
             &contexts,
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         // The album folders under the root title, and the hash/lineage carry the
         // resolved context, not a self-rooted fallback.
@@ -647,6 +649,7 @@ mod tests {
             &contexts_of(&store),
             &store.colliding_root_titles(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         let child1 = cycle1.iter().find(|d| d.clip.id == "child-remix").unwrap();
         assert!(
@@ -663,6 +666,7 @@ mod tests {
             &contexts_of(&store),
             &store.colliding_root_titles(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         for (a, b) in cycle1.iter().zip(&cycle2) {
             assert_eq!(a.path, b.path, "album path drifted for {}", a.clip.id);
@@ -697,6 +701,7 @@ mod tests {
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         assert_ne!(desired[0].path, desired[1].path);
         assert!(desired.iter().all(|d| d.path.ends_with(".mp3")));
@@ -714,6 +719,7 @@ mod tests {
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         assert!(!desired[0].path.contains('\\'));
         assert!(desired[0].path.contains('/'));
@@ -740,6 +746,7 @@ mod tests {
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         let base = desired[0].path.strip_suffix(".flac").unwrap();
         assert_eq!(desired[0].artifacts.len(), 1);
@@ -768,6 +775,7 @@ mod tests {
                 animated_covers: true,
                 ..Default::default()
             },
+            &NamingConfig::default(),
         );
         assert!(desired[0].artifacts.is_empty());
     }
@@ -788,6 +796,7 @@ mod tests {
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         assert_eq!(desired[0].artifacts.len(), 1);
         assert_eq!(desired[0].artifacts[0].kind, ArtifactKind::CoverJpg);
@@ -804,6 +813,7 @@ mod tests {
                 animated_covers: true,
                 ..Default::default()
             },
+            &NamingConfig::default(),
         );
         let base = desired[0].path.strip_suffix(".flac").unwrap();
         let webp = desired[0]
@@ -828,6 +838,7 @@ mod tests {
                 animated_covers: true,
                 ..Default::default()
             },
+            &NamingConfig::default(),
         );
         assert!(
             desired[0]
@@ -850,6 +861,7 @@ mod tests {
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         assert!(
             off[0]
@@ -870,6 +882,7 @@ mod tests {
                 details: true,
                 ..Default::default()
             },
+            &NamingConfig::default(),
         );
         let base = on[0].path.strip_suffix(".flac").unwrap();
         let details = on[0]
@@ -900,6 +913,7 @@ mod tests {
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         assert!(
             off[0]
@@ -919,6 +933,7 @@ mod tests {
                 lyrics: true,
                 ..Default::default()
             },
+            &NamingConfig::default(),
         );
         let base = on[0].path.strip_suffix(".flac").unwrap();
         let lyrics = on[0]
@@ -948,6 +963,7 @@ mod tests {
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         assert!(
             off[0]
@@ -967,6 +983,7 @@ mod tests {
                 lrc: true,
                 ..Default::default()
             },
+            &NamingConfig::default(),
         );
         let base = on[0].path.strip_suffix(".flac").unwrap();
         let lrc = on[0]
@@ -998,6 +1015,7 @@ mod tests {
                 lrc: true,
                 ..Default::default()
             },
+            &NamingConfig::default(),
         );
         assert!(
             desired[0]
@@ -1024,6 +1042,7 @@ mod tests {
                 lyrics: true,
                 ..Default::default()
             },
+            &NamingConfig::default(),
         );
         assert!(
             desired[0]
@@ -1053,6 +1072,7 @@ mod tests {
                 lyrics: true,
                 ..Default::default()
             },
+            &NamingConfig::default(),
         );
         let base = desired[0].path.strip_suffix(".flac").unwrap();
         let kinds: BTreeSet<ArtifactKind> = desired[0].artifacts.iter().map(|a| a.kind).collect();
@@ -1524,6 +1544,7 @@ mod tests {
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         // A playlist with b, then a clip absent from the library, then a.
         let missing = clip("id-x", "Missing Song", "bob");
@@ -1563,6 +1584,7 @@ mod tests {
             &no_contexts(),
             &no_collisions(),
             ArtifactToggles::default(),
+            &NamingConfig::default(),
         );
         let members = vec![a.clone()];
         let inputs = vec![
@@ -1591,5 +1613,35 @@ mod tests {
     #[test]
     fn build_playlist_desired_is_empty_for_no_inputs() {
         assert!(build_playlist_desired(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn build_desired_respects_custom_naming_config() {
+        use suno_core::CharacterSet;
+
+        let a = clip("abcdefgh-1234", "Song A", "alice");
+        let clips = [&a];
+        let custom = NamingConfig {
+            template: "{title}/{id8}".to_owned(),
+            character_set: CharacterSet::Ascii,
+            ..NamingConfig::default()
+        };
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            SourceMode::Mirror,
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles::default(),
+            &custom,
+        );
+        // The custom template places the title as a directory and id8 as the
+        // file stem, different from the default layout.
+        assert!(
+            desired[0].path.starts_with("Song A/"),
+            "path: {}",
+            desired[0].path
+        );
+        assert!(desired[0].path.contains(&a.id[..8]));
     }
 }

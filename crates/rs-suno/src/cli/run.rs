@@ -19,10 +19,10 @@ use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
     AdoptDecision, AlbumArt, AlbumDesired, ClerkAuth, Clip, Config, Error as CoreError,
-    ExecOptions, Filesystem, FlagOverrides, LineageContext, LocalFile, Owner, OwnerGate,
-    PlaylistDesired, PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode, SourceStatus,
-    SunoClient, adopt_decision, album_desired, deletion_allowed, is_downloadable, owner_gate,
-    plan_album_artifacts, plan_playlist_artifacts, reconcile, resolve_roots,
+    ExecOptions, Filesystem, FlagOverrides, LineageContext, LocalFile, NamingConfig, Owner,
+    OwnerGate, PlaylistDesired, PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode,
+    SourceStatus, SunoClient, adopt_decision, album_desired, deletion_allowed, is_downloadable,
+    owner_gate, plan_album_artifacts, plan_playlist_artifacts, reconcile, resolve_roots,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
@@ -399,6 +399,8 @@ fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
         details_sidecar: args.details_sidecar.then_some(true),
         lyrics_sidecar: args.lyrics_sidecar.then_some(true),
         lrc_sidecar: args.lrc_sidecar.then_some(true),
+        naming_template: args.naming_template.clone(),
+        character_set: args.character_set.map(Into::into),
     }
 }
 
@@ -725,6 +727,11 @@ async fn run_one(
             details: settings.details_sidecar,
             lyrics: settings.lyrics_sidecar,
             lrc: settings.lrc_sidecar,
+        },
+        &NamingConfig {
+            template: settings.naming_template.clone(),
+            character_set: settings.character_set,
+            ..NamingConfig::default()
         },
     );
     // Folder-level album art is keyed on the stable root id and chosen purely

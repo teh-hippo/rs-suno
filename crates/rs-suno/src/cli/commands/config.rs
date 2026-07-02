@@ -148,6 +148,8 @@ fn render_show(config: &Config) -> String {
         || d.retries.is_some()
         || d.min_newest.is_some()
         || d.animated_covers.is_some()
+        || d.naming_template.is_some()
+        || d.character_set.is_some()
     {
         out.push_str("[defaults]\n");
         push_opt(&mut out, "format", d.format.map(|f| f.to_string()));
@@ -162,6 +164,12 @@ fn render_show(config: &Config) -> String {
             &mut out,
             "animated_covers",
             d.animated_covers.map(|v| v.to_string()),
+        );
+        push_opt(&mut out, "naming_template", d.naming_template.clone());
+        push_opt(
+            &mut out,
+            "character_set",
+            d.character_set.map(|v| v.to_string()),
         );
         out.push('\n');
     }
@@ -192,6 +200,12 @@ fn render_show(config: &Config) -> String {
             &mut out,
             "animated_covers",
             acc.animated_covers.map(|v| v.to_string()),
+        );
+        push_opt(&mut out, "naming_template", acc.naming_template.clone());
+        push_opt(
+            &mut out,
+            "character_set",
+            acc.character_set.map(|v| v.to_string()),
         );
         let mut sources: Vec<&String> = acc.sources.keys().collect();
         sources.sort();
@@ -401,5 +415,16 @@ mod tests {
         assert_eq!(dir_mode, 0o700);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn show_renders_naming_template_and_character_set() {
+        let toml = "[defaults]\nnaming_template = \"{title}/{id8}\"\ncharacter_set = \"ascii\"\n\n[accounts.alice]\nnaming_template = \"{creator}/{title}\"\ncharacter_set = \"unicode\"\n";
+        let config = Config::from_toml(toml).unwrap();
+        let shown = render_show(&config);
+        assert!(shown.contains("naming_template = {title}/{id8}"));
+        assert!(shown.contains("character_set = ascii"));
+        assert!(shown.contains("naming_template = {creator}/{title}"));
+        assert!(shown.contains("character_set = unicode"));
     }
 }

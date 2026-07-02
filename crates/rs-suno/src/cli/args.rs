@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use suno_core::AudioFormat;
+use suno_core::{AudioFormat, CharacterSet};
 
 /// A download-only tool for mirroring your Suno.ai library.
 #[derive(Parser, Debug)]
@@ -103,6 +103,23 @@ impl From<AudioFmt> for AudioFormat {
     }
 }
 
+/// Character set for filename sanitisation, mapped onto [`CharacterSet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum Charset {
+    Unicode,
+    Ascii,
+}
+
+impl From<Charset> for CharacterSet {
+    fn from(value: Charset) -> Self {
+        match value {
+            Charset::Unicode => CharacterSet::Unicode,
+            Charset::Ascii => CharacterSet::Ascii,
+        }
+    }
+}
+
 /// Output format for `ls`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 #[value(rename_all = "lower")]
@@ -162,6 +179,13 @@ pub struct SyncArgs {
     /// per-line timestamps).
     #[arg(long)]
     pub lrc_sidecar: bool,
+    /// Relative path template for naming downloaded files.
+    /// Placeholders: {creator}, {handle}, {album}, {title}, {id}, {id8}, {root_id8}.
+    #[arg(long, value_name = "TEMPLATE")]
+    pub naming_template: Option<String>,
+    /// Character set for filename sanitisation: unicode or ascii.
+    #[arg(long, value_enum, value_name = "SET")]
+    pub character_set: Option<Charset>,
 }
 
 /// `check` accepts every `sync` flag plus `--exit-code`.
@@ -476,5 +500,41 @@ mod tests {
         assert_eq!(AudioFormat::from(AudioFmt::Flac), AudioFormat::Flac);
         assert_eq!(AudioFormat::from(AudioFmt::Mp3), AudioFormat::Mp3);
         assert_eq!(AudioFormat::from(AudioFmt::Wav), AudioFormat::Wav);
+    }
+
+    #[test]
+    fn charset_maps_to_core() {
+        assert_eq!(CharacterSet::from(Charset::Unicode), CharacterSet::Unicode);
+        assert_eq!(CharacterSet::from(Charset::Ascii), CharacterSet::Ascii);
+    }
+
+    #[test]
+    fn sync_parses_naming_template_and_character_set() {
+        let cli = Cli::try_parse_from([
+            "suno",
+            "sync",
+            "/music",
+            "--naming-template",
+            "{title}/{id8}",
+            "--character-set",
+            "ascii",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Sync(args) => {
+                assert_eq!(args.naming_template.as_deref(), Some("{title}/{id8}"));
+                assert_eq!(args.character_set, Some(Charset::Ascii));
+            }
+            _ => panic!("expected sync"),
+        }
+        // Absent flags leave both as None.
+        let cli = Cli::try_parse_from(["suno", "sync", "/music"]).unwrap();
+        match cli.command {
+            Command::Sync(args) => {
+                assert_eq!(args.naming_template, None);
+                assert_eq!(args.character_set, None);
+            }
+            _ => panic!("expected sync"),
+        }
     }
 }
