@@ -43,7 +43,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             return Ok(ExitCode::Config);
         }
     };
-    let token = match run::resolve_token(&label, &settings) {
+    let token = match run::resolve_token(&label, &settings).await {
         Ok(Some(token)) => token,
         Ok(None) => {
             eprintln!(

@@ -363,7 +363,7 @@ pub(crate) fn single_account(
     Ok((label, settings))
 }
 
-pub(crate) fn resolve_token(
+pub(crate) async fn resolve_token(
     label: &str,
     settings: &suno_core::EffectiveSettings,
 ) -> std::result::Result<Option<String>, String> {
@@ -371,14 +371,19 @@ pub(crate) fn resolve_token(
         return Ok(Some(token));
     }
     if let Some(command) = settings.token_command.as_deref() {
-        return run_token_command(label, command).map(Some);
+        return run_token_command(label, command).await.map(Some);
     }
     Ok(settings.stored_token.clone())
 }
 
-fn run_token_command(label: &str, command: &str) -> std::result::Result<String, String> {
-    let output = token_command_process(command)
-        .output()
+async fn run_token_command(label: &str, command: &str) -> std::result::Result<String, String> {
+    let command = command.to_owned();
+    // Run the child process off the async runtime so a slow token_command never
+    // stalls other tasks; tokio lacks the `process` feature here, so this wraps
+    // the blocking `std::process::Command` rather than using `tokio::process`.
+    let output = tokio::task::spawn_blocking(move || token_command_process(&command).output())
+        .await
+        .map_err(|err| format!("token_command for account '{label}' did not complete: {err}"))?
         .map_err(|err| format!("could not run token_command for account '{label}': {err}"))?;
     if !output.status.success() {
         return Err(format!(
@@ -422,9 +427,18 @@ fn exit_status_summary(status: ExitStatus) -> String {
 }
 
 fn token_available(global: &GlobalArgs, env: &HashMap<String, String>) -> bool {
-    global.token.is_some()
+    if global.token.is_some()
         || env.contains_key("SUNO_TOKEN")
         || env.contains_key("SUNO_TOKEN_COMMAND")
+    {
+        return true;
+    }
+    // A token-only run without a configured account falls back to the implicit
+    // `default` account, so also honour that label's per-account env vars (and an
+    // explicit --account), matching the resolver's prefix via `label_to_env`.
+    let prefix = suno_core::config::label_to_env(global.account.as_deref().unwrap_or("default"));
+    env.contains_key(&format!("SUNO_{prefix}_TOKEN"))
+        || env.contains_key(&format!("SUNO_{prefix}_TOKEN_COMMAND"))
 }
 
 /// Load config from the override or platform default. A missing default file is
@@ -511,7 +525,7 @@ async fn run_one(
         }
     };
 
-    let token = match resolve_token(&target.label, &settings) {
+    let token = match resolve_token(&target.label, &settings).await {
         Ok(Some(token)) => token,
         Ok(None) => {
             eprintln!(
@@ -2071,6 +2085,41 @@ mod tests {
     }
 
     #[test]
+    fn token_available_accepts_default_account_env() {
+        let global = GlobalArgs::default();
+        let env: HashMap<String, String> =
+            [("SUNO_DEFAULT_TOKEN".to_owned(), "env-token".to_owned())]
+                .into_iter()
+                .collect();
+        assert!(super::token_available(&global, &env));
+    }
+
+    #[test]
+    fn token_available_accepts_explicit_account_command_env() {
+        let global = GlobalArgs {
+            account: Some("my-lib".to_owned()),
+            ..Default::default()
+        };
+        let env: HashMap<String, String> = [(
+            "SUNO_MY_LIB_TOKEN_COMMAND".to_owned(),
+            "printf secret".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+        assert!(super::token_available(&global, &env));
+    }
+
+    #[test]
+    fn token_available_ignores_other_account_env() {
+        let global = GlobalArgs::default();
+        let env: HashMap<String, String> =
+            [("SUNO_ALICE_TOKEN".to_owned(), "env-token".to_owned())]
+                .into_iter()
+                .collect();
+        assert!(!super::token_available(&global, &env));
+    }
+
+    #[test]
     fn single_account_accepts_implicit_token_command_env() {
         let global = GlobalArgs::default();
         let env: HashMap<String, String> =
@@ -2083,48 +2132,48 @@ mod tests {
         assert_eq!(settings.token_command.as_deref(), Some("printf token"));
     }
 
-    #[test]
-    fn resolve_token_prefers_direct_token_over_stored_token() {
+    #[tokio::test]
+    async fn resolve_token_prefers_direct_token_over_stored_token() {
         let settings = settings_with(Some("flag-token"), Some("stored-token"), None);
-        let token = resolve_token("alice", &settings).unwrap();
+        let token = resolve_token("alice", &settings).await.unwrap();
         assert_eq!(token.as_deref(), Some("flag-token"));
     }
 
-    #[test]
-    fn resolve_token_falls_back_to_stored_token() {
+    #[tokio::test]
+    async fn resolve_token_falls_back_to_stored_token() {
         let settings = settings_with(None, Some("stored-token"), None);
-        let token = resolve_token("alice", &settings).unwrap();
+        let token = resolve_token("alice", &settings).await.unwrap();
         assert_eq!(token.as_deref(), Some("stored-token"));
     }
 
     #[cfg(unix)]
-    #[test]
-    fn resolve_token_uses_trimmed_command_stdout() {
+    #[tokio::test]
+    async fn resolve_token_uses_trimmed_command_stdout() {
         let settings = settings_with(
             None,
             Some("stored-token"),
             Some(&success_command("cmd-token")),
         );
-        let token = resolve_token("alice", &settings).unwrap();
+        let token = resolve_token("alice", &settings).await.unwrap();
         assert_eq!(token.as_deref(), Some("cmd-token"));
     }
 
     #[cfg(unix)]
-    #[test]
-    fn resolve_token_command_failure_is_clear_and_redacted() {
+    #[tokio::test]
+    async fn resolve_token_command_failure_is_clear_and_redacted() {
         let secret = "secret-command-output";
         let settings = settings_with(None, Some("stored-token"), Some(&fail_command(secret)));
-        let err = resolve_token("alice", &settings).unwrap_err();
+        let err = resolve_token("alice", &settings).await.unwrap_err();
         assert!(err.contains("token_command for account 'alice' failed with exit status 23"));
         assert!(!err.contains(secret), "error leaked command output: {err}");
         assert!(!err.contains("stored-token"), "error leaked token: {err}");
     }
 
     #[cfg(unix)]
-    #[test]
-    fn resolve_token_command_rejects_whitespace_output() {
+    #[tokio::test]
+    async fn resolve_token_command_rejects_whitespace_output() {
         let settings = settings_with(None, Some("stored-token"), Some("printf '   \\n\\t'"));
-        let err = resolve_token("alice", &settings).unwrap_err();
+        let err = resolve_token("alice", &settings).await.unwrap_err();
         assert!(err.contains("produced empty output"));
         assert!(!err.contains("stored-token"), "error leaked token: {err}");
     }

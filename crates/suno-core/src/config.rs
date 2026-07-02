@@ -443,10 +443,10 @@ fn resolve_bool(
     Ok(src.or(acc).or(defaults).unwrap_or(compiled))
 }
 
-/// Convert an account label to its environment variable prefix.
-///
-/// `my-lib` becomes `MY_LIB`.
-fn label_to_env(label: &str) -> String {
+/// Convert an account label to its environment variable prefix, mirroring the
+/// per-account keys the resolver reads: `my-lib` becomes `MY_LIB` for lookups
+/// like `SUNO_MY_LIB_TOKEN`.
+pub fn label_to_env(label: &str) -> String {
     label.to_ascii_uppercase().replace('-', "_")
 }
 

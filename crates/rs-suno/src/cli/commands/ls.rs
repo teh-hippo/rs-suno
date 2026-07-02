@@ -34,7 +34,7 @@ pub async fn run_ls(global: &GlobalArgs, args: &LsArgs, force_json: bool) -> Res
             return Ok(ExitCode::Config);
         }
     };
-    let token = match run::resolve_token(&label, &settings) {
+    let token = match run::resolve_token(&label, &settings).await {
         Ok(Some(token)) => token,
         Ok(None) => {
             eprintln!(
