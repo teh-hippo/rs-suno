@@ -54,6 +54,7 @@ pub struct Defaults {
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
+    pub token_command: Option<String>,
     pub animated_covers: Option<bool>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
@@ -70,6 +71,7 @@ pub struct SourceConfig {
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
+    pub token_command: Option<String>,
     pub animated_covers: Option<bool>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
@@ -83,6 +85,7 @@ pub struct SourceConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AccountConfig {
     pub token: Option<String>,
+    pub token_command: Option<String>,
     pub root: Option<String>,
     /// Optional Suno user id to assert this account authenticates as, refusing
     /// to run on a mismatch (a belt-and-braces check alongside the on-disk
@@ -369,11 +372,20 @@ impl Config {
             .token
             .clone()
             .or_else(|| env.get(&format!("SUNO_{label_env}_TOKEN")).cloned())
-            .or_else(|| env.get("SUNO_TOKEN").cloned())
-            .or_else(|| acc.token.clone());
+            .or_else(|| env.get("SUNO_TOKEN").cloned());
+
+        let token_command = env
+            .get(&format!("SUNO_{label_env}_TOKEN_COMMAND"))
+            .cloned()
+            .or_else(|| env.get("SUNO_TOKEN_COMMAND").cloned())
+            .or_else(|| src.and_then(|s| s.token_command.clone()))
+            .or_else(|| acc.token_command.clone())
+            .or_else(|| self.defaults.token_command.clone());
 
         Ok(EffectiveSettings {
             token,
+            stored_token: acc.token.clone(),
+            token_command,
             account_id: acc.account_id.clone(),
             format,
             concurrency,
@@ -431,10 +443,10 @@ fn resolve_bool(
     Ok(src.or(acc).or(defaults).unwrap_or(compiled))
 }
 
-/// Convert an account label to its environment variable prefix.
-///
-/// `my-lib` becomes `MY_LIB`.
-fn label_to_env(label: &str) -> String {
+/// Convert an account label to its environment variable prefix, mirroring the
+/// per-account keys the resolver reads: `my-lib` becomes `MY_LIB` for lookups
+/// like `SUNO_MY_LIB_TOKEN`.
+pub fn label_to_env(label: &str) -> String {
     label.to_ascii_uppercase().replace('-', "_")
 }
 
@@ -459,7 +471,12 @@ pub struct FlagOverrides {
 /// Resolved effective settings for one account/source combination.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveSettings {
+    /// A direct token from `--token` or `SUNO_*_TOKEN`.
     pub token: Option<String>,
+    /// A stored token from `[accounts.<label>].token`.
+    pub stored_token: Option<String>,
+    /// A command to run for the token when no direct token was supplied.
+    pub token_command: Option<String>,
     /// The optional configured account id assertion (see [`AccountConfig`]).
     pub account_id: Option<String>,
     pub format: AudioFormat,
@@ -552,6 +569,8 @@ mod tests {
             eff,
             EffectiveSettings {
                 token: None,
+                stored_token: None,
+                token_command: None,
                 account_id: None,
                 format: AudioFormat::Flac,
                 concurrency: 4,
@@ -697,6 +716,7 @@ mod tests {
             .collect();
         let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
         assert_eq!(eff.token.as_deref(), Some("env_tok"));
+        assert_eq!(eff.stored_token.as_deref(), Some("file_tok"));
 
         // flag overrides env
         let flags = FlagOverrides {
@@ -705,6 +725,20 @@ mod tests {
         };
         let eff = cfg.resolve("alice", None, &env, &flags).unwrap();
         assert_eq!(eff.token.as_deref(), Some("flag_tok"));
+        assert_eq!(eff.stored_token.as_deref(), Some("file_tok"));
+    }
+
+    #[test]
+    fn stored_token_is_populated_from_config_when_no_override_exists() {
+        let toml = r#"
+            [accounts.alice]
+            token = "file_tok"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.token, None);
+        assert_eq!(eff.stored_token.as_deref(), Some("file_tok"));
+        assert_eq!(eff.token_command, None);
     }
 
     #[test]
@@ -719,6 +753,58 @@ mod tests {
         .collect();
         let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
         assert_eq!(eff.token.as_deref(), Some("per_account"));
+    }
+
+    #[test]
+    fn token_command_resolves_from_defaults_account_source_and_env() {
+        let toml = r#"
+            [defaults]
+            token_command = "defaults"
+
+            [accounts.alice]
+            token_command = "account"
+
+            [accounts.alice.sources.liked]
+            token_command = "source"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.token_command.as_deref(), Some("account"));
+
+        let eff = cfg
+            .resolve("alice", Some("liked"), &no_env(), &no_flags())
+            .unwrap();
+        assert_eq!(eff.token_command.as_deref(), Some("source"));
+
+        let env: HashMap<String, String> = [("SUNO_TOKEN_COMMAND".into(), "global".into())]
+            .into_iter()
+            .collect();
+        let eff = cfg
+            .resolve("alice", Some("liked"), &env, &no_flags())
+            .unwrap();
+        assert_eq!(eff.token_command.as_deref(), Some("global"));
+
+        let env: HashMap<String, String> = [
+            ("SUNO_TOKEN_COMMAND".into(), "global".into()),
+            ("SUNO_ALICE_TOKEN_COMMAND".into(), "per_account".into()),
+        ]
+        .into_iter()
+        .collect();
+        let eff = cfg
+            .resolve("alice", Some("liked"), &env, &no_flags())
+            .unwrap();
+        assert_eq!(eff.token_command.as_deref(), Some("per_account"));
+    }
+
+    #[test]
+    fn per_account_token_command_env_label_uppersnakedcase() {
+        let cfg = Config::from_toml("[accounts.my-lib]\n").unwrap();
+        let env: HashMap<String, String> = [("SUNO_MY_LIB_TOKEN_COMMAND".into(), "command".into())]
+            .into_iter()
+            .collect();
+        let eff = cfg.resolve("my-lib", None, &env, &no_flags()).unwrap();
+        assert_eq!(eff.token_command.as_deref(), Some("command"));
     }
 
     #[test]

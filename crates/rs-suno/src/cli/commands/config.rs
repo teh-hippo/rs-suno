@@ -1,7 +1,7 @@
 //! `config init`, `config add-account`, and `config show`.
 //!
 //! The core `Config` type is deserialize-only, so writing is done by emitting
-//! TOML text directly. `show` redacts every token.
+//! TOML text directly. `show` redacts every token-bearing setting.
 
 use std::io::Write;
 #[cfg(unix)]
@@ -149,6 +149,7 @@ fn render_show(config: &Config) -> String {
         || d.concurrency.is_some()
         || d.retries.is_some()
         || d.min_newest.is_some()
+        || d.token_command.is_some()
         || d.animated_covers.is_some()
         || d.naming_template.is_some()
         || d.character_set.is_some()
@@ -162,6 +163,7 @@ fn render_show(config: &Config) -> String {
         );
         push_opt(&mut out, "retries", d.retries.map(|v| v.to_string()));
         push_opt(&mut out, "min_newest", d.min_newest.map(|v| v.to_string()));
+        push_redacted(&mut out, "token_command", d.token_command.as_deref());
         push_opt(
             &mut out,
             "animated_covers",
@@ -185,6 +187,7 @@ fn render_show(config: &Config) -> String {
             Some(_) => "  token = [redacted]\n",
             None => "  token = [not set]\n",
         });
+        push_redacted(&mut out, "token_command", acc.token_command.as_deref());
         push_opt(&mut out, "root", acc.root.clone());
         push_opt(&mut out, "format", acc.format.map(|f| f.to_string()));
         push_reserved(
@@ -214,6 +217,7 @@ fn render_show(config: &Config) -> String {
         for name in sources {
             let src = &acc.sources[name];
             out.push_str(&format!("  [accounts.{label}.sources.{name}]\n"));
+            push_redacted(&mut out, "    token_command", src.token_command.as_deref());
             push_opt(&mut out, "    format", src.format.map(|f| f.to_string()));
             push_opt(&mut out, "    naming_template", src.naming_template.clone());
             push_opt(
@@ -285,6 +289,12 @@ fn push_reserved(out: &mut String, key: &str, value: Option<String>) {
         out.push_str(&format!(
             "  {key} = {value}  # reserved; downloads are sequential\n"
         ));
+    }
+}
+
+fn push_redacted(out: &mut String, key: &str, value: Option<&str>) {
+    if value.is_some() {
+        out.push_str(&format!("  {key} = [redacted]\n"));
     }
 }
 
@@ -400,6 +410,26 @@ mod tests {
         assert!(shown.contains("token = [redacted]"));
         assert!(!shown.contains("supersecret"));
         assert!(shown.contains("root = /music"));
+    }
+
+    #[test]
+    fn show_redacts_token_command() {
+        let toml = r#"
+            [defaults]
+            token_command = "printf 'default-secret\n'"
+
+            [accounts.alice]
+            token_command = "printf 'account-secret\n'"
+
+            [accounts.alice.sources.liked]
+            token_command = "printf 'source-secret\n'"
+        "#;
+        let config = Config::from_toml(toml).unwrap();
+        let shown = render_show(&config);
+        assert!(shown.contains("token_command = [redacted]"));
+        assert!(!shown.contains("default-secret"));
+        assert!(!shown.contains("account-secret"));
+        assert!(!shown.contains("source-secret"));
     }
 
     #[test]

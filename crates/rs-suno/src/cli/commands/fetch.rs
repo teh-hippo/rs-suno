@@ -43,9 +43,18 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             return Ok(ExitCode::Config);
         }
     };
-    let Some(token) = settings.token else {
-        eprintln!("error: no token for account '{label}'; pass --token or set it in config");
-        return Ok(ExitCode::Config);
+    let token = match run::resolve_token(&label, &settings).await {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            eprintln!(
+                "error: no token for account '{label}'; pass --token, set SUNO_TOKEN or SUNO_TOKEN_COMMAND, or set token/token_command in config"
+            );
+            return Ok(ExitCode::Config);
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            return Ok(ExitCode::Config);
+        }
     };
 
     let id = parse_clip_id(&args.id);

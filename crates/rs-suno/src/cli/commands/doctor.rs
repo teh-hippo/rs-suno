@@ -357,6 +357,8 @@ mod tests {
     fn settings() -> EffectiveSettings {
         EffectiveSettings {
             token: Some("eyJsupersecret".to_owned()),
+            stored_token: None,
+            token_command: None,
             account_id: Some("acct-123".to_owned()),
             format: AudioFormat::Flac,
             concurrency: 4,

@@ -34,13 +34,29 @@ value like a password. Anyone with it can access your library.
 
 ## Provide the token
 
-You can supply the token three ways, in order of precedence:
+You can supply the token four ways, in order of precedence:
 
 1. The `--token <TOKEN>` flag.
 2. The `SUNO_TOKEN` environment variable (or the per-account
    `SUNO_<LABEL>_TOKEN`).
-3. The `token` field in your [config file](configuration.md), which is the usual
-   place for it.
+3. A `token_command`, from `SUNO_TOKEN_COMMAND`, `SUNO_<LABEL>_TOKEN_COMMAND`,
+   or your [config file](configuration.md). `rs-suno` runs the configured shell
+   command, trims stdout, and uses that as the token.
+4. The `token` field in your [config file](configuration.md), which is the usual
+   fallback place for it.
+
+For example, Bitwarden Secrets Manager works natively with:
+
+```toml
+[accounts.me]
+token_command = "bws secret list -o json | jq -r '[.[]|select(.key==\"SUNO_TOKEN\")][0].value'"
+```
+
+or just for one run:
+
+```bash
+SUNO_TOKEN_COMMAND="bws secret get <secret-id>" suno sync
+```
 
 The interactive setup writes it to the config for you:
 
@@ -84,5 +100,10 @@ suno config add-account <account> --token <new-token>
 - The `--token` flag hides its environment value in help output.
 - The `__client` cookie is only ever sent to Clerk; the Suno API only ever
   receives the short-lived JWT.
+
+If you use `token_command`, remember that `rs-suno` executes a user-configured
+shell command and trusts its stdout as the credential. Keep that command under
+your control, avoid echoing secrets to stderr, and treat the command itself as
+sensitive configuration.
 
 Never commit a token to source control or paste it into logs or issues.

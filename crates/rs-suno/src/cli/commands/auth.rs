@@ -41,10 +41,20 @@ async fn refresh_accounts(global: &GlobalArgs, refresh: &AuthRefreshArgs) -> Res
     let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
     let mut worst = ExitCode::Ok;
     for (label, settings) in resolved {
-        let Some(token) = settings.token else {
-            eprintln!("error: no token for account '{label}'; pass --token or set it in config");
-            worst = worse(worst, ExitCode::Config);
-            continue;
+        let token = match run::resolve_token(&label, &settings).await {
+            Ok(Some(token)) => token,
+            Ok(None) => {
+                eprintln!(
+                    "error: no token for account '{label}'; pass --token, set SUNO_TOKEN or SUNO_TOKEN_COMMAND, or set token/token_command in config"
+                );
+                worst = worse(worst, ExitCode::Config);
+                continue;
+            }
+            Err(err) => {
+                eprintln!("error: {err}");
+                worst = worse(worst, ExitCode::Config);
+                continue;
+            }
         };
         let mut auth = ClerkAuth::new(&token);
         match auth.authenticate(&http).await {
@@ -145,7 +155,7 @@ mod tests {
         .unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].0, "alice");
-        assert_eq!(targets[0].1.token.as_deref(), Some("t"));
+        assert_eq!(targets[0].1.stored_token.as_deref(), Some("t"));
     }
 
     #[test]
