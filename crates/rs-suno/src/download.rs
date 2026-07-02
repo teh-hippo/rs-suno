@@ -43,8 +43,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     write_atomic_impl(path, bytes, false)
 }
 
-/// Write `bytes` to `path` atomically via a private (`0600`) temporary file and
-/// rename.
+/// Write `bytes` to `path` atomically via a temporary file and rename.
+///
+/// On Unix the temporary file is created with private (`0600`) permissions. That
+/// mode is not applied on non-Unix platforms, where the private flag is ignored.
 pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     write_atomic_impl(path, bytes, true)
 }
@@ -88,10 +90,12 @@ fn write_temp_file(path: &Path, bytes: &[u8], _private: bool) -> std::io::Result
     Ok(())
 }
 
-/// Apply `mode` to `path`, removing the file again if hardening fails.
+/// Apply `mode` to `path`. If hardening fails, remove the file only when its
+/// current permissions are looser than `mode`; a file already at least as
+/// restrictive as `mode` is kept so a transient chmod failure never discards it.
 #[cfg(unix)]
 pub fn set_permissions_or_remove(path: &Path, mode: u32) -> std::io::Result<()> {
-    set_permissions_or_remove_with(path, |path| {
+    set_permissions_or_remove_with(path, mode, |path| {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
     })
 }
@@ -102,22 +106,35 @@ pub fn set_permissions_or_remove(_path: &Path, _mode: u32) -> std::io::Result<()
 }
 
 #[cfg(unix)]
-fn set_permissions_or_remove_with<F>(path: &Path, set_permissions: F) -> std::io::Result<()>
+fn set_permissions_or_remove_with<F>(
+    path: &Path,
+    mode: u32,
+    set_permissions: F,
+) -> std::io::Result<()>
 where
     F: FnOnce(&Path) -> std::io::Result<()>,
 {
-    match set_permissions(path) {
-        Ok(()) => Ok(()),
-        Err(err) => match std::fs::remove_file(path) {
-            Ok(()) => Err(err),
-            Err(remove_err) => Err(std::io::Error::new(
-                err.kind(),
-                format!(
-                    "{err}; also could not remove insecure file {}: {remove_err}",
-                    path.display()
-                ),
-            )),
-        },
+    let Err(err) = set_permissions(path) else {
+        return Ok(());
+    };
+    // Hardening failed. Keep the file when its permissions are already at least
+    // as restrictive as the target (they grant nothing beyond `mode`); only
+    // remove it when leaving it could expose it more widely than intended.
+    if let Ok(meta) = std::fs::metadata(path) {
+        let current = meta.permissions().mode() & 0o777;
+        if current & !(mode & 0o777) == 0 {
+            return Ok(());
+        }
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Err(err),
+        Err(remove_err) => Err(std::io::Error::new(
+            err.kind(),
+            format!(
+                "{err}; also could not remove insecure file {}: {remove_err}",
+                path.display()
+            ),
+        )),
     }
 }
 
@@ -260,8 +277,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("secret.bin");
         std::fs::write(&path, b"secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        let err = set_permissions_or_remove_with(&path, |_path| {
+        let err = set_permissions_or_remove_with(&path, 0o600, |_path| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "no chmod",
@@ -271,6 +289,30 @@ mod tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_permissions_or_remove_keeps_already_restrictive_file() {
+        let dir = Path::new("target").join(format!("write-atomic-keep-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.bin");
+        std::fs::write(&path, b"secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        set_permissions_or_remove_with(&path, 0o600, |_path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "no chmod",
+            ))
+        })
+        .unwrap();
+
+        assert!(path.exists());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
