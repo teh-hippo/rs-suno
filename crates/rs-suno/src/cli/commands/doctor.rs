@@ -5,7 +5,10 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use suno_core::{ClerkAuth, Config, EffectiveSettings, FlagOverrides, SunoClient, TOKEN_EXPIRY_WARN_DAYS, TokenExpiry};
+use suno_core::{
+    ClerkAuth, Config, EffectiveSettings, FlagOverrides, SunoClient, TOKEN_EXPIRY_WARN_DAYS,
+    TokenExpiry,
+};
 
 use crate::cli::args::GlobalArgs;
 use crate::cli::commands::version;
@@ -151,8 +154,13 @@ fn resolve_targets(
         return labels
             .into_iter()
             .map(|label| {
-                let settings = cfg.resolve(&label, None, env, flags).map_err(|err| err.to_string())?;
-                let root = cfg.accounts.get(&label).and_then(|account| account.root.clone());
+                let settings = cfg
+                    .resolve(&label, None, env, flags)
+                    .map_err(|err| err.to_string())?;
+                let root = cfg
+                    .accounts
+                    .get(&label)
+                    .and_then(|account| account.root.clone());
                 Ok(DoctorTarget {
                     label,
                     settings,
@@ -163,7 +171,9 @@ fn resolve_targets(
     }
 
     let (label, settings) = run::single_account(config, global, flags, env)?;
-    let root = config.and_then(|cfg| cfg.accounts.get(&label)).and_then(|account| account.root.clone());
+    let root = config
+        .and_then(|cfg| cfg.accounts.get(&label))
+        .and_then(|account| account.root.clone());
     Ok(vec![DoctorTarget {
         label,
         settings,
@@ -218,7 +228,12 @@ fn render_env_section(out: &mut String, env: &HashMap<String, String>) {
         Some(path) => writeln!(out, "  SUNO_CONFIG: set ({path})").ok(),
         None => writeln!(out, "  SUNO_CONFIG: unset").ok(),
     };
-    writeln!(out, "  SUNO_TOKEN: {}", present(env.contains_key("SUNO_TOKEN"))).ok();
+    writeln!(
+        out,
+        "  SUNO_TOKEN: {}",
+        present(env.contains_key("SUNO_TOKEN"))
+    )
+    .ok();
 }
 
 fn render_config_section(out: &mut String, config: &ConfigDiagnostic) {
@@ -314,7 +329,9 @@ fn exit_code_for_core_error(err: &suno_core::Error) -> ExitCode {
     match err {
         suno_core::Error::Auth(_) => ExitCode::Auth,
         suno_core::Error::Config(_) => ExitCode::Config,
-        suno_core::Error::Connection(_) | suno_core::Error::RateLimited { .. } => ExitCode::Transient,
+        suno_core::Error::Connection(_) | suno_core::Error::RateLimited { .. } => {
+            ExitCode::Transient
+        }
         _ => ExitCode::General,
     }
 }

@@ -728,7 +728,11 @@ mod tests {
     #[test]
     fn get_billing_info_rejects_missing_balance() {
         let mut rules = auth_rules();
-        rules.push(Rule::new(BILLING_INFO_PATH, 200, r#"{"monthly_usage":12}"#.to_string()));
+        rules.push(Rule::new(
+            BILLING_INFO_PATH,
+            200,
+            r#"{"monthly_usage":12}"#.to_string(),
+        ));
         let http = MockHttp::new(rules);
         let mut client = authed_client(&http);
 
