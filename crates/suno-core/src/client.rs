@@ -57,8 +57,9 @@ impl<C: Clock> SunoClient<C> {
     /// List clips across the whole library, or only liked clips.
     ///
     /// Walks the cursor-paginated `POST /api/feed/v3` feed, following
-    /// `next_cursor` until the server reports the end. Stops early once `limit`
-    /// clips are collected. Paging is hard-capped at [`MAX_PAGES`] so a runaway
+    /// `next_cursor` until the server reports the end. Once `limit` clips have
+    /// been collected it stops at the next page boundary and truncates to
+    /// `limit`. Paging is hard-capped at [`MAX_PAGES`] so a runaway
     /// `has_more` can never loop forever. When `liked` is set the feed filter
     /// scopes to liked clips (`liked: "True"`).
     ///
