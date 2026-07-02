@@ -14,7 +14,9 @@ use suno_core::Config;
 use crate::cli::args::{ConfigAddAccountArgs, ConfigArgs, ConfigCommand, GlobalArgs};
 use crate::cli::desired::ExitCode;
 use crate::cli::logs;
-use crate::download::{set_permissions_or_remove, write_atomic_private};
+#[cfg(unix)]
+use crate::download::set_permissions_or_remove;
+use crate::download::write_atomic_private;
 
 const PRIVATE_CONFIG_FILE_MODE: u32 = 0o600;
 const PRIVATE_CONFIG_DIR_MODE: u32 = 0o700;

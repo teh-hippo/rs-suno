@@ -100,11 +100,6 @@ pub fn set_permissions_or_remove(path: &Path, mode: u32) -> std::io::Result<()> 
     })
 }
 
-#[cfg(not(unix))]
-pub fn set_permissions_or_remove(_path: &Path, _mode: u32) -> std::io::Result<()> {
-    Ok(())
-}
-
 #[cfg(unix)]
 fn set_permissions_or_remove_with<F>(
     path: &Path,

@@ -17,7 +17,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use suno_core::{Action, Clip, Failure, LineageStore, Manifest, Plan, render_library_index};
 
-use crate::download::{set_permissions_or_remove, write_atomic, write_atomic_private};
+#[cfg(unix)]
+use crate::download::set_permissions_or_remove;
+use crate::download::{write_atomic, write_atomic_private};
 
 /// The manifest file name, kept beside the mirrored library.
 pub const MANIFEST_NAME: &str = ".suno-manifest.json";

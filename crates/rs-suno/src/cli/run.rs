@@ -32,6 +32,7 @@ use crate::cli::desired::{
 use crate::cli::logs;
 use crate::cli::output;
 use crate::clock::TokioClock;
+#[cfg(unix)]
 use crate::download::set_permissions_or_remove;
 use crate::ffmpeg::FfmpegAdapter;
 use crate::fs::FsAdapter;
@@ -1791,6 +1792,7 @@ fn read_last_run(dest: &Path) -> Option<u64> {
 fn write_last_run(dest: &Path) {
     let path = dest.join(LAST_RUN_NAME);
     if std::fs::write(&path, now_secs().to_string()).is_ok() {
+        #[cfg(unix)]
         let _ = set_permissions_or_remove(&path, PRIVATE_STATE_FILE_MODE);
     }
 }
