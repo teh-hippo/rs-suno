@@ -996,6 +996,7 @@ async fn execute_plan(
         max_retries: settings.retries,
         wav_poll_attempts: WAV_POLL_ATTEMPTS,
         wav_poll_interval: WAV_POLL_INTERVAL,
+        concurrency: settings.concurrency,
     };
     let started = std::time::Instant::now();
 

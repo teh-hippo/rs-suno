@@ -171,8 +171,8 @@ pub struct SyncArgs {
     /// Download retry attempts per clip.
     #[arg(long, value_name = "N")]
     pub retries: Option<u32>,
-    /// Simultaneous downloads (reserved; downloads are currently sequential).
-    #[arg(long, value_name = "N", hide = true)]
+    /// Simultaneous downloads (default 4).
+    #[arg(long, value_name = "N")]
     pub concurrency: Option<u32>,
     /// Also write an animated cover.webp from each clip's video preview.
     #[arg(long)]

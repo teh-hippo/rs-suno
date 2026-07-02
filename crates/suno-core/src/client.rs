@@ -62,6 +62,14 @@ impl<C: Clock> SunoClient<C> {
         &self.auth
     }
 
+    /// The adaptive limiter's current requests-per-second rate, for tests that
+    /// assert the limiter still records success and `429` correctly (including
+    /// under concurrent WAV-render calls serialised through the executor).
+    #[cfg(test)]
+    pub(crate) fn limiter_rate(&self) -> f64 {
+        self.limiter.rate()
+    }
+
     /// List clips across the whole library, or only liked clips.
     ///
     /// Walks the cursor-paginated `POST /api/feed/v3` feed, following

@@ -254,6 +254,7 @@ pub(super) fn fast_opts() -> ExecOptions {
         max_retries: 3,
         wav_poll_attempts: 3,
         wav_poll_interval: Duration::from_secs(5),
+        concurrency: 4,
     }
 }
 

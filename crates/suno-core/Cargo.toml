@@ -12,6 +12,7 @@ readme = "../../README.md"
 [dependencies]
 base64 = "0.22.1"
 fnv = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 id3 = "1"
 metaflac = "0.2"
 serde = { version = "1.0.228", features = ["derive"] }
