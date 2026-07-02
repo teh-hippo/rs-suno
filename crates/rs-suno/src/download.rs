@@ -50,10 +50,22 @@ pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 fn write_atomic_impl(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
+    write_atomic_with(path, bytes, private, replace)
+}
+
+fn write_atomic_with<F>(
+    path: &Path,
+    bytes: &[u8],
+    private: bool,
+    replace_fn: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
     let tmp = temp_sibling(path);
     let _scratch = Scratch(tmp.clone());
     write_temp_file(&tmp, bytes, private)?;
-    replace(&tmp, path)?;
+    replace_fn(&tmp, path)?;
     Ok(())
 }
 
@@ -96,10 +108,16 @@ where
 {
     match set_permissions(path) {
         Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = std::fs::remove_file(path);
-            Err(err)
-        }
+        Err(err) => match std::fs::remove_file(path) {
+            Ok(()) => Err(err),
+            Err(remove_err) => Err(std::io::Error::new(
+                err.kind(),
+                format!(
+                    "{err}; also could not remove insecure file {}: {remove_err}",
+                    path.display()
+                ),
+            )),
+        },
     }
 }
 
@@ -252,6 +270,30 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_private_cleans_up_temp_on_rename_failure() {
+        let dir = Path::new("target").join(format!("write-atomic-private-fail-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.bin");
+        assert!(
+            write_atomic_with(&path, b"secret", true, |_tmp, _path| {
+                Err(std::io::Error::other("rename failed"))
+            })
+            .is_err()
+        );
+
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.is_empty());
         assert!(!path.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
