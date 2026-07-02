@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/teh-hippo/rs-suno/compare/v0.8.0...v0.9.0) (2026-07-02)
+
+
+### Features
+
+* embed real lyrics and add an optional untimed .lrc sidecar ([#53](https://github.com/teh-hippo/rs-suno/issues/53)) ([3fb9df3](https://github.com/teh-hippo/rs-suno/commit/3fb9df3a10a1e9cf396988353c1bd3546c595bd8))
+
 ## [0.8.0](https://github.com/teh-hippo/rs-suno/compare/v0.7.0...v0.8.0) (2026-07-02)
 
 
