@@ -10,6 +10,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{IsTerminal, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -41,6 +43,8 @@ const WAV_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How many deletion paths the confirmation prompt lists before summarising.
 const PROMPT_PATH_LIMIT: usize = 3;
 const LAST_RUN_NAME: &str = ".suno-last-run";
+#[cfg(unix)]
+const PRIVATE_STATE_FILE_MODE: u32 = 0o600;
 
 /// Which verb is running; it sets the source mode and whether the run executes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1431,7 +1435,14 @@ fn read_last_run(dest: &Path) -> Option<u64> {
 }
 
 fn write_last_run(dest: &Path) {
-    let _ = std::fs::write(dest.join(LAST_RUN_NAME), now_secs().to_string());
+    let path = dest.join(LAST_RUN_NAME);
+    if std::fs::write(&path, now_secs().to_string()).is_ok() {
+        #[cfg(unix)]
+        let _ = std::fs::set_permissions(
+            &path,
+            std::fs::Permissions::from_mode(PRIVATE_STATE_FILE_MODE),
+        );
+    }
 }
 
 /// Resolve when a SIGINT (Ctrl-C) or, on Unix, a SIGTERM arrives.
@@ -1485,6 +1496,27 @@ mod tests {
             dest,
             token_available: token,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn last_run_marker_uses_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = Path::new("target").join(format!(
+            "run-last-run-perms-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_last_run(&dir);
+        let mode = std::fs::metadata(dir.join(LAST_RUN_NAME))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

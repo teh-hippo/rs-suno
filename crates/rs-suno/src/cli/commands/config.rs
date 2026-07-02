@@ -4,6 +4,8 @@
 //! TOML text directly. `show` redacts every token.
 
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -13,6 +15,11 @@ use crate::cli::args::{ConfigAddAccountArgs, ConfigArgs, ConfigCommand, GlobalAr
 use crate::cli::desired::ExitCode;
 use crate::cli::logs;
 use crate::download::write_atomic;
+
+#[cfg(unix)]
+const PRIVATE_CONFIG_FILE_MODE: u32 = 0o600;
+#[cfg(unix)]
+const PRIVATE_CONFIG_DIR_MODE: u32 = 0o700;
 
 /// Run a `config` subcommand.
 pub fn run_config(global: &GlobalArgs, args: &ConfigArgs) -> Result<ExitCode> {
@@ -230,9 +237,23 @@ fn write_config(path: &Path, body: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
+        set_private_permissions(parent, PRIVATE_CONFIG_DIR_MODE)?;
     }
     write_atomic(path, body.as_bytes())
-        .with_context(|| format!("could not write {}", path.display()))
+        .with_context(|| format!("could not write {}", path.display()))?;
+    set_private_permissions(path, PRIVATE_CONFIG_FILE_MODE)
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path, mode: u32) -> Result<()> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("could not set permissions on {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
 }
 
 /// Escape a string for a double-quoted TOML value.
@@ -355,5 +376,32 @@ mod tests {
     fn opt_blanks_become_none() {
         assert_eq!(opt("   "), None);
         assert_eq!(opt(" /music "), Some("/music"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_config_sets_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            Path::new("target").join(format!("config-private-{}-{stamp}", std::process::id()));
+        let path = dir.join("suno/config.toml");
+        write_config(&path, "[accounts.default]\ntoken = \"x\"\n").unwrap();
+
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(dir_mode, 0o700);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
