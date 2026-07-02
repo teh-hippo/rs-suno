@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/teh-hippo/rs-suno/compare/v0.7.0...v0.8.0) (2026-07-02)
+
+
+### Features
+
+* scope a sync to liked songs or specific playlists ([#50](https://github.com/teh-hippo/rs-suno/issues/50)) ([8eef731](https://github.com/teh-hippo/rs-suno/commit/8eef731a58ebf8d773bccb1953347d8c4eca5978))
+
 ## [0.7.0](https://github.com/teh-hippo/rs-suno/compare/v0.6.0...v0.7.0) (2026-07-02)
 
 
