@@ -787,10 +787,9 @@ mod tests {
     #[test]
     fn per_account_token_command_env_label_uppersnakedcase() {
         let cfg = Config::from_toml("[accounts.my-lib]\n").unwrap();
-        let env: HashMap<String, String> =
-            [("SUNO_MY_LIB_TOKEN_COMMAND".into(), "command".into())]
-                .into_iter()
-                .collect();
+        let env: HashMap<String, String> = [("SUNO_MY_LIB_TOKEN_COMMAND".into(), "command".into())]
+            .into_iter()
+            .collect();
         let eff = cfg.resolve("my-lib", None, &env, &no_flags()).unwrap();
         assert_eq!(eff.token_command.as_deref(), Some("command"));
     }

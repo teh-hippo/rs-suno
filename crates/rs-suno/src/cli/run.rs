@@ -2037,24 +2037,20 @@ mod tests {
     #[test]
     fn token_available_accepts_token_command_env() {
         let global = GlobalArgs::default();
-        let env: HashMap<String, String> = [(
-            "SUNO_TOKEN_COMMAND".to_owned(),
-            "printf secret".to_owned(),
-        )]
-        .into_iter()
-        .collect();
+        let env: HashMap<String, String> =
+            [("SUNO_TOKEN_COMMAND".to_owned(), "printf secret".to_owned())]
+                .into_iter()
+                .collect();
         assert!(super::token_available(&global, &env));
     }
 
     #[test]
     fn single_account_accepts_implicit_token_command_env() {
         let global = GlobalArgs::default();
-        let env: HashMap<String, String> = [(
-            "SUNO_TOKEN_COMMAND".to_owned(),
-            "printf token".to_owned(),
-        )]
-        .into_iter()
-        .collect();
+        let env: HashMap<String, String> =
+            [("SUNO_TOKEN_COMMAND".to_owned(), "printf token".to_owned())]
+                .into_iter()
+                .collect();
         let (label, settings) =
             single_account(None, &global, &FlagOverrides::default(), &env).unwrap();
         assert_eq!(label, "default");
@@ -2078,7 +2074,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_token_uses_trimmed_command_stdout() {
-        let settings = settings_with(None, Some("stored-token"), Some(&success_command("cmd-token")));
+        let settings = settings_with(
+            None,
+            Some("stored-token"),
+            Some(&success_command("cmd-token")),
+        );
         let token = resolve_token("alice", &settings).unwrap();
         assert_eq!(token.as_deref(), Some("cmd-token"));
     }
