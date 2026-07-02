@@ -45,6 +45,40 @@ pub(crate) fn decode_jwt_exp(token: &str) -> i64 {
     value.get("exp").and_then(Value::as_i64).unwrap_or(0)
 }
 
+/// Warn when the pasted `__client` cookie is within this many days of expiry.
+pub const TOKEN_EXPIRY_WARN_DAYS: i64 = 14;
+
+/// The lifecycle state of the pasted `__client` cookie relative to now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenExpiry {
+    /// The cookie could not be decoded, so its deadline is unknown.
+    Unknown,
+    /// The cookie is valid and comfortably beyond the warning window.
+    Fresh,
+    /// The cookie expires within the warning window, in `days` (rounded up).
+    Expiring { days: i64 },
+    /// The cookie has already expired.
+    Expired,
+}
+
+/// Classify a cookie's `exp` against `now_unix` and a warning `window_secs`.
+///
+/// `days` is rounded up so any time left short of a full day still reports at
+/// least `1`, never `0`.
+pub fn classify_token_expiry(exp: i64, now_unix: i64, window_secs: i64) -> TokenExpiry {
+    if exp <= now_unix {
+        return TokenExpiry::Expired;
+    }
+    let remaining = exp - now_unix;
+    if remaining < window_secs {
+        const DAY_SECS: i64 = 86_400;
+        return TokenExpiry::Expiring {
+            days: (remaining + DAY_SECS - 1) / DAY_SECS,
+        };
+    }
+    TokenExpiry::Fresh
+}
+
 struct ClientInfo {
     session_id: String,
     user_id: Option<String>,
@@ -159,6 +193,23 @@ impl ClerkAuth {
     /// The account display name, or `"Suno"` when none is known.
     pub fn display_name(&self) -> &str {
         self.display_name.as_deref().unwrap_or("Suno")
+    }
+
+    /// Decode the `exp` claim of the stored `__client` cookie, if it decodes.
+    pub fn cookie_exp(&self) -> Option<i64> {
+        let normalised = normalise_token(&self.cookie);
+        let token = normalised.strip_prefix("__client=")?;
+        match decode_jwt_exp(token) {
+            0 => None,
+            exp => Some(exp),
+        }
+    }
+
+    /// Classify how close the stored cookie is to its own expiry.
+    pub fn token_expiry(&self, now_unix: i64, window_secs: i64) -> TokenExpiry {
+        self.cookie_exp()
+            .map(|exp| classify_token_expiry(exp, now_unix, window_secs))
+            .unwrap_or(TokenExpiry::Unknown)
     }
 
     /// Fetch the Clerk session and a first JWT, returning the user ID.
@@ -287,6 +338,82 @@ mod tests {
     fn decode_exp_handles_garbage() {
         assert_eq!(decode_jwt_exp("not-a-jwt"), 0);
         assert_eq!(decode_jwt_exp(""), 0);
+    }
+
+    #[test]
+    fn classify_marks_fresh_beyond_window() {
+        let window = TOKEN_EXPIRY_WARN_DAYS * 86_400;
+        let exp = 1_000_000 + window + 1;
+        assert_eq!(
+            classify_token_expiry(exp, 1_000_000, window),
+            TokenExpiry::Fresh
+        );
+    }
+
+    #[test]
+    fn classify_boundary_is_fresh_just_inside_is_expiring() {
+        let window = TOKEN_EXPIRY_WARN_DAYS * 86_400;
+        let now = 1_000_000;
+        assert_eq!(
+            classify_token_expiry(now + window, now, window),
+            TokenExpiry::Fresh
+        );
+        assert_eq!(
+            classify_token_expiry(now + window - 1, now, window),
+            TokenExpiry::Expiring {
+                days: TOKEN_EXPIRY_WARN_DAYS
+            }
+        );
+    }
+
+    #[test]
+    fn classify_ceils_partial_days() {
+        let window = TOKEN_EXPIRY_WARN_DAYS * 86_400;
+        let now = 1_000_000;
+        assert_eq!(
+            classify_token_expiry(now + 43_200, now, window),
+            TokenExpiry::Expiring { days: 1 }
+        );
+    }
+
+    #[test]
+    fn classify_marks_expired_at_or_before_now() {
+        let window = TOKEN_EXPIRY_WARN_DAYS * 86_400;
+        assert_eq!(
+            classify_token_expiry(1_000, 1_000, window),
+            TokenExpiry::Expired
+        );
+        assert_eq!(
+            classify_token_expiry(999, 1_000, window),
+            TokenExpiry::Expired
+        );
+    }
+
+    #[test]
+    fn token_expiry_round_trips_through_cookie() {
+        let window = TOKEN_EXPIRY_WARN_DAYS * 86_400;
+        let now = 1_000_000;
+        let exp = now + 5 * 86_400;
+        let auth = ClerkAuth::new(&jwt_with_exp(exp));
+        assert_eq!(auth.cookie_exp(), Some(exp));
+        assert_eq!(
+            auth.token_expiry(now, window),
+            TokenExpiry::Expiring { days: 5 }
+        );
+    }
+
+    #[test]
+    fn token_expiry_is_unknown_for_undecodable_cookie() {
+        let window = TOKEN_EXPIRY_WARN_DAYS * 86_400;
+        let garbage = ClerkAuth::new("rawvalue");
+        assert_eq!(garbage.cookie_exp(), None);
+        assert_eq!(
+            garbage.token_expiry(1_000_000, window),
+            TokenExpiry::Unknown
+        );
+        // A JWT carrying exp = 0 decodes to nothing usable, so also Unknown.
+        let zero = ClerkAuth::new(&jwt_with_exp(0));
+        assert_eq!(zero.token_expiry(1_000_000, window), TokenExpiry::Unknown);
     }
 
     #[test]

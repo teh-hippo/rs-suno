@@ -61,6 +61,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     if let Err(err) = auth.authenticate(&http).await {
         return Ok(run::report_auth_failure(&label, &err));
     }
+    crate::cli::expiry::warn_token_expiry(&label, &auth, global.verbosity());
     let mut client = SunoClient::new(auth, TokioClock);
 
     let clip = client

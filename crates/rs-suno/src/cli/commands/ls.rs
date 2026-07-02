@@ -54,6 +54,7 @@ pub async fn run_ls(global: &GlobalArgs, args: &LsArgs, force_json: bool) -> Res
         Err(err) => return Ok(run::report_auth_failure(&label, &err)),
     };
     let display_name = auth.display_name().to_owned();
+    crate::cli::expiry::warn_token_expiry(&label, &auth, global.verbosity());
     let mut client = SunoClient::new(auth, TokioClock);
 
     let (clips, _complete) = match client.list_clips(&http, args.liked, args.limit).await {

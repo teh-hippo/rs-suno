@@ -32,7 +32,7 @@ mod testutil;
 #[cfg(test)]
 mod sync_chaos;
 
-pub use auth::ClerkAuth;
+pub use auth::{ClerkAuth, TOKEN_EXPIRY_WARN_DAYS, TokenExpiry, classify_token_expiry};
 pub use client::{Playlist, SunoClient};
 pub use clock::Clock;
 pub use config::{
