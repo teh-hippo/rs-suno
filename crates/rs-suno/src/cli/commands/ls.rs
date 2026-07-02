@@ -34,9 +34,18 @@ pub async fn run_ls(global: &GlobalArgs, args: &LsArgs, force_json: bool) -> Res
             return Ok(ExitCode::Config);
         }
     };
-    let Some(token) = settings.token else {
-        eprintln!("error: no token for account '{label}'; pass --token or set it in config");
-        return Ok(ExitCode::Config);
+    let token = match run::resolve_token(&label, &settings) {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            eprintln!(
+                "error: no token for account '{label}'; pass --token, set SUNO_TOKEN or SUNO_TOKEN_COMMAND, or set token/token_command in config"
+            );
+            return Ok(ExitCode::Config);
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            return Ok(ExitCode::Config);
+        }
     };
 
     let since = match args.since.as_deref().map(RecencySpec::parse).transpose() {

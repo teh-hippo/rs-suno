@@ -60,7 +60,7 @@ token = "<your __client token>"
 root = "/home/alice/music/suno"
 
 [accounts.work]
-token = "<another token>"
+token_command = "bws secret get <secret-id>"
 root = "/home/alice/music/suno-work"
 format = "mp3"
 ```
@@ -74,6 +74,7 @@ needed. These modes are not applied on non-Unix platforms.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `token` | string | | The `__client` session token for the account. |
+| `token_command` | string | | A shell command to run for the account token. `rs-suno` trims stdout and uses it as the token. It is resolved after `--token` and `SUNO_*_TOKEN`, but before the stored `token`. |
 | `root` | path | | Default destination directory. Used when a command omits `DEST`, and required by `--all`. |
 | `account_id` | string | | Optional Suno user id this account must authenticate as. When set, a run refuses (exit 7) before contacting Suno if the token belongs to a different id, a belt-and-braces check alongside the on-disk owner pin. See [deletion safety](sync-copy-and-deletion-safety.md). |
 | `format` | `mp3` \| `flac` \| `wav` | `flac` | Audio format for downloads. |
@@ -87,6 +88,12 @@ needed. These modes are not applied on non-Unix platforms.
 
 Any account key except `token`, `root`, and `account_id` may also be set under
 `[defaults]` to apply to every account.
+
+`token_command` also works in `[accounts.<label>.sources.<name>]`, so one source
+can override an account or default command when needed.
+
+Security note: `token_command` runs a user-configured shell command. Keep it
+under your control and never rely on untrusted input in the command string.
 
 ### Per-area sync/copy modes
 
@@ -140,11 +147,21 @@ For every setting, the first value found wins, in this order:
 3. Config file (`[accounts.<label>]` before `[defaults]`).
 4. The built-in default.
 
+Token resolution has one extra step between environment variables and the stored
+account token:
+
+1. `--token`
+2. `SUNO_<LABEL>_TOKEN` or `SUNO_TOKEN`
+3. `SUNO_<LABEL>_TOKEN_COMMAND`, `SUNO_TOKEN_COMMAND`, or `token_command`
+   resolved from source, account, then defaults
+4. `[accounts.<label>].token`
+
 ## Environment variables
 
 | Variable | Equivalent | Notes |
 |---|---|---|
 | `SUNO_TOKEN` | `--token` | Also `SUNO_<LABEL>_TOKEN` for one account. |
+| `SUNO_TOKEN_COMMAND` | `token_command` | Also `SUNO_<LABEL>_TOKEN_COMMAND` for one account. |
 | `SUNO_ACCOUNT` | `--account` | |
 | `SUNO_CONFIG` | `--config` | |
 | `SUNO_DRY_RUN` | `--dry-run` | |

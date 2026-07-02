@@ -13,6 +13,7 @@ use std::io::{IsTerminal, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -180,7 +181,7 @@ pub fn plan_targets(
         _ => {
             if !sel.token_available {
                 return Err(
-                    "no account configured and no token provided; pass --token or run 'suno config init'"
+                    "no account configured and no token provided; pass --token, set SUNO_TOKEN_COMMAND, or run 'suno config init'"
                         .to_owned(),
                 );
             }
@@ -236,7 +237,7 @@ async fn run(
     exit_code: bool,
 ) -> Result<ExitCode> {
     let env: HashMap<String, String> = std::env::vars().collect();
-    let token_available = global.token.is_some() || env.contains_key("SUNO_TOKEN");
+    let token_available = token_available(global, &env);
 
     let config = match load_config(global.config.as_deref())? {
         ConfigState::Loaded(cfg) => Some(cfg),
@@ -315,7 +316,7 @@ pub(crate) fn single_account(
     flags: &FlagOverrides,
     env: &HashMap<String, String>,
 ) -> std::result::Result<(String, suno_core::EffectiveSettings), String> {
-    let token_available = global.token.is_some() || env.contains_key("SUNO_TOKEN");
+    let token_available = token_available(global, env);
     let (label, implicit) = if global.all {
         return Err(
             "this command runs a single account; pass --account instead of --all".to_owned(),
@@ -343,7 +344,8 @@ pub(crate) fn single_account(
             _ => {
                 if !token_available {
                     return Err(
-                        "no account configured and no token provided; pass --token".to_owned()
+                        "no account configured and no token provided; pass --token or set SUNO_TOKEN_COMMAND"
+                            .to_owned()
                     );
                 }
                 ("default".to_owned(), true)
@@ -359,6 +361,67 @@ pub(crate) fn single_account(
     }
     .map_err(|err| err.to_string())?;
     Ok((label, settings))
+}
+
+pub(crate) fn resolve_token(
+    label: &str,
+    settings: &suno_core::EffectiveSettings,
+) -> std::result::Result<Option<String>, String> {
+    if let Some(token) = settings.token.clone() {
+        return Ok(Some(token));
+    }
+    if let Some(command) = settings.token_command.as_deref() {
+        return run_token_command(label, command).map(Some);
+    }
+    Ok(settings.stored_token.clone())
+}
+
+fn run_token_command(label: &str, command: &str) -> std::result::Result<String, String> {
+    let output = token_command_process(command)
+        .output()
+        .map_err(|err| format!("could not run token_command for account '{label}': {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "token_command for account '{label}' failed with {}",
+            exit_status_summary(output.status)
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|_| format!("token_command for account '{label}' produced non-UTF-8 output"))?;
+    let token = stdout.trim();
+    if token.is_empty() {
+        return Err(format!(
+            "token_command for account '{label}' produced empty output"
+        ));
+    }
+    Ok(token.to_owned())
+}
+
+#[cfg(unix)]
+fn token_command_process(command: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command);
+    cmd
+}
+
+#[cfg(windows)]
+fn token_command_process(command: &str) -> Command {
+    let mut cmd = Command::new("cmd");
+    cmd.arg("/C").arg(command);
+    cmd
+}
+
+fn exit_status_summary(status: ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("exit status {code}"),
+        None => "termination by signal".to_owned(),
+    }
+}
+
+fn token_available(global: &GlobalArgs, env: &HashMap<String, String>) -> bool {
+    global.token.is_some()
+        || env.contains_key("SUNO_TOKEN")
+        || env.contains_key("SUNO_TOKEN_COMMAND")
 }
 
 /// Load config from the override or platform default. A missing default file is
@@ -445,12 +508,19 @@ async fn run_one(
         }
     };
 
-    let Some(token) = settings.token.clone() else {
-        eprintln!(
-            "error: no token for account '{}'; pass --token or set it in config",
-            target.label
-        );
-        return Ok(ExitCode::Config);
+    let token = match resolve_token(&target.label, &settings) {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            eprintln!(
+                "error: no token for account '{}'; pass --token, set SUNO_TOKEN or SUNO_TOKEN_COMMAND, or set token/token_command in config",
+                target.label
+            );
+            return Ok(ExitCode::Config);
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            return Ok(ExitCode::Config);
+        }
     };
 
     if settings.format == suno_core::AudioFormat::Wav && verbosity >= -1 {
@@ -1853,6 +1923,41 @@ mod tests {
         }
     }
 
+    fn settings_with(
+        token: Option<&str>,
+        stored_token: Option<&str>,
+        token_command: Option<&str>,
+    ) -> suno_core::EffectiveSettings {
+        suno_core::EffectiveSettings {
+            token: token.map(str::to_owned),
+            stored_token: stored_token.map(str::to_owned),
+            token_command: token_command.map(str::to_owned),
+            account_id: None,
+            format: suno_core::AudioFormat::Flac,
+            concurrency: 4,
+            retries: 3,
+            min_newest: 1,
+            animated_covers: false,
+            details_sidecar: false,
+            lyrics_sidecar: false,
+            lrc_sidecar: false,
+            video_mp4: false,
+            naming_template: "{title}".to_owned(),
+            character_set: suno_core::CharacterSet::Unicode,
+            areas: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn success_command(token: &str) -> String {
+        format!("printf '%s\\n' '{token}'")
+    }
+
+    #[cfg(unix)]
+    fn fail_command(output: &str) -> String {
+        format!("printf '%s' '{output}'; exit 23")
+    }
+
     #[cfg(unix)]
     #[test]
     fn last_run_marker_uses_private_permissions() {
@@ -1927,6 +2032,75 @@ mod tests {
     fn implicit_without_dest_errors() {
         let s = sel(false, None, None, true);
         assert!(plan_targets(None, &s).is_err());
+    }
+
+    #[test]
+    fn token_available_accepts_token_command_env() {
+        let global = GlobalArgs::default();
+        let env: HashMap<String, String> = [(
+            "SUNO_TOKEN_COMMAND".to_owned(),
+            "printf secret".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+        assert!(super::token_available(&global, &env));
+    }
+
+    #[test]
+    fn single_account_accepts_implicit_token_command_env() {
+        let global = GlobalArgs::default();
+        let env: HashMap<String, String> = [(
+            "SUNO_TOKEN_COMMAND".to_owned(),
+            "printf token".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+        let (label, settings) =
+            single_account(None, &global, &FlagOverrides::default(), &env).unwrap();
+        assert_eq!(label, "default");
+        assert_eq!(settings.token_command.as_deref(), Some("printf token"));
+    }
+
+    #[test]
+    fn resolve_token_prefers_direct_token_over_stored_token() {
+        let settings = settings_with(Some("flag-token"), Some("stored-token"), None);
+        let token = resolve_token("alice", &settings).unwrap();
+        assert_eq!(token.as_deref(), Some("flag-token"));
+    }
+
+    #[test]
+    fn resolve_token_falls_back_to_stored_token() {
+        let settings = settings_with(None, Some("stored-token"), None);
+        let token = resolve_token("alice", &settings).unwrap();
+        assert_eq!(token.as_deref(), Some("stored-token"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_token_uses_trimmed_command_stdout() {
+        let settings = settings_with(None, Some("stored-token"), Some(&success_command("cmd-token")));
+        let token = resolve_token("alice", &settings).unwrap();
+        assert_eq!(token.as_deref(), Some("cmd-token"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_token_command_failure_is_clear_and_redacted() {
+        let secret = "secret-command-output";
+        let settings = settings_with(None, Some("stored-token"), Some(&fail_command(secret)));
+        let err = resolve_token("alice", &settings).unwrap_err();
+        assert!(err.contains("token_command for account 'alice' failed with exit status 23"));
+        assert!(!err.contains(secret), "error leaked command output: {err}");
+        assert!(!err.contains("stored-token"), "error leaked token: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_token_command_rejects_whitespace_output() {
+        let settings = settings_with(None, Some("stored-token"), Some("printf '   \\n\\t'"));
+        let err = resolve_token("alice", &settings).unwrap_err();
+        assert!(err.contains("produced empty output"));
+        assert!(!err.contains("stored-token"), "error leaked token: {err}");
     }
 
     #[test]
