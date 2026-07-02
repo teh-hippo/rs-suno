@@ -65,8 +65,9 @@ configured `root` is used.
 | `--format <mp3\|flac\|wav>` | `flac` | Audio format for downloads. |
 | `--limit <N>` | | Mirror only the N most recent clips. |
 | `--since <SPEC>` | | Mirror clips newer than `7d`, `2w`, or `last-run`. |
-| `--liked` | off | Scope the run to your liked songs only. |
-| `--playlist <ID_OR_NAME>` | | Scope the run to a playlist, by id or name (repeatable). |
+| `--liked` | off | Scope the run to your liked songs only (additive unless `--mode mirror`). |
+| `--playlist <ID_OR_NAME>` | | Scope the run to a playlist, by id or name (repeatable; additive unless `--mode mirror`). |
+| `--mode <mirror\|copy>` | | Override the mode for this run: `mirror` may delete, `copy` only adds. |
 | `--min-newest <N>` | `1` | Newest clips always kept when a recency filter applies. |
 | `--retries <N>` | `3` | Download retry attempts per clip. |
 | `--animated-covers` | off | Also write animated WebP covers from video previews. |
@@ -84,16 +85,19 @@ or ambiguous value fails and prints the visible playlists. `--playlist liked` is
 an alias for `--liked`. Clips that appear in more than one scope are downloaded
 once.
 
-A scoped run only ever lists part of your library, so, like `--limit` and
-`--since`, it never deletes: no file, folder art, or `.m3u8` is removed on a
-scoped run. Scoped runs also do not maintain `.m3u8` playlists, but they may
-still write and rewrite folder art for the albums they touch. `--liked` and
-`--playlist` are command-line flags only for now; there is no per-source scope in
-the config file yet.
+A bare scoped run is **additive**: `--liked` and `--playlist` default to `copy`,
+so like `--limit` and `--since` they never delete. Adding `--mode mirror` arms
+deletion for the scope, but `rs-suno` then also lists your whole library as an
+invisible copy protector, so a scoped mirror deletes only the orphans of the
+scope it was pointed at and never a file that lives elsewhere in your library
+(see [deletion safety](sync-copy-and-deletion-safety.md)). A scoped mirror
+maintains the `.m3u8` only for the playlists it enumerated; a full-library `sync`
+maintains every playlist's `.m3u8`. For a durable per-area mode, use the
+`[areas]` config (see the configuration guide).
 
 ```bash
 # Mirror only your liked songs:
-suno sync /music/suno --liked
+suno sync /music/suno --liked --mode mirror
 
 # Mirror two playlists by name and id:
 suno sync /music/suno --playlist "Neon Nights" --playlist 6f1e...c3

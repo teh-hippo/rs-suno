@@ -15,6 +15,42 @@ safe.
 Both verbs share the same selection and the same incremental engine. The only
 difference is whether local files may be removed.
 
+### Choosing the mode per area
+
+By default the verb sets the mode for the whole run: `sync` mirrors, `copy` adds.
+Two mechanisms let you choose the mode for a specific area instead:
+
+- **`--mode <mirror|copy>`** overrides the mode for a single run. It pairs with a
+  scope flag, so `suno sync --playlist "Focus" --mode mirror` mirrors just that
+  playlist while `suno sync --liked --mode copy` tops the liked feed up
+  additively. With no scope flag, `--mode mirror` mirrors the whole library and
+  `--mode copy` is additive, exactly like the verb.
+- **The `[areas]` config** sets a durable per-area mode for an account: a
+  `library`, `liked`, and per-playlist `mirror` or `copy`, plus `library = "off"`
+  (see the configuration guide). Config-driven areas apply whenever you run
+  without a scope flag; a scope flag always wins for that run.
+
+An area set to `mirror` can delete; an area set to `copy` only ever adds. The
+deletion-safety rules below apply to every area no matter how its mode was
+chosen.
+
+### Scoped mirrors keep the rest of your library safe
+
+A bare `--liked` or `--playlist X` is **copy** by default, so it deletes nothing.
+Arming deletion for a scope needs `--mode mirror` (or a `mirror` area in config).
+
+When any armed area is a mirror **and** the library is not itself a selected
+area, `rs-suno` still lists your **whole** library as an invisible copy
+protector for that run. That protector holds every library-exclusive file, so a
+scoped mirror can delete only the orphans of the scope it was pointed at, never a
+file that lives elsewhere in your library. The protector lists the full library
+unfiltered, so a stray `--limit` or `--since` cannot shrink it and silently widen
+what a mirror may delete.
+
+The one way to delete library-exclusive files deliberately is `library = "off"`
+in an `[areas]` config, which drops the protector. It is only expressible in
+config, never as a flag, so it can never happen by accident.
+
 ## What a run does
 
 Each run works in three stages:
@@ -75,9 +111,16 @@ no truncation, and no narrowing filter was applied. In practice this means:
 - A network or listing error disables deletion for that run.
 - `--limit` and `--since` narrow the listing, so a run using either **never
   deletes**. Use them freely for quick top-ups without any deletion risk.
-- `--liked` and `--playlist` scope a run to a subset of your library, so a scoped
-  run **never deletes** either. Scoped runs also skip `.m3u8` playlist
-  maintenance, though they may still write folder art for the albums they touch.
+- `--liked` and `--playlist` are additive by default, so a bare scoped run
+  **never deletes**. Adding `--mode mirror` arms deletion for that scope, but the
+  implicit full-library copy protector (described above) still shields every
+  file outside the scope. A scoped mirror maintains the `.m3u8` only for the
+  playlists it actually enumerated; a full-library `sync` maintains every
+  playlist's `.m3u8` as before.
+
+An empty **mirror** area is never treated as authoritative: a legitimately empty
+feed is indistinguishable from a dropped listing, so it suppresses deletion for
+the whole run rather than risk deleting everything the area held.
 
 A missing clip in a partial or filtered listing might still exist upstream, so it
 is never read as a deletion.
@@ -245,6 +288,10 @@ suno sync --yes
 
 # Fast top-up of just the last week, with no deletion risk:
 suno sync --since 7d
+
+# Mirror a single playlist, deleting only that playlist's orphans while the
+# rest of the library stays protected:
+suno sync --playlist "Focus" --mode mirror
 
 # See exactly what a mirror would change, changing nothing:
 suno check --exit-code

@@ -38,7 +38,8 @@ pub use auth::{ClerkAuth, TOKEN_EXPIRY_WARN_DAYS, TokenExpiry, classify_token_ex
 pub use client::{Playlist, SunoClient};
 pub use clock::Clock;
 pub use config::{
-    AccountConfig, AudioFormat, Config, Defaults, EffectiveSettings, FlagOverrides, SourceConfig,
+    AccountConfig, AreaMode, AreasConfig, AudioFormat, Config, Defaults, EffectiveSettings,
+    FlagOverrides, SourceConfig,
 };
 pub use downloadable::is_downloadable;
 pub use error::{Error, Result};

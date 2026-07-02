@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::naming::CharacterSet;
+use crate::reconcile::SourceMode;
 
 /// Audio format for downloaded clips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -97,6 +98,58 @@ pub struct AccountConfig {
     pub character_set: Option<CharacterSet>,
     #[serde(default)]
     pub sources: HashMap<String, SourceConfig>,
+    /// Per-area mode selection (`sync` vs `copy`) for this account's library,
+    /// liked feed, and playlists. Absent means the classic single-verb run.
+    pub areas: Option<AreasConfig>,
+}
+
+/// How a single area treats deletion, including the library-only `off` value.
+///
+/// `off` is expressible only for the library area: it deliberately arms deletion
+/// of library-exclusive files by suppressing the implicit copy-protector, so a
+/// typo can never silently disarm that safety. `copy` and `mirror` map straight
+/// onto the matching [`SourceMode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AreaMode {
+    /// Suppress the implicit library copy-protector (arm library deletions).
+    Off,
+    /// Treat the area with the given [`SourceMode`].
+    Mode(SourceMode),
+}
+
+impl<'de> Deserialize<'de> for AreaMode {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.as_str() {
+            "off" => Ok(AreaMode::Off),
+            "copy" => Ok(AreaMode::Mode(SourceMode::Copy)),
+            "mirror" => Ok(AreaMode::Mode(SourceMode::Mirror)),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown area mode '{other}', expected 'off', 'copy', or 'mirror'"
+            ))),
+        }
+    }
+}
+
+/// Per-area mode selection for an account.
+///
+/// `library` accepts `off`/`copy`/`mirror`; `liked` and `playlists` accept
+/// `copy`/`mirror`; `playlist` overrides individual playlists by canonical Suno
+/// id. `deny_unknown_fields` turns a mistyped key (e.g. `libary`) into a parse
+/// error rather than a silent no-op. The `playlist` map cannot carry
+/// `deny_unknown_fields` (its keys are dynamic playlist ids), but every value is
+/// a closed [`SourceMode`], so a bad mode string still errors at parse time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AreasConfig {
+    pub library: Option<AreaMode>,
+    pub liked: Option<SourceMode>,
+    pub playlists: Option<SourceMode>,
+    #[serde(default)]
+    pub playlist: HashMap<String, SourceMode>,
 }
 
 /// Top-level configuration parsed from a TOML file.
@@ -319,6 +372,7 @@ impl Config {
             lrc_sidecar,
             naming_template,
             character_set,
+            areas: acc.areas.clone(),
         })
     }
 }
@@ -403,6 +457,8 @@ pub struct EffectiveSettings {
     pub lrc_sidecar: bool,
     pub naming_template: String,
     pub character_set: CharacterSet,
+    /// The per-account `[areas]` selection table, if configured.
+    pub areas: Option<AreasConfig>,
 }
 
 #[cfg(test)]
@@ -491,6 +547,7 @@ mod tests {
                 lrc_sidecar: false,
                 naming_template: crate::naming::DEFAULT_TEMPLATE.to_owned(),
                 character_set: CharacterSet::Unicode,
+                areas: None,
             }
         );
     }
@@ -914,5 +971,73 @@ mod tests {
             .into_iter()
             .collect();
         assert!(cfg.resolve("alice", None, &env, &no_flags()).is_err());
+    }
+
+    #[test]
+    fn areas_parse_full_table() {
+        let toml = r#"
+            [accounts.alice]
+            token = "t"
+            [accounts.alice.areas]
+            library = "off"
+            liked = "copy"
+            playlists = "mirror"
+            [accounts.alice.areas.playlist]
+            "pl_abc123" = "mirror"
+            "pl_def456" = "copy"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let areas = cfg.accounts["alice"].areas.as_ref().unwrap();
+        assert_eq!(areas.library, Some(AreaMode::Off));
+        assert_eq!(areas.liked, Some(SourceMode::Copy));
+        assert_eq!(areas.playlists, Some(SourceMode::Mirror));
+        assert_eq!(areas.playlist["pl_abc123"], SourceMode::Mirror);
+        assert_eq!(areas.playlist["pl_def456"], SourceMode::Copy);
+    }
+
+    #[test]
+    fn areas_library_accepts_copy_and_mirror() {
+        for (raw, expect) in [
+            ("copy", AreaMode::Mode(SourceMode::Copy)),
+            ("mirror", AreaMode::Mode(SourceMode::Mirror)),
+        ] {
+            let toml =
+                format!("[accounts.a]\ntoken = \"t\"\n[accounts.a.areas]\nlibrary = \"{raw}\"\n");
+            let cfg = Config::from_toml(&toml).unwrap();
+            assert_eq!(
+                cfg.accounts["a"].areas.as_ref().unwrap().library,
+                Some(expect)
+            );
+        }
+    }
+
+    #[test]
+    fn areas_bad_mode_errors() {
+        let toml = "[accounts.a]\ntoken = \"t\"\n[accounts.a.areas]\nliked = \"miror\"\n";
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn areas_bad_playlist_mode_errors() {
+        let toml = "[accounts.a]\ntoken = \"t\"\n[accounts.a.areas.playlist]\n\"pl1\" = \"off\"\n";
+        // `off` is a library-only value; a per-playlist entry must be copy/mirror.
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn areas_unknown_field_errors() {
+        // D7: a mistyped key (libary) is a parse error, not a silent no-op.
+        let toml = "[accounts.a]\ntoken = \"t\"\n[accounts.a.areas]\nlibary = \"off\"\n";
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn areas_absent_is_none() {
+        let toml = "[accounts.a]\ntoken = \"t\"\n";
+        assert!(
+            Config::from_toml(toml).unwrap().accounts["a"]
+                .areas
+                .is_none()
+        );
     }
 }

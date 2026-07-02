@@ -86,6 +86,38 @@ needed. These modes are not applied on non-Unix platforms.
 Any account key except `token`, `root`, and `account_id` may also be set under
 `[defaults]` to apply to every account.
 
+### Per-area sync/copy modes
+
+By default a verb sets the mode for the whole run: `sync` mirrors, `copy` adds.
+An optional `[accounts.<label>.areas]` table gives an account a durable per-area
+mode instead, so a scheduled `suno sync` can mirror some areas and only add to
+others:
+
+```toml
+[accounts.me.areas]
+library = "mirror"   # "mirror", "copy", or "off"
+liked = "copy"       # "mirror" or "copy"
+playlists = "copy"   # default mode for every playlist
+
+[accounts.me.areas.playlist]
+# Per-playlist overrides, keyed by playlist id (see `suno ls-playlists`).
+pl_abc123 = "mirror"
+```
+
+- **`library`** takes `mirror`, `copy`, or `off`. `off` is the only way to let a
+  mirror delete files that exist only in your library and nowhere else, so it
+  drops the implicit copy protector described in
+  [deletion safety](sync-copy-and-deletion-safety.md). It cannot be set by a
+  flag, only here.
+- **`liked`** and **`playlists`** take `mirror` or `copy`. `playlists` sets the
+  default for every playlist; `[areas.playlist]` overrides individual playlists
+  by id.
+- An area you do not list is simply not selected by a config-driven run.
+
+A scope flag (`--liked` or `--playlist`) always overrides `[areas]` for that run,
+and an unknown key (for example `libary` instead of `library`) is a parse error
+rather than a silent no-op.
+
 ### Multiple accounts
 
 Each account has its own token and its own `root`. Account roots must not nest

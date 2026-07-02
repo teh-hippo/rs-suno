@@ -27,9 +27,9 @@ use suno_core::{
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
 use crate::cli::desired::{
-    ArtifactToggles, Confirm, ExitCode, LIKED_PLAYLIST_ID, PlaylistInput, build_desired,
-    build_playlist_desired, confirm_decision, confirmed, dedup_clips_by_id, fully_enumerated,
-    is_narrowed, is_scoped, mass_delete_abort, resolve_playlist, run_exit_code,
+    ArtifactToggles, Confirm, ExitCode, LIKED_PLAYLIST_ID, PlaylistInput, PlaylistPolicy,
+    ResolvedSelection, build_desired, build_modes_by_id, build_playlist_desired, confirm_decision,
+    confirmed, is_narrowed, mass_delete_abort, resolve_playlist, resolve_selection, run_exit_code,
 };
 use crate::cli::logs;
 use crate::cli::output;
@@ -555,29 +555,52 @@ async fn run_one(
 
     let mut client = SunoClient::new(auth, TokioClock);
 
-    // A scoped run (`--liked` and/or `--playlist`) lists only a subset of the
-    // library, so it can never delete: `enumerated` below folds `scoped` into the
-    // same not-fully-enumerated verdict a `--limit`/`--since` narrowing uses.
-    let scoped = is_scoped(args.liked, &args.playlist);
-    let (clips, complete) = if scoped {
-        match list_scoped_clips(&mut client, &http, &target.label, args, verbosity).await {
-            ScopedListing::Clips(clips) => (clips, false),
-            ScopedListing::Empty => {
-                if verbosity >= -1 {
-                    eprintln!(
-                        "notice: nothing to do; the requested scope holds no downloadable clips."
-                    );
-                }
-                return Ok(ExitCode::Ok);
-            }
-            ScopedListing::Failed(code) => return Ok(code),
-        }
-    } else {
-        match client.list_clips(&http, false, args.limit).await {
-            Ok(result) => result,
-            Err(err) => return Ok(report_listing_failure(&target.label, &err)),
-        }
+    // Resolve which areas this run touches and their modes (pure). CLI scope
+    // flags win over `[areas]` config; a copy verb or a force-additive run
+    // rewrites every mode to Copy. When any Mirror area is armed and the library
+    // is neither explicitly selected nor `"off"`, an implicit full-library copy
+    // protector is injected so a Mirror area can never delete a library-exclusive
+    // file (D1).
+    let force_copy_initial = verb == Verb::Copy || force_additive;
+    let selection = resolve_selection(
+        verb.mode(),
+        args.mode.map(SourceMode::from),
+        args.liked,
+        &args.playlist,
+        settings.areas.as_ref(),
+        force_copy_initial,
+    );
+
+    // List every area (IO). A failed secondary area contributes a
+    // non-enumerated, empty source (never aborting, never vanishing) so one
+    // failure suppresses all deletion while successful areas still download; an
+    // unresolvable explicit `--playlist X` typo keeps today's hard failure.
+    let areas = match enumerate_areas(
+        &selection,
+        &mut client,
+        &http,
+        &target.label,
+        args,
+        verbosity,
+    )
+    .await
+    {
+        Ok(areas) => areas,
+        Err(code) => return Ok(code),
     };
+
+    // Build the clip union in canonical area order (Library > Liked > Playlist),
+    // keeping the first area's payload per id so the Library variant wins (H1).
+    let clips = union_clips(&areas);
+
+    // A purely scoped run that resolved to nothing downloadable is a no-op: keep
+    // today's notice rather than fall through to an empty plan.
+    if clips.is_empty() && selection.library.is_none() {
+        if verbosity >= -1 {
+            eprintln!("notice: nothing to do; the requested scope holds no downloadable clips.");
+        }
+        return Ok(ExitCode::Ok);
+    }
 
     // Resolve every listed clip's root ancestor (roots need the whole set as
     // the universe). Resolution is best-effort: a hard IO failure degrades to
@@ -608,8 +631,9 @@ async fn run_one(
         store.update(&clips, resolution, &now_rfc3339());
     }
     let colliding_albums = store.colliding_root_titles();
-    let narrowed = is_narrowed(args.limit, args.since.as_deref());
-    let enumerated = fully_enumerated(complete, narrowed || scoped);
+    // Preliminary authority for the first-use adoption check, computed before
+    // any adoption can flip the run additive.
+    let enumerated = library_authoritative(&areas, force_copy_initial);
 
     // PHASE 2: first-use adoption, now the listing is known. Only a library
     // that PHASE 1 left unpinned (FirstUse) reaches here; identity is confirmed
@@ -687,15 +711,37 @@ async fn run_one(
         }
     }
 
-    // A re-pin run (Mismatch + --allow-account-change) must never delete the
-    // previous account's files this invocation, so it runs additively (Copy
-    // semantics) regardless of the verb; a subsequent normal sync, now pinned
-    // to the new account, will mirror.
-    let mode = if force_additive {
-        SourceMode::Copy
-    } else {
-        verb.mode()
-    };
+    // Assemble the final per-area view now the run's additivity is known. A copy
+    // verb or a force-additive run (re-pin/adopt) rewrites every area to Copy, so
+    // no Mirror source remains and deletion is impossible; the protector already
+    // never armed anything.
+    let force_copy = verb == Verb::Copy || force_additive;
+    let sources: Vec<SourceStatus> = areas
+        .iter()
+        .map(|area| SourceStatus {
+            mode: area_mode(area, force_copy),
+            fully_enumerated: area_enumerated(area, force_copy),
+        })
+        .collect();
+    let can_delete = deletion_allowed(&sources);
+    // Art, `.m3u8`, and the library index are gated on an authoritative Library:
+    // a Library area present in the selection (the implicit protector counts;
+    // `library="off"` does not) that fully enumerated.
+    let library_authoritative = library_authoritative(&areas, force_copy);
+
+    // Every clip's modes across the areas holding it, so each Desired carries the
+    // Copy protection of any Copy area even when a Mirror area also holds it
+    // (SYNC-8).
+    let area_modes: Vec<(SourceMode, Vec<String>)> = areas
+        .iter()
+        .map(|area| {
+            (
+                area_mode(area, force_copy),
+                area.clips.iter().map(|clip| clip.id.clone()).collect(),
+            )
+        })
+        .collect();
+    let modes_by_id = build_modes_by_id(&area_modes);
 
     let since = match args.since.as_deref().map(RecencySpec::parse).transpose() {
         Ok(since) => since,
@@ -704,9 +750,14 @@ async fn run_one(
             return Ok(ExitCode::Config);
         }
     };
+    // `--limit`/`--since` narrow the selection only on a run that cannot delete
+    // and has no authoritative library: truncating the union on an armed or
+    // protected run would drop a Mirror/protector clip from `desired` and turn it
+    // into a deletion candidate, so a stray `--limit` never disarms a mirror (D2).
+    let truncate = !can_delete && !library_authoritative;
     let params = SelectParams {
-        limit: args.limit,
-        since,
+        limit: if truncate { args.limit } else { None },
+        since: if truncate { since } else { None },
         min_newest: settings.min_newest as usize,
         now: now_secs(),
         last_run: read_last_run(dest),
@@ -719,7 +770,7 @@ async fn run_one(
     let desired = build_desired(
         &selected,
         settings.format,
-        mode,
+        &modes_by_id,
         &contexts,
         &colliding_albums,
         ArtifactToggles {
@@ -735,32 +786,43 @@ async fn run_one(
         },
     );
     // Folder-level album art is keyed on the stable root id and chosen purely
-    // from the selected clips (most-played for folder.jpg, first-created animated
-    // for cover.webp); --animated-covers gates the webp.
-    let albums_desired = album_desired(&desired, settings.animated_covers);
-
-    // Playlists (.m3u8) are reconciled only on a fully-enumerated run: a narrowed
-    // or truncated audio listing cannot authoritatively render a playlist (its
-    // members outside the selection would look absent), so leave every existing
-    // .m3u8 untouched rather than rewrite it to a comment-only stub (B2 spirit).
-    // Within a full run the fetch is best-effort per HARDENING B2: a failed
-    // /api/playlist/me listing yields an empty desired and playlists_enumerated
-    // = false (no writes, no deletes); a failed single-playlist member fetch adds
-    // that id to `protected`, excluding it from BOTH the desired writes and the
-    // stale-delete candidate set so its file is neither rewritten nor removed.
-    let mut protected_playlists: BTreeSet<String> = BTreeSet::new();
-    let (playlist_desired, playlists_enumerated) = if enumerated {
-        fetch_playlist_desired(
-            &mut client,
-            &http,
-            &desired,
-            &mut protected_playlists,
-            verbosity,
-        )
-        .await
+    // from the selected clips. Without an authoritative Library the folder view
+    // is partial, so leave folder art entirely untouched (no rewrites, no
+    // deletes) by handing the planner an empty desired set.
+    let albums_desired = if library_authoritative {
+        album_desired(&desired, settings.animated_covers)
     } else {
-        (Vec::new(), false)
+        Vec::new()
     };
+
+    // Playlists (.m3u8). Only the classic plain-library run walks every account
+    // playlist and maintains them all exactly as today (the full member sets are
+    // knowable). Every scoped or `[areas]` run -- including one carrying an
+    // injected copy-protector, which makes the Library authoritative for audio
+    // deletion but selects no playlists -- maintains only the playlist areas it
+    // selected and fully enumerated, and protects every other id so no `.m3u8`
+    // is rewritten or deleted from a partial view (B2/D3).
+    let mut protected_playlists: BTreeSet<String> = BTreeSet::new();
+    let (playlist_desired, playlists_enumerated) =
+        if selection.is_plain_library() && library_authoritative {
+            fetch_playlist_desired(
+                &mut client,
+                &http,
+                &desired,
+                &mut protected_playlists,
+                verbosity,
+            )
+            .await
+        } else {
+            build_scoped_playlist_desired(
+                &areas,
+                &desired,
+                &store,
+                &mut protected_playlists,
+                force_copy,
+                !truncate,
+            )
+        };
     // The stored view handed to the planner drops protected ids, so a playlist
     // whose members could not be fetched is never treated as stale (B2).
     let stored_playlists: BTreeMap<String, PlaylistState> = store
@@ -782,9 +844,9 @@ async fn run_one(
             &store.albums,
             &playlist_desired,
             &stored_playlists,
-            enumerated,
+            &sources,
+            library_authoritative,
             playlists_enumerated,
-            mode,
         )?;
         if verbosity >= 1 {
             let no_failures = HashSet::new();
@@ -816,9 +878,9 @@ async fn run_one(
         &store.albums,
         &playlist_desired,
         &stored_playlists,
-        enumerated,
+        &sources,
+        library_authoritative,
         playlists_enumerated,
-        mode,
     )?;
 
     // Persist the lineage graph *before* execute (durability H4), under the same
@@ -905,7 +967,7 @@ async fn run_one(
         &settings,
         &account,
         verbosity,
-        enumerated,
+        library_authoritative,
     )
     .await
 }
@@ -923,7 +985,7 @@ async fn execute_plan(
     settings: &suno_core::EffectiveSettings,
     account: &str,
     verbosity: i8,
-    enumerated: bool,
+    library_authoritative: bool,
 ) -> Result<ExitCode> {
     let fs = FsAdapter::new(dest);
     let ffmpeg = FfmpegAdapter::new(dest);
@@ -1006,12 +1068,12 @@ async fn execute_plan(
         .collect();
     // Best-effort library index: a regenerable scripting artefact, so a failure
     // to write it must never fail an otherwise-green mirror (unlike the
-    // manifest). Gated on `enumerated`, not playlist membership: a narrowed
-    // `--limit`/`--since` run sees only a window of clips live, so it would null
-    // the artist/tags/duration of every out-of-window clip and regress a richer
-    // index from a prior full run; only a full run writes, avoiding that
-    // live-field oscillation.
-    if enumerated
+    // manifest). Gated on an authoritative Library (D4), not playlist membership:
+    // a narrowed `--limit`/`--since` or area-only run sees only a window of clips
+    // live, so it would null the artist/tags/duration of every out-of-window clip
+    // and regress a richer index from a prior full run; only an authoritative
+    // Library run writes, avoiding that live-field oscillation.
+    if library_authoritative
         && let Err(err) = logs::save_index(dest, &manifest, store, &clips_by_id)
         && verbosity >= -1
     {
@@ -1058,86 +1120,353 @@ async fn execute_plan(
     Ok(run_exit_code(&outcome))
 }
 
-/// The outcome of listing a scoped run's clips.
-enum ScopedListing {
-    /// The deduplicated union of every scoped source's downloadable clips.
-    Clips(Vec<Clip>),
-    /// The scope resolved but held no downloadable clips (an empty or
-    /// fully-filtered playlist). The caller prints a notice and exits `Ok`; it
-    /// must never fall through to a full-feed sync.
-    Empty,
-    /// A listing or resolution failure. Carries the exit code to return.
-    Failed(ExitCode),
+/// One area's listing outcome for the multi-area planner.
+///
+/// The `authoritative_ignoring_empty` flag is the area's completeness verdict
+/// *before* the empty-mirror guard (§5), which [`area_enumerated`] applies later
+/// against the final mode, so a copy-verb override that turns a Mirror area Copy
+/// re-scores an empty area correctly.
+struct AreaListing {
+    kind: AreaKind,
+    /// The resolved (pre copy-override) mode for this area.
+    mode: SourceMode,
+    /// The area's downloadable clips.
+    clips: Vec<Clip>,
+    /// Completeness modulo the empty-mirror guard: `true` when the listing
+    /// drained, was not deliberately narrowed, and lost no member to the
+    /// downloadable filter.
+    authoritative_ignoring_empty: bool,
 }
 
-/// List the clips for a scoped run: the liked feed and/or named playlists.
+/// Which kind of area a listing came from, carrying playlist identity so its
+/// `.m3u8` can be maintained by id and name.
+enum AreaKind {
+    Library,
+    Liked,
+    Playlist { id: String, name: String },
+}
+
+/// This area's mode after the copy-verb / force-additive override.
+fn area_mode(area: &AreaListing, force_copy: bool) -> SourceMode {
+    if force_copy {
+        SourceMode::Copy
+    } else {
+        area.mode
+    }
+}
+
+/// Whether this area is authoritative for deletion, applying the empty-mirror
+/// guard (§5) against the final mode.
+fn area_enumerated(area: &AreaListing, force_copy: bool) -> bool {
+    let mode = area_mode(area, force_copy);
+    area.authoritative_ignoring_empty && !(area.clips.is_empty() && mode == SourceMode::Mirror)
+}
+
+/// Whether a Library area is present and fully enumerated (the implicit
+/// protector counts; `library="off"` leaves no Library area, so this is false).
+fn library_authoritative(areas: &[AreaListing], force_copy: bool) -> bool {
+    areas
+        .iter()
+        .any(|a| matches!(a.kind, AreaKind::Library) && area_enumerated(a, force_copy))
+}
+
+/// Build the clip union across areas in canonical order, first area winning per
+/// id so the Library payload is kept (H1).
+fn union_clips(areas: &[AreaListing]) -> Vec<Clip> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut union: Vec<Clip> = Vec::new();
+    for area in areas {
+        for clip in &area.clips {
+            if seen.insert(clip.id.clone()) {
+                union.push(clip.clone());
+            }
+        }
+    }
+    union
+}
+
+/// A playlist area whose listing could not be resolved or fetched: it holds no
+/// clips and is never authoritative, so it suppresses deletion without ever
+/// vanishing from the sources (§6).
+fn unresolved_playlist_area(mode: SourceMode) -> AreaListing {
+    AreaListing {
+        kind: AreaKind::Playlist {
+            id: String::new(),
+            name: String::new(),
+        },
+        mode,
+        clips: Vec::new(),
+        authoritative_ignoring_empty: false,
+    }
+}
+
+/// List every selected area (IO), in canonical order Library > Liked > Playlist.
 ///
-/// `--liked` (and the `--playlist liked` alias) contributes the liked feed;
-/// every other `--playlist` value is resolved against the account's own
-/// non-trashed playlists ([`resolve_playlist`]) and its members are filtered
-/// through [`is_downloadable`], since raw playlist members can include
-/// streaming, infill, and artefact clips the feed path already screens out. The
-/// sources are unioned and deduplicated by clip id, so a clip that appears in
-/// several scopes is downloaded once.
-///
-/// An unknown or ambiguous `--playlist` value prints the resolution error and
-/// the account's visible playlists, then fails with [`ExitCode::Config`] rather
-/// than silently widening the run. An empty resolved scope returns
-/// [`ScopedListing::Empty`] so a typo can never become a full sync.
-async fn list_scoped_clips(
+/// A failed *secondary* area (liked, a playlist, or the unfiltered library
+/// protector) warns and contributes a non-enumerated, empty source so one
+/// failure suppresses all deletion while successful areas still download (§6). A
+/// failed *plain* library listing (the sole area of a classic run) keeps today's
+/// hard abort, and an unresolvable explicit `--playlist X` typo keeps today's
+/// hard [`ExitCode::Config`].
+async fn enumerate_areas(
+    selection: &ResolvedSelection,
     client: &mut SunoClient<TokioClock>,
     http: &ReqwestHttp,
     label: &str,
     args: &SyncArgs,
     verbosity: i8,
-) -> ScopedListing {
-    // The `--playlist liked` alias unifies with the `--liked` synthetic source.
-    let mut want_liked = args.liked;
-    let mut playlist_values: Vec<&str> = Vec::new();
-    for value in &args.playlist {
-        if value == LIKED_PLAYLIST_ID {
-            want_liked = true;
-        } else {
-            playlist_values.push(value.as_str());
-        }
-    }
+) -> std::result::Result<Vec<AreaListing>, ExitCode> {
+    let mut areas: Vec<AreaListing> = Vec::new();
+    // A `--limit`/`--since` narrowing is a deliberate act, so a narrowed Library
+    // or Liked area is not authoritative; the unfiltered protector ignores it (D2)
+    // and playlists take neither flag.
+    let narrowed = is_narrowed(args.limit, args.since.as_deref());
 
-    let mut union: Vec<Clip> = Vec::new();
-
-    if want_liked {
-        match client.list_clips(http, true, None).await {
-            Ok((liked, _complete)) => union.extend(liked),
-            Err(err) => return ScopedListing::Failed(report_listing_failure(label, &err)),
-        }
-    }
-
-    if !playlist_values.is_empty() {
-        let playlists = match client.get_playlists(http).await {
-            Ok(playlists) => playlists,
-            Err(err) => return ScopedListing::Failed(report_listing_failure(label, &err)),
-        };
-        for value in &playlist_values {
-            let playlist = match resolve_playlist(value, &playlists) {
-                Ok(playlist) => playlist,
+    if let Some(lib) = selection.library {
+        if lib.unfiltered {
+            // Protector / configured Library: list the whole feed, ignoring any
+            // `--limit`/`--since` so a stray narrowing never disarms it (D2).
+            match client.list_clips(http, false, None).await {
+                Ok((clips, complete)) => areas.push(AreaListing {
+                    kind: AreaKind::Library,
+                    mode: lib.mode,
+                    clips,
+                    authoritative_ignoring_empty: complete,
+                }),
                 Err(err) => {
-                    eprintln!("error: {err}.");
-                    print_visible_playlists(&playlists, verbosity);
-                    return ScopedListing::Failed(ExitCode::Config);
+                    if verbosity >= -1 {
+                        eprintln!(
+                            "warning: library listing failed ({err}); suppressing deletion this run"
+                        );
+                    }
+                    areas.push(AreaListing {
+                        kind: AreaKind::Library,
+                        mode: lib.mode,
+                        clips: Vec::new(),
+                        authoritative_ignoring_empty: false,
+                    });
                 }
-            };
-            match client.get_playlist_clips(http, &playlist.id).await {
-                Ok(members) => union.extend(members.into_iter().filter(is_downloadable)),
-                Err(err) => return ScopedListing::Failed(report_listing_failure(label, &err)),
+            }
+        } else {
+            // Plain Library run: honours `--limit`, and a listing failure aborts
+            // exactly as today (the run has no other data source).
+            match client.list_clips(http, false, args.limit).await {
+                Ok((clips, complete)) => areas.push(AreaListing {
+                    kind: AreaKind::Library,
+                    mode: lib.mode,
+                    clips,
+                    authoritative_ignoring_empty: complete && !narrowed,
+                }),
+                Err(err) => return Err(report_listing_failure(label, &err)),
             }
         }
     }
 
-    let union = dedup_clips_by_id(union);
-    if union.is_empty() {
-        ScopedListing::Empty
-    } else {
-        ScopedListing::Clips(union)
+    if let Some(mode) = selection.liked {
+        match client.list_clips(http, true, None).await {
+            Ok((clips, complete)) => areas.push(AreaListing {
+                kind: AreaKind::Liked,
+                mode,
+                clips,
+                authoritative_ignoring_empty: complete && !narrowed,
+            }),
+            Err(err) => {
+                if verbosity >= -1 {
+                    eprintln!(
+                        "warning: liked feed failed to list ({err}); suppressing deletion this run"
+                    );
+                }
+                areas.push(AreaListing {
+                    kind: AreaKind::Liked,
+                    mode,
+                    clips: Vec::new(),
+                    authoritative_ignoring_empty: false,
+                });
+            }
+        }
     }
+
+    if !matches!(selection.playlists, PlaylistPolicy::None) {
+        // Resolve names and enumerate the `All` group via the account's playlists.
+        let playlists = match client.get_playlists(http).await {
+            Ok(playlists) => Some(playlists),
+            Err(err) => {
+                if selection.cli_scoped {
+                    return Err(report_listing_failure(label, &err));
+                }
+                if verbosity >= -1 {
+                    eprintln!(
+                        "warning: playlist listing failed ({err}); suppressing deletion this run"
+                    );
+                }
+                None
+            }
+        };
+        match (&selection.playlists, playlists) {
+            (PlaylistPolicy::Explicit(list), Some(pls)) => {
+                for (value, mode) in list {
+                    let playlist = match resolve_playlist(value, &pls) {
+                        Ok(playlist) => playlist,
+                        Err(err) => {
+                            if selection.cli_scoped {
+                                eprintln!("error: {err}.");
+                                print_visible_playlists(&pls, verbosity);
+                                return Err(ExitCode::Config);
+                            }
+                            if verbosity >= -1 {
+                                eprintln!(
+                                    "warning: a configured playlist could not be resolved ({err}); leaving its .m3u8 untouched"
+                                );
+                            }
+                            areas.push(unresolved_playlist_area(*mode));
+                            continue;
+                        }
+                    };
+                    areas.push(
+                        list_playlist_area(
+                            client,
+                            http,
+                            &playlist.id,
+                            &playlist.name,
+                            *mode,
+                            verbosity,
+                        )
+                        .await,
+                    );
+                }
+            }
+            (PlaylistPolicy::All { default, overrides }, Some(pls)) => {
+                for playlist in &pls {
+                    let mode = overrides.get(&playlist.id).copied().unwrap_or(*default);
+                    areas.push(
+                        list_playlist_area(
+                            client,
+                            http,
+                            &playlist.id,
+                            &playlist.name,
+                            mode,
+                            verbosity,
+                        )
+                        .await,
+                    );
+                }
+            }
+            (PlaylistPolicy::Explicit(list), None) => {
+                for (_, mode) in list {
+                    areas.push(unresolved_playlist_area(*mode));
+                }
+            }
+            (PlaylistPolicy::All { default, .. }, None) => {
+                areas.push(unresolved_playlist_area(*default));
+            }
+            (PlaylistPolicy::None, _) => {}
+        }
+    }
+
+    Ok(areas)
+}
+
+/// List one playlist's members (IO), filtering to downloadable clips. A failure
+/// contributes a non-enumerated, empty source (§6); a member lost to the
+/// downloadable filter marks the area non-authoritative so its Mirror cannot
+/// delete this run (§4).
+async fn list_playlist_area(
+    client: &mut SunoClient<TokioClock>,
+    http: &ReqwestHttp,
+    id: &str,
+    name: &str,
+    mode: SourceMode,
+    verbosity: i8,
+) -> AreaListing {
+    match client.get_playlist_clips(http, id).await {
+        Ok((raw, complete)) => {
+            let raw_len = raw.len();
+            let clips: Vec<Clip> = raw.into_iter().filter(is_downloadable).collect();
+            let any_filtered = clips.len() < raw_len;
+            AreaListing {
+                kind: AreaKind::Playlist {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                },
+                mode,
+                clips,
+                authoritative_ignoring_empty: complete && !any_filtered,
+            }
+        }
+        Err(err) => {
+            if verbosity >= -1 {
+                eprintln!(
+                    "warning: playlist '{name}' members failed to list ({err}); suppressing deletion this run"
+                );
+            }
+            AreaListing {
+                kind: AreaKind::Playlist {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                },
+                mode,
+                clips: Vec::new(),
+                authoritative_ignoring_empty: false,
+            }
+        }
+    }
+}
+
+/// Build the `.m3u8` desired state for an area-scoped run (no authoritative
+/// Library). Only the playlist and liked areas that fully enumerated their
+/// members are rendered, and only when `members_intact` (the union was not
+/// truncated by `--limit`/`--since`, so `desired` still holds every member);
+/// every other stored playlist id is protected so no `.m3u8` is rewritten or
+/// deleted from a partial view (B2/D3).
+fn build_scoped_playlist_desired(
+    areas: &[AreaListing],
+    desired: &[suno_core::Desired],
+    store: &suno_core::LineageStore,
+    protected: &mut BTreeSet<String>,
+    force_copy: bool,
+    members_intact: bool,
+) -> (Vec<PlaylistDesired>, bool) {
+    let mut owned: Vec<(String, String, Vec<Clip>)> = Vec::new();
+    for area in areas {
+        match &area.kind {
+            AreaKind::Playlist { id, name } => {
+                if members_intact && !id.is_empty() && area_enumerated(area, force_copy) {
+                    owned.push((id.clone(), name.clone(), area.clips.clone()));
+                } else if !id.is_empty() {
+                    protected.insert(id.clone());
+                }
+            }
+            AreaKind::Liked => {
+                if members_intact && area_enumerated(area, force_copy) {
+                    owned.push((
+                        LIKED_PLAYLIST_ID.to_owned(),
+                        "Liked Songs".to_owned(),
+                        area.clips.clone(),
+                    ));
+                } else {
+                    protected.insert(LIKED_PLAYLIST_ID.to_owned());
+                }
+            }
+            AreaKind::Library => {}
+        }
+    }
+    let rendered: BTreeSet<&str> = owned.iter().map(|(id, _, _)| id.as_str()).collect();
+    // Protect every stored playlist this run is not authoritatively rewriting, so
+    // a non-selected playlist's `.m3u8` is never treated as stale.
+    for id in store.playlists.keys() {
+        if !rendered.contains(id.as_str()) {
+            protected.insert(id.clone());
+        }
+    }
+    let inputs: Vec<PlaylistInput<'_>> = owned
+        .iter()
+        .map(|(id, name, members)| PlaylistInput {
+            id: id.as_str(),
+            name: name.as_str(),
+            members: members.as_slice(),
+        })
+        .collect();
+    (build_playlist_desired(&inputs, desired), true)
 }
 
 /// Print the account's own playlists to help a user correct a `--playlist` typo.
@@ -1185,11 +1514,24 @@ async fn fetch_playlist_desired(
         }
     };
 
-    // Own each playlist's members so the borrowed `PlaylistInput`s stay valid.
+    // Own each playlist's members so the borrowed `PlaylistInput`s stay valid. A
+    // playlist whose single page did not return its whole member set (D5) is
+    // protected rather than rendered from a truncated page (B2).
     let mut fetched: Vec<(String, String, Vec<Clip>)> = Vec::new();
     for playlist in &playlists {
         match client.get_playlist_clips(http, &playlist.id).await {
-            Ok(members) => fetched.push((playlist.id.clone(), playlist.name.clone(), members)),
+            Ok((members, true)) => {
+                fetched.push((playlist.id.clone(), playlist.name.clone(), members))
+            }
+            Ok((_, false)) => {
+                if verbosity >= -1 {
+                    eprintln!(
+                        "warning: playlist '{}' returned an incomplete member page; keeping its .m3u8 unchanged",
+                        playlist.name
+                    );
+                }
+                protected.insert(playlist.id.clone());
+            }
             Err(err) => {
                 if verbosity >= -1 {
                     eprintln!(
@@ -1251,11 +1593,17 @@ async fn fetch_playlist_desired(
 /// confirmation prompt already cover them.
 ///
 /// Playlists carry a second, independent gate: `playlists_enumerated` is true
-/// only when the `/api/playlist/me` listing succeeded on a fully-enumerated run.
+/// only when the playlist listing succeeded on a fully-enumerated run.
 /// [`plan_playlist_artifacts`] emits a playlist delete only when BOTH the shared
 /// `can_delete` verdict and `playlists_enumerated` hold, so a failed, empty, or
 /// partial playlist listing never removes an existing `.m3u8` (HARDENING B2).
 /// These deletes also count toward the mass-delete cap via [`Plan::artifact_deletes`].
+///
+/// `sources` is one [`SourceStatus`] per selected area, so [`deletion_allowed`]
+/// requires every area fully enumerated and at least one Mirror. Folder art
+/// carries the extra `library_authoritative` gate: without an authoritative
+/// Library the folder view is partial, so art is neither rewritten (the caller
+/// passes an empty `albums_desired`) nor deleted.
 #[allow(clippy::too_many_arguments)]
 fn load_and_reconcile(
     dest: &Path,
@@ -1264,20 +1612,17 @@ fn load_and_reconcile(
     albums: &BTreeMap<String, AlbumArt>,
     playlist_desired: &[PlaylistDesired],
     playlists: &BTreeMap<String, PlaylistState>,
-    enumerated: bool,
+    sources: &[SourceStatus],
+    library_authoritative: bool,
     playlists_enumerated: bool,
-    mode: SourceMode,
 ) -> Result<(suno_core::Manifest, suno_core::Plan)> {
     let manifest = logs::load_manifest(dest)?;
     let local = stat_manifest(dest, &manifest);
-    let sources = vec![SourceStatus {
-        mode,
-        fully_enumerated: enumerated,
-    }];
-    let can_delete = deletion_allowed(&sources);
-    let mut plan = reconcile(&manifest, desired, &local, &sources);
+    let can_delete = deletion_allowed(sources);
+    let art_can_delete = can_delete && library_authoritative;
+    let mut plan = reconcile(&manifest, desired, &local, sources);
     plan.actions
-        .extend(plan_album_artifacts(albums_desired, albums, can_delete));
+        .extend(plan_album_artifacts(albums_desired, albums, art_can_delete));
     plan.actions.extend(plan_playlist_artifacts(
         playlist_desired,
         playlists,
@@ -1544,6 +1889,10 @@ mod tests {
             Path::new("target").join(format!("run-nodir-{}-{}", std::process::id(), now_secs()));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!dir.exists());
+        let sources = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: false,
+        }];
         let (manifest, plan) = load_and_reconcile(
             &dir,
             &[],
@@ -1551,9 +1900,9 @@ mod tests {
             &BTreeMap::new(),
             &[],
             &BTreeMap::new(),
+            &sources,
             false,
             false,
-            SourceMode::Mirror,
         )
         .unwrap();
         assert!(manifest.is_empty());
@@ -1789,5 +2138,330 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(code, ExitCode::Usage);
+    }
+
+    fn tclip(id: &str) -> Clip {
+        Clip {
+            id: id.to_owned(),
+            title: "Song".to_owned(),
+            handle: "alice".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn area(kind: AreaKind, mode: SourceMode, ids: &[&str], authoritative: bool) -> AreaListing {
+        AreaListing {
+            kind,
+            mode,
+            clips: ids.iter().map(|id| tclip(id)).collect(),
+            authoritative_ignoring_empty: authoritative,
+        }
+    }
+
+    // Test 5: an empty Mirror area is never authoritative (a legitimately empty
+    // mirror is indistinguishable from a dropped listing), so deletion is
+    // suppressed. An empty Copy area stays enumerated (it protects nothing).
+    #[test]
+    fn empty_mirror_area_is_not_enumerated() {
+        let mirror = area(AreaKind::Liked, SourceMode::Mirror, &[], true);
+        assert!(!area_enumerated(&mirror, false));
+        let copy = area(AreaKind::Liked, SourceMode::Copy, &[], true);
+        assert!(area_enumerated(&copy, false));
+        // A non-empty mirror that fully listed is authoritative.
+        let full = area(AreaKind::Liked, SourceMode::Mirror, &["x"], true);
+        assert!(area_enumerated(&full, false));
+    }
+
+    // library_authoritative counts the implicit protector but is false for
+    // `library="off"` (no library area at all).
+    #[test]
+    fn library_authoritative_counts_protector_not_off() {
+        let with_protector = vec![
+            area(AreaKind::Library, SourceMode::Copy, &["lib"], true),
+            area(
+                AreaKind::Playlist {
+                    id: "p".into(),
+                    name: "P".into(),
+                },
+                SourceMode::Mirror,
+                &["pl"],
+                true,
+            ),
+        ];
+        assert!(library_authoritative(&with_protector, false));
+
+        let off = vec![area(
+            AreaKind::Playlist {
+                id: "p".into(),
+                name: "P".into(),
+            },
+            SourceMode::Mirror,
+            &["pl"],
+            true,
+        )];
+        assert!(!library_authoritative(&off, false));
+    }
+
+    // H1: the union keeps the first area's payload per id (Library wins over a
+    // later playlist copy of the same clip).
+    #[test]
+    fn union_keeps_first_area_payload() {
+        let mut lib = tclip("shared");
+        lib.title = "Library".to_owned();
+        let mut pl = tclip("shared");
+        pl.title = "Playlist".to_owned();
+        let areas = vec![
+            AreaListing {
+                kind: AreaKind::Library,
+                mode: SourceMode::Copy,
+                clips: vec![lib, tclip("lib-only")],
+                authoritative_ignoring_empty: true,
+            },
+            AreaListing {
+                kind: AreaKind::Playlist {
+                    id: "p".into(),
+                    name: "P".into(),
+                },
+                mode: SourceMode::Mirror,
+                clips: vec![pl],
+                authoritative_ignoring_empty: true,
+            },
+        ];
+        let union = union_clips(&areas);
+        assert_eq!(union.len(), 2);
+        assert_eq!(union[0].id, "shared");
+        assert_eq!(union[0].title, "Library");
+        assert_eq!(union[1].id, "lib-only");
+    }
+
+    // D1 / Test 3: `sync --playlist X --mode mirror` (no config) protects
+    // library-exclusive files while deleting a playlist-exclusive orphan. The
+    // protector lists the whole library as Copy, so a library-only manifest entry
+    // is stamped Copy in the union and never deleted, even though the playlist
+    // Mirror arms the run.
+    #[test]
+    fn mirror_playlist_protects_library_exclusive_files() {
+        use suno_core::{LocalFile, Manifest, ManifestEntry, reconcile};
+
+        // The resolved selection: playlist Mirror + injected library protector.
+        let selection = resolve_selection(
+            SourceMode::Mirror,
+            Some(SourceMode::Mirror),
+            false,
+            &["holiday".to_owned()],
+            None,
+            false,
+        );
+        assert!(selection.library.unwrap().protector);
+
+        // Enumerate: the protector holds the full library (lib-only + shared); the
+        // mirror playlist holds shared + pl-only.
+        let areas = vec![
+            area(
+                AreaKind::Library,
+                SourceMode::Copy,
+                &["lib-only", "shared"],
+                true,
+            ),
+            area(
+                AreaKind::Playlist {
+                    id: "holiday".into(),
+                    name: "Holiday".into(),
+                },
+                SourceMode::Mirror,
+                &["shared", "pl-only"],
+                true,
+            ),
+        ];
+        let force_copy = false;
+        let sources: Vec<SourceStatus> = areas
+            .iter()
+            .map(|a| SourceStatus {
+                mode: area_mode(a, force_copy),
+                fully_enumerated: area_enumerated(a, force_copy),
+            })
+            .collect();
+        assert!(deletion_allowed(&sources), "armed and fully enumerated");
+
+        let area_modes: Vec<(SourceMode, Vec<String>)> = areas
+            .iter()
+            .map(|a| {
+                (
+                    area_mode(a, force_copy),
+                    a.clips.iter().map(|c| c.id.clone()).collect(),
+                )
+            })
+            .collect();
+        let modes = build_modes_by_id(&area_modes);
+        // The library-exclusive clip is Copy-only; the shared clip is protected.
+        assert_eq!(modes["lib-only"], vec![SourceMode::Copy]);
+        assert_eq!(modes["shared"], vec![SourceMode::Mirror, SourceMode::Copy]);
+        assert_eq!(modes["pl-only"], vec![SourceMode::Mirror]);
+
+        let union = union_clips(&areas);
+        let desired = build_desired(
+            &union.iter().collect::<Vec<_>>(),
+            suno_core::AudioFormat::Flac,
+            &modes,
+            &HashMap::new(),
+            &BTreeSet::new(),
+            ArtifactToggles::default(),
+            &suno_core::NamingConfig::default(),
+        );
+
+        // Manifest: the three known clips plus a playlist-exclusive orphan that is
+        // no longer anywhere in source.
+        let mut manifest = Manifest::new();
+        for id in ["lib-only", "shared", "pl-only", "gone-orphan"] {
+            manifest.insert(
+                id,
+                ManifestEntry {
+                    path: format!("{id}.flac"),
+                    format: suno_core::AudioFormat::Flac,
+                    size: 100,
+                    ..Default::default()
+                },
+            );
+        }
+        let local: HashMap<String, LocalFile> = manifest
+            .iter()
+            .map(|(id, _)| {
+                (
+                    id.clone(),
+                    LocalFile {
+                        exists: true,
+                        size: 100,
+                    },
+                )
+            })
+            .collect();
+        let plan = reconcile(&manifest, &desired, &local, &sources);
+        let deleted: Vec<&str> = plan
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                suno_core::Action::Delete { clip_id, .. } => Some(clip_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Only the orphan with no source area is deleted; the library-exclusive
+        // file and the copy-protected shared clip survive.
+        assert_eq!(deleted, vec!["gone-orphan"]);
+    }
+
+    // Test 9: a single failed (non-enumerated) area suppresses deletion for the
+    // whole run, even when another area is armed and fully enumerated.
+    #[test]
+    fn a_failed_area_suppresses_deletion_for_the_run() {
+        let areas = [
+            area(AreaKind::Liked, SourceMode::Mirror, &["a"], true),
+            // Playlist listing failed: empty and non-authoritative.
+            area(
+                AreaKind::Playlist {
+                    id: "p".into(),
+                    name: "P".into(),
+                },
+                SourceMode::Mirror,
+                &[],
+                false,
+            ),
+        ];
+        let sources: Vec<SourceStatus> = areas
+            .iter()
+            .map(|a| SourceStatus {
+                mode: area_mode(a, false),
+                fully_enumerated: area_enumerated(a, false),
+            })
+            .collect();
+        assert!(!deletion_allowed(&sources));
+    }
+
+    // Test 8: with every area enumerated, a mixed Mirror + Copy selection deletes
+    // only orphans exclusive to a Mirror area; a Copy area's orphan is protected
+    // and the run remains armed.
+    #[test]
+    fn mixed_mode_deletes_only_mirror_exclusive_orphans() {
+        use suno_core::{LocalFile, Manifest, ManifestEntry, reconcile};
+
+        let areas = vec![
+            area(AreaKind::Liked, SourceMode::Mirror, &["m-live"], true),
+            area(
+                AreaKind::Playlist {
+                    id: "p".into(),
+                    name: "P".into(),
+                },
+                SourceMode::Copy,
+                &["c-live"],
+                true,
+            ),
+        ];
+        let sources: Vec<SourceStatus> = areas
+            .iter()
+            .map(|a| SourceStatus {
+                mode: area_mode(a, false),
+                fully_enumerated: area_enumerated(a, false),
+            })
+            .collect();
+        assert!(deletion_allowed(&sources));
+
+        let area_modes: Vec<(SourceMode, Vec<String>)> = areas
+            .iter()
+            .map(|a| {
+                (
+                    area_mode(a, false),
+                    a.clips.iter().map(|c| c.id.clone()).collect(),
+                )
+            })
+            .collect();
+        let modes = build_modes_by_id(&area_modes);
+        let union = union_clips(&areas);
+        let desired = build_desired(
+            &union.iter().collect::<Vec<_>>(),
+            suno_core::AudioFormat::Flac,
+            &modes,
+            &HashMap::new(),
+            &BTreeSet::new(),
+            ArtifactToggles::default(),
+            &suno_core::NamingConfig::default(),
+        );
+
+        let mut manifest = Manifest::new();
+        // Orphans: one previously from the mirror area, one from the copy area.
+        for id in ["m-live", "c-live", "m-orphan", "c-orphan"] {
+            manifest.insert(
+                id,
+                ManifestEntry {
+                    path: format!("{id}.flac"),
+                    format: suno_core::AudioFormat::Flac,
+                    size: 100,
+                    // The copy-area orphan carries the preserve marker a prior copy
+                    // run stamped, so it can never be deleted.
+                    preserve: id == "c-orphan",
+                    ..Default::default()
+                },
+            );
+        }
+        let local: HashMap<String, LocalFile> = manifest
+            .iter()
+            .map(|(id, _)| {
+                (
+                    id.clone(),
+                    LocalFile {
+                        exists: true,
+                        size: 100,
+                    },
+                )
+            })
+            .collect();
+        let plan = reconcile(&manifest, &desired, &local, &sources);
+        let deleted: Vec<&str> = plan
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                suno_core::Action::Delete { clip_id, .. } => Some(clip_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deleted, vec!["m-orphan"]);
     }
 }

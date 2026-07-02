@@ -220,9 +220,54 @@ fn render_show(config: &Config) -> String {
                 src.character_set.map(|v| v.to_string()),
             );
         }
+        if let Some(areas) = &acc.areas {
+            render_areas(&mut out, label, areas);
+        }
         out.push('\n');
     }
     out
+}
+
+/// Render an account's `[areas]` selection table.
+///
+/// Playlist ids are shown with a trailing `# (unknown)` comment: `config show`
+/// runs offline, so it cannot resolve an id to its live playlist name.
+fn render_areas(out: &mut String, label: &str, areas: &suno_core::AreasConfig) {
+    out.push_str(&format!("  [accounts.{label}.areas]\n"));
+    if let Some(library) = areas.library {
+        out.push_str(&format!("    library = {}\n", area_mode_str(library)));
+    }
+    if let Some(liked) = areas.liked {
+        out.push_str(&format!("    liked = {}\n", source_mode_str(liked)));
+    }
+    if let Some(playlists) = areas.playlists {
+        out.push_str(&format!("    playlists = {}\n", source_mode_str(playlists)));
+    }
+    if !areas.playlist.is_empty() {
+        out.push_str(&format!("  [accounts.{label}.areas.playlist]\n"));
+        let mut ids: Vec<&String> = areas.playlist.keys().collect();
+        ids.sort();
+        for id in ids {
+            let mode = source_mode_str(areas.playlist[id]);
+            out.push_str(&format!("    \"{id}\" = {mode}  # (unknown)\n"));
+        }
+    }
+}
+
+/// The TOML keyword for a [`SourceMode`].
+fn source_mode_str(mode: suno_core::SourceMode) -> &'static str {
+    match mode {
+        suno_core::SourceMode::Mirror => "mirror",
+        suno_core::SourceMode::Copy => "copy",
+    }
+}
+
+/// The TOML keyword for an [`AreaMode`], including the library-only `off`.
+fn area_mode_str(mode: suno_core::AreaMode) -> &'static str {
+    match mode {
+        suno_core::AreaMode::Off => "off",
+        suno_core::AreaMode::Mode(mode) => source_mode_str(mode),
+    }
 }
 
 fn push_opt(out: &mut String, key: &str, value: Option<String>) {
@@ -394,6 +439,32 @@ mod tests {
     fn opt_blanks_become_none() {
         assert_eq!(opt("   "), None);
         assert_eq!(opt(" /music "), Some("/music"));
+    }
+
+    #[test]
+    fn show_renders_areas_block_with_playlist_id_and_name_comment() {
+        let toml = "
+            [accounts.alice]
+            token = \"t\"
+
+            [accounts.alice.areas]
+            library = \"off\"
+            liked = \"copy\"
+            playlists = \"mirror\"
+
+            [accounts.alice.areas.playlist]
+            abc123 = \"copy\"
+        ";
+        let config = Config::from_toml(toml).unwrap();
+        let shown = render_show(&config);
+        assert!(shown.contains("[accounts.alice.areas]"));
+        assert!(shown.contains("library = off"));
+        assert!(shown.contains("liked = copy"));
+        assert!(shown.contains("playlists = mirror"));
+        assert!(shown.contains("[accounts.alice.areas.playlist]"));
+        // The playlist id is rendered with a resolved-name comment placeholder
+        // (the offline command cannot resolve the live name).
+        assert!(shown.contains("\"abc123\" = copy  # (unknown)"));
     }
 
     #[cfg(unix)]
