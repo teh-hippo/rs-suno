@@ -571,6 +571,14 @@ async fn run_one(
     // here so a swapped or mistyped token can never make another account's
     // clips look absent from source and delete this library's files.
     let mut store = logs::load_graph(dest)?;
+    // Derive the eligible-root set from the loaded cache so overrides and
+    // collision detection are correct even on a resolution-failed run (where
+    // `store.update` is skipped below); a successful run refreshes it again.
+    store.refresh_eligible_roots();
+    // Layer this account's manual album-name overrides onto the store before any
+    // album title is resolved, so the folder path, ALBUM tag, change hash, index
+    // and disambiguation all reflect the preferred name from one source.
+    store.set_album_overrides(settings.album_overrides.clone());
     let mut owner_dirty = false;
     // A pin/adopt/re-pin that actually happens this run: its notice is printed
     // and its audit line written only on the executing path, where the pin is
@@ -1959,6 +1967,7 @@ mod tests {
             naming_template: "{title}".to_owned(),
             character_set: suno_core::CharacterSet::Unicode,
             areas: None,
+            album_overrides: std::collections::BTreeMap::new(),
         }
     }
 

@@ -3,7 +3,7 @@
 //! Parses a TOML string and merges in environment variables and CLI flag
 //! overrides supplied by the caller. Performs no disk or environment IO.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
@@ -107,6 +107,13 @@ pub struct AccountConfig {
     /// Per-area mode selection (`sync` vs `copy`) for this account's library,
     /// liked feed, and playlists. Absent means the classic single-verb run.
     pub areas: Option<AreasConfig>,
+    /// Manual album-name overrides, keyed by the album's stable lineage root id
+    /// (`<root_id> = "Preferred Name"`). Album identity is the lineage root, so
+    /// the override is account-wide (like lineage), never per-source: the
+    /// derived title is unstable and is exactly what this replaces. An empty or
+    /// whitespace-only value is ignored, so a stray key cannot blank an album.
+    #[serde(default)]
+    pub albums: HashMap<String, String>,
 }
 
 /// How a single area treats deletion, including the library-only `off` value.
@@ -399,6 +406,12 @@ impl Config {
             naming_template,
             character_set,
             areas: acc.areas.clone(),
+            album_overrides: acc
+                .albums
+                .iter()
+                .filter(|(_, name)| !name.trim().is_empty())
+                .map(|(root_id, name)| (root_id.clone(), name.trim().to_owned()))
+                .collect(),
         })
     }
 }
@@ -492,6 +505,10 @@ pub struct EffectiveSettings {
     pub character_set: CharacterSet,
     /// The per-account `[areas]` selection table, if configured.
     pub areas: Option<AreasConfig>,
+    /// Manual album-name overrides, keyed by lineage root id, resolved from the
+    /// account's `[accounts.<label>.albums]` table. Deterministically ordered
+    /// (a [`BTreeMap`]) and pre-trimmed of empty values by [`Config::resolve`].
+    pub album_overrides: BTreeMap<String, String>,
 }
 
 #[cfg(test)]
@@ -584,6 +601,7 @@ mod tests {
                 naming_template: crate::naming::DEFAULT_TEMPLATE.to_owned(),
                 character_set: CharacterSet::Unicode,
                 areas: None,
+                album_overrides: BTreeMap::new(),
             }
         );
     }
@@ -1143,6 +1161,35 @@ mod tests {
         assert_eq!(areas.playlists, Some(SourceMode::Mirror));
         assert_eq!(areas.playlist["pl_abc123"], SourceMode::Mirror);
         assert_eq!(areas.playlist["pl_def456"], SourceMode::Copy);
+    }
+
+    #[test]
+    fn album_overrides_parse_and_resolve() {
+        let toml = r#"
+            [accounts.alice]
+            token = "t"
+            [accounts.alice.albums]
+            "root_abc123" = "Preferred Name"
+            "root_def456" = "Another Album"
+            "root_blank" = "   "
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        assert_eq!(
+            cfg.accounts["alice"].albums["root_abc123"],
+            "Preferred Name"
+        );
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.album_overrides["root_abc123"], "Preferred Name");
+        assert_eq!(eff.album_overrides["root_def456"], "Another Album");
+        // A blank value is dropped so it can never blank an album.
+        assert!(!eff.album_overrides.contains_key("root_blank"));
+    }
+
+    #[test]
+    fn album_overrides_absent_by_default() {
+        let cfg = Config::from_toml("[accounts.alice]\ntoken = \"t\"\n").unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert!(eff.album_overrides.is_empty());
     }
 
     #[test]

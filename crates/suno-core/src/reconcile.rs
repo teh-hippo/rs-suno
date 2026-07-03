@@ -1411,6 +1411,67 @@ mod tests {
     }
 
     #[test]
+    fn bulk_album_rename_moves_and_retags_without_redownload() {
+        // Renaming an album (a manual override) changes both the folder path and
+        // the ALBUM tag/hash for every member clip. Reconcile must emit a Rename
+        // (a filesystem move) plus an in-place Retag per clip, and NEVER a
+        // Download: deletion safety holds (no Delete) and no audio is re-fetched.
+        let mut manifest = Manifest::new();
+        for id in ["a", "b", "c"] {
+            manifest.insert(
+                id,
+                entry(
+                    &format!("Creator/Old Album/{id}.flac"),
+                    AudioFormat::Flac,
+                    "old-meta",
+                    "art",
+                ),
+            );
+        }
+        let d: Vec<Desired> = ["a", "b", "c"]
+            .iter()
+            .map(|id| {
+                desired(
+                    id,
+                    &format!("Creator/New Album/{id}.flac"),
+                    AudioFormat::Flac,
+                    "new-meta",
+                    "art",
+                )
+            })
+            .collect();
+        let local: HashMap<String, LocalFile> = ["a", "b", "c"]
+            .iter()
+            .map(|id| (id.to_string(), present(100)))
+            .collect();
+
+        let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+
+        assert_eq!(plan.renames(), 3, "every member folder move is a rename");
+        assert_eq!(
+            plan.retags(),
+            3,
+            "the album tag change retags each in place"
+        );
+        assert_eq!(
+            plan.downloads(),
+            0,
+            "an album rename must never re-download"
+        );
+        assert_eq!(
+            plan.deletes(),
+            0,
+            "deletion safety: a rename deletes nothing"
+        );
+        for id in ["a", "b", "c"] {
+            assert!(plan.actions.contains(&Action::Rename {
+                from: format!("Creator/Old Album/{id}.flac"),
+                to: format!("Creator/New Album/{id}.flac"),
+            }));
+        }
+    }
+
+    #[test]
     fn format_change_reformats() {
         let mut manifest = Manifest::new();
         manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
