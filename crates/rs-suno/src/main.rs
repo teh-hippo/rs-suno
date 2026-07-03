@@ -19,6 +19,9 @@ use crate::cli::run;
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install ring TLS provider: a provider is already set");
     let cli = Cli::parse();
     let code = match dispatch(cli).await {
         Ok(code) => code,
