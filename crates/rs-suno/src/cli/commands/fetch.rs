@@ -92,7 +92,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             let audio = download::get_bytes(&http, &url)
                 .await
                 .context("could not download the MP3")?;
-            let tagged = tag_mp3(&audio, &meta, cover.as_deref())?;
+            let tagged = tag_mp3(&audio, &meta, cover.as_deref(), None)?;
             fs.write_atomic(&filename, &tagged)?;
         }
         AudioFormat::Flac => {

@@ -16,8 +16,9 @@ is `rs-suno`, so you install it with `cargo install rs-suno` and then run `suno`
   artwork, renames or re-encodes files that changed, and, with `sync`, removes
   local files whose clips have left your library.
 - Embeds rich metadata: core tags (title, artist, album, date) plus Suno details
-  (style, model, creator, and remix lineage), a front cover, and unsynced
-  lyrics.
+  (style, model, creator, and remix lineage), a front cover, and lyrics —
+  including optional synced (timed) lyrics as an `.lrc` sidecar and an
+  MP3 `SYLT` frame.
 - Groups remixes and edits into lineage albums and writes M3U8 playlists,
   including a synthetic "Liked Songs" list.
 - Is safe to run unattended from cron or a systemd timer, with careful deletion

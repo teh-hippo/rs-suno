@@ -14,6 +14,7 @@ use crate::config::AudioFormat;
 use crate::consts::SUNO_SONG_BASE_URL;
 use crate::graph::LineageStore;
 use crate::lineage::LineageContext;
+use crate::lyrics::AlignedLyrics;
 use crate::manifest::Manifest;
 use crate::model::Clip;
 use crate::tag::{TrackMetadata, non_empty};
@@ -251,10 +252,46 @@ pub fn render_clip_lyrics(clip: &Clip) -> Option<String> {
 /// is empty or unknown, plus a constant `[re:rs-suno]` tool tag. When the lyrics
 /// are empty or whitespace-only, `None` is returned so no empty `.lrc` is
 /// written.
+///
+/// This is the fallback for a clip with no aligned lyrics; when Suno's alignment
+/// is available the synced [`render_synced_lrc`] supersedes it at the same path.
 pub fn render_clip_lrc(clip: &Clip, lineage: &LineageContext) -> Option<String> {
     if clip.lyrics.trim().is_empty() {
         return None;
     }
+    let mut out = lrc_headers(clip, lineage);
+    for line in clip.lyrics.trim_end().lines() {
+        let _ = writeln!(out, "{line}");
+    }
+    Some(out)
+}
+
+/// Render a synced (timed) `.lrc` sidecar for `clip` from Suno's `aligned`
+/// lyrics, or `None` when there is nothing to time (an instrumental).
+///
+/// The header block is identical to the untimed [`render_clip_lrc`]; the body is
+/// the line-level form from [`AlignedLyrics::lrc_body`]: one `[mm:ss.xx]` stamp
+/// per aligned line, followed by the line text. This is the universally
+/// supported LRC form, so every player syncs it cleanly (word-level timing is
+/// carried in the MP3 `SYLT` frame, not inline in the `.lrc`). Returns `None`
+/// when `aligned` yields no timed lines, so an instrumental writes no `.lrc`.
+pub fn render_synced_lrc(
+    clip: &Clip,
+    lineage: &LineageContext,
+    aligned: &AlignedLyrics,
+) -> Option<String> {
+    let body = aligned.lrc_body();
+    if body.is_empty() {
+        return None;
+    }
+    let mut out = lrc_headers(clip, lineage);
+    out.push_str(&body);
+    Some(out)
+}
+
+/// The shared `.lrc` header block: `[ti:]`, `[ar:]`, `[al:]`, `[length:]` (each
+/// omitted when empty or unknown), plus the constant `[re:rs-suno]` tool tag.
+fn lrc_headers(clip: &Clip, lineage: &LineageContext) -> String {
     let meta = TrackMetadata::from_clip(clip, lineage);
     let length = format_duration(clip.duration);
     let headers: [(&str, &str); 5] = [
@@ -271,10 +308,7 @@ pub fn render_clip_lrc(clip: &Clip, lineage: &LineageContext) -> Option<String> 
         }
         let _ = writeln!(out, "[{tag}:{}]", to_single_line(value));
     }
-    for line in clip.lyrics.trim_end().lines() {
-        let _ = writeln!(out, "{line}");
-    }
-    Some(out)
+    out
 }
 
 /// Format a duration in seconds as `mm:ss`, or the empty string when it is
@@ -516,6 +550,42 @@ mod tests {
         assert!(rendered.contains("[ti:Bare]\n"));
         assert!(rendered.contains("[re:rs-suno]\n"));
         assert!(rendered.ends_with("one line\n"));
+    }
+
+    fn sample_aligned() -> crate::lyrics::AlignedLyrics {
+        crate::lyrics::AlignedLyrics::from_json(&serde_json::json!({
+            "aligned_words": [],
+            "aligned_lyrics": [
+                {"text": "thunder rolls", "start_s": 1.5, "end_s": 2.4, "section": "Verse 1",
+                 "words": [
+                     {"text": "thunder", "start_s": 1.5, "end_s": 2.0},
+                     {"text": "rolls", "start_s": 2.1, "end_s": 2.4}
+                 ]}
+            ]
+        }))
+    }
+
+    #[test]
+    fn synced_lrc_has_headers_then_line_stamps() {
+        let rendered = render_synced_lrc(&full_clip(), &full_lineage(), &sample_aligned()).unwrap();
+        let expected = "[ti:Electric Storm]\n\
+            [ar:alice]\n\
+            [al:Weather Series]\n\
+            [length:3:32]\n\
+            [re:rs-suno]\n\
+            [00:01.50]thunder rolls\n";
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn synced_lrc_is_none_for_empty_alignment() {
+        // An instrumental (empty arrays) writes no synced `.lrc`, exactly as an
+        // empty cover URL writes no cover.
+        let empty = crate::lyrics::AlignedLyrics::default();
+        assert_eq!(
+            render_synced_lrc(&full_clip(), &full_lineage(), &empty),
+            None
+        );
     }
 
     #[test]

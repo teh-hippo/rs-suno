@@ -8,10 +8,14 @@
 use std::io::Cursor;
 
 use id3::TagLike;
-use id3::frame::{Comment, ExtendedText, Lyrics, Picture, PictureType};
+use id3::frame::{
+    Comment, ExtendedText, Lyrics, Picture, PictureType, SynchronisedLyrics,
+    SynchronisedLyricsType, TimestampFormat,
+};
 
 use crate::error::{Error, Result};
 use crate::lineage::{EdgeType, LineageContext};
+use crate::lyrics::AlignedLyrics;
 use crate::model::Clip;
 
 const COVER_MIME: &str = "image/jpeg";
@@ -87,8 +91,23 @@ impl TrackMetadata {
 /// Tag `audio` (an MP3 byte stream) with `meta`, returning the tagged bytes.
 ///
 /// Writes ID3v2.4 frames, replacing any existing ID3 tag, and embeds `cover`
-/// as a front-cover `APIC` frame when provided.
-pub fn tag_mp3(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Result<Vec<u8>> {
+/// as a front-cover `APIC` frame when provided. When `synced` carries aligned
+/// lyrics, a word-level `SYLT` (synchronised lyrics) frame is added alongside
+/// the plain `USLT` lyrics, so a player can render karaoke-style timed lyrics;
+/// an empty (instrumental) `synced` adds no `SYLT`. `SYLT` is MP3-only — FLAC
+/// and WAV carry no ID3, so they never receive it.
+///
+/// Because the whole tag is rebuilt, any existing `SYLT`/`USLT` lyrics would be
+/// lost on a plain retag that carries no new lyrics. To avoid downgrading a good
+/// timed file, existing `SYLT` frames are preserved when `synced` is `None`, and
+/// existing `USLT` frames are preserved when `meta` carries no lyrics text.
+pub fn tag_mp3(
+    audio: &[u8],
+    meta: &TrackMetadata,
+    cover: Option<&[u8]>,
+    synced: Option<&AlignedLyrics>,
+) -> Result<Vec<u8>> {
+    let existing = id3::Tag::read_from2(Cursor::new(audio)).ok();
     let mut tag = id3::Tag::new();
     tag.set_title(meta.title.clone());
     tag.set_artist(meta.artist.clone());
@@ -114,6 +133,11 @@ pub fn tag_mp3(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Resu
             description: String::new(),
             text: meta.lyrics.clone(),
         });
+    } else if let Some(existing) = &existing {
+        // No new lyrics this run (a plain retag): keep any embedded USLT.
+        for lyrics in existing.lyrics() {
+            tag.add_frame(lyrics.clone());
+        }
     }
     for (desc, value) in meta.suno_fields() {
         if !value.is_empty() {
@@ -131,11 +155,45 @@ pub fn tag_mp3(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Resu
             data: bytes.to_vec(),
         });
     }
+    match synced.and_then(build_sylt) {
+        Some(sylt) => {
+            tag.add_frame(sylt);
+        }
+        // No new alignment this run: keep any embedded SYLT so a retag never
+        // downgrades a timed file.
+        None => {
+            if let Some(existing) = &existing {
+                for sylt in existing.synchronised_lyrics() {
+                    tag.add_frame(sylt.clone());
+                }
+            }
+        }
+    }
 
     let mut cursor = Cursor::new(audio.to_vec());
     tag.write_to_file(&mut cursor, id3::Version::Id3v24)
         .map_err(|err| Error::Tag(format!("could not write ID3 tag: {err}")))?;
     Ok(cursor.into_inner())
+}
+
+/// Build a word-level `SYLT` frame from `aligned`, or `None` when there is
+/// nothing to time (an instrumental with empty arrays).
+///
+/// Timestamps are absolute milliseconds ([`TimestampFormat::Ms`]); the content
+/// is the word-level segments from [`AlignedLyrics::sylt_entries`], with a
+/// leading newline on each line's first word so a player renders line breaks.
+fn build_sylt(aligned: &AlignedLyrics) -> Option<SynchronisedLyrics> {
+    let content = aligned.sylt_entries();
+    if content.is_empty() {
+        return None;
+    }
+    Some(SynchronisedLyrics {
+        lang: LANG.to_owned(),
+        timestamp_format: TimestampFormat::Ms,
+        content_type: SynchronisedLyricsType::Lyrics,
+        description: String::new(),
+        content,
+    })
 }
 
 /// Tag `audio` (a FLAC byte stream) with `meta`, returning the tagged bytes.
@@ -144,15 +202,27 @@ pub fn tag_mp3(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Resu
 /// block, and preserves the original `STREAMINFO` and audio frames. Works in
 /// memory: the existing metadata blocks are rewritten and the audio frames are
 /// appended unchanged.
+///
+/// When `meta` carries no lyrics text (a plain retag), any existing `LYRICS`
+/// comment is preserved rather than dropped, so a retag never loses embedded
+/// lyrics.
 pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Result<Vec<u8>> {
     let mut tag = metaflac::Tag::read_from(&mut Cursor::new(audio))
         .map_err(|err| Error::Tag(format!("could not read FLAC metadata: {err}")))?;
+
+    let existing_lyrics: Vec<String> = tag
+        .get_vorbis("LYRICS")
+        .map(|values| values.map(str::to_owned).collect())
+        .unwrap_or_default();
 
     tag.remove_blocks(metaflac::BlockType::VorbisComment);
     for (key, value) in flac_fields(meta) {
         if !value.is_empty() {
             tag.set_vorbis(key, vec![value.to_owned()]);
         }
+    }
+    if meta.lyrics.is_empty() && !existing_lyrics.is_empty() {
+        tag.set_vorbis("LYRICS", existing_lyrics);
     }
     if let Some(bytes) = cover {
         tag.add_picture(
@@ -408,7 +478,7 @@ mod tests {
     fn mp3_round_trips_core_tags() {
         let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
         let cover = b"\xFF\xD8\xFFcover-bytes".to_vec();
-        let tagged = tag_mp3(b"", &meta, Some(&cover)).unwrap();
+        let tagged = tag_mp3(b"", &meta, Some(&cover), None).unwrap();
 
         let tag = id3::Tag::read_from2(Cursor::new(tagged)).unwrap();
         assert_eq!(tag.title(), Some("Electric Storm"));
@@ -457,7 +527,7 @@ mod tests {
         assert_eq!(meta.lyrics, "the sung words");
         assert_eq!(meta.prompt, "the generation prompt");
 
-        let tagged = tag_mp3(b"", &meta, None).unwrap();
+        let tagged = tag_mp3(b"", &meta, None, None).unwrap();
         let tag = id3::Tag::read_from2(Cursor::new(tagged)).unwrap();
         let uslt = tag.lyrics().next().map(|frame| frame.text.clone());
         assert_eq!(uslt.as_deref(), Some("the sung words"));
@@ -468,11 +538,122 @@ mod tests {
         assert_eq!(prompt.as_deref(), Some("the generation prompt"));
     }
 
+    fn sample_aligned() -> AlignedLyrics {
+        AlignedLyrics::from_json(&serde_json::json!({
+            "aligned_words": [],
+            "aligned_lyrics": [
+                {"text": "Hello world", "start_s": 0.5, "end_s": 1.4, "section": "Verse 1",
+                 "words": [
+                     {"text": "Hello", "start_s": 0.5, "end_s": 0.9},
+                     {"text": "world", "start_s": 1.0, "end_s": 1.4}
+                 ]},
+                {"text": "again", "start_s": 61.2, "end_s": 61.8, "section": "Chorus",
+                 "words": [{"text": "again", "start_s": 61.2, "end_s": 61.8}]}
+            ]
+        }))
+    }
+
+    #[test]
+    fn build_sylt_produces_ms_word_entries() {
+        let sylt = build_sylt(&sample_aligned()).unwrap();
+        assert_eq!(sylt.timestamp_format, TimestampFormat::Ms);
+        assert_eq!(sylt.content_type, SynchronisedLyricsType::Lyrics);
+        assert_eq!(sylt.lang, "eng");
+        assert_eq!(
+            sylt.content,
+            vec![
+                (500, "Hello".to_owned()),
+                (1000, " world".to_owned()),
+                (61200, "\nagain".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_sylt_is_none_for_empty_alignment() {
+        assert!(build_sylt(&AlignedLyrics::default()).is_none());
+    }
+
+    #[test]
+    fn mp3_embeds_sylt_when_synced_present() {
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+        let aligned = sample_aligned();
+        let tagged = tag_mp3(b"frames", &meta, None, Some(&aligned)).unwrap();
+        let tag = id3::Tag::read_from2(Cursor::new(&tagged)).unwrap();
+        let sylt = tag
+            .synchronised_lyrics()
+            .next()
+            .expect("a SYLT frame is present");
+        assert_eq!(sylt.timestamp_format, TimestampFormat::Ms);
+        assert_eq!(sylt.content.first(), Some(&(500, "Hello".to_owned())));
+        assert!(tagged.ends_with(b"frames"));
+    }
+
+    #[test]
+    fn mp3_omits_sylt_for_instrumental() {
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+        let tagged = tag_mp3(b"frames", &meta, None, Some(&AlignedLyrics::default())).unwrap();
+        let tag = id3::Tag::read_from2(Cursor::new(&tagged)).unwrap();
+        assert_eq!(tag.synchronised_lyrics().count(), 0);
+    }
+
+    #[test]
+    fn mp3_retag_preserves_existing_sylt_and_uslt_without_new_lyrics() {
+        // First write embeds SYLT + USLT from alignment.
+        let aligned = sample_aligned();
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+        let mut with_lyrics = meta.clone();
+        with_lyrics.lyrics = aligned.plain_text();
+        let first = tag_mp3(b"frames", &with_lyrics, None, Some(&aligned)).unwrap();
+
+        // A later retag carries NO new lyrics (empty lyrics, no synced): the
+        // existing SYLT and USLT must be preserved, not dropped.
+        let mut retag_meta = meta.clone();
+        retag_meta.lyrics = String::new();
+        let retagged = tag_mp3(&first, &retag_meta, None, None).unwrap();
+        let tag = id3::Tag::read_from2(Cursor::new(&retagged)).unwrap();
+        assert_eq!(tag.synchronised_lyrics().count(), 1, "SYLT preserved");
+        assert_eq!(
+            tag.lyrics().next().map(|frame| frame.text.clone()),
+            Some(aligned.plain_text()),
+            "USLT preserved"
+        );
+    }
+
+    #[test]
+    fn mp3_retag_replaces_sylt_when_new_alignment_given() {
+        let aligned = sample_aligned();
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+        let first = tag_mp3(b"frames", &meta, None, Some(&aligned)).unwrap();
+        // A fresh alignment on retag replaces (not stacks) the SYLT frame.
+        let again = tag_mp3(&first, &meta, None, Some(&aligned)).unwrap();
+        let tag = id3::Tag::read_from2(Cursor::new(&again)).unwrap();
+        assert_eq!(tag.synchronised_lyrics().count(), 1);
+    }
+
+    #[test]
+    fn flac_retag_preserves_existing_lyrics_comment() {
+        let audio = minimal_flac();
+        let mut meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+        meta.lyrics = "line one\nline two".to_owned();
+        let first = tag_flac(&audio, &meta, None).unwrap();
+
+        // A retag with no lyrics text keeps the existing LYRICS comment.
+        let mut retag_meta = meta.clone();
+        retag_meta.lyrics = String::new();
+        let retagged = tag_flac(&first, &retag_meta, None).unwrap();
+        let tag = metaflac::Tag::read_from(&mut Cursor::new(&retagged)).unwrap();
+        assert_eq!(
+            tag.get_vorbis("LYRICS").map(|v| v.collect::<Vec<_>>()),
+            Some(vec!["line one\nline two"])
+        );
+    }
+
     #[test]
     fn mp3_tagging_replaces_an_existing_tag() {
         let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
-        let once = tag_mp3(b"audioframes", &meta, None).unwrap();
-        let twice = tag_mp3(&once, &meta, None).unwrap();
+        let once = tag_mp3(b"audioframes", &meta, None, None).unwrap();
+        let twice = tag_mp3(&once, &meta, None, None).unwrap();
 
         let tag = id3::Tag::read_from2(Cursor::new(&twice)).unwrap();
         assert_eq!(tag.title(), Some("Electric Storm"));

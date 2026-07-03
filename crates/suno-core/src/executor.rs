@@ -47,6 +47,7 @@ use crate::fs::Filesystem;
 use crate::graph::{AlbumArt, PlaylistState};
 use crate::http::{Http, HttpRequest};
 use crate::lineage::LineageContext;
+use crate::lyrics::AlignedLyrics;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
 use crate::reconcile::{Action, ArtifactKind, Desired, Plan, SourceMode, set_manifest_artifact};
@@ -187,12 +188,22 @@ pub struct Ports<'a, H, F, G, C> {
 /// always yields the same manifest and counts whatever the concurrency level. A
 /// per-clip failure is recorded and the run continues; only an auth failure or a
 /// full disk aborts, and it does so promptly by stopping further audio work.
+///
+/// `synced` carries this run's fetched aligned (synced) lyrics keyed by clip id;
+/// it is the caller's IO result, not part of the pure plan. Audio tagging embeds
+/// a clip's entry as an MP3 `SYLT` frame and as the plain `USLT`/`LYRICS` text
+/// (FLAC), so a clip absent from the map (an instrumental, a WAV target, or a
+/// run with the feature off) is tagged exactly as before. The synced `.lrc`
+/// sidecar itself is a generated artifact whose body the caller has already
+/// resolved into the plan, so it is written like any other text sidecar.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute<H, F, G, C>(
     plan: &Plan,
     manifest: &mut Manifest,
     albums: &mut BTreeMap<String, AlbumArt>,
     playlists: &mut BTreeMap<String, PlaylistState>,
     desired: &[Desired],
+    synced: &HashMap<String, AlignedLyrics>,
     ports: Ports<'_, H, F, G, C>,
     opts: &ExecOptions,
 ) -> ExecOutcome
@@ -257,6 +268,7 @@ where
         opts,
         by_id: &by_id,
         by_path: &by_path,
+        synced,
         write_targets: &write_targets,
     };
 
@@ -519,6 +531,11 @@ struct Ctx<'a, H, F, G, C> {
     opts: &'a ExecOptions,
     by_id: &'a HashMap<&'a str, &'a Desired>,
     by_path: &'a HashMap<&'a str, &'a Desired>,
+    /// This run's fetched aligned (synced) lyrics, keyed by clip id. Audio
+    /// tagging reads a clip's entry to embed an MP3 `SYLT` frame and the plain
+    /// lyric text; a clip absent here is tagged exactly as before. Populated by
+    /// the caller (the fetch is IO), so the engine stays free of direct IO.
+    synced: &'a HashMap<String, AlignedLyrics>,
     /// Every destination path this run writes (audio downloads and reformats,
     /// artifact writes, and rename targets). The inline old-sidecar cleanup in
     /// [`write_artifact`](Ctx::write_artifact) skips any path in this set, so a
@@ -708,14 +725,14 @@ where
             return Ok(Effect::Retagged);
         }
 
-        let meta = TrackMetadata::from_clip(clip, lineage);
+        let (meta, synced) = self.track_meta(clip, lineage);
         let cover = self.fetch_cover(clip).await;
         let existing = self
             .fs
             .read(path)
             .map_err(|err| permanent_fail(&clip.id, format!("could not read for retag: {err}")))?;
         let tagged = match format {
-            AudioFormat::Mp3 => tag_mp3(&existing, &meta, cover.as_deref()),
+            AudioFormat::Mp3 => tag_mp3(&existing, &meta, cover.as_deref(), synced),
             AudioFormat::Flac => tag_flac(&existing, &meta, cover.as_deref()),
             AudioFormat::Wav => unreachable!("WAV handled above"),
         }
@@ -1020,7 +1037,7 @@ where
         lineage: &LineageContext,
         format: AudioFormat,
     ) -> Result<Vec<u8>, Fail> {
-        let meta = TrackMetadata::from_clip(clip, lineage);
+        let (meta, synced) = self.track_meta(clip, lineage);
         match format {
             AudioFormat::Mp3 => {
                 let url = clip.mp3_url();
@@ -1029,7 +1046,7 @@ where
                     .await
                     .map_err(|err| err.attribute(&clip.id))?;
                 let cover = self.fetch_cover(clip).await;
-                tag_mp3(&audio, &meta, cover.as_deref())
+                tag_mp3(&audio, &meta, cover.as_deref(), synced)
                     .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
             AudioFormat::Flac => {
@@ -1047,6 +1064,32 @@ where
             }
             AudioFormat::Wav => self.fetch_wav(client_lock, clip).await,
         }
+    }
+
+    /// This run's non-empty aligned lyrics for a clip, if any were fetched.
+    fn synced_for(&self, clip_id: &str) -> Option<&AlignedLyrics> {
+        self.synced
+            .get(clip_id)
+            .filter(|aligned| !aligned.is_empty())
+    }
+
+    /// The track metadata for a clip, paired with its synced lyrics (if any).
+    ///
+    /// The feed omits per-clip lyrics, so when this run fetched aligned lyrics
+    /// for the clip the plain text is folded into `lyrics` here, which the MP3
+    /// `USLT` and FLAC `LYRICS` tags then carry. The returned [`AlignedLyrics`]
+    /// is passed on to [`tag_mp3`] for the word-level `SYLT` frame.
+    fn track_meta<'m>(
+        &'m self,
+        clip: &Clip,
+        lineage: &LineageContext,
+    ) -> (TrackMetadata, Option<&'m AlignedLyrics>) {
+        let synced = self.synced_for(&clip.id);
+        let mut meta = TrackMetadata::from_clip(clip, lineage);
+        if let Some(aligned) = synced {
+            meta.lyrics = aligned.plain_text();
+        }
+        (meta, synced)
     }
 
     /// Resolve the rendered WAV URL and download it.
@@ -1450,12 +1493,14 @@ mod tests {
         opts: &ExecOptions,
     ) -> ExecOutcome {
         let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+        let synced = HashMap::new();
         pollster::block_on(execute(
             plan,
             manifest,
             albums,
             playlists,
             desired,
+            &synced,
             Ports {
                 client: &mut client,
                 http,
@@ -1522,6 +1567,123 @@ mod tests {
         assert_eq!(entry.art_hash, "art");
         assert_eq!(entry.size, written.len() as u64);
         assert!(!entry.preserve);
+    }
+
+    #[test]
+    fn download_mp3_embeds_sylt_and_lyrics_from_synced_map() {
+        // A clip whose alignment was fetched this run gets a word-level SYLT frame
+        // and its plain lyric text embedded (USLT), end to end through execute.
+        let c = art_clip("a");
+        let d = desired(c.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format: AudioFormat::Mp3,
+            }],
+        };
+        let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
+            .route("a/large.jpg", Reply::ok(b"art-bytes".to_vec()));
+        let fs = MemFs::new();
+        let ffmpeg = StubFfmpeg::flac();
+        let clock = RecordingClock::new();
+        let mut manifest = Manifest::new();
+        let mut albums = BTreeMap::new();
+        let mut playlists = BTreeMap::new();
+        let mut synced = HashMap::new();
+        synced.insert(
+            "a".to_string(),
+            AlignedLyrics::from_json(&serde_json::json!({
+                "aligned_words": [],
+                "aligned_lyrics": [
+                    {"text": "hi there", "start_s": 0.5, "end_s": 1.2, "section": "Verse 1",
+                     "words": [
+                         {"text": "hi", "start_s": 0.5, "end_s": 0.8},
+                         {"text": "there", "start_s": 0.9, "end_s": 1.2}
+                     ]}
+                ]
+            })),
+        );
+        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+        let outcome = pollster::block_on(execute(
+            &plan,
+            &mut manifest,
+            &mut albums,
+            &mut playlists,
+            &[d],
+            &synced,
+            Ports {
+                client: &mut client,
+                http: &http,
+                fs: &fs,
+                ffmpeg: &ffmpeg,
+                clock: &clock,
+            },
+            &ExecOptions::default(),
+        ));
+
+        assert_eq!(outcome.downloaded, 1);
+        let written = fs.read_file("a.mp3").unwrap();
+        let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
+        assert_eq!(
+            tag.synchronised_lyrics().count(),
+            1,
+            "a SYLT frame is embedded"
+        );
+        // The plain lyric text is populated from the alignment for the USLT frame.
+        assert_eq!(
+            tag.lyrics().next().map(|frame| frame.text.as_str()),
+            Some("hi there")
+        );
+    }
+
+    #[test]
+    fn download_mp3_embeds_no_sylt_when_synced_map_empty() {
+        // The synced map is empty when the feature is off (no alignment fetched),
+        // so no SYLT frame and no lyric text are embedded.
+        let c = art_clip("a");
+        let d = desired(c.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format: AudioFormat::Mp3,
+            }],
+        };
+        let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
+            .route("a/large.jpg", Reply::ok(b"art-bytes".to_vec()));
+        let fs = MemFs::new();
+        let ffmpeg = StubFfmpeg::flac();
+        let clock = RecordingClock::new();
+        let mut manifest = Manifest::new();
+        let mut albums = BTreeMap::new();
+        let mut playlists = BTreeMap::new();
+        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+        let outcome = pollster::block_on(execute(
+            &plan,
+            &mut manifest,
+            &mut albums,
+            &mut playlists,
+            &[d],
+            &HashMap::new(),
+            Ports {
+                client: &mut client,
+                http: &http,
+                fs: &fs,
+                ffmpeg: &ffmpeg,
+                clock: &clock,
+            },
+            &ExecOptions::default(),
+        ));
+        assert_eq!(outcome.downloaded, 1);
+        let written = fs.read_file("a.mp3").unwrap();
+        let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
+        assert_eq!(tag.synchronised_lyrics().count(), 0);
+        assert_eq!(tag.lyrics().count(), 0);
     }
 
     #[test]
@@ -2385,6 +2547,7 @@ mod tests {
         let existing = tag_mp3(
             b"audio",
             &TrackMetadata::from_clip(&c, &LineageContext::own_root(&c)),
+            None,
             None,
         )
         .unwrap();
@@ -4098,6 +4261,7 @@ mod tests {
                 &mut albums,
                 &mut playlists,
                 desired,
+                &HashMap::new(),
                 Ports {
                     client: &mut client,
                     http,
@@ -4305,6 +4469,7 @@ mod tests {
                 &mut albums,
                 &mut playlists,
                 &desireds,
+                &HashMap::new(),
                 Ports {
                     client: &mut client,
                     http: &scripted,
@@ -4610,6 +4775,7 @@ mod tests {
                 &mut albums,
                 &mut playlists,
                 &desireds,
+                &HashMap::new(),
                 Ports {
                     client: &mut client,
                     http: &http,

@@ -207,8 +207,9 @@ pub struct SyncArgs {
     /// library-exclusive files are never deleted.
     #[arg(long, value_name = "ID_OR_NAME")]
     pub playlist: Vec<String>,
-    /// Also write an untimed `.lrc` sidecar next to each song (plain lyrics, no
-    /// per-line timestamps).
+    /// Also write a synced `.lrc` sidecar next to each song (word/line-level
+    /// timed lyrics when Suno has them, plus an MP3 SYLT frame; untimed
+    /// fallback otherwise). Instrumentals get no file.
     #[arg(long)]
     pub lrc_sidecar: bool,
     /// Also download the standalone `.mp4` music video next to each song, when

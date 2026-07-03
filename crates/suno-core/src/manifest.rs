@@ -27,6 +27,28 @@ pub struct ArtifactState {
     pub hash: String,
 }
 
+/// The record that a clip's synced lyrics were resolved (fetched) this run.
+///
+/// Suno's forced alignment for a clip is immutable in practice, so once a clip's
+/// alignment has been fetched it need not be fetched again until the render
+/// [`version`](Self::version) bumps. A clip that resolved to no lyrics (an
+/// instrumental) writes no `.lrc`, so without this marker it would be re-fetched
+/// every run; the marker records the check so it is not. A genuinely-empty clip
+/// is re-checked only after [`checked_unix`](Self::checked_unix) ages past the
+/// re-check window, to pick up alignment Suno may compute after generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncedLyricsCheck {
+    /// The render version this clip's synced lyrics were last resolved at. A
+    /// bump forces a re-fetch and re-render (the `.lrc` format changed).
+    pub version: u32,
+    /// Unix seconds of the last alignment fetch, for the bounded empty re-check.
+    pub checked_unix: u64,
+    /// Whether the clip resolved to no lyrics (an instrumental): no `.lrc` was
+    /// written, and only such clips are re-checked once the window elapses.
+    pub empty: bool,
+}
+
 /// One manifest record: the prior known state of a single downloaded clip.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -57,9 +79,15 @@ pub struct ManifestEntry {
     /// Prior state of the plain-text `.lyrics.txt` sidecar, when one was written.
     #[serde(default)]
     pub lyrics_txt: Option<ArtifactState>,
-    /// Prior state of the untimed `.lrc` sidecar, when one was written.
+    /// Prior state of the synced `.lrc` sidecar, when one was written. Its hash
+    /// is the content hash of the rendered `.lrc` body, so an alignment or
+    /// renderer change rewrites it.
     #[serde(default)]
     pub lrc: Option<ArtifactState>,
+    /// The synced-lyrics resolution marker, gating whether the clip's alignment
+    /// is re-fetched. Present once the clip has been resolved (written or empty).
+    #[serde(default)]
+    pub synced_lyrics: Option<SyncedLyricsCheck>,
     /// Prior state of the standalone `.mp4` music video, when one was written.
     #[serde(default)]
     pub video_mp4: Option<ArtifactState>,
@@ -320,7 +348,35 @@ mod tests {
         assert_eq!(e.details_txt, None);
         assert_eq!(e.lyrics_txt, None);
         assert_eq!(e.lrc, None);
+        assert_eq!(e.synced_lyrics, None);
         assert!(!e.preserve);
+    }
+
+    #[test]
+    fn synced_lyrics_check_roundtrips_and_defaults() {
+        // A pre-feature manifest loads with no synced-lyrics marker; a populated
+        // one round-trips intact, so the field is purely additive.
+        let json =
+            r#"{"c":{"path":"a.flac","format":"flac","meta_hash":"m","art_hash":"a","size":1}}"#;
+        assert_eq!(
+            serde_json::from_str::<Manifest>(json)
+                .unwrap()
+                .get("c")
+                .unwrap()
+                .synced_lyrics,
+            None
+        );
+
+        let mut m = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac);
+        e.synced_lyrics = Some(SyncedLyricsCheck {
+            version: 1,
+            checked_unix: 1_700_000_000,
+            empty: true,
+        });
+        m.insert("a", e);
+        let back: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(m, back);
     }
 
     #[test]

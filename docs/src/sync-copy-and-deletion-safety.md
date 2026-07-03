@@ -219,10 +219,13 @@ off:
   deleting real lyrics on a transient empty read, lyrics opt out of removal the
   same way covers do. Turning `lyrics_sidecar` off leaves existing `.lyrics.txt`
   files in place; delete them by hand if you want them gone.
-- **Untimed lyrics (`.lrc`).** The `.lrc` sidecar is written only when a song has
-  lyrics, exactly like `.lyrics.txt`, so it opts out of removal the same way.
-  Turning `lrc_sidecar` off leaves existing `.lrc` files in place. The lyrics
-  carry no per-line timestamps.
+- **Synced lyrics (`.lrc`).** The `.lrc` sidecar is written only when a song has
+  lyrics Suno can align, exactly like `.lyrics.txt`, so an absent `.lrc` is
+  ambiguous (the feature is off, the song is an instrumental, or a fetch failed)
+  and it opts out of removal the same way covers do. Turning `lrc_sidecar` off
+  leaves existing `.lrc` files in place. When alignment is available the file
+  carries line-level timestamps (and MP3 gains a word-level `SYLT` frame);
+  otherwise it falls back to the untimed lyrics. An instrumental writes no file.
 - **Music video (`.mp4`).** The standalone video is a large binary and its source
   URL can be transiently absent, so it opts out of removal the same way covers do.
   Turning `video_mp4` off leaves existing `.mp4` videos in place; a video is only

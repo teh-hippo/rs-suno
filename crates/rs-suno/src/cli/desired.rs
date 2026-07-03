@@ -13,7 +13,7 @@ use suno_core::{
     AreaMode, AreasConfig, ArtifactKind, AudioFormat, Clip, Desired, DesiredArtifact, ExecOutcome,
     LineageContext, M3u8Entry, NamingConfig, NamingRequest, Playlist, PlaylistDesired, RunStatus,
     SourceMode, art_hash, art_url_hash, content_hash, meta_hash, render_clip_details,
-    render_clip_lrc, render_clip_lyrics, render_clip_names, render_m3u8, sanitise_name,
+    render_clip_lyrics, render_clip_names, render_m3u8, sanitise_name, synced_lrc_source_hash,
 };
 
 /// Below this manifest size the mass-deletion fraction rule does not fire; a
@@ -51,8 +51,10 @@ impl ExitCode {
 ///
 /// Each mirrors one resolved setting: `animated_covers` gates the `cover.webp`,
 /// `details` the `.details.txt` dump, `lyrics` the `.lyrics.txt` file, `lrc`
-/// the untimed `.lrc` sidecar, and `video` the standalone `.mp4` music video.
-/// All default off, matching the compiled config defaults.
+/// the synced `.lrc` sidecar (Suno's word/line-level timed lyrics, which also
+/// drives the MP3 `SYLT` frame and the plain lyric tag), and `video` the
+/// standalone `.mp4` music video. All default off, matching the compiled config
+/// defaults.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ArtifactToggles {
     pub animated_covers: bool,
@@ -172,7 +174,11 @@ pub fn build_desired(
 /// `DetailsTxt` is always emitted when `toggles.details` is set (the render is
 /// total); `LyricsTxt` only when `toggles.lyrics` is set and the clip has
 /// non-empty lyrics (the render is partial), so no empty lyrics file is written.
-/// The untimed `Lrc` follows the same partial rule under `toggles.lrc`.
+/// The synced `Lrc` is emitted under `toggles.lrc` for every clip (alignment
+/// availability is knowable only from the endpoint, not the feed), carrying a
+/// source-proxy hash and no inline body; its timed body is resolved from the
+/// fetched alignment just before execution, and a clip with neither alignment
+/// nor lyrics writes no file (its emptiness cached so it is not re-fetched).
 fn clip_artifacts(
     clip: &Clip,
     base: &str,
@@ -219,15 +225,23 @@ fn clip_artifacts(
             content: Some(text),
         });
     }
-    if toggles.lrc
-        && let Some(text) = render_clip_lrc(clip, lineage)
-    {
+    if toggles.lrc {
+        // Emitted for every clip: alignment availability is knowable only from
+        // the endpoint, not the feed (a clip can carry neither `lyrics` nor a
+        // `prompt` yet still have full word/line alignment), so the fetch itself
+        // decides. The artifact carries no inline body and a source-proxy hash
+        // keyed on the (immutable) clip id plus the render version, so reconcile
+        // skips an unchanged clip with no fetch while a version bump rewrites
+        // every sidecar. The body is resolved just before execution (the untimed
+        // lyrics when Suno has no alignment); a clip with neither alignment nor
+        // lyrics resolves to nothing and writes no `.lrc`, its emptiness cached
+        // on the manifest so it is not re-fetched every run.
         artifacts.push(DesiredArtifact {
             kind: ArtifactKind::Lrc,
             path: format!("{base}.lrc"),
             source_url: String::new(),
-            hash: content_hash(&text),
-            content: Some(text),
+            hash: synced_lrc_source_hash(&clip.id),
+            content: None,
         });
     }
     if toggles.video && !clip.video_url.is_empty() {
@@ -1280,7 +1294,7 @@ mod tests {
     }
 
     #[test]
-    fn build_desired_emits_lrc_sidecar_only_when_enabled_and_present() {
+    fn build_desired_emits_lrc_sidecar_only_when_enabled() {
         let with_lyrics = Clip {
             lyrics: "la la la".to_owned(),
             ..clip("id-a", "Song", "alice")
@@ -1304,7 +1318,9 @@ mod tests {
                 .all(|art| art.kind != ArtifactKind::Lrc)
         );
 
-        // Enabled with lyrics: an untimed Lrc is emitted next to the audio.
+        // Enabled with a lyric signal: a synced Lrc is emitted next to the audio
+        // with a source-proxy hash and NO inline content (the timed body is
+        // resolved from the fetched alignment just before execution).
         let on = build_desired(
             &clips,
             AudioFormat::Flac,
@@ -1325,18 +1341,21 @@ mod tests {
             .expect("lrc sidecar expected");
         assert_eq!(lrc.path, format!("{base}.lrc"));
         assert_eq!(lrc.source_url, "");
-        let body = render_clip_lrc(&with_lyrics, &LineageContext::own_root(&with_lyrics)).unwrap();
-        assert_eq!(lrc.content.as_deref(), Some(body.as_str()));
-        assert_eq!(lrc.hash, content_hash(&body));
-        // Untimed: the body carries no per-line timestamps.
-        assert!(!body.contains("[00:"));
+        assert_eq!(lrc.content, None);
+        assert_eq!(lrc.hash, synced_lrc_source_hash(&with_lyrics.id));
     }
 
     #[test]
-    fn build_desired_omits_lrc_sidecar_when_clip_has_no_lyrics() {
-        let no_lyrics = clip("id-a", "Song", "alice");
-        assert!(no_lyrics.lyrics.is_empty());
-        let clips = [&no_lyrics];
+    fn build_desired_emits_lrc_sidecar_from_prompt_when_feed_omits_lyrics() {
+        // The v3 feed omits per-clip lyrics but carries the prompt; a clip with
+        // only a prompt is still a synced-lyrics candidate, so a proxy-hashed Lrc
+        // is emitted (its body is fetched later).
+        let prompt_only = Clip {
+            prompt: "the sung words live here".to_owned(),
+            ..clip("id-a", "Song", "alice")
+        };
+        assert!(prompt_only.lyrics.is_empty());
+        let clips = [&prompt_only];
         let desired = build_desired(
             &clips,
             AudioFormat::Flac,
@@ -1349,12 +1368,42 @@ mod tests {
             },
             &NamingConfig::default(),
         );
-        assert!(
-            desired[0]
-                .artifacts
-                .iter()
-                .all(|art| art.kind != ArtifactKind::Lrc)
+        let lrc = desired[0]
+            .artifacts
+            .iter()
+            .find(|art| art.kind == ArtifactKind::Lrc)
+            .expect("lrc sidecar expected");
+        assert_eq!(lrc.content, None);
+        assert_eq!(lrc.hash, synced_lrc_source_hash(&prompt_only.id));
+    }
+
+    #[test]
+    fn build_desired_emits_lrc_sidecar_even_when_feed_has_no_lyrics_or_prompt() {
+        // A clip can carry neither `lyrics` nor a `prompt` in the feed yet still
+        // have full word/line alignment at the endpoint (observed live), so the
+        // artifact must be emitted regardless; the fetch decides emptiness.
+        let bare = clip("id-a", "Song", "alice");
+        assert!(bare.lyrics.is_empty() && bare.prompt.is_empty());
+        let clips = [&bare];
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            &modes_for(&clips, SourceMode::Mirror),
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                lrc: true,
+                ..Default::default()
+            },
+            &NamingConfig::default(),
         );
+        let lrc = desired[0]
+            .artifacts
+            .iter()
+            .find(|art| art.kind == ArtifactKind::Lrc)
+            .expect("lrc sidecar expected even with no feed lyrics/prompt");
+        assert_eq!(lrc.content, None);
+        assert_eq!(lrc.hash, synced_lrc_source_hash(&bare.id));
     }
 
     #[test]
