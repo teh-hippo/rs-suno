@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/teh-hippo/rs-suno/compare/v0.17.0...v0.17.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* count sidecar artifact writes in dry-run and sync summary ([6cebf60](https://github.com/teh-hippo/rs-suno/commit/6cebf6011be3c8d9a56acf8691f085007a72f858)), closes [#105](https://github.com/teh-hippo/rs-suno/issues/105)
+
 ## [0.17.0](https://github.com/teh-hippo/rs-suno/compare/v0.16.1...v0.17.0) (2026-07-03)
 
 
