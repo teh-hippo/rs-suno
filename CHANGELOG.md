@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/teh-hippo/rs-suno/compare/v0.16.1...v0.17.0) (2026-07-03)
+
+
+### Features
+
+* manual album-name overrides in config ([#92](https://github.com/teh-hippo/rs-suno/issues/92)) ([bf71472](https://github.com/teh-hippo/rs-suno/commit/bf7147230a86d5a004a1b37e7ac02281ccd26f72))
+
 ## [0.16.1](https://github.com/teh-hippo/rs-suno/compare/v0.16.0...v0.16.1) (2026-07-02)
 
 
