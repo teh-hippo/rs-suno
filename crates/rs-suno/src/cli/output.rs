@@ -238,14 +238,25 @@ fn short_id(id: &str) -> String {
 /// A clean or per-clip-failed run reads "{verb} complete"; a run the engine
 /// aborted (a full disk or a bad token) reads "{verb} aborted" and names why,
 /// so the counters are never mistaken for a finished mirror.
+///
+/// The `sidecars` line counts external artifact writes (`.lrc`, `.lyrics.txt`,
+/// `.details.txt`, covers, `.mp4`, playlists), which are otherwise invisible: a
+/// clip whose audio is untouched but which gains a sidecar records as a skip on
+/// the audio, so without this line enabling a sidecar on a synced library would
+/// read as "skipped" (#105). Artifact deletes fold into `deleted` alongside
+/// audio deletes, matching the confirmation prompt and mass-delete cap, which
+/// already treat both as one destructive footprint. Every counted action lands
+/// in exactly one bucket, so on a completed run `total` equals the plan's
+/// `applying N action(s)` figure.
 pub fn run_summary(verb_label: &str, account: &str, outcome: &ExecOutcome, secs: f64) -> String {
     let downloaded = outcome.downloaded + outcome.reformatted;
     let tagged = outcome.retagged;
     let renamed = outcome.renamed;
-    let deleted = outcome.deleted;
+    let deleted = outcome.deleted + outcome.artifacts_deleted;
+    let sidecars = outcome.artifacts_written;
     let skipped = outcome.skipped;
     let failed = outcome.failed();
-    let total = downloaded + tagged + renamed + deleted + skipped + failed;
+    let total = downloaded + tagged + renamed + deleted + sidecars + skipped + failed;
     let header = match outcome.status {
         RunStatus::Completed => format!("{verb_label} complete: {account}"),
         RunStatus::DiskFull => {
@@ -256,20 +267,27 @@ pub fn run_summary(verb_label: &str, account: &str, outcome: &ExecOutcome, secs:
         }
     };
     format!(
-        "{header}\n  downloaded  {downloaded:>4}\n  tagged      {tagged:>4}\n  renamed     {renamed:>4}\n  deleted     {deleted:>4}\n  skipped     {skipped:>4}\n  failed      {failed:>4}\n  total       {total:>4}\nDuration: {secs:.1}s"
+        "{header}\n  downloaded  {downloaded:>4}\n  tagged      {tagged:>4}\n  renamed     {renamed:>4}\n  deleted     {deleted:>4}\n  sidecars    {sidecars:>4}\n  skipped     {skipped:>4}\n  failed      {failed:>4}\n  total       {total:>4}\nDuration: {secs:.1}s"
     )
 }
 
 /// The dry-run / check summary derived from the plan, making no changes.
+///
+/// Mirrors [`run_summary`]'s buckets so a dry run previews exactly what a real
+/// run reports: `sidecars` counts pending artifact writes ([`Plan::artifact_writes`])
+/// and `to delete` folds in artifact deletes ([`Plan::artifact_deletes`]). Every
+/// action variant maps to one bucket, so `total` equals [`Plan::len`] (the
+/// `applying N action(s)` figure a real run would print).
 pub fn dry_summary(account: &str, plan: &Plan) -> String {
     let to_download = plan.downloads() + plan.reformats();
     let to_tag = plan.retags();
     let to_rename = plan.renames();
-    let to_delete = plan.deletes();
+    let to_delete = plan.deletes() + plan.artifact_deletes();
+    let sidecars = plan.artifact_writes();
     let up_to_date = plan.skips();
-    let total = to_download + to_tag + to_rename + to_delete + up_to_date;
+    let total = to_download + to_tag + to_rename + to_delete + sidecars + up_to_date;
     format!(
-        "Dry run: {account} (no changes made)\n  to download {to_download:>4}\n  to tag      {to_tag:>4}\n  to rename   {to_rename:>4}\n  to delete   {to_delete:>4}\n  up to date  {up_to_date:>4}\n  total       {total:>4}"
+        "Dry run: {account} (no changes made)\n  to download {to_download:>4}\n  to tag      {to_tag:>4}\n  to rename   {to_rename:>4}\n  to delete   {to_delete:>4}\n  sidecars    {sidecars:>4}\n  up to date  {up_to_date:>4}\n  total       {total:>4}"
     )
 }
 
@@ -476,5 +494,123 @@ mod tests {
         assert!(prompt.contains("song-0.flac"));
         assert!(prompt.contains("and 3 more"));
         assert!(prompt.trim_end().ends_with("Proceed?"));
+    }
+
+    /// Read the integer a summary prints against `label` (its `  <label> N` row).
+    fn count_in(summary: &str, label: &str) -> usize {
+        summary
+            .lines()
+            .find_map(|line| {
+                line.trim_start()
+                    .strip_prefix(label)
+                    .map(|rest| rest.trim().parse::<usize>().expect("numeric bucket"))
+            })
+            .unwrap_or_else(|| panic!("no '{label}' line in:\n{summary}"))
+    }
+
+    /// The outcome the executor records for a fully completed run of `plan`: each
+    /// action maps to exactly one counter, mirroring `Ctx::apply`. Ties the run
+    /// summary to the plan so a dry run and a real run must agree.
+    fn completed_outcome(plan: &Plan) -> ExecOutcome {
+        let mut outcome = ExecOutcome::default();
+        for action in &plan.actions {
+            match action {
+                Action::Download { .. } => outcome.downloaded += 1,
+                Action::Reformat { .. } => outcome.reformatted += 1,
+                Action::Retag { .. } => outcome.retagged += 1,
+                Action::Rename { .. } => outcome.renamed += 1,
+                Action::Delete { .. } => outcome.deleted += 1,
+                Action::Skip { .. } => outcome.skipped += 1,
+                Action::WriteArtifact { .. } => outcome.artifacts_written += 1,
+                Action::DeleteArtifact { .. } => outcome.artifacts_deleted += 1,
+            }
+        }
+        outcome
+    }
+
+    fn write_lrc(owner: &str, path: &str) -> Action {
+        Action::WriteArtifact {
+            kind: ArtifactKind::Lrc,
+            path: path.to_owned(),
+            source_url: String::new(),
+            hash: "h".to_owned(),
+            owner_id: owner.to_owned(),
+            content: Some("[00:00.00] la".to_owned()),
+        }
+    }
+
+    #[test]
+    fn summaries_count_sidecar_writes_on_an_already_synced_library() {
+        // Enabling a sidecar on a fully-synced library: the audio is untouched
+        // (every clip is a Skip) but each clip gains a new `.lrc`. The bug (#105)
+        // was that these writes vanished into "up to date / skipped"; both
+        // summaries must now count them and reconcile with the action list.
+        let plan = Plan {
+            actions: vec![
+                Action::Skip {
+                    clip_id: "a".to_owned(),
+                },
+                Action::Skip {
+                    clip_id: "b".to_owned(),
+                },
+                Action::Skip {
+                    clip_id: "c".to_owned(),
+                },
+                write_lrc("a", "a.lrc"),
+                write_lrc("b", "b.lrc"),
+            ],
+        };
+
+        let dry = dry_summary("alice", &plan);
+        assert!(dry.contains("  sidecars "), "sidecar line missing:\n{dry}");
+        assert_eq!(count_in(&dry, "sidecars"), 2, "{dry}");
+        assert_eq!(count_in(&dry, "up to date"), 3, "{dry}");
+        assert_eq!(count_in(&dry, "to download"), 0, "{dry}");
+        assert_eq!(count_in(&dry, "to tag"), 0, "{dry}");
+        // The dry-run total reconciles with the `applying N action(s)` figure.
+        assert_eq!(count_in(&dry, "total"), plan.len());
+
+        let outcome = completed_outcome(&plan);
+        let run = run_summary("Sync", "alice", &outcome, 1.0);
+        assert!(run.contains("  sidecars "), "sidecar line missing:\n{run}");
+        assert_eq!(count_in(&run, "sidecars"), 2, "{run}");
+        assert_eq!(count_in(&run, "skipped"), 3, "{run}");
+        assert_eq!(count_in(&run, "total"), plan.len(), "{run}");
+
+        // Dry run previews exactly what the real run reports.
+        assert_eq!(count_in(&dry, "sidecars"), count_in(&run, "sidecars"));
+        assert_eq!(count_in(&dry, "up to date"), count_in(&run, "skipped"));
+        assert_eq!(count_in(&dry, "total"), count_in(&run, "total"));
+    }
+
+    #[test]
+    fn artifact_deletes_fold_into_the_delete_bucket() {
+        // A removed-kind or co-deleted sidecar is a local-file removal, so it is
+        // counted alongside audio deletes (as the prompt and mass-delete cap
+        // already group them), not in `sidecars`.
+        let plan = Plan {
+            actions: vec![
+                Action::Delete {
+                    path: "x.flac".to_owned(),
+                    clip_id: "x".to_owned(),
+                },
+                Action::DeleteArtifact {
+                    kind: ArtifactKind::Lrc,
+                    path: "x.lrc".to_owned(),
+                    owner_id: "x".to_owned(),
+                },
+            ],
+        };
+
+        let dry = dry_summary("alice", &plan);
+        assert_eq!(count_in(&dry, "to delete"), 2, "{dry}");
+        assert_eq!(count_in(&dry, "sidecars"), 0, "{dry}");
+        assert_eq!(count_in(&dry, "total"), plan.len(), "{dry}");
+
+        let outcome = completed_outcome(&plan);
+        let run = run_summary("Sync", "alice", &outcome, 1.0);
+        assert_eq!(count_in(&run, "deleted"), 2, "{run}");
+        assert_eq!(count_in(&run, "sidecars"), 0, "{run}");
+        assert_eq!(count_in(&run, "total"), plan.len(), "{run}");
     }
 }
