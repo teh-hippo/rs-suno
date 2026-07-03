@@ -16,7 +16,7 @@ use crate::graph::LineageStore;
 use crate::lineage::LineageContext;
 use crate::manifest::Manifest;
 use crate::model::Clip;
-use crate::tag::TrackMetadata;
+use crate::tag::{TrackMetadata, non_empty};
 
 /// The schema version of the library index document.
 ///
@@ -165,14 +165,6 @@ pub fn render_library_index(
         clips,
     };
     serde_json::to_string_pretty(&index).expect("library index serialises")
-}
-
-/// `Some(s)` when `s` is non-empty, else `None`.
-///
-/// Mirrors the tagger's own emptiness test so the index `artist` agrees with the
-/// embedded `ARTIST` tag, including the shared `"Suno"` fallback.
-fn non_empty(s: &str) -> Option<&str> {
-    (!s.is_empty()).then_some(s)
 }
 
 /// Round a duration in seconds to the nearest whole second for `#EXTINF`.

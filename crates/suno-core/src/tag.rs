@@ -232,7 +232,10 @@ fn lineage_summary(clip: &Clip, lineage: &LineageContext) -> String {
 }
 
 /// `Some(s)` when `s` is non-empty, else `None`.
-fn non_empty(s: &str) -> Option<&str> {
+///
+/// Shared with the library index so its `artist`/`handle` fields apply the same
+/// emptiness test (and `"Suno"` fallback) as the embedded tags.
+pub(crate) fn non_empty(s: &str) -> Option<&str> {
     (!s.is_empty()).then_some(s)
 }
 
