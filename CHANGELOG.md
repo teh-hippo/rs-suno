@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/teh-hippo/rs-suno/compare/v0.19.0...v0.20.0) (2026-07-03)
+
+
+### Features
+
+* mirror existing Suno stems (download-only) ([#100](https://github.com/teh-hippo/rs-suno/issues/100)) ([f3c08e9](https://github.com/teh-hippo/rs-suno/commit/f3c08e9c6196101dde7b7d42cd62aea67eaf100f))
+
 ## [0.19.0](https://github.com/teh-hippo/rs-suno/compare/v0.18.0...v0.19.0) (2026-07-03)
 
 
