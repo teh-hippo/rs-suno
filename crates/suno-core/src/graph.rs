@@ -603,9 +603,10 @@ impl LineageStore {
     /// (album folder, embedded tags, the change hash), so a dropped resolution
     /// call never rewrites the library (HARDENING H3). The root comes from the
     /// monotonic resolution cache (the clip's own id when the store has no
-    /// better answer) and the root title from that root's archived node, so a
-    /// transient miss keeps the last-known-good album even for a since-purged
-    /// ancestor. The parent edge is read structurally from the clip itself.
+    /// better answer) and the root title and date from that root's archived
+    /// node, so a transient miss keeps the last-known-good album (even for a
+    /// since-purged ancestor) and the Year tag anchors on the root's year. The
+    /// parent edge is read structurally from the clip itself.
     pub fn context_for(&self, clip: &Clip) -> LineageContext {
         let cached = self.get_root(&clip.id);
         let root_id = cached
@@ -617,6 +618,10 @@ impl LineageStore {
             .map(|node| node.title.clone())
             .unwrap_or_else(|| clip.title.clone());
         let root_title = self.effective_root_title(&root_id, root_title);
+        let root_date = self
+            .node(&root_id)
+            .map(|node| node.created_at.clone())
+            .unwrap_or_else(|| clip.created_at.clone());
         let (parent_id, edge_type) = match immediate_parent(clip) {
             Some((id, edge)) => (id, Some(edge)),
             None => (String::new(), None),
@@ -627,6 +632,7 @@ impl LineageStore {
         LineageContext {
             root_id,
             root_title,
+            root_date,
             parent_id,
             edge_type,
             status,
@@ -642,10 +648,9 @@ impl LineageStore {
     /// decides whether the clip folders under its root's album or its own title.
     /// A clip absent from the store folds to a self-root with an empty title.
     pub fn album_for_id(&self, id: &str) -> String {
-        let own_title = self
-            .node(id)
-            .map(|node| node.title.clone())
-            .unwrap_or_default();
+        let own = self.node(id);
+        let own_title = own.map(|node| node.title.clone()).unwrap_or_default();
+        let own_created_at = own.map(|node| node.created_at.clone()).unwrap_or_default();
         let root_id = self
             .get_root(id)
             .map(|entry| entry.root_id.clone())
@@ -656,9 +661,14 @@ impl LineageStore {
             .map(|node| node.title.clone())
             .unwrap_or_else(|| own_title.clone());
         let root_title = self.effective_root_title(&root_id, root_title);
+        let root_date = self
+            .node(&root_id)
+            .map(|node| node.created_at.clone())
+            .unwrap_or(own_created_at);
         let context = LineageContext {
             root_id,
             root_title,
+            root_date,
             parent_id: String::new(),
             edge_type: None,
             status: ResolveStatus::Resolved,
@@ -1371,6 +1381,58 @@ mod tests {
     }
 
     #[test]
+    fn context_for_tags_the_root_year_across_a_calendar_boundary() {
+        // A December root with a January revision: both tag the root's year, so
+        // the album groups under one year even across the boundary.
+        let clips = vec![
+            Clip {
+                id: "child".into(),
+                title: "Revision".into(),
+                clip_type: "gen".into(),
+                task: "cover".into(),
+                created_at: "2024-01-02T08:00:00Z".into(),
+                cover_clip_id: "root".into(),
+                edited_clip_id: "root".into(),
+                ..Default::default()
+            },
+            Clip {
+                id: "root".into(),
+                title: "Origin".into(),
+                clip_type: "gen".into(),
+                created_at: "2023-12-30T23:00:00Z".into(),
+                ..Default::default()
+            },
+        ];
+        let mut roots = HashMap::new();
+        for id in ["child", "root"] {
+            roots.insert(
+                id.to_owned(),
+                RootInfo {
+                    root_id: "root".into(),
+                    root_title: "Origin".into(),
+                    status: ResolveStatus::Resolved,
+                },
+            );
+        }
+        let resolution = Resolution {
+            roots,
+            gap_filled: Vec::new(),
+        };
+        let mut store = LineageStore::new();
+        store.update(&clips, &resolution, "now");
+
+        let child_ctx = store.context_for(&clips[0]);
+        assert_eq!(child_ctx.root_id, "root");
+        assert_eq!(child_ctx.root_date, "2023-12-30T23:00:00Z");
+        // The January child tags the December root's year, not its own 2024.
+        assert_eq!(child_ctx.year(&clips[0].created_at), "2023");
+
+        // The root tags its own year (the same year).
+        let root_ctx = store.context_for(&clips[1]);
+        assert_eq!(root_ctx.year(&clips[1].created_at), "2023");
+    }
+
+    #[test]
     fn context_for_an_unknown_clip_is_self_rooted() {
         let store = LineageStore::new();
         let orphan = Clip {
@@ -1719,6 +1781,7 @@ mod tests {
         let ctx_of = |root_id: &str| LineageContext {
             root_id: root_id.to_owned(),
             root_title: "Shared".to_owned(),
+            root_date: String::new(),
             parent_id: String::new(),
             edge_type: None,
             status: ResolveStatus::Resolved,

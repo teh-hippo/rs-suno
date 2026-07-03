@@ -537,6 +537,7 @@ mod tests {
         let lineage = LineageContext {
             root_id: "root-9".to_string(),
             root_title: "Origin".to_string(),
+            root_date: String::new(),
             parent_id: "root-9".to_string(),
             edge_type: Some(EdgeType::Cover),
             status: ResolveStatus::Resolved,
@@ -614,6 +615,7 @@ mod tests {
         let lineage = LineageContext {
             root_id: "root-1".to_string(),
             root_title: "Original".to_string(),
+            root_date: String::new(),
             parent_id: "root-1".to_string(),
             edge_type: Some(EdgeType::Cover),
             status: ResolveStatus::Resolved,
@@ -645,6 +647,7 @@ mod tests {
         let lineage = LineageContext {
             root_id: "root-1".to_string(),
             root_title: "Preferred Album".to_string(),
+            root_date: String::new(),
             parent_id: "root-1".to_string(),
             edge_type: Some(EdgeType::Cover),
             status: ResolveStatus::Resolved,

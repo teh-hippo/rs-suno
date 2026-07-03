@@ -350,6 +350,7 @@ mod tests {
         LineageContext {
             root_id: "rootid567890".to_owned(),
             root_title: "Weather Series".to_owned(),
+            root_date: String::new(),
             parent_id: "parentid1234".to_owned(),
             edge_type: Some(EdgeType::Extend),
             status: ResolveStatus::Resolved,
@@ -437,6 +438,7 @@ mod tests {
         let lineage = LineageContext {
             root_id: "root-01".to_owned(),
             root_title: "Resolved Album".to_owned(),
+            root_date: String::new(),
             parent_id: "root-01".to_owned(),
             edge_type: Some(EdgeType::Cover),
             status: ResolveStatus::Resolved,
