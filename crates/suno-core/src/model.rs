@@ -24,6 +24,10 @@ pub struct Clip {
     pub is_liked: bool,
     pub is_trashed: bool,
     pub has_vocal: bool,
+    /// Whether Suno reports this clip already has separated stems, from
+    /// `metadata.has_stem`. The stems mirror uses it as a precondition: a clip
+    /// whose `has_stem` is false or absent is never queried for stems.
+    pub has_stem: bool,
     pub clip_type: String,
     pub prompt: String,
     pub gpt_description_prompt: String,
@@ -104,6 +108,7 @@ impl Clip {
             is_liked: bool_field(raw, "is_liked"),
             is_trashed: bool_field(raw, "is_trashed"),
             has_vocal: bool_field(&metadata, "has_vocal"),
+            has_stem: bool_field(&metadata, "has_stem"),
             clip_type: string(&metadata, "type"),
             prompt: string(&metadata, "prompt"),
             gpt_description_prompt: string(&metadata, "gpt_description_prompt"),
@@ -362,6 +367,24 @@ mod tests {
         assert_eq!(
             Clip::from_json(&serde_json::json!({"id": "x", "play_count": null})).play_count,
             0
+        );
+    }
+
+    #[test]
+    fn has_stem_parses_from_metadata_and_defaults_to_false() {
+        // Present and true in metadata.
+        let with_stem = serde_json::json!({"id": "x", "metadata": {"has_stem": true}});
+        assert!(Clip::from_json(&with_stem).has_stem);
+        // Absent, null, or non-bool metadata.has_stem defaults to false, so a
+        // clip is never mistaken for a stem source without an explicit true.
+        assert!(!Clip::from_json(&serde_json::json!({"id": "x"})).has_stem);
+        assert!(
+            !Clip::from_json(&serde_json::json!({"id": "x", "metadata": {"has_stem": null}}))
+                .has_stem
+        );
+        assert!(
+            !Clip::from_json(&serde_json::json!({"id": "x", "metadata": {"has_stem": false}}))
+                .has_stem
         );
     }
 

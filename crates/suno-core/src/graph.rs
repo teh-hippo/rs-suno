@@ -1818,6 +1818,7 @@ mod tests {
                 trashed: false,
                 private: false,
                 artifacts: Vec::new(),
+                stems: None,
             }
         };
         let desired = vec![
@@ -1929,6 +1930,7 @@ mod tests {
                 trashed: false,
                 private: false,
                 artifacts: Vec::new(),
+                stems: None,
             }
         };
         let desired = vec![

@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
-use crate::config::AudioFormat;
+use crate::config::{AudioFormat, StemFormat};
 use crate::graph::{AlbumArt, PlaylistState};
 use crate::hash::{art_hash, art_url_hash};
 use crate::lineage::LineageContext;
@@ -120,6 +120,49 @@ pub struct Desired {
     /// defaults to empty; later phases populate it (P7 covers per-song art), so
     /// for now every production caller passes an empty vec and only tests set it.
     pub artifacts: Vec<DesiredArtifact>,
+    /// The clip's desired stem set, when stems are being mirrored.
+    ///
+    /// Tri-state, encoding stem deletion safety:
+    /// - `None` — the stem listing is not authoritative this run (the feature is
+    ///   off, `has_stem` is false/absent, or the listing was disabled, failed,
+    ///   partial, `400`, or otherwise indeterminate). Existing local stems are
+    ///   KEPT and never deleted; a paging error is never read as "no stems".
+    /// - `Some(set)` — an AUTHORITATIVE, fully enumerated set. Stems missing from
+    ///   it are written, drifted ones rewritten, and a tracked stem absent from
+    ///   it is delete-reconciled through the shared deletion gate.
+    ///
+    /// Defaults to `None`, so any caller that does not mirror stems leaves local
+    /// stems untouched.
+    pub stems: Option<Vec<DesiredStem>>,
+}
+
+/// One desired stem for a clip.
+///
+/// Carries the stable per-stem key (the manifest map key), where the stem file
+/// should live, where to fetch it, and a source change hash that drives rewrite
+/// detection against the manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesiredStem {
+    /// The stable key for this stem (server stem id, else label), unique within
+    /// the clip. This is the manifest map key, so add/rewrite/remove target the
+    /// right stem without disturbing the others.
+    pub key: String,
+    /// The stem's own server clip id, used to render its lossless WAV through the
+    /// free `convert_wav` flow. Empty only for a degenerate listing with no id,
+    /// in which case the stem is stored as MP3 (WAV needs an id to render).
+    pub stem_id: String,
+    /// Resolved relative target path for the stem file, inside the song's
+    /// `.stems` sub-folder. Its extension matches [`format`](Self::format).
+    pub path: String,
+    /// The public CDN MP3 URL for the stem (a free GET). Downloaded directly for
+    /// an MP3 stem; for a WAV stem it is the source-of-truth for the rewrite
+    /// hash while the bytes come from the rendered WAV.
+    pub source_url: String,
+    /// The container the stem is stored in (WAV by default, or MP3). Stems are
+    /// always stored RAW; this is never FLAC.
+    pub format: StemFormat,
+    /// Source change hash; a change from the manifest triggers a rewrite.
+    pub hash: String,
 }
 
 /// One desired external artifact for a clip.
@@ -270,6 +313,37 @@ pub enum Action {
         path: String,
         owner_id: String,
     },
+    /// Write (or rewrite) one stem file for its owning clip.
+    ///
+    /// Emitted when the clip's manifest stem map lacks this `key`, or its stored
+    /// hash or path drifts (the song moved, or the stem format changed). A write
+    /// is additive and never gated by deletion safety. Stems are stored RAW in
+    /// their native container and never transcoded to FLAC: a `Wav` stem is
+    /// rendered through the free `convert_wav` flow keyed on `stem_id`, an `Mp3`
+    /// stem is fetched straight from `source_url`. `key` is the stable stem key,
+    /// so the executor updates the right slot in the clip's keyed stem map.
+    WriteStem {
+        clip_id: String,
+        key: String,
+        stem_id: String,
+        path: String,
+        source_url: String,
+        format: StemFormat,
+        hash: String,
+    },
+    /// Delete one stem file and clear its slot in the clip's keyed stem map.
+    ///
+    /// Only ever emitted through [`delete_stem_action`], which shares the audio
+    /// `can_delete` gate and the owning entry's `preserve` marker, so a stem is
+    /// never removed on an incomplete listing or for a preserved clip. Emitted
+    /// either when an AUTHORITATIVE stem listing no longer contains `key`, or as
+    /// a co-delete when the owning clip's audio is deleted (so the `.stems`
+    /// folder is never orphaned).
+    DeleteStem {
+        clip_id: String,
+        key: String,
+        path: String,
+    },
 }
 
 /// The reconcile output: an ordered, deterministic list of actions.
@@ -333,6 +407,16 @@ impl Plan {
         self.count(|a| matches!(a, Action::DeleteArtifact { .. }))
     }
 
+    /// Number of [`Action::WriteStem`] actions.
+    pub fn stem_writes(&self) -> usize {
+        self.count(|a| matches!(a, Action::WriteStem { .. }))
+    }
+
+    /// Number of [`Action::DeleteStem`] actions.
+    pub fn stem_deletes(&self) -> usize {
+        self.count(|a| matches!(a, Action::DeleteStem { .. }))
+    }
+
     fn count(&self, pred: impl Fn(&Action) -> bool) -> usize {
         self.actions.iter().filter(|a| pred(a)).count()
     }
@@ -378,8 +462,10 @@ pub fn reconcile(
             .any(|a| matches!(a, Action::Delete { .. }));
         if audio_deleted {
             co_delete_artifacts(d.clip.id.as_str(), manifest, can_delete, &mut actions);
+            co_delete_stems(d.clip.id.as_str(), manifest, can_delete, &mut actions);
         } else {
             plan_clip_artifacts(d, manifest, can_delete, &mut actions);
+            plan_clip_stems(d, manifest, can_delete, &mut actions);
         }
     }
 
@@ -391,8 +477,10 @@ pub fn reconcile(
         match delete_action(clip_id, manifest, can_delete) {
             Some(action) => {
                 actions.push(action);
-                // Co-delete the absent clip's sidecars under the same gate.
+                // Co-delete the absent clip's sidecars and stems under the same
+                // gate, so neither a sidecar nor the `.stems` folder is stranded.
                 co_delete_artifacts(clip_id, manifest, can_delete, &mut actions);
+                co_delete_stems(clip_id, manifest, can_delete, &mut actions);
             }
             // SYNC-9 / preserve / empty-path: absence is unreliable or the entry
             // is protected, so keep the file rather than delete it.
@@ -597,6 +685,26 @@ pub(crate) fn set_manifest_artifact(
     }
 }
 
+/// Set (or clear) one stem slot in a clip's keyed stem map.
+///
+/// The executor calls this after a [`Action::WriteStem`] (with the new state)
+/// or a [`Action::DeleteStem`] (with `None`), so the map mutation lives in one
+/// place. Clearing the last stem leaves an empty map, which serialises away.
+pub(crate) fn set_manifest_stem(
+    entry: &mut ManifestEntry,
+    key: &str,
+    state: Option<ArtifactState>,
+) {
+    match state {
+        Some(state) => {
+            entry.stems.insert(key.to_string(), state);
+        }
+        None => {
+            entry.stems.remove(key);
+        }
+    }
+}
+
 /// Reconcile the artifacts of a clip whose audio is kept this run.
 ///
 /// Writes each desired per-clip artifact that the manifest lacks, whose stored
@@ -693,6 +801,112 @@ fn co_delete_artifacts(
     }
 }
 
+/// The single gate every [`Action::DeleteStem`] passes through.
+///
+/// The keyed-stem analogue of [`delete_artifact_action`], sharing the exact
+/// audio deletion safety: it returns a delete only when deletion is allowed for
+/// the run (`can_delete`), the owning manifest entry exists, the stem `path` is
+/// non-empty (so an empty path can never delete the account root), and the
+/// owning entry is not `preserve`-marked (a preserved clip's stems are preserved
+/// too). A `None` result means the caller must keep the stem file.
+fn delete_stem_action(
+    clip_id: &str,
+    key: &str,
+    path: &str,
+    manifest: &Manifest,
+    can_delete: bool,
+) -> Option<Action> {
+    if !can_delete {
+        return None;
+    }
+    let entry = manifest.get(clip_id)?;
+    if path.is_empty() || entry.preserve {
+        return None;
+    }
+    Some(Action::DeleteStem {
+        clip_id: clip_id.to_string(),
+        key: key.to_string(),
+        path: path.to_string(),
+    })
+}
+
+/// Reconcile the keyed stems of a clip whose audio is kept this run.
+///
+/// Does nothing when `d.stems` is `None` (the listing was not authoritative:
+/// feature off, `has_stem` false, or a disabled/failed/partial/`400` listing),
+/// so existing local stems are always KEPT — a paging error is never read as
+/// "no stems". When `d.stems` is `Some(set)`, the set is authoritative:
+///
+/// - each desired stem the manifest lacks, whose stored hash drifts, or whose
+///   stored path drifts (the song moved), is written; and
+/// - each tracked stem whose key is absent from the authoritative set is
+///   delete-reconciled through the shared [`delete_stem_action`] gate, unless
+///   the clip is protected this run (private or copy-held).
+///
+/// A protected clip keeps every stem regardless of the persisted `preserve`
+/// marker (which may still be false on the run that first protects the clip).
+fn plan_clip_stems(d: &Desired, manifest: &Manifest, can_delete: bool, out: &mut Vec<Action>) {
+    let Some(desired_stems) = &d.stems else {
+        return;
+    };
+    let clip_id = d.clip.id.as_str();
+    let entry = manifest.get(clip_id);
+
+    for stem in desired_stems {
+        let needs_write = match entry.and_then(|e| e.stems.get(&stem.key)) {
+            None => true,
+            Some(state) => state.hash != stem.hash || state.path != stem.path,
+        };
+        if needs_write {
+            out.push(Action::WriteStem {
+                clip_id: clip_id.to_string(),
+                key: stem.key.clone(),
+                stem_id: stem.stem_id.clone(),
+                path: stem.path.clone(),
+                source_url: stem.source_url.clone(),
+                format: stem.format,
+                hash: stem.hash.clone(),
+            });
+        }
+    }
+
+    let protected_now = d.private || d.modes.contains(&SourceMode::Copy);
+    if !protected_now && let Some(entry) = entry {
+        let desired_keys: BTreeSet<&str> = desired_stems.iter().map(|s| s.key.as_str()).collect();
+        for (key, state) in &entry.stems {
+            // A tracked stem the authoritative listing no longer contains is a
+            // genuine removal (the stem was deleted on Suno), reconciled through
+            // the shared gate. This fires ONLY for an authoritative set, so an
+            // empty/partial/paged-error listing (`d.stems == None`) never reaches
+            // here and can never delete a stem.
+            if !desired_keys.contains(key.as_str())
+                && let Some(action) =
+                    delete_stem_action(clip_id, key, &state.path, manifest, can_delete)
+            {
+                out.push(action);
+            }
+        }
+    }
+}
+
+/// Co-delete every stem of a clip whose audio is being deleted this run.
+///
+/// Each removal flows through the shared [`delete_stem_action`] gate, so a stem
+/// is co-deleted only when the audio delete itself was allowed; on an incomplete
+/// listing or a preserved entry nothing is emitted. This is what keeps a
+/// `.stems` sub-folder from being orphaned when its song is deleted: the stem
+/// files are removed alongside the audio, and the now-empty folder is pruned.
+fn co_delete_stems(clip_id: &str, manifest: &Manifest, can_delete: bool, out: &mut Vec<Action>) {
+    let Some(entry) = manifest.get(clip_id) else {
+        return;
+    };
+    for (key, state) in &entry.stems {
+        if let Some(action) = delete_stem_action(clip_id, key, &state.path, manifest, can_delete) {
+            out.push(action);
+        }
+    }
+}
+
 /// Collapse duplicate desired entries for one clip id into a single record.
 ///
 /// Safety folds are order-independent: `private` and copy-held are unions, and
@@ -722,6 +936,7 @@ fn aggregate_desired(desired: &[Desired]) -> Vec<Desired> {
                     acc.meta_hash = d.meta_hash.clone();
                     acc.art_hash = d.art_hash.clone();
                     acc.artifacts = d.artifacts.clone();
+                    acc.stems = d.stems.clone();
                 }
             }
         }
@@ -759,16 +974,18 @@ fn rep_key(d: &Desired) -> (&str, &str, &str, u8) {
 }
 
 /// Downgrade any delete whose path is also written by a `Download`,
-/// `Reformat`, `Rename`, or `WriteArtifact` this run, so a deletion can never
-/// clobber a file the same plan just produced. This covers both the audio
-/// [`Action::Delete`] and every artifact [`Action::DeleteArtifact`] class.
+/// `Reformat`, `Rename`, `WriteArtifact`, or `WriteStem` this run, so a deletion
+/// can never clobber a file the same plan just produced. This covers the audio
+/// [`Action::Delete`], every artifact [`Action::DeleteArtifact`] class, and
+/// every [`Action::DeleteStem`].
 fn suppress_path_aliasing(actions: &mut [Action]) {
     let targets: BTreeSet<String> = actions
         .iter()
         .filter_map(|a| match a {
             Action::Download { path, .. }
             | Action::Reformat { path, .. }
-            | Action::WriteArtifact { path, .. } => Some(path.clone()),
+            | Action::WriteArtifact { path, .. }
+            | Action::WriteStem { path, .. } => Some(path.clone()),
             Action::Rename { to, .. } => Some(to.clone()),
             _ => None,
         })
@@ -786,6 +1003,13 @@ fn suppress_path_aliasing(actions: &mut [Action]) {
         {
             *a = Action::Skip {
                 clip_id: owner_id.clone(),
+            };
+        }
+        if let Action::DeleteStem { path, clip_id, .. } = a
+            && targets.contains(path.as_str())
+        {
+            *a = Action::Skip {
+                clip_id: clip_id.clone(),
             };
         }
     }
@@ -1281,6 +1505,7 @@ mod tests {
             trashed: false,
             private: false,
             artifacts: Vec::new(),
+            stems: None,
         }
     }
 
@@ -2225,6 +2450,9 @@ mod tests {
                 Action::Rename { to, .. } => to.as_str(),
                 Action::WriteArtifact { owner_id, .. }
                 | Action::DeleteArtifact { owner_id, .. } => owner_id.as_str(),
+                Action::WriteStem { clip_id, .. } | Action::DeleteStem { clip_id, .. } => {
+                    clip_id.as_str()
+                }
             })
             .collect();
         assert_eq!(ids, ["a", "b", "c", "z"]);
@@ -3170,6 +3398,7 @@ mod tests {
             trashed: false,
             private: false,
             artifacts: Vec::new(),
+            stems: None,
         }
     }
 
@@ -3821,6 +4050,323 @@ mod tests {
             }
         }
     }
+
+    // ── Keyed stem reconcile ────────────────────────────────────────
+
+    fn dstem(key: &str, path: &str, hash: &str) -> DesiredStem {
+        DesiredStem {
+            key: key.to_string(),
+            stem_id: key.to_string(),
+            path: path.to_string(),
+            source_url: format!("https://cdn1.suno.ai/{key}.mp3"),
+            format: StemFormat::Mp3,
+            hash: hash.to_string(),
+        }
+    }
+
+    /// A kept FLAC clip that desires the given (possibly `None`) stem set.
+    fn stem_desired(id: &str, stems: Option<Vec<DesiredStem>>) -> Desired {
+        Desired {
+            stems,
+            ..desired(id, &format!("{id}.flac"), AudioFormat::Flac, "m", "art")
+        }
+    }
+
+    /// A manifest entry for a kept clip carrying the given tracked stems.
+    fn entry_with_stems(id: &str, stems: &[(&str, &str, &str)]) -> ManifestEntry {
+        let mut e = entry(&format!("{id}.flac"), AudioFormat::Flac, "m", "art");
+        for (key, path, hash) in stems {
+            e.stems.insert(
+                key.to_string(),
+                ArtifactState {
+                    path: path.to_string(),
+                    hash: hash.to_string(),
+                },
+            );
+        }
+        e
+    }
+
+    fn stem_writes(plan: &Plan) -> Vec<(&str, &str)> {
+        plan.actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::WriteStem { key, path, .. } => Some((key.as_str(), path.as_str())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn stem_deletes(plan: &Plan) -> Vec<(&str, &str)> {
+        plan.actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::DeleteStem { key, path, .. } => Some((key.as_str(), path.as_str())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stems_none_keeps_every_existing_stem() {
+        // An indeterminate listing (feature off, has_stem false, or a
+        // paged-error) surfaces as `None`: no stem is written or deleted.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry_with_stems(
+                "a",
+                &[
+                    ("voc", "a.stems/voc.mp3", "h1"),
+                    ("drm", "a.stems/drm.mp3", "h2"),
+                ],
+            ),
+        );
+        let d = vec![stem_desired("a", None)];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.stem_writes(), 0);
+        assert_eq!(plan.stem_deletes(), 0);
+    }
+
+    #[test]
+    fn stems_authoritative_writes_missing_stems() {
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+        let d = vec![stem_desired(
+            "a",
+            Some(vec![
+                dstem("voc", "a.stems/voc.mp3", "h1"),
+                dstem("drm", "a.stems/drm.mp3", "h2"),
+            ]),
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(
+            stem_writes(&plan),
+            vec![("voc", "a.stems/voc.mp3"), ("drm", "a.stems/drm.mp3")]
+        );
+        assert_eq!(plan.stem_deletes(), 0);
+    }
+
+    #[test]
+    fn stems_authoritative_rewrites_only_on_hash_or_path_drift() {
+        let mut manifest = Manifest::new();
+        // voc unchanged, drm hash drift, bas path drift (song moved).
+        manifest.insert(
+            "a",
+            entry_with_stems(
+                "a",
+                &[
+                    ("voc", "a.stems/voc.mp3", "h1"),
+                    ("drm", "a.stems/drm.mp3", "h2"),
+                    ("bas", "old.stems/bas.mp3", "h3"),
+                ],
+            ),
+        );
+        let d = vec![stem_desired(
+            "a",
+            Some(vec![
+                dstem("voc", "a.stems/voc.mp3", "h1"),     // unchanged
+                dstem("drm", "a.stems/drm.mp3", "h2-new"), // hash drift
+                dstem("bas", "a.stems/bas.mp3", "h3"),     // path drift
+            ]),
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(
+            stem_writes(&plan),
+            vec![("drm", "a.stems/drm.mp3"), ("bas", "a.stems/bas.mp3")]
+        );
+        assert_eq!(plan.stem_deletes(), 0);
+    }
+
+    #[test]
+    fn stems_authoritative_removes_a_stem_absent_from_the_set() {
+        // drm is gone from the authoritative listing, so it is delete-reconciled
+        // through the shared gate; voc (still present) is untouched.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry_with_stems(
+                "a",
+                &[
+                    ("voc", "a.stems/voc.mp3", "h1"),
+                    ("drm", "a.stems/drm.mp3", "h2"),
+                ],
+            ),
+        );
+        let d = vec![stem_desired(
+            "a",
+            Some(vec![dstem("voc", "a.stems/voc.mp3", "h1")]),
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.stem_writes(), 0);
+        assert_eq!(stem_deletes(&plan), vec![("drm", "a.stems/drm.mp3")]);
+    }
+
+    #[test]
+    fn stems_removal_needs_deletion_allowed() {
+        // The same authoritative-omission case, but deletion is not allowed this
+        // run (no fully-enumerated mirror). The stem is KEPT, never deleted.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry_with_stems(
+                "a",
+                &[
+                    ("voc", "a.stems/voc.mp3", "h1"),
+                    ("drm", "a.stems/drm.mp3", "h2"),
+                ],
+            ),
+        );
+        let d = vec![stem_desired(
+            "a",
+            Some(vec![dstem("voc", "a.stems/voc.mp3", "h1")]),
+        )];
+
+        let incomplete = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: false,
+        }];
+        assert_eq!(
+            reconcile(&manifest, &d, &local_present("a"), &incomplete).stem_deletes(),
+            0
+        );
+
+        let copy_only = vec![SourceStatus {
+            mode: SourceMode::Copy,
+            fully_enumerated: true,
+        }];
+        assert_eq!(
+            reconcile(&manifest, &d, &local_present("a"), &copy_only).stem_deletes(),
+            0
+        );
+    }
+
+    #[test]
+    fn stems_removal_skipped_for_preserved_or_protected_clip() {
+        let mut manifest = Manifest::new();
+        let mut e = entry_with_stems(
+            "a",
+            &[
+                ("voc", "a.stems/voc.mp3", "h1"),
+                ("drm", "a.stems/drm.mp3", "h2"),
+            ],
+        );
+        e.preserve = true;
+        manifest.insert("a", e);
+        let authoritative = Some(vec![dstem("voc", "a.stems/voc.mp3", "h1")]);
+
+        // preserve marker wins: no stem delete.
+        let d = vec![stem_desired("a", authoritative.clone())];
+        assert_eq!(
+            reconcile(&manifest, &d, &local_present("a"), &mirror_ok()).stem_deletes(),
+            0
+        );
+
+        // A copy-held clip this run also keeps all stems (protected_now).
+        let mut manifest2 = Manifest::new();
+        manifest2.insert(
+            "a",
+            entry_with_stems(
+                "a",
+                &[
+                    ("voc", "a.stems/voc.mp3", "h1"),
+                    ("drm", "a.stems/drm.mp3", "h2"),
+                ],
+            ),
+        );
+        let held = Desired {
+            modes: vec![SourceMode::Mirror, SourceMode::Copy],
+            stems: authoritative,
+            ..desired("a", "a.flac", AudioFormat::Flac, "m", "art")
+        };
+        assert_eq!(
+            reconcile(&manifest2, &[held], &local_present("a"), &mirror_ok()).stem_deletes(),
+            0
+        );
+    }
+
+    #[test]
+    fn stems_are_co_deleted_when_the_song_is_trashed() {
+        // A trashed clip's audio is deleted; its stems must be co-deleted so the
+        // `.stems` folder is not orphaned (no stranding).
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry_with_stems(
+                "a",
+                &[
+                    ("voc", "a.stems/voc.mp3", "h1"),
+                    ("drm", "a.stems/drm.mp3", "h2"),
+                ],
+            ),
+        );
+        let trashed = Desired {
+            trashed: true,
+            ..desired("a", "a.flac", AudioFormat::Flac, "m", "art")
+        };
+        let plan = reconcile(&manifest, &[trashed], &local_present("a"), &mirror_ok());
+        assert_eq!(plan.deletes(), 1, "the trashed audio is deleted");
+        let mut deleted: Vec<&str> = stem_deletes(&plan).into_iter().map(|(k, _)| k).collect();
+        deleted.sort_unstable();
+        assert_eq!(deleted, vec!["drm", "voc"], "both stems co-deleted");
+    }
+
+    #[test]
+    fn stems_are_co_deleted_for_an_absent_clip() {
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry_with_stems("a", &[("voc", "a.stems/voc.mp3", "h1")]),
+        );
+        // Desired is empty: clip "a" left every source and is deleted.
+        let plan = reconcile(&manifest, &[], &local_present("a"), &mirror_ok());
+        assert_eq!(plan.deletes(), 1);
+        assert_eq!(stem_deletes(&plan), vec![("voc", "a.stems/voc.mp3")]);
+    }
+
+    #[test]
+    fn stems_are_kept_when_absent_clip_listing_is_incomplete() {
+        // SYNC-9: an unreliable listing deletes nothing, stems included.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry_with_stems("a", &[("voc", "a.stems/voc.mp3", "h1")]),
+        );
+        let incomplete = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: false,
+        }];
+        let plan = reconcile(&manifest, &[], &HashMap::new(), &incomplete);
+        assert_eq!(plan.deletes(), 0);
+        assert_eq!(plan.stem_deletes(), 0);
+    }
+
+    #[test]
+    fn stem_delete_is_suppressed_when_it_aliases_a_stem_write() {
+        // A prior stem at a path is being removed, while a different stem is
+        // written to that same path this run (a re-key at a stable path). The
+        // delete must be downgraded so it can never clobber the fresh write.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry_with_stems("a", &[("old", "a.stems/mix.mp3", "h1")]),
+        );
+        let d = vec![stem_desired(
+            "a",
+            Some(vec![dstem("new", "a.stems/mix.mp3", "h2")]),
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        // The new stem is written to the shared path; the old key's delete of the
+        // same path is suppressed (no DeleteStem survives for that path).
+        assert_eq!(stem_writes(&plan), vec![("new", "a.stems/mix.mp3")]);
+        assert!(
+            !plan.actions.iter().any(|a| matches!(
+                a,
+                Action::DeleteStem { path, .. } if path == "a.stems/mix.mp3"
+            )),
+            "a stem delete must never alias a stem write target"
+        );
+    }
 }
 
 /// Property-based tests that lock the delete guard against random inputs.
@@ -3972,6 +4518,7 @@ mod proptests {
             trashed,
             private,
             artifacts: Vec::new(),
+            stems: None,
         }
     }
 

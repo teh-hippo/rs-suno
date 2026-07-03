@@ -296,6 +296,81 @@ pub fn sanitise_name(name: &str) -> String {
     }
 }
 
+/// The `.stems` sub-folder that sits beside a song's audio file.
+///
+/// `base` is the song's extensionless relative path (the same value the audio
+/// and its sidecars are built from), so the folder is `{base}.stems`. It cannot
+/// collide with the audio file (`{base}.<ext>`) or any `{base}.<sidecar>`
+/// because the `.stems` suffix is distinct, mirroring the sidecar convention.
+pub fn stems_folder(base: &str) -> String {
+    format!("{base}.stems")
+}
+
+/// The relative path of one stem file inside a song's [`stems_folder`].
+///
+/// Named base+label+disambiguation rather than label-only, because Auto Split
+/// can mislabel stems and Advanced Split yields ~100 instruments, so blank or
+/// duplicate labels are expected. The file is
+/// `{song file name} - {label} [{stem id8}].{ext}`; the ` - {label}` piece is
+/// dropped when the label sanitises to empty, and the `[{stem id8}]`
+/// disambiguator (the first 8 characters of the stable stem id) keeps blank or
+/// duplicate labels collision-free. Every component is run through the same
+/// [`sanitise_component`] filter as the rest of the library, honouring
+/// `character_set`.
+pub fn stem_file_path(
+    base: &str,
+    label: &str,
+    stem_id: &str,
+    ext: &str,
+    character_set: CharacterSet,
+) -> String {
+    let folder = stems_folder(base);
+    // The song's own file-name stem (the last path component of `base`), reused
+    // so a stem stays identifiable even when viewed outside its `.stems` folder.
+    let song_stem = base.rsplit('/').next().unwrap_or(base);
+    let label = sanitise_component(label, character_set, DEFAULT_MAX_COMPONENT_LEN);
+    let id8 = sanitise_component(
+        &truncate_chars(stem_id, 8),
+        CharacterSet::Ascii,
+        DEFAULT_MAX_COMPONENT_LEN,
+    );
+
+    let mut name = song_stem.to_string();
+    if !label.is_empty() {
+        name.push_str(" - ");
+        name.push_str(&label);
+    }
+    if !id8.is_empty() {
+        name.push_str(" [");
+        name.push_str(&id8);
+        name.push(']');
+    }
+    // A degenerate base (empty song stem, blank label, empty id) must still
+    // yield a usable name rather than a hidden dotfile.
+    if name.trim().is_empty() {
+        name = "stem".to_string();
+    }
+    format!("{folder}/{name}.{}", sanitise_ext(ext))
+}
+
+/// Reduce a candidate extension to a safe lowercase alphanumeric token,
+/// defaulting to `mp3` when it is empty or fully stripped. The caller passes the
+/// resolved stem format's extension (`wav` or `mp3`); stems are stored RAW.
+fn sanitise_ext(ext: &str) -> String {
+    let cleaned: String = ext
+        .trim_start_matches('.')
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .take(8)
+        .collect();
+    if cleaned.is_empty() {
+        "mp3".to_string()
+    } else {
+        cleaned
+    }
+}
+
 fn sanitise_component(
     value: &str,
     character_set: CharacterSet,
@@ -760,5 +835,56 @@ mod tests {
         // A name made only of illegal characters strips to nothing, so the
         // caller still gets a usable, non-empty stem.
         assert_eq!(sanitise_name("///"), "playlist");
+    }
+
+    #[test]
+    fn stems_folder_is_a_sibling_suffix_of_the_song_base() {
+        assert_eq!(
+            stems_folder("Creator/Album/Creator-Song [abcd1234]"),
+            "Creator/Album/Creator-Song [abcd1234].stems"
+        );
+    }
+
+    #[test]
+    fn stem_file_path_combines_song_stem_label_and_disambiguator() {
+        let path = stem_file_path(
+            "Creator/Album/Creator-Song [abcd1234]",
+            "Vocals",
+            "stem-vocals-9f8e7d6c",
+            "mp3",
+            CharacterSet::Unicode,
+        );
+        assert_eq!(
+            path,
+            "Creator/Album/Creator-Song [abcd1234].stems/Creator-Song [abcd1234] - Vocals [stem-voc].mp3"
+        );
+    }
+
+    #[test]
+    fn stem_file_path_disambiguates_blank_and_duplicate_labels_by_id() {
+        // Two stems with the SAME (blank) label must not collide: the stem-id
+        // disambiguator keeps them distinct even with no usable label.
+        let a = stem_file_path("song", "", "id-aaaaaaaa", "wav", CharacterSet::Unicode);
+        let b = stem_file_path("song", "", "id-bbbbbbbb", "wav", CharacterSet::Unicode);
+        assert_eq!(a, "song.stems/song [id-aaaaa].wav");
+        assert_eq!(b, "song.stems/song [id-bbbbb].wav");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn stem_file_path_sanitises_label_and_extension_and_honours_ascii() {
+        // Illegal path characters in the label are stripped, the extension is
+        // reduced to a safe lowercase token, and ASCII folding applies.
+        let path = stem_file_path(
+            "song",
+            "Lead/Vocal: Æ",
+            "STEMID12",
+            ".FLAC",
+            CharacterSet::Ascii,
+        );
+        assert_eq!(path, "song.stems/song - Lead Vocal AE [STEMID12].flac");
+        // A junk extension falls back to mp3 (defensive; callers pass wav/mp3).
+        let fallback = stem_file_path("s", "Bass", "x", "??", CharacterSet::Unicode);
+        assert_eq!(fallback, "s.stems/s - Bass [x].mp3");
     }
 }

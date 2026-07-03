@@ -31,6 +31,12 @@ pub enum Error {
     /// The config file could not be parsed or failed validation.
     #[error("config error: {0}")]
     Config(String),
+    /// A request was refused by an engine-side safety guard before it reached
+    /// the network. Used by the crate-wide POST allow-list, which rejects any
+    /// POST to a path outside the small known-safe set so a mutating request
+    /// (above all a credit-spending one) can never be sent by accident.
+    #[error("refused: {0}")]
+    Refused(String),
 }
 
 /// A `Result` whose error is the engine [`Error`].

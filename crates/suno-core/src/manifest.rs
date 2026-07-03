@@ -91,6 +91,14 @@ pub struct ManifestEntry {
     /// Prior state of the standalone `.mp4` music video, when one was written.
     #[serde(default)]
     pub video_mp4: Option<ArtifactState>,
+    /// Prior state of each downloaded stem, keyed by a stable per-stem key
+    /// (the server stem id, falling back to its label). Unlike the single-slot
+    /// sidecars above, a clip owns a *set* of stems, so this is a keyed map:
+    /// individual stems are added, rewritten, or removed without disturbing the
+    /// others (no whole-folder deletes). Empty and omitted from older manifests,
+    /// so the growth is purely additive.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stems: BTreeMap<String, ArtifactState>,
 }
 
 impl ManifestEntry {
@@ -108,6 +116,7 @@ impl ManifestEntry {
         ]
         .into_iter()
         .flatten()
+        .chain(self.stems.values())
         .map(|state| state.path.as_str())
     }
 }
@@ -349,6 +358,7 @@ mod tests {
         assert_eq!(e.lyrics_txt, None);
         assert_eq!(e.lrc, None);
         assert_eq!(e.synced_lyrics, None);
+        assert!(e.stems.is_empty());
         assert!(!e.preserve);
     }
 
@@ -377,6 +387,47 @@ mod tests {
         m.insert("a", e);
         let back: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn stems_default_to_empty_and_are_omitted_when_serialised_empty() {
+        // A pre-stems manifest loads with an empty stem map (additive growth),
+        // and an entry with no stems serialises without a `stems` key so the
+        // on-disk manifest is byte-identical for anyone not using the feature.
+        let json = r#"{"clip1":{"path":"a.flac","format":"flac","meta_hash":"m","art_hash":"a","size":1}}"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert!(m.get("clip1").unwrap().stems.is_empty());
+        let value: serde_json::Value = serde_json::to_value(&m).unwrap();
+        assert!(value.get("clip1").unwrap().get("stems").is_none());
+    }
+
+    #[test]
+    fn stems_map_roundtrips_and_reports_paths() {
+        let mut e = entry("song.flac", AudioFormat::Flac);
+        e.stems.insert(
+            "stem-vocals".to_string(),
+            ArtifactState {
+                path: "song.stems/song - Vocals [stem-voc].mp3".to_string(),
+                hash: "voc-hash".to_string(),
+            },
+        );
+        e.stems.insert(
+            "stem-drums".to_string(),
+            ArtifactState {
+                path: "song.stems/song - Drums [stem-drm].mp3".to_string(),
+                hash: "drm-hash".to_string(),
+            },
+        );
+        let mut m = Manifest::new();
+        m.insert("clip1", e);
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(m, back);
+        // Both stem paths are reported as owned artifact paths (so the executor
+        // co-deletes them with the song and never orphans the `.stems` folder).
+        let paths: Vec<&str> = back.get("clip1").unwrap().artifact_paths().collect();
+        assert!(paths.contains(&"song.stems/song - Vocals [stem-voc].mp3"));
+        assert!(paths.contains(&"song.stems/song - Drums [stem-drm].mp3"));
     }
 
     #[test]

@@ -47,6 +47,54 @@ impl fmt::Display for AudioFormat {
     }
 }
 
+/// Container format for a downloaded stem.
+///
+/// Stems are stored RAW in their native container and are never transcoded, so
+/// unlike [`AudioFormat`] there is no lossless-from-lossy render: WAV comes
+/// straight from Suno's free `convert_wav` endpoint and MP3 straight from the
+/// public CDN. FLAC is deliberately unrepresentable — a stem is never
+/// re-encoded to FLAC, even when the song's own format is FLAC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StemFormat {
+    /// Lossless WAV via the free `convert_wav` render, stored as delivered.
+    #[default]
+    Wav,
+    /// The public CDN MP3, stored as delivered.
+    Mp3,
+}
+
+impl StemFormat {
+    /// The file extension for a stem stored in this format.
+    pub fn ext(self) -> &'static str {
+        match self {
+            Self::Wav => "wav",
+            Self::Mp3 => "mp3",
+        }
+    }
+}
+
+impl FromStr for StemFormat {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "wav" => Ok(Self::Wav),
+            "mp3" => Ok(Self::Mp3),
+            "flac" => Err(Error::Config(
+                "stems cannot be stored as FLAC; use 'wav' or 'mp3'".to_string(),
+            )),
+            other => Err(Error::Config(format!("unknown stem format '{other}'"))),
+        }
+    }
+}
+
+impl fmt::Display for StemFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.ext())
+    }
+}
+
 /// Global default settings applied when no account or source override applies.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Defaults {
@@ -60,6 +108,8 @@ pub struct Defaults {
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
     pub video_mp4: Option<bool>,
+    pub download_stems: Option<bool>,
+    pub stem_format: Option<StemFormat>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
 }
@@ -77,6 +127,8 @@ pub struct SourceConfig {
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
     pub video_mp4: Option<bool>,
+    pub download_stems: Option<bool>,
+    pub stem_format: Option<StemFormat>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
 }
@@ -100,6 +152,8 @@ pub struct AccountConfig {
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
     pub video_mp4: Option<bool>,
+    pub download_stems: Option<bool>,
+    pub stem_format: Option<StemFormat>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
     #[serde(default)]
@@ -354,6 +408,27 @@ impl Config {
             "VIDEO_MP4",
         )?;
 
+        let download_stems = resolve_bool(
+            flags.download_stems,
+            env_val("DOWNLOAD_STEMS"),
+            src.and_then(|s| s.download_stems),
+            acc.download_stems,
+            self.defaults.download_stems,
+            false,
+            "DOWNLOAD_STEMS",
+        )?;
+
+        let stem_format_from_env = env_val("STEM_FORMAT")
+            .map(str::parse::<StemFormat>)
+            .transpose()?;
+        let stem_format = flags
+            .stem_format
+            .or(stem_format_from_env)
+            .or_else(|| src.and_then(|s| s.stem_format))
+            .or(acc.stem_format)
+            .or(self.defaults.stem_format)
+            .unwrap_or_default();
+
         let naming_template_from_env = env_val("NAMING_TEMPLATE").map(str::to_owned);
         let naming_template = flags
             .naming_template
@@ -403,6 +478,8 @@ impl Config {
             lyrics_sidecar,
             lrc_sidecar,
             video_mp4,
+            download_stems,
+            stem_format,
             naming_template,
             character_set,
             areas: acc.areas.clone(),
@@ -477,6 +554,8 @@ pub struct FlagOverrides {
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
     pub video_mp4: Option<bool>,
+    pub download_stems: Option<bool>,
+    pub stem_format: Option<StemFormat>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
 }
@@ -501,6 +580,8 @@ pub struct EffectiveSettings {
     pub lyrics_sidecar: bool,
     pub lrc_sidecar: bool,
     pub video_mp4: bool,
+    pub download_stems: bool,
+    pub stem_format: StemFormat,
     pub naming_template: String,
     pub character_set: CharacterSet,
     /// The per-account `[areas]` selection table, if configured.
@@ -598,6 +679,8 @@ mod tests {
                 lyrics_sidecar: false,
                 lrc_sidecar: false,
                 video_mp4: false,
+                download_stems: false,
+                stem_format: StemFormat::Wav,
                 naming_template: crate::naming::DEFAULT_TEMPLATE.to_owned(),
                 character_set: CharacterSet::Unicode,
                 areas: None,
@@ -925,6 +1008,124 @@ mod tests {
                 .unwrap()
                 .video_mp4
         );
+    }
+
+    #[test]
+    fn download_stems_defaults_off_and_follows_precedence() {
+        // Compiled default is off (bulk stem mirroring never spends, but it is
+        // opt-in so it never runs unless asked).
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+        assert!(
+            !cfg.resolve("alice", None, &no_env(), &no_flags())
+                .unwrap()
+                .download_stems
+        );
+
+        // File default on; per-source off; env on; flag off — flag wins.
+        let toml = r#"
+            [defaults]
+            download_stems = true
+
+            [accounts.alice.sources.liked]
+            download_stems = false
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        assert!(
+            cfg.resolve("alice", None, &no_env(), &no_flags())
+                .unwrap()
+                .download_stems
+        );
+        assert!(
+            !cfg.resolve("alice", Some("liked"), &no_env(), &no_flags())
+                .unwrap()
+                .download_stems
+        );
+
+        let env: HashMap<String, String> = [("SUNO_DOWNLOAD_STEMS".into(), "true".into())]
+            .into_iter()
+            .collect();
+        assert!(
+            cfg.resolve("alice", Some("liked"), &env, &no_flags())
+                .unwrap()
+                .download_stems
+        );
+
+        let flags = FlagOverrides {
+            download_stems: Some(false),
+            ..Default::default()
+        };
+        assert!(
+            !cfg.resolve("alice", Some("liked"), &env, &flags)
+                .unwrap()
+                .download_stems
+        );
+    }
+
+    #[test]
+    fn stem_format_defaults_to_wav_and_follows_precedence() {
+        // Compiled default is WAV (lossless, the safe default for stems).
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+        assert_eq!(
+            cfg.resolve("alice", None, &no_env(), &no_flags())
+                .unwrap()
+                .stem_format,
+            StemFormat::Wav
+        );
+
+        // File default mp3; per-source wav; env mp3; flag wav — flag wins.
+        let toml = r#"
+            [defaults]
+            stem_format = "mp3"
+
+            [accounts.alice.sources.liked]
+            stem_format = "wav"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        assert_eq!(
+            cfg.resolve("alice", None, &no_env(), &no_flags())
+                .unwrap()
+                .stem_format,
+            StemFormat::Mp3
+        );
+        assert_eq!(
+            cfg.resolve("alice", Some("liked"), &no_env(), &no_flags())
+                .unwrap()
+                .stem_format,
+            StemFormat::Wav
+        );
+
+        let env: HashMap<String, String> = [("SUNO_STEM_FORMAT".into(), "mp3".into())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            cfg.resolve("alice", Some("liked"), &env, &no_flags())
+                .unwrap()
+                .stem_format,
+            StemFormat::Mp3
+        );
+
+        let flags = FlagOverrides {
+            stem_format: Some(StemFormat::Wav),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolve("alice", Some("liked"), &env, &flags)
+                .unwrap()
+                .stem_format,
+            StemFormat::Wav
+        );
+    }
+
+    #[test]
+    fn stem_format_rejects_flac_and_unknown() {
+        // FLAC is deliberately unrepresentable for stems: parsing it is an error,
+        // so a config or flag can never ask for a FLAC stem.
+        assert!("flac".parse::<StemFormat>().is_err());
+        assert!("aac".parse::<StemFormat>().is_err());
+        assert_eq!("WAV".parse::<StemFormat>().unwrap(), StemFormat::Wav);
+        assert_eq!("Mp3".parse::<StemFormat>().unwrap(), StemFormat::Mp3);
+        // A FLAC stem_format in config is a config error, not a silent fallback.
+        assert!(Config::from_toml("[defaults]\nstem_format = \"flac\"\n").is_err());
     }
 
     #[test]

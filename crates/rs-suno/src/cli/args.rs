@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use suno_core::{AudioFormat, CharacterSet};
+use suno_core::{AudioFormat, CharacterSet, StemFormat};
 
 /// A download-only tool for mirroring your Suno.ai library.
 #[derive(Parser, Debug)]
@@ -101,6 +101,24 @@ impl From<AudioFmt> for AudioFormat {
             AudioFmt::Mp3 => AudioFormat::Mp3,
             AudioFmt::Flac => AudioFormat::Flac,
             AudioFmt::Wav => AudioFormat::Wav,
+        }
+    }
+}
+
+/// Container for downloaded stems, mapped onto [`StemFormat`]. FLAC is
+/// deliberately absent: stems are stored RAW and never transcoded to FLAC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum StemFmt {
+    Wav,
+    Mp3,
+}
+
+impl From<StemFmt> for StemFormat {
+    fn from(value: StemFmt) -> Self {
+        match value {
+            StemFmt::Wav => StemFormat::Wav,
+            StemFmt::Mp3 => StemFormat::Mp3,
         }
     }
 }
@@ -216,6 +234,15 @@ pub struct SyncArgs {
     /// Suno provides one.
     #[arg(long)]
     pub video_mp4: bool,
+    /// Also mirror each song's already-generated stems into a `.stems` sub-folder
+    /// beside it. Download-only: mirrors stems that already exist and never
+    /// triggers separation or spends credits. Off by default.
+    #[arg(long)]
+    pub download_stems: bool,
+    /// Container for downloaded stems: wav (default, lossless via the free WAV
+    /// render) or mp3. Stems are stored RAW and are never transcoded to FLAC.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub stem_format: Option<StemFmt>,
     /// Relative path template for naming downloaded files.
     /// Placeholders: {creator}, {handle}, {album}, {title}, {id}, {id8}, {root_id8}.
     #[arg(long, value_name = "TEMPLATE")]

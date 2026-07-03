@@ -10,10 +10,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path};
 
 use suno_core::{
-    AreaMode, AreasConfig, ArtifactKind, AudioFormat, Clip, Desired, DesiredArtifact, ExecOutcome,
-    LineageContext, M3u8Entry, NamingConfig, NamingRequest, Playlist, PlaylistDesired, RunStatus,
-    SourceMode, art_hash, art_url_hash, content_hash, meta_hash, render_clip_details,
-    render_clip_lyrics, render_clip_names, render_m3u8, sanitise_name, synced_lrc_source_hash,
+    AreaMode, AreasConfig, ArtifactKind, AudioFormat, CharacterSet, Clip, Desired, DesiredArtifact,
+    DesiredStem, ExecOutcome, LineageContext, M3u8Entry, NamingConfig, NamingRequest, Playlist,
+    PlaylistDesired, RunStatus, SourceMode, Stem, StemFormat, art_hash, art_url_hash, content_hash,
+    meta_hash, render_clip_details, render_clip_lyrics, render_clip_names, render_m3u8,
+    sanitise_name, stem_file_path, synced_lrc_source_hash,
 };
 
 /// Below this manifest size the mass-deletion fraction rule does not fire; a
@@ -152,9 +153,87 @@ pub fn build_desired(
                 trashed: false,
                 private: false,
                 artifacts,
+                // Stems are threaded in after this pure pass (they need a network
+                // listing); `None` means "no authoritative stem info", so a run
+                // without `download_stems` leaves any local stems untouched.
+                stems: None,
             }
         })
         .collect()
+}
+
+/// Build the authoritative desired stem set for one clip from its listed stems.
+///
+/// `base` is the clip's extensionless audio path, so each stem file sits in the
+/// `{base}.stems/` sub-folder beside the song. Keys are the stable stem id
+/// (falling back to the label, then a positional key), de-duplicated so blank or
+/// duplicate labels never collide. The file name and its `[stem id8]`
+/// disambiguator come from [`stem_file_path`], honouring the run's character
+/// set, and its extension is the resolved [`StemFormat`] — stems are stored RAW
+/// (WAV by default, or MP3), never transcoded to FLAC. The rewrite hash tracks
+/// the stem's public MP3 URL (a changed URL, or a format switch that moves the
+/// path, re-downloads), mirroring the video sidecar.
+///
+/// A `Wav` stem needs the stem's own id to render its lossless WAV, so a
+/// (degenerate) stem with no id falls back to `Mp3` for that stem alone.
+///
+/// Only ever called with an AUTHORITATIVE listing (see run.rs), so the returned
+/// set is safe to drive stem removals against.
+pub(crate) fn clip_stems(
+    base: &str,
+    stems: &[Stem],
+    stem_format: StemFormat,
+    character_set: CharacterSet,
+) -> Vec<DesiredStem> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut out = Vec::new();
+    for (index, stem) in stems.iter().enumerate() {
+        let base_key = if !stem.id.is_empty() {
+            stem.id.clone()
+        } else if !stem.label.is_empty() {
+            stem.label.clone()
+        } else {
+            format!("stem{index}")
+        };
+        // Ensure the manifest key is unique within the clip even when ids are
+        // blank and labels duplicate.
+        let mut key = base_key.clone();
+        let mut suffix = 1;
+        while !seen.insert(key.clone()) {
+            key = format!("{base_key}-{suffix}");
+            suffix += 1;
+        }
+        // The filename disambiguator is the stable stem id when present, else the
+        // resolved key, so two stems can never map to the same file.
+        let disambiguator = if stem.id.is_empty() {
+            key.as_str()
+        } else {
+            stem.id.as_str()
+        };
+        // WAV needs the stem's own id to render; without one, store this stem as
+        // MP3 so the extension always matches what actually gets written.
+        let format = if stem_format == StemFormat::Wav && stem.id.is_empty() {
+            StemFormat::Mp3
+        } else {
+            stem_format
+        };
+        let path = stem_file_path(
+            base,
+            &stem.label,
+            disambiguator,
+            format.ext(),
+            character_set,
+        );
+        out.push(DesiredStem {
+            key,
+            stem_id: stem.id.clone(),
+            path,
+            source_url: stem.url.clone(),
+            format,
+            hash: art_url_hash(&stem.url),
+        });
+    }
+    out
 }
 
 /// The per-clip sidecars desired alongside `base`, the extensionless audio path

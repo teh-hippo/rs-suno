@@ -258,6 +258,7 @@ mod tests {
             private: false,
             artifacts: vec![lrc_artifact(id)],
             clip: c,
+            stems: None,
         }
     }
 

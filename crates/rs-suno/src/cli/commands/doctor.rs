@@ -298,6 +298,8 @@ fn render_resolved_settings(out: &mut String, settings: &EffectiveSettings) {
     writeln!(out, "    lyrics_sidecar: {}", settings.lyrics_sidecar).ok();
     writeln!(out, "    lrc_sidecar: {}", settings.lrc_sidecar).ok();
     writeln!(out, "    video_mp4: {}", settings.video_mp4).ok();
+    writeln!(out, "    download_stems: {}", settings.download_stems).ok();
+    writeln!(out, "    stem_format: {}", settings.stem_format).ok();
     writeln!(out, "    naming_template: {}", settings.naming_template).ok();
     writeln!(out, "    character_set: {}", settings.character_set).ok();
     writeln!(
@@ -369,6 +371,8 @@ mod tests {
             lyrics_sidecar: true,
             lrc_sidecar: false,
             video_mp4: true,
+            download_stems: false,
+            stem_format: suno_core::StemFormat::Wav,
             naming_template: "{title}/{id8}".to_owned(),
             character_set: CharacterSet::Ascii,
             areas: None,
