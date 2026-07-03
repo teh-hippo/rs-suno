@@ -7,3 +7,12 @@ version = "0.20.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/teh-hippo/rs-suno"
+
+# Whole-program optimisation for the shipped binary: fat LTO with a single
+# codegen unit lets the linker inline and drop unreachable code across crates,
+# and stripping removes symbols. Trims the release binary substantially with no
+# behavioural change (tests run on the dev profile, so they are unaffected).
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
