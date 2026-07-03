@@ -15,6 +15,7 @@ use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
 use crate::is_downloadable;
 use crate::limiter::{AdaptiveLimiter, retry_after_delay};
+use crate::lyrics::AlignedLyrics;
 use crate::model::Clip;
 
 /// One of the account's own playlists, as listed by `/api/playlist/me`.
@@ -160,6 +161,29 @@ impl<C: Clock> SunoClient<C> {
             .and_then(Value::as_str)
             .filter(|url| !url.is_empty())
             .map(str::to_string))
+    }
+
+    /// Fetch a clip's word- and line-level aligned (synced) lyrics.
+    ///
+    /// `GET /api/gen/{id}/aligned_lyrics/v2/` (the trailing slash is required) on
+    /// the studio-api host, authenticated with the same JWT as every other
+    /// library read. The `v2` shape carries both a flat word-level list and a
+    /// line-level list with section labels and nested per-word timing (see
+    /// [`AlignedLyrics`]).
+    ///
+    /// An instrumental or un-alignable clip returns `200` with empty arrays,
+    /// which maps to an empty [`AlignedLyrics`]; a `404` (no alignment for the
+    /// clip) is treated the same way, so an absent endpoint is "no synced
+    /// lyrics" rather than a run failure — the caller then writes no synced
+    /// artefact, exactly as an empty cover URL writes no cover. Rides the
+    /// adaptive rate limiter like the other reads.
+    pub async fn aligned_lyrics(&mut self, http: &impl Http, id: &str) -> Result<AlignedLyrics> {
+        let path = format!("/api/gen/{id}/aligned_lyrics/v2/");
+        match self.api_get_retrying(http, &path).await {
+            Ok(body) => Ok(AlignedLyrics::from_bytes(&body)),
+            Err(Error::NotFound(_)) => Ok(AlignedLyrics::default()),
+            Err(err) => Err(err),
+        }
     }
 
     /// Fetch specific clips by id, one `GET /api/clip/{id}` per id.
@@ -740,6 +764,61 @@ mod tests {
 
         let err = pollster::block_on(client.get_billing_info(&http)).unwrap_err();
         assert!(err.to_string().contains("total_credits_left"));
+    }
+
+    #[test]
+    fn aligned_lyrics_reads_words_and_lines() {
+        let mut rules = auth_rules();
+        let body = serde_json::json!({
+            "aligned_words": [
+                {"word": "hi", "success": true, "start_s": 0.5, "end_s": 0.9, "p_align": 0.99}
+            ],
+            "aligned_lyrics": [
+                {"text": "hi", "start_s": 0.5, "end_s": 0.9, "section": "Verse 1",
+                 "words": [{"text": "hi", "start_s": 0.5, "end_s": 0.9}]}
+            ],
+            "hoot_cer": 0.2, "is_streamed": false
+        })
+        .to_string();
+        rules.push(Rule::new("/aligned_lyrics/v2/", 200, body));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let aligned = pollster::block_on(client.aligned_lyrics(&http, "clip-1")).unwrap();
+        assert_eq!(aligned.words.len(), 1);
+        assert_eq!(aligned.lines.len(), 1);
+        assert_eq!(aligned.lines[0].section, "Verse 1");
+        assert!(!aligned.is_empty());
+    }
+
+    #[test]
+    fn aligned_lyrics_empty_arrays_map_to_empty() {
+        let mut rules = auth_rules();
+        rules.push(Rule::new(
+            "/aligned_lyrics/v2/",
+            200,
+            r#"{"aligned_words":[],"aligned_lyrics":[],"hoot_cer":1.0}"#.to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let aligned = pollster::block_on(client.aligned_lyrics(&http, "instr")).unwrap();
+        assert!(aligned.is_empty());
+    }
+
+    #[test]
+    fn aligned_lyrics_maps_404_to_empty() {
+        let mut rules = auth_rules();
+        rules.push(Rule::new(
+            "/aligned_lyrics/v2/",
+            404,
+            "not found".to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let mut client = authed_client(&http);
+
+        let aligned = pollster::block_on(client.aligned_lyrics(&http, "missing")).unwrap();
+        assert!(aligned.is_empty());
     }
 
     fn scripted_client(http: &ScriptedHttp, clock: RecordingClock) -> SunoClient<RecordingClock> {

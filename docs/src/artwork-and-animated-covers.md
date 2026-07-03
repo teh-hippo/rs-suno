@@ -27,9 +27,47 @@ uses Vorbis comments.
 
 **Lyrics**
 
-Unsynced lyrics (plain text, without timestamps) are embedded when the clip has
-them. You can also write them beside the audio as an optional `.lyrics.txt` or an
-untimed `.lrc` sidecar.
+Plain lyrics (without timestamps) are embedded when the clip has them: as a
+`USLT` frame in MP3 and a `LYRICS` comment in FLAC. You can also write them
+beside the audio as an optional `.lyrics.txt` sidecar.
+
+**Synced (timed) lyrics**
+
+With `lrc_sidecar` enabled, `rs-suno` also writes a synced `<song>.lrc` beside
+each audio file. When Suno has word/line alignment for the clip, the `.lrc` is a
+standard line-level file carrying one `[mm:ss.xx]` timestamp per line:
+
+```text
+[ti:Neon Horizon]
+[ar:alice]
+[al:Neon Horizon]
+[length:2:58]
+[re:rs-suno]
+[00:12.52]We ride the neon
+[00:15.30]Chasing the dawn
+```
+
+Line-level is the universally supported LRC form, so every player syncs and
+displays it cleanly. (The enhanced "A2" per-word format is parsed by only a few
+karaoke players and shows as literal text in the rest, so it is not used; the
+per-word timing is carried in the MP3 `SYLT` frame instead.)
+
+The `.lrc` is the primary synced-lyrics artefact and is written for every
+format (MP3, FLAC and WAV). For **MP3 only**, an ID3 `SYLT` (synchronised
+lyrics) frame is embedded in the file as well with word-level timing, so players
+that read `SYLT` show karaoke-style per-word lyrics. FLAC and WAV carry no ID3,
+so they get no `SYLT`; the line-level `.lrc` covers them.
+
+The alignment is fetched from Suno once per song (the result is immutable), so
+enabling the feature does a one-off fetch per song with lyrics; a steady-state
+re-sync fetches nothing more. A clip Suno cannot align — an **instrumental** —
+writes no `.lrc` and embeds no `SYLT`, exactly as a clip with no cover writes no
+cover; such clips are re-checked occasionally in case Suno adds alignment later.
+If a fetch fails (a network or server error), the song's existing `.lrc` and
+tags are left untouched and it is retried on the next run, so a good timed file
+is never downgraded. Turning `lrc_sidecar` off writes no `.lrc`, embeds nothing,
+and fetches no alignment, and leaves any existing `.lrc` files in place (it is
+never treated as a deletion).
 
 ## Cover art
 
@@ -72,13 +110,16 @@ the default static covers.
 
 ## A note on WAV
 
-The WAV format carries only limited metadata. When you download in WAV, lyrics
-and embedded album art are omitted, and `rs-suno` warns you. Choose FLAC (the
-default) or MP3 if you want the full set of tags and embedded art.
+The WAV format carries only limited metadata. When you download in WAV, embedded
+lyrics and album art are omitted, and `rs-suno` warns you. Choose FLAC (the
+default) or MP3 if you want the full set of tags and embedded art. The synced
+`.lrc` sidecar is a separate file, so it is still written for WAV downloads when
+`lrc_sidecar` is enabled; only the in-file `SYLT`/`USLT` tags are MP3/FLAC-only.
 
 ## What lands on disk
 
-For an album with animated covers enabled, the layout looks like:
+For an album with animated covers and synced lyrics enabled, the layout looks
+like:
 
 ```text
 alice/
@@ -88,10 +129,12 @@ alice/
     alice-Neon Horizon [a1b2c3d4].flac
     alice-Neon Horizon [a1b2c3d4].jpg
     alice-Neon Horizon [a1b2c3d4].webp
+    alice-Neon Horizon [a1b2c3d4].lrc
     alice-Neon Horizon (Remix) [8d9e0f1a].flac
     alice-Neon Horizon (Remix) [8d9e0f1a].jpg
     alice-Neon Horizon (Remix) [8d9e0f1a].webp
+    alice-Neon Horizon (Remix) [8d9e0f1a].lrc
 ```
 
 Without `--animated-covers`, the `.webp` files and `cover.webp` are simply not
-written.
+written; without `lrc_sidecar`, the `.lrc` files are not written.

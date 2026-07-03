@@ -17,11 +17,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
-    AdoptDecision, AlbumArt, AlbumDesired, ClerkAuth, Clip, Config, Error as CoreError,
-    ExecOptions, Filesystem, FlagOverrides, LineageContext, LocalFile, NamingConfig, Owner,
-    OwnerGate, PlaylistDesired, PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode,
-    SourceStatus, SunoClient, adopt_decision, album_desired, deletion_allowed, is_downloadable,
-    owner_gate, plan_album_artifacts, plan_playlist_artifacts, reconcile, resolve_roots,
+    AdoptDecision, AlbumArt, AlbumDesired, AlignedLyrics, ClerkAuth, Clip, Config,
+    Error as CoreError, ExecOptions, Filesystem, FlagOverrides, LineageContext, LocalFile,
+    Manifest, NamingConfig, Owner, OwnerGate, PlaylistDesired, PlaylistState, Ports, ResolveOpts,
+    RunStatus, SourceMode, SourceStatus, SunoClient, adopt_decision, album_desired,
+    deletion_allowed, is_downloadable, owner_gate, plan_album_artifacts, plan_playlist_artifacts,
+    reconcile, resolve_roots,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
@@ -863,7 +864,7 @@ async fn run_one(
         .iter()
         .map(|clip| (clip.id.clone(), store.context_for(clip)))
         .collect();
-    let desired = build_desired(
+    let mut desired = build_desired(
         &selected,
         settings.format,
         &modes_by_id,
@@ -932,9 +933,14 @@ async fn run_one(
     let dry_run = global.dry_run || verb == Verb::Check;
 
     // Dry-run and check report without touching disk: the destination is not
-    // created and no lock is taken. A missing manifest reads as empty.
+    // created and no lock is taken. A missing manifest reads as empty. The synced
+    // `.lrc` preview reflects which clips would be (re)fetched and written,
+    // without any network fetch.
     if dry_run {
-        let (_manifest, plan) = load_and_reconcile(
+        let manifest = logs::load_manifest(dest)?;
+        suno_core::preview_synced_lrc(&mut desired, &manifest, now_secs(), settings.lrc_sidecar);
+        let plan = reconcile_run(
+            &manifest,
             dest,
             &desired,
             &albums_desired,
@@ -944,7 +950,7 @@ async fn run_one(
             &sources,
             library_authoritative,
             playlists_enumerated,
-        )?;
+        );
         if verbosity >= 1 {
             let no_failures = HashSet::new();
             for line in output::action_lines(&plan, &no_failures, verbosity) {
@@ -968,7 +974,24 @@ async fn run_one(
     std::fs::create_dir_all(dest)
         .with_context(|| format!("could not create {}", dest.display()))?;
     let _lock = logs::acquire_lock(dest)?;
-    let (manifest, plan) = load_and_reconcile(
+    let manifest = logs::load_manifest(dest)?;
+    // Resolve this run's synced lyrics before reconcile: fetch Suno's alignment
+    // for the clips that need it (gated by the per-clip marker, so a steady-state
+    // re-sync fetches nothing and the feature being off fetches nothing), and
+    // fill each clip's `.lrc` artifact with its content-hashed body. Reconcile
+    // then plans the `.lrc` writes from the ACTUAL body, and the executor embeds
+    // the same alignment as MP3 `SYLT`/plain-lyric tags.
+    let (synced, pending_checks) = resolve_synced_lyrics(
+        &mut desired,
+        &manifest,
+        &mut client,
+        &http,
+        settings.lrc_sidecar,
+        verbosity,
+    )
+    .await;
+    let plan = reconcile_run(
+        &manifest,
         dest,
         &desired,
         &albums_desired,
@@ -978,7 +1001,7 @@ async fn run_one(
         &sources,
         library_authoritative,
         playlists_enumerated,
-    )?;
+    );
 
     // Persist the lineage graph *before* execute (durability H4), under the same
     // lock as the manifest. This run refreshed it when it folded in a fresh
@@ -1054,9 +1077,11 @@ async fn run_one(
 
     execute_plan(
         verb,
-        &plan,
+        plan,
         &desired,
         manifest,
+        synced,
+        pending_checks,
         &mut store,
         &mut client,
         &http,
@@ -1072,9 +1097,11 @@ async fn run_one(
 #[allow(clippy::too_many_arguments)]
 async fn execute_plan(
     verb: Verb,
-    plan: &suno_core::Plan,
+    plan: suno_core::Plan,
     desired: &[suno_core::Desired],
     mut manifest: suno_core::Manifest,
+    synced: HashMap<String, AlignedLyrics>,
+    pending_checks: Vec<suno_core::PendingCheck>,
     store: &mut suno_core::LineageStore,
     client: &mut SunoClient<TokioClock>,
     http: &ReqwestHttp,
@@ -1104,7 +1131,7 @@ async fn execute_plan(
             clock: &clock,
         };
         tokio::select! {
-            out = suno_core::execute(plan, &mut manifest, &mut store.albums, &mut store.playlists, desired, ports, &opts) => Some(out),
+            out = suno_core::execute(&plan, &mut manifest, &mut store.albums, &mut store.playlists, desired, &synced, ports, &opts) => Some(out),
             _ = wait_for_signal() => None,
         }
     };
@@ -1155,6 +1182,12 @@ async fn execute_plan(
         return Ok(ExitCode::DiskFull);
     }
 
+    // Record the synced-lyrics resolution markers now the writes have landed:
+    // an instrumental is marked so it is not re-fetched every run, and a written
+    // clip is marked only once its `.lrc` slot reflects the body (so an
+    // interrupted or failed write is re-resolved next run rather than skipped).
+    record_synced_lyrics_checks(&mut manifest, &pending_checks);
+
     logs::save_manifest(dest, &manifest)?;
     // Persist the graph again after execute: the lineage part was already saved
     // for durability before execute, but album-art state is mutated *during*
@@ -1187,11 +1220,11 @@ async fn execute_plan(
         .iter()
         .map(|d| (d.path.as_str(), d.clip.id.as_str()))
         .collect();
-    logs::append_audit(dest, plan, &failed, &rename_owner)?;
+    logs::append_audit(dest, &plan, &failed, &rename_owner)?;
     write_last_run(dest);
 
     if verbosity >= 1 {
-        for line in output::action_lines(plan, &failed, verbosity) {
+        for line in output::action_lines(&plan, &failed, verbosity) {
             eprintln!("{line}");
         }
     }
@@ -1216,6 +1249,83 @@ async fn execute_plan(
     }
 
     Ok(run_exit_code(&outcome))
+}
+
+/// The warning shown when a clip's alignment fetch fails. Deliberately carries
+/// NO clip id, request URL, or error detail: a reqwest transport error's text
+/// can include the full `/api/gen/{id}/...` URL, so the raw error is never
+/// interpolated into any message (the clip id must not leak).
+const SYNCED_LYRICS_FETCH_WARNING: &str = "could not fetch synced lyrics for a clip; its synced lyrics are skipped this run and retried next run";
+
+/// Resolve this run's synced lyrics: fetch Suno's word/line alignment for the
+/// clips that need it, fill each clip's `.lrc` artifact with its content-hashed
+/// body, and return the per-clip alignment (for the executor's `SYLT`/plain
+/// tags) plus the resolution checks to record after the writes land.
+///
+/// The pure [`synced_lyrics_targets`](suno_core::synced_lyrics_targets) decides
+/// which clips to fetch (empty when the feature is off, and skipping clips
+/// already resolved at this render version), and [`apply_synced_lrc`](suno_core::apply_synced_lrc)
+/// maps each result onto the desired artifact; this function is only the IO glue.
+/// A fetch failure keeps the clip's existing `.lrc`/tags untouched (no downgrade)
+/// and is retried next run; its warning never prints the clip id, URL, or token.
+async fn resolve_synced_lyrics(
+    desired: &mut [suno_core::Desired],
+    manifest: &Manifest,
+    client: &mut SunoClient<TokioClock>,
+    http: &ReqwestHttp,
+    enabled: bool,
+    verbosity: i8,
+) -> (HashMap<String, AlignedLyrics>, Vec<suno_core::PendingCheck>) {
+    let mut synced: HashMap<String, AlignedLyrics> = HashMap::new();
+    for id in suno_core::synced_lyrics_targets(desired, manifest, now_secs(), enabled) {
+        match client.aligned_lyrics(http, &id).await {
+            Ok(aligned) => {
+                synced.insert(id, aligned);
+            }
+            // Keep the message free of the clip id, request URL, and token: a
+            // transport error's `Display` can carry the full `/api/gen/{id}/...`
+            // URL, so it must never be interpolated here.
+            Err(_) => {
+                if verbosity >= -1 {
+                    eprintln!("warning: {SYNCED_LYRICS_FETCH_WARNING}");
+                }
+            }
+        }
+    }
+    let pending = suno_core::apply_synced_lrc(desired, manifest, &synced);
+    (synced, pending)
+}
+
+/// Record the synced-lyrics resolution markers after this run's `.lrc` writes.
+///
+/// An instrumental (empty) clip is marked unconditionally so it is not re-fetched
+/// every run; a clip that produced a body is marked only once its `.lrc` slot
+/// reflects that body's hash, so an interrupted or failed write leaves no marker
+/// and is re-resolved next run rather than skipped.
+fn record_synced_lyrics_checks(manifest: &mut Manifest, pending: &[suno_core::PendingCheck]) {
+    let now = now_secs();
+    for check in pending {
+        let durable = if check.empty {
+            true
+        } else {
+            match (&check.body_hash, manifest.get(&check.clip_id)) {
+                (Some(hash), Some(entry)) => {
+                    entry.lrc.as_ref().map(|slot| &slot.hash) == Some(hash)
+                }
+                _ => false,
+            }
+        };
+        if !durable {
+            continue;
+        }
+        if let Some(entry) = manifest.entries.get_mut(&check.clip_id) {
+            entry.synced_lyrics = Some(suno_core::SyncedLyricsCheck {
+                version: suno_core::SYNCED_LRC_VERSION,
+                checked_unix: now,
+                empty: check.empty,
+            });
+        }
+    }
 }
 
 /// One area's listing outcome for the multi-area planner.
@@ -1680,15 +1790,16 @@ async fn fetch_playlist_desired(
     (build_playlist_desired(&inputs, desired), true)
 }
 
-/// Load the manifest beside `dest` and reconcile `desired` against it, then
-/// append the folder-art and playlist plans.
+/// Reconcile `desired` against `manifest` (already loaded), then append the
+/// folder-art and playlist plans.
 ///
-/// Shared by the dry-run and executing paths. Reading a missing manifest yields
-/// an empty one and statting absent files is harmless, so this never creates the
-/// destination directory. The folder-art actions share the run's single deletion
-/// verdict ([`deletion_allowed`]) so album art is never removed on an incomplete
-/// listing, and they land on the same [`Plan`] so the mass-delete cap and the
-/// confirmation prompt already cover them.
+/// Shared by the dry-run and executing paths. The manifest is loaded and the
+/// desired `.lrc` artifacts resolved by the caller *before* this, so reconcile
+/// sees each `.lrc`'s real content hash. Statting absent files is harmless, so
+/// this never creates the destination directory. The folder-art actions share
+/// the run's single deletion verdict ([`deletion_allowed`]) so album art is
+/// never removed on an incomplete listing, and they land on the same [`Plan`] so
+/// the mass-delete cap and the confirmation prompt already cover them.
 ///
 /// Playlists carry a second, independent gate: `playlists_enumerated` is true
 /// only when the playlist listing succeeded on a fully-enumerated run.
@@ -1703,7 +1814,8 @@ async fn fetch_playlist_desired(
 /// Library the folder view is partial, so art is neither rewritten (the caller
 /// passes an empty `albums_desired`) nor deleted.
 #[allow(clippy::too_many_arguments)]
-fn load_and_reconcile(
+fn reconcile_run(
+    manifest: &suno_core::Manifest,
     dest: &Path,
     desired: &[suno_core::Desired],
     albums_desired: &[AlbumDesired],
@@ -1713,12 +1825,11 @@ fn load_and_reconcile(
     sources: &[SourceStatus],
     library_authoritative: bool,
     playlists_enumerated: bool,
-) -> Result<(suno_core::Manifest, suno_core::Plan)> {
-    let manifest = logs::load_manifest(dest)?;
-    let local = stat_manifest(dest, &manifest);
+) -> suno_core::Plan {
+    let local = stat_manifest(dest, manifest);
     let can_delete = deletion_allowed(sources);
     let art_can_delete = can_delete && library_authoritative;
-    let mut plan = reconcile(&manifest, desired, &local, sources);
+    let mut plan = reconcile(manifest, desired, &local, sources);
     plan.actions
         .extend(plan_album_artifacts(albums_desired, albums, art_can_delete));
     plan.actions.extend(plan_playlist_artifacts(
@@ -1727,7 +1838,7 @@ fn load_and_reconcile(
         can_delete,
         playlists_enumerated,
     ));
-    Ok((manifest, plan))
+    plan
 }
 
 /// Stat every manifest path so reconcile can spot missing or empty files.
@@ -2018,7 +2129,7 @@ mod tests {
     }
 
     #[test]
-    fn load_and_reconcile_does_not_create_the_destination() {
+    fn reconcile_run_reads_a_missing_destination_as_empty() {
         // The dry-run / check path reads through a missing destination as an
         // empty manifest without creating it, so it never touches disk.
         let dir =
@@ -2029,7 +2140,9 @@ mod tests {
             mode: SourceMode::Mirror,
             fully_enumerated: false,
         }];
-        let (manifest, plan) = load_and_reconcile(
+        let manifest = logs::load_manifest(&dir).unwrap();
+        let plan = reconcile_run(
+            &manifest,
             &dir,
             &[],
             &[],
@@ -2039,14 +2152,25 @@ mod tests {
             &sources,
             false,
             false,
-        )
-        .unwrap();
+        );
         assert!(manifest.is_empty());
         assert!(plan.actions.is_empty());
         assert!(
             !dir.exists(),
             "dry-run path must not create the destination directory"
         );
+    }
+
+    #[test]
+    fn synced_lyrics_fetch_warning_never_leaks_a_clip_id_or_url() {
+        // The fetch-failure warning must not carry the request URL or clip id: a
+        // reqwest transport error's text can include `/api/gen/{id}/...`, so the
+        // raw error is never interpolated. This guards that redaction.
+        let msg = SYNCED_LYRICS_FETCH_WARNING;
+        assert!(!msg.contains("/api/gen/"));
+        assert!(!msg.contains("aligned_lyrics"));
+        assert!(!msg.contains('{'), "no interpolation placeholder");
+        assert!(!msg.contains("http"));
     }
 
     #[test]

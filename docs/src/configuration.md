@@ -83,7 +83,7 @@ needed. These modes are not applied on non-Unix platforms.
 | `animated_covers` | bool | `false` | Also write animated WebP covers from clip video previews. |
 | `details_sidecar` | bool | `false` | Also write a plain-text `<song>.details.txt` beside each audio file, dumping the same metadata that is embedded in the tags plus the song id, duration, and canonical `suno.com` URL. |
 | `lyrics_sidecar` | bool | `false` | Also write a plain-text `<song>.lyrics.txt` beside each audio file, holding the song's lyrics verbatim. A song with no lyrics gets no file. |
-| `lrc_sidecar` | bool | `false` | Also write an untimed `<song>.lrc` beside each audio file, holding the song's lyrics with a small tag header (plain lyrics, no per-line timestamps). A song with no lyrics gets no file. |
+| `lrc_sidecar` | bool | `false` | Also write a `<song>.lrc` beside each audio file. When Suno has word/line alignment for the song, the `.lrc` is synced line-level (a `[mm:ss.xx]` timestamp per line — the universally supported form) and, for MP3, an ID3 `SYLT` frame with per-word timing is embedded too; otherwise it falls back to the untimed lyrics. A song Suno cannot align (an instrumental) gets no file. Enabling this fetches each song's alignment once. |
 | `video_mp4` | bool | `false` | Also download the standalone `<song>.mp4` music video beside each audio file, when Suno provides one. A song with no video gets no file. Turning this off leaves existing videos in place; a video is only removed alongside its own audio. |
 
 Any account key except `token`, `root`, and `account_id` may also be set under

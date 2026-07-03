@@ -87,6 +87,25 @@ pub fn art_url_hash(url: &str) -> String {
     }
 }
 
+/// The change-detection version for the synced `.lrc` body. Bump this when the
+/// rendered `.lrc` format changes so existing sidecars are rewritten on the next
+/// run (their stored hash then no longer matches, exactly as edited content
+/// would move a [`content_hash`]).
+pub const SYNCED_LRC_VERSION: u32 = 2;
+
+/// A stable per-clip source sentinel for the synced `.lrc` sidecar.
+///
+/// Suno's forced alignment for a given clip is immutable (the audio and its
+/// lyrics are fixed once generated), so the sidecar's rewrite detection keys on
+/// the clip id plus the render [`SYNCED_LRC_VERSION`] rather than the fetched
+/// body. This lets reconcile skip an unchanged clip WITHOUT a network fetch (the
+/// timed body is resolved only when a write is actually planned), while a
+/// version bump rewrites every sidecar. It mirrors how the cover sidecars key on
+/// their source URL rather than the fetched bytes ("the hash tracks the source").
+pub fn synced_lrc_source_hash(clip_id: &str) -> String {
+    content_hash(&format!("synced-lrc/v{SYNCED_LRC_VERSION}/{clip_id}"))
+}
+
 /// A sentinel for the embedded cover art: a digest of the selected art URL, or
 /// the empty string when the clip carries no art. A mismatch against the
 /// manifest means the file on disk holds stale art even if its tags are current.
@@ -232,5 +251,16 @@ mod tests {
             h,
             content_hash("#EXTM3U\n#PLAYLIST:Mix\n#EXTINF:61,One\nA/One.flac\n")
         );
+    }
+
+    #[test]
+    fn synced_lrc_source_hash_is_stable_per_clip_and_never_empty() {
+        let a = synced_lrc_source_hash("clip-a");
+        assert_eq!(a.len(), 16);
+        assert_eq!(a, synced_lrc_source_hash("clip-a"), "stable per clip id");
+        // Distinct clips get distinct sentinels; none is the empty ("absent")
+        // value, so a desired synced `.lrc` is never mistaken for "no artifact".
+        assert_ne!(a, synced_lrc_source_hash("clip-b"));
+        assert!(!a.is_empty());
     }
 }

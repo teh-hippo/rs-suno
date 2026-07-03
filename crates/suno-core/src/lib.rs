@@ -21,11 +21,13 @@ mod hash;
 mod http;
 mod limiter;
 mod lineage;
+mod lyrics;
 mod manifest;
 mod model;
 mod naming;
 pub mod reconcile;
 pub mod select;
+mod synced;
 mod tag;
 
 #[cfg(test)]
@@ -46,7 +48,7 @@ pub use error::{Error, Result};
 pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute};
 pub use extras::{
     INDEX_SCHEMA_VERSION, M3u8Entry, render_clip_details, render_clip_lrc, render_clip_lyrics,
-    render_library_index, render_m3u8,
+    render_library_index, render_m3u8, render_synced_lrc,
 };
 pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind, WebpEncodeSettings};
 pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
@@ -54,13 +56,16 @@ pub use graph::{
     AdoptDecision, AlbumArt, CacheEntry, LineageStore, Node, Owner, OwnerCheck, OwnerGate,
     PlaylistState, StoredEdge, adopt_decision, owner_gate,
 };
-pub use hash::{art_hash, art_url_hash, content_hash, meta_hash};
+pub use hash::{
+    SYNCED_LRC_VERSION, art_hash, art_url_hash, content_hash, meta_hash, synced_lrc_source_hash,
+};
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use lineage::{
     Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveOpts, ResolveStatus, RootInfo,
     edge_type, immediate_parent, lineage_edges, resolve_roots,
 };
-pub use manifest::{ArtifactState, Manifest, ManifestEntry};
+pub use lyrics::{AlignedLine, AlignedLineWord, AlignedLyrics, AlignedWord};
+pub use manifest::{ArtifactState, Manifest, ManifestEntry, SyncedLyricsCheck};
 pub use model::{Clip, HistoryEntry};
 pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,
@@ -70,5 +75,9 @@ pub use reconcile::{
     Action, AlbumDesired, ArtifactKind, Desired, DesiredArtifact, LocalFile, Plan, PlaylistDesired,
     SourceMode, SourceStatus, album_desired, deletion_allowed, plan_album_artifacts,
     plan_playlist_artifacts, reconcile,
+};
+pub use synced::{
+    PendingCheck, SYNCED_LRC_RECHECK_SECS, apply_synced_lrc, preview_synced_lrc,
+    synced_lyrics_targets,
 };
 pub use tag::{TrackMetadata, tag_flac, tag_mp3};

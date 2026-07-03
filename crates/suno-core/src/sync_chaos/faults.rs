@@ -49,12 +49,14 @@ fn drive_capturing(
     let ffmpeg = StubFfmpeg::flac();
     let mut albums = std::collections::BTreeMap::new();
     let mut playlists = std::collections::BTreeMap::new();
+    let synced = std::collections::HashMap::new();
     let outcome = pollster::block_on(execute(
         plan,
         manifest,
         &mut albums,
         &mut playlists,
         desired,
+        &synced,
         Ports {
             client: &mut client,
             http,
