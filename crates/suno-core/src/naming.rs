@@ -633,6 +633,37 @@ mod tests {
     }
 
     #[test]
+    fn overridden_album_drives_the_folder_path() {
+        // A LineageContext whose root_title carries a manual override (as the
+        // store produces it) folders the clip under the preferred album name.
+        let clip = Clip {
+            id: "child".to_string(),
+            title: "Remix".to_string(),
+            display_name: "München".to_string(),
+            ..Clip::default()
+        };
+        let lineage = LineageContext {
+            root_id: "root-1".to_string(),
+            root_title: "Preferred Album".to_string(),
+            parent_id: "root-1".to_string(),
+            edge_type: Some(EdgeType::Cover),
+            status: ResolveStatus::Resolved,
+        };
+
+        let rendered = render_clip_name(
+            NamingRequest {
+                clip: &clip,
+                lineage: &lineage,
+            },
+            &NamingConfig::default(),
+        );
+        assert_eq!(
+            rendered.relative_path.to_string_lossy(),
+            "München/Preferred Album/München-Remix [child]"
+        );
+    }
+
+    #[test]
     fn album_is_own_title_for_a_root() {
         let clip = Clip {
             id: "root-1".to_string(),

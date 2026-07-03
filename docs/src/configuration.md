@@ -127,6 +127,42 @@ A scope flag (`--liked` or `--playlist`) always overrides `[areas]` for that run
 and an unknown key (for example `libary` instead of `library`) is a parse error
 rather than a silent no-op.
 
+### Album name overrides
+
+Album names are derived from lineage: a clip folders under its root ancestor's
+title, or its own title when it is a root (see
+[lineage and albums](lineage-and-albums.md)). When a derived name is undesirable
+(for example the earliest version of a song carried a strange working title
+before you settled on a proper one), an optional
+`[accounts.<label>.albums]` table renames an album by its stable lineage root
+id:
+
+```toml
+[accounts.me.albums]
+# <root_id> = "Preferred Name"
+"1a2b3c4d-...-rootid" = "Greatest Hits"
+```
+
+- The key is the album's **lineage root id**, not the derived title. The root id
+  is stable, whereas the derived title is exactly what you are replacing. Find it
+  from the `[{root_id8}]` suffix in a folder name, the `SUNO_LINEAGE` tag's
+  `Root <id>` line, or the lineage store.
+- The override is **account-wide**, like lineage itself, so it is set on the
+  account and never per-source.
+- A blank or whitespace-only value is ignored, so a stray key can never blank an
+  album.
+- The preferred name flows consistently into the folder path, the `ALBUM` tag,
+  the change hash, and album-art paths, and it also settles name collisions: two
+  distinct roots renamed onto the same album are still kept apart by the
+  `[{root_id8}]` suffix.
+
+On the next `sync`, an album rename **moves** the existing folder and all its
+contents (member tracks, `folder.jpg`, `cover.webp` / `cover.mp4`) to the new
+path and prunes the emptied old directory. It re-tags each track in place from
+the local file; it does not re-download the audio. Deletion safety holds
+throughout: the rename is a move, never a delete-then-redownload, and nothing is
+deleted on an empty, failed, or partial listing.
+
 ### Multiple accounts
 
 Each account has its own token and its own `root`. Account roots must not nest

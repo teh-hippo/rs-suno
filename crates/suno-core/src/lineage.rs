@@ -161,6 +161,16 @@ pub struct LineageContext {
     /// The resolved root ancestor id (the clip's own id when it is a root).
     pub root_id: String,
     /// The root ancestor's title (empty when the root is outside the index).
+    ///
+    /// When built via the lineage store ([`context_for`]/[`album_for_id`]) this
+    /// carries the *effective* album title: a manual override supplants the
+    /// derived title here, so the folder path, `ALBUM` tag, and change hash all
+    /// reflect it from one source. Contexts built without the store (e.g.
+    /// [`own_root`]) carry the raw title.
+    ///
+    /// [`context_for`]: crate::LineageStore::context_for
+    /// [`album_for_id`]: crate::LineageStore::album_for_id
+    /// [`own_root`]: LineageContext::own_root
     pub root_title: String,
     /// The immediate parent id ([`immediate_parent`]); empty for a root.
     pub parent_id: String,

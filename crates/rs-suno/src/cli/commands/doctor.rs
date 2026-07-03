@@ -372,6 +372,7 @@ mod tests {
             naming_template: "{title}/{id8}".to_owned(),
             character_set: CharacterSet::Ascii,
             areas: None,
+            album_overrides: std::collections::BTreeMap::new(),
         }
     }
 

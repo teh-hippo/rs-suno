@@ -26,6 +26,16 @@ is chosen simply:
 So a song and all its remixes and extensions land in one album named after the
 original, while a standalone clip sits in an album of its own name.
 
+### Overriding an album name
+
+When a derived title is undesirable, you can rename an album by its lineage root
+id in the `[accounts.<label>.albums]` config table (see
+[album name overrides](configuration.md#album-name-overrides)). The preferred
+name replaces the derived one everywhere the album appears: the folder path, the
+`ALBUM` tag, the change hash, and album art. On the next `sync` the existing
+folder is moved to the new name and the emptied old directory pruned, with no
+re-download and deletion safety intact.
+
 ## File and folder layout
 
 Files are named deterministically from the clip and its lineage:
