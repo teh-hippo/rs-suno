@@ -101,18 +101,9 @@ impl Clip {
             created_at: string(raw, "created_at"),
             display_name: string(raw, "display_name"),
             handle: string(raw, "handle"),
-            is_liked: raw
-                .get("is_liked")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            is_trashed: raw
-                .get("is_trashed")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            has_vocal: metadata
-                .get("has_vocal")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            is_liked: bool_field(raw, "is_liked"),
+            is_trashed: bool_field(raw, "is_trashed"),
+            has_vocal: bool_field(&metadata, "has_vocal"),
             clip_type: string(&metadata, "type"),
             prompt: string(&metadata, "prompt"),
             gpt_description_prompt: string(&metadata, "gpt_description_prompt"),
@@ -124,10 +115,7 @@ impl Clip {
             lineage_status: string(raw, "lineage_status"),
             edited_clip_id: string(&metadata, "edited_clip_id"),
             task: string(&metadata, "task"),
-            is_remix: metadata
-                .get("is_remix")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            is_remix: bool_field(&metadata, "is_remix"),
             cover_clip_id: string(&metadata, "cover_clip_id"),
             upsample_clip_id: string(&metadata, "upsample_clip_id"),
             remaster_clip_id: string(&metadata, "remaster_clip_id"),
@@ -177,6 +165,11 @@ fn string(value: &Value, key: &str) -> String {
         .to_string()
 }
 
+/// Read a bool field, defaulting to `false` when missing or not a bool.
+fn bool_field(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
 /// Read a CDN URL field, rewriting the unreliable `cdn2` host to `cdn1`.
 fn cdn(value: &Value, key: &str) -> String {
     string(value, key).replace("cdn2.suno.ai", "cdn1.suno.ai")
@@ -202,7 +195,7 @@ fn history_entries(value: &Value, key: &str) -> Vec<HistoryEntry> {
             },
             _ => HistoryEntry {
                 id: string(item, "id"),
-                infill: item.get("infill").and_then(Value::as_bool).unwrap_or(false),
+                infill: bool_field(item, "infill"),
                 continue_at: item.get("continue_at").and_then(Value::as_f64),
                 infill_start_s: item.get("infill_start_s").and_then(Value::as_f64),
                 infill_end_s: item.get("infill_end_s").and_then(Value::as_f64),
