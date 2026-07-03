@@ -42,7 +42,7 @@ Verbosity is relative to the default level of 0.
 | Silent | `-qq` | Errors only. |
 | Quiet | `-q` | Per-run summary, warnings, and errors. |
 | Default | | Summary plus a single progress line. |
-| Verbose | `-v` | A line per clip as it is downloaded, tagged, renamed, skipped, or deleted. |
+| Verbose | `-v` | A line per clip as it is downloaded, tagged, renamed, skipped, or deleted, and a line per sidecar written or removed. |
 
 Machine-readable output (`ls` rows and `lsjson` objects) goes to stdout;
 progress and summaries go to stderr, so a piped `lsjson` stays clean.
@@ -333,11 +333,18 @@ Sync complete: me
   tagged         3
   renamed        1
   deleted        2
+  sidecars       8
   skipped      129
   failed         0
-  total        147
+  total        155
 Duration: 43.2s
 ```
+
+The `sidecars` line counts external artifact files written this run (`.lrc`,
+`.lyrics.txt`, `.details.txt`, cover art, `.mp4`, and playlists); sidecar
+removals are counted under `deleted` with the audio deletes. So enabling a
+sidecar on an already-synced library reports the files it writes rather than
+hiding them as `skipped`.
 
 A `--dry-run` or `check` run reports the pending counts instead, and makes no
 changes:
@@ -348,6 +355,7 @@ Dry run: me (no changes made)
   to tag         3
   to rename      1
   to delete      2
+  sidecars       8
   up to date   129
-  total        147
+  total        155
 ```
