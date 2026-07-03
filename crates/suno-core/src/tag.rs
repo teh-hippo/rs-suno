@@ -29,6 +29,9 @@ pub struct TrackMetadata {
     pub album: String,
     pub album_artist: String,
     pub date: String,
+    /// The album's release year (`YYYY`): the lineage root's creation year, or
+    /// the clip's own year when the root's is unavailable.
+    pub year: String,
     pub lyrics: String,
     pub prompt: String,
     pub comment: String,
@@ -46,11 +49,14 @@ impl TrackMetadata {
     /// mirroring `ha-suno`'s `to_track_metadata`.
     ///
     /// `artist` and `album_artist` fall back to `"Suno"`, and `date` is the
-    /// `YYYY-MM-DD` prefix of `created_at`. The `album`, `parent`, `root`, and
-    /// `lineage` tags come from the resolved context, never the now-defunct
-    /// `album_title`/`edited_clip_id`/`root_ancestor_id` feed fields. The
-    /// `lyrics` tag carries the clip's real lyrics, and the generation `prompt`
-    /// is preserved in its own `SUNO_PROMPT` tag.
+    /// `YYYY-MM-DD` prefix of `created_at`. `year` is the lineage root's
+    /// creation year (the clip's own year when the root's is unavailable), so an
+    /// album whose tracks cross a calendar boundary groups under one year. The
+    /// `album`, `parent`, `root`, and `lineage` tags come from the resolved
+    /// context, never the now-defunct `album_title`/`edited_clip_id`/
+    /// `root_ancestor_id` feed fields. The `lyrics` tag carries the clip's real
+    /// lyrics, and the generation `prompt` is preserved in its own `SUNO_PROMPT`
+    /// tag.
     pub fn from_clip(clip: &Clip, lineage: &LineageContext) -> TrackMetadata {
         let artist = non_empty(&clip.display_name).unwrap_or("Suno").to_owned();
         let album = lineage.album(&clip.title);
@@ -60,6 +66,7 @@ impl TrackMetadata {
             album,
             album_artist: artist,
             date: first_chars(&clip.created_at, 10),
+            year: lineage.year(&clip.created_at),
             lyrics: clip.lyrics.clone(),
             prompt: clip.prompt.clone(),
             comment: clip.gpt_description_prompt.clone(),
@@ -119,6 +126,9 @@ pub fn tag_mp3(
     }
     if !meta.date.is_empty() {
         tag.set_text("TDRC", meta.date.as_str());
+    }
+    if !meta.year.is_empty() {
+        tag.set_text("TDRL", meta.year.as_str());
     }
     if !meta.comment.is_empty() {
         tag.add_frame(Comment {
@@ -241,13 +251,14 @@ pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Res
 }
 
 /// The Vorbis comment fields, in `(KEY, value)` order.
-fn flac_fields(meta: &TrackMetadata) -> [(&'static str, &str); 15] {
+fn flac_fields(meta: &TrackMetadata) -> [(&'static str, &str); 16] {
     [
         ("TITLE", &meta.title),
         ("ARTIST", &meta.artist),
         ("ALBUM", &meta.album),
         ("ALBUMARTIST", &meta.album_artist),
         ("DATE", &meta.date),
+        ("YEAR", &meta.year),
         ("LYRICS", &meta.lyrics),
         ("DESCRIPTION", &meta.comment),
         ("SUNO_PROMPT", &meta.prompt),
@@ -341,11 +352,13 @@ mod tests {
     }
 
     /// A resolved context for [`full_clip`]: an extension whose root carries the
-    /// "Weather Series" album title.
+    /// "Weather Series" album title and a root date one year before the clip's
+    /// own, so the Year tag can be seen to follow the root, not the clip.
     fn full_lineage() -> LineageContext {
         LineageContext {
             root_id: "rootid567890".to_owned(),
             root_title: "Weather Series".to_owned(),
+            root_date: "2023-11-02T09:00:00Z".to_owned(),
             parent_id: "parentid1234".to_owned(),
             edge_type: Some(EdgeType::Extend),
             status: ResolveStatus::Resolved,
@@ -360,6 +373,8 @@ mod tests {
         assert_eq!(meta.album, "Weather Series");
         assert_eq!(meta.album_artist, "alice");
         assert_eq!(meta.date, "2024-03-10");
+        // The Year follows the lineage root (2023), not the clip's own 2024.
+        assert_eq!(meta.year, "2023");
         assert_eq!(meta.lyrics, "thunder rolls\nover the plains");
         assert_eq!(meta.prompt, "an orchestral storm");
         assert_eq!(meta.comment, "a moody cinematic build");
@@ -382,6 +397,7 @@ mod tests {
         assert_eq!(meta.album_artist, "Suno");
         assert_eq!(meta.album, "Just A Title");
         assert_eq!(meta.date, "");
+        assert_eq!(meta.year, "");
         assert_eq!(meta.model, "");
         assert_eq!(meta.lineage, "");
     }
@@ -396,6 +412,7 @@ mod tests {
         let lineage = LineageContext {
             root_id: "root-01".to_owned(),
             root_title: "The Album".to_owned(),
+            root_date: String::new(),
             parent_id: "root-01".to_owned(),
             edge_type: Some(EdgeType::Cover),
             status: ResolveStatus::Resolved,
@@ -452,6 +469,7 @@ mod tests {
         let lineage = LineageContext {
             root_id: "root-7777".to_owned(),
             root_title: "Origin".to_owned(),
+            root_date: String::new(),
             parent_id: "parent-9999".to_owned(),
             edge_type: None,
             status: ResolveStatus::Resolved,
@@ -485,6 +503,12 @@ mod tests {
         assert_eq!(tag.artist(), Some("alice"));
         assert_eq!(tag.album(), Some("Weather Series"));
         assert_eq!(tag.album_artist(), Some("alice"));
+
+        // TDRC keeps the accurate per-track recording date; TDRL surfaces the
+        // lineage root's year so a player can show a distinct Year.
+        let text = |id: &str| tag.get(id).and_then(|frame| frame.content().text());
+        assert_eq!(text("TDRC"), Some("2024-03-10"));
+        assert_eq!(text("TDRL"), Some("2023"));
 
         let extended = |desc: &str| {
             tag.extended_texts()
@@ -676,6 +700,9 @@ mod tests {
         assert_eq!(vorbis.get("ARTIST").unwrap(), &["alice"]);
         assert_eq!(vorbis.get("ALBUM").unwrap(), &["Weather Series"]);
         assert_eq!(vorbis.get("ALBUMARTIST").unwrap(), &["alice"]);
+        // DATE is the per-track date; YEAR carries the lineage root's year.
+        assert_eq!(vorbis.get("DATE").unwrap(), &["2024-03-10"]);
+        assert_eq!(vorbis.get("YEAR").unwrap(), &["2023"]);
         assert_eq!(vorbis.get("SUNO_MODEL").unwrap(), &["chirp-v4 (v4)"]);
         assert_eq!(vorbis.get("SUNO_PROMPT").unwrap(), &["an orchestral storm"]);
         assert_eq!(

@@ -172,6 +172,19 @@ pub struct LineageContext {
     /// [`album_for_id`]: crate::LineageStore::album_for_id
     /// [`own_root`]: LineageContext::own_root
     pub root_title: String,
+    /// The root ancestor's creation timestamp (its raw `created_at`), or empty
+    /// when the root is outside the index.
+    ///
+    /// Surfaced so the Year tag can group an album under its lineage root's
+    /// year: a later revision that crosses a calendar boundary still carries the
+    /// root's year. Contexts built without the store ([`own_root`]/[`for_clip`])
+    /// carry the clip's own `created_at`, so [`year`] falls back to the clip's
+    /// own year when the root's date is unavailable.
+    ///
+    /// [`own_root`]: LineageContext::own_root
+    /// [`for_clip`]: LineageContext::for_clip
+    /// [`year`]: LineageContext::year
+    pub root_date: String,
     /// The immediate parent id ([`immediate_parent`]); empty for a root.
     pub parent_id: String,
     /// How the clip derives from its parent; `None` for a root.
@@ -186,7 +199,9 @@ impl LineageContext {
     /// Root id/title/status come from `resolution.roots[clip.id]`; when the clip
     /// is absent (it was not part of the resolved set) it is treated as its own
     /// resolved root. The parent id and edge come from [`immediate_parent`],
-    /// which is empty/`None` for a root.
+    /// which is empty/`None` for a root. `root_date` is the clip's own
+    /// `created_at`: this store-less path has no window onto the root's date, so
+    /// [`year`](Self::year) falls back to the clip's own year.
     pub fn for_clip(clip: &Clip, resolution: &Resolution) -> LineageContext {
         let (root_id, root_title, status) = match resolution.roots.get(&clip.id) {
             Some(info) => (info.root_id.clone(), info.root_title.clone(), info.status),
@@ -199,6 +214,7 @@ impl LineageContext {
         LineageContext {
             root_id,
             root_title,
+            root_date: clip.created_at.clone(),
             parent_id,
             edge_type,
             status,
@@ -207,11 +223,13 @@ impl LineageContext {
 
     /// A self-rooted context for `clip`: it is treated as its own resolved root
     /// with no parent. Used as a defensive fallback where a resolved context is
-    /// unavailable (a clip absent from the current desired set).
+    /// unavailable (a clip absent from the current desired set). `root_date` is
+    /// the clip's own `created_at`, so it tags its own year.
     pub fn own_root(clip: &Clip) -> LineageContext {
         LineageContext {
             root_id: clip.id.clone(),
             root_title: clip.title.clone(),
+            root_date: clip.created_at.clone(),
             parent_id: String::new(),
             edge_type: None,
             status: ResolveStatus::Resolved,
@@ -232,6 +250,29 @@ impl LineageContext {
             own_title.to_owned()
         }
     }
+
+    /// The album's release year: the lineage root's creation year when known,
+    /// otherwise `own_created_at`'s year.
+    ///
+    /// The root anchors the year so an album whose tracks straddle a calendar
+    /// boundary (a December root with a January revision) groups under one year,
+    /// mirroring how [`album`](Self::album) anchors the folder on the root's
+    /// title. A root uses its own year; the fallback covers a root whose date is
+    /// outside the index.
+    pub fn year(&self, own_created_at: &str) -> String {
+        let root_year = year_of(&self.root_date);
+        if root_year.is_empty() {
+            year_of(own_created_at)
+        } else {
+            root_year
+        }
+    }
+}
+
+/// The 4-digit calendar year prefix of an ISO-8601 `created_at`, or empty when
+/// `created_at` is empty.
+fn year_of(created_at: &str) -> String {
+    created_at.chars().take(4).collect()
 }
 
 /// Classify a clip's relationship to its parent, purely from its structure.
@@ -1551,6 +1592,7 @@ mod tests {
         let ctx = LineageContext {
             root_id: "outside".into(),
             root_title: String::new(),
+            root_date: String::new(),
             parent_id: "outside".into(),
             edge_type: Some(EdgeType::Cover),
             status: ResolveStatus::External,
@@ -1569,5 +1611,53 @@ mod tests {
         assert_eq!(ctx.root_id, "solo");
         assert_eq!(ctx.parent_id, "");
         assert_eq!(ctx.edge_type, None);
+    }
+
+    #[test]
+    fn year_prefers_the_root_year_over_the_clips_own() {
+        // A December root with a January revision: the child tags the root's
+        // year so the album groups under one year across the boundary.
+        let ctx = LineageContext {
+            root_id: "root-1".into(),
+            root_title: "Origin".into(),
+            root_date: "2023-12-30T23:00:00Z".into(),
+            parent_id: "root-1".into(),
+            edge_type: Some(EdgeType::Extend),
+            status: ResolveStatus::Resolved,
+        };
+        assert_eq!(ctx.year("2024-01-02T08:00:00Z"), "2023");
+    }
+
+    #[test]
+    fn year_falls_back_to_own_when_the_root_date_is_unavailable() {
+        let ctx = LineageContext {
+            root_id: "outside".into(),
+            root_title: String::new(),
+            root_date: String::new(),
+            parent_id: "outside".into(),
+            edge_type: Some(EdgeType::Cover),
+            status: ResolveStatus::External,
+        };
+        assert_eq!(ctx.year("2024-07-01T00:00:00Z"), "2024");
+    }
+
+    #[test]
+    fn own_root_tags_its_own_year() {
+        let clip = Clip {
+            id: "solo".into(),
+            title: "Solo".into(),
+            created_at: "2022-05-06T12:00:00Z".into(),
+            ..Default::default()
+        };
+        let ctx = LineageContext::own_root(&clip);
+        assert_eq!(ctx.root_date, "2022-05-06T12:00:00Z");
+        assert_eq!(ctx.year(&clip.created_at), "2022");
+    }
+
+    #[test]
+    fn year_is_empty_when_no_date_is_known() {
+        let clip = Clip::default();
+        let ctx = LineageContext::own_root(&clip);
+        assert_eq!(ctx.year(&clip.created_at), "");
     }
 }

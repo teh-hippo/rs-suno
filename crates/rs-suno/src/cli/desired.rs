@@ -833,6 +833,7 @@ mod tests {
         let lineage = LineageContext {
             root_id: "root-1".to_owned(),
             root_title: "Original".to_owned(),
+            root_date: String::new(),
             parent_id: "root-1".to_owned(),
             edge_type: None,
             status: suno_core::ResolveStatus::Resolved,

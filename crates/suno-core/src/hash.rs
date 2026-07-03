@@ -39,12 +39,12 @@ pub fn content_hash(text: &str) -> String {
 /// Covers every field that affects file *content*: title, tags, the selected
 /// art URL, video cover, the prompt, the lyrics and description, the account
 /// handle, and the *resolved* lineage that gets embedded (immediate parent and
-/// edge, root id and title, and the album the clip folders under), so a change
-/// to any of them is detected as a needed retag. This takes the resolved
-/// [`LineageContext`] rather than the raw feed fields precisely because those
-/// resolved values are what end up in the file (HARDENING B1: if a value is
-/// embedded, it is in the change hash), so a retitle, re-point, or album move
-/// triggers a retag.
+/// edge, root id and title, the album the clip folders under, and the release
+/// year the album groups under), so a change to any of them is detected as a
+/// needed retag. This takes the resolved [`LineageContext`] rather than the raw
+/// feed fields precisely because those resolved values are what end up in the
+/// file (HARDENING B1: if a value is embedded, it is in the change hash), so a
+/// retitle, re-point, album move, or year correction triggers a retag.
 ///
 /// Path-affecting fields such as `display_name` are excluded on purpose: a path
 /// change is a rename, detected by comparing the rendered path with the stored
@@ -53,7 +53,7 @@ pub fn content_hash(text: &str) -> String {
 pub fn meta_hash(clip: &Clip, lineage: &LineageContext) -> String {
     let edge_label = lineage.edge_type.map(EdgeType::label).unwrap_or("");
     let fields = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         clip.title,
         clip.tags,
         clip.selected_image_url().unwrap_or(""),
@@ -63,6 +63,7 @@ pub fn meta_hash(clip: &Clip, lineage: &LineageContext) -> String {
         lineage.root_id,
         lineage.root_title,
         lineage.album(&clip.title),
+        lineage.year(&clip.created_at),
         clip.prompt,
         clip.lyrics,
         clip.gpt_description_prompt,
@@ -138,11 +139,12 @@ mod tests {
     }
 
     /// The resolved lineage embedded alongside [`sample`]: an extension of a
-    /// parent under the "Weather Series" root.
+    /// parent under the "Weather Series" root, created in 2023.
     fn sample_lineage() -> LineageContext {
         LineageContext {
             root_id: "root-1".to_owned(),
             root_title: "Weather Series".to_owned(),
+            root_date: "2023-05-01T00:00:00Z".to_owned(),
             parent_id: "parent-1".to_owned(),
             edge_type: Some(EdgeType::Extend),
             status: ResolveStatus::Resolved,
@@ -154,7 +156,7 @@ mod tests {
         // Golden value: a change here means the sentinel encoding changed and
         // every existing manifest would see a spurious retag. Change with care.
         let h = meta_hash(&sample(), &sample_lineage());
-        assert_eq!(h, "25a62fac4d9e37cd");
+        assert_eq!(h, "f58211fa8ffcb22e");
         assert_eq!(h.len(), 16);
         assert_eq!(h, meta_hash(&sample(), &sample_lineage()));
     }
@@ -216,6 +218,7 @@ mod tests {
             |l: &mut LineageContext| l.root_id = "other-root".to_owned(),
             |l: &mut LineageContext| l.root_title = "Other Album".to_owned(),
             |l: &mut LineageContext| l.edge_type = Some(EdgeType::Cover),
+            |l: &mut LineageContext| l.root_date = "2099-01-01T00:00:00Z".to_owned(),
         ] {
             let mut lin = sample_lineage();
             mutate(&mut lin);
