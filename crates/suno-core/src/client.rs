@@ -406,14 +406,20 @@ impl<C: Clock> SunoClient<C> {
     }
 }
 
+/// Unwrap a `{ "clip": {...} }` wrapper to the inner clip object, or return
+/// `value` unchanged when it carries no object `clip` key (it is already bare).
+fn unwrap_clip(value: &Value) -> &Value {
+    value
+        .get("clip")
+        .filter(|clip| clip.is_object())
+        .unwrap_or(value)
+}
+
 /// Parse a single-clip response body, accepting either a bare clip object or a
 /// `{"clip": {...}}` wrapper. Returns `None` when no clip id is present.
 fn parse_clip(body: &[u8]) -> Option<Clip> {
     let data: Value = serde_json::from_slice(body).ok()?;
-    let raw = data
-        .get("clip")
-        .filter(|value| value.is_object())
-        .unwrap_or(&data);
+    let raw = unwrap_clip(&data);
     let has_id = raw
         .get("id")
         .and_then(Value::as_str)
@@ -554,13 +560,7 @@ fn parse_playlist_clips(body: &[u8]) -> Result<(Vec<Clip>, bool)> {
     let clips: Vec<Clip> = raw
         .map(|raw| {
             raw.iter()
-                .map(|entry| {
-                    let clip = entry
-                        .get("clip")
-                        .filter(|value| value.is_object())
-                        .unwrap_or(entry);
-                    Clip::from_json(clip)
-                })
+                .map(|entry| Clip::from_json(unwrap_clip(entry)))
                 .filter(|clip| !clip.id.is_empty())
                 .collect()
         })
