@@ -230,6 +230,21 @@ off:
   URL can be transiently absent, so it opts out of removal the same way covers do.
   Turning `video_mp4` off leaves existing `.mp4` videos in place; a video is only
   removed when its whole song leaves every source and the audio is deleted with it.
+- **Stems (`<song>.stems/`).** When `download_stems` is on, a song's existing stems
+  are mirrored into a sibling `.stems` sub-folder, tracked per stem by a stable key
+  so individual stems add, rewrite, and remove independently (never a whole-folder
+  delete). Stems are download-only and read-only: the mirror reads the stem count
+  (`GET /api/clip/{id}/stems/pages`), pages the listing (`GET /api/clip/{id}/stems?page=N`),
+  and downloads each stem, and **never** triggers separation or spends credits. Each
+  stem is stored RAW: with the default `stem_format = "wav"` the lossless WAV is
+  fetched through the same free `convert_wav` render the FLAC pipeline uses (0 credits),
+  and with `stem_format = "mp3"` the public CDN MP3 is downloaded directly. A stem is
+  never transcoded to FLAC, even for a FLAC song — stems are the deliberate exception.
+  A stem is removed only when Suno's *authoritative* listing for the song no longer
+  contains it, or alongside its own song when the audio is deleted (which also prunes
+  the emptied `.stems` folder). A listing is authoritative only when its whole page
+  set drains after returning at least one stem; a disabled, failed, partial, `400`,
+  or empty listing is never read as "no stems", so existing stems are kept.
 
 Whichever the case, a sidecar is only ever deleted through the shared gate, so
 an incomplete listing or a preserved (private or copy-held) song never loses

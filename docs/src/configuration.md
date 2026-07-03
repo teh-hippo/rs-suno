@@ -54,6 +54,8 @@ details_sidecar = false
 lyrics_sidecar = false
 lrc_sidecar = false
 video_mp4 = false
+download_stems = false
+stem_format = "wav"
 
 [accounts.me]
 token = "<your __client token>"
@@ -85,6 +87,8 @@ needed. These modes are not applied on non-Unix platforms.
 | `lyrics_sidecar` | bool | `false` | Also write a plain-text `<song>.lyrics.txt` beside each audio file, holding the song's lyrics verbatim. A song with no lyrics gets no file. |
 | `lrc_sidecar` | bool | `false` | Also write a `<song>.lrc` beside each audio file. When Suno has word/line alignment for the song, the `.lrc` is synced line-level (a `[mm:ss.xx]` timestamp per line — the universally supported form) and, for MP3, an ID3 `SYLT` frame with per-word timing is embedded too; otherwise it falls back to the untimed lyrics. A song Suno cannot align (an instrumental) gets no file. Enabling this fetches each song's alignment once. |
 | `video_mp4` | bool | `false` | Also download the standalone `<song>.mp4` music video beside each audio file, when Suno provides one. A song with no video gets no file. Turning this off leaves existing videos in place; a video is only removed alongside its own audio. |
+| `download_stems` | bool | `false` | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder beside it. Download-only: it lists and downloads existing stems and **never** triggers separation or spends credits. A song with no stems gets no folder. Each stem is stored RAW (see `stem_format`), never transcoded to FLAC. Turning this off leaves existing stems in place; individual stems are only removed when Suno's authoritative listing no longer contains them, or alongside their own song. |
+| `stem_format` | string | `wav` | Container for downloaded stems: `wav` (lossless, fetched through the same free WAV render the FLAC pipeline uses) or `mp3` (the public CDN file). Stems are stored RAW in whichever container and are never re-encoded to FLAC, even when the song's own `format` is FLAC. |
 
 Any account key except `token`, `root`, and `account_id` may also be set under
 `[defaults]` to apply to every account.
@@ -210,6 +214,8 @@ account token:
 | `SUNO_LYRICS_SIDECAR` | `--lyrics-sidecar` | `true` or `false`. |
 | `SUNO_LRC_SIDECAR` | `--lrc-sidecar` | `true` or `false`. |
 | `SUNO_VIDEO_MP4` | `--video-mp4` | `true` or `false`. |
+| `SUNO_DOWNLOAD_STEMS` | `--download-stems` | `true` or `false`. |
+| `SUNO_STEM_FORMAT` | `--stem-format` | `wav` or `mp3`. |
 
 Per-account variants use the account label upper-cased with hyphens turned into
 underscores, so account `my-lib` reads `SUNO_MY_LIB_TOKEN`,

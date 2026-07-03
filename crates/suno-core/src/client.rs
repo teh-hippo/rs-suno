@@ -41,6 +41,28 @@ pub struct BillingInfo {
     pub total_credits_left: u64,
 }
 
+/// One separated stem of a clip, as listed by the free, read-only stems
+/// endpoint.
+///
+/// A stem is itself a full clip object: the listing returns the same shape as
+/// the library feed, so each stem carries its own clip `id`, a `title` whose
+/// trailing parenthetical is the stem label (e.g. `"My Song (Vocals)"`), a
+/// `status`, and a public `audio_url` on `cdn1.suno.ai` that downloads free and
+/// unauthenticated. Listing and downloading stems never spends credits or
+/// triggers separation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stem {
+    /// The stem's own server clip id. Used both as the stable per-stem key and
+    /// to render the stem's lossless WAV through the free `convert_wav` flow.
+    pub id: String,
+    /// The stem label, taken from the trailing parenthetical of the stem clip's
+    /// title (e.g. `Vocals`, `Backing Vocals`, `Drums`). May be blank when the
+    /// title has no parenthetical, so it is never used alone as a key or name.
+    pub label: String,
+    /// The public CDN MP3 URL the stem downloads from (a plain GET; free).
+    pub url: String,
+}
+
 /// A client for the Suno library API, owning the account's [`ClerkAuth`].
 ///
 /// The [`Clock`] is held so [`api_request`](Self::api_request) can back off
@@ -291,6 +313,79 @@ impl<C: Clock> SunoClient<C> {
         parse_billing_info(&body)
     }
 
+    /// List a clip's already-separated stems (free, read-only).
+    ///
+    /// Uses the live stems shape: first `GET /api/clip/{id}/stems/pages` for the
+    /// page count (`{"pages": N}`), then `GET /api/clip/{id}/stems?page=P` for
+    /// each `P` in `0..N` (the pages are 0-indexed), whose body is
+    /// `{"stems": [<clip>, ...]}` where each stem is a full clip object. Every
+    /// request rides the shared limiter and retry. This endpoint only reads: it
+    /// never spends credits and never triggers separation, so it is safe on the
+    /// bulk mirror path. The caller must only invoke it when the clip's
+    /// `has_stem` is true.
+    ///
+    /// Returns the collected stems paired with a `complete` flag that is `true`
+    /// only when the listing was fully and authoritatively enumerated: the page
+    /// count came back and every one of its pages drained, AFTER at least one
+    /// stem was seen. This encodes the deletion-safety invariant: an empty
+    /// listing (`pages == 0`, or a `400`/`404` on the page-count endpoint, which
+    /// Suno returns for a clip with zero stems), a transport failure, or a
+    /// partial drain (a page error mid-enumeration surfaces as `Err`) all yield a
+    /// non-authoritative result, so the caller KEEPS any existing local stems and
+    /// never reads the absence as "no stems". A clip that declares more than
+    /// [`MAX_PAGES`] pages is likewise a truncated listing and never authoritative.
+    /// A stem is only ever removed from an authoritative (`complete`) listing that
+    /// omits it, or when its owning clip's audio is deleted.
+    pub async fn list_stems(
+        &mut self,
+        http: &impl Http,
+        clip_id: &str,
+    ) -> Result<(Vec<Stem>, bool)> {
+        let declared = self.stem_page_count(http, clip_id).await?;
+        // Zero pages (or no page count) is Suno's "this clip has no stems"
+        // answer: indeterminate for deletion, never an authoritative empty.
+        if declared == 0 {
+            return Ok((Vec::new(), false));
+        }
+        let pages = declared.min(MAX_PAGES);
+        let mut stems: Vec<Stem> = Vec::new();
+        for page in 0..pages {
+            // Pages are 0-indexed (0..N-1); note the path has no trailing slash
+            // before the query, distinguishing it from `.../stems/pages`.
+            let path = format!("/api/clip/{clip_id}/stems?page={page}");
+            // A page error mid-enumeration is indeterminate, not a clean end:
+            // surface it so the caller keeps existing stems rather than reading a
+            // partial drain as authoritative and removing stems.
+            let body = self.api_get_retrying(http, &path).await?;
+            stems.extend(parse_stems_page(&body));
+        }
+        dedupe_stems(&mut stems);
+        // Authoritative only when the whole declared page set actually drained
+        // and it held stems: an all-empty listing is never "no stems", and a
+        // clip declaring more than the `MAX_PAGES` cap is a truncated listing,
+        // never authoritative, so its un-fetched stems are kept (mirroring the
+        // feed's `list_clips` cap handling).
+        let complete = !stems.is_empty() && declared <= MAX_PAGES;
+        Ok((stems, complete))
+    }
+
+    /// Read the stems page count for a clip from `GET /api/clip/{id}/stems/pages`
+    /// (`{"pages": N}`).
+    ///
+    /// A clip with no stems answers `400`/`404` here; both mean "no stems" and
+    /// map to `0` (indeterminate, never an authoritative empty set), while any
+    /// other error (a transient `5xx`, a transport failure) propagates so the
+    /// caller treats the stems as unknown and keeps them.
+    async fn stem_page_count(&mut self, http: &impl Http, clip_id: &str) -> Result<u32> {
+        let path = format!("/api/clip/{clip_id}/stems/pages");
+        match self.api_get_retrying(http, &path).await {
+            Ok(body) => Ok(parse_stem_page_count(&body)),
+            Err(err) if is_invalid_page_error(&err) => Ok(0),
+            Err(Error::NotFound(_)) => Ok(0),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Try the dedicated clip endpoint, returning `None` when it is missing or
     /// returns a body that does not yield the requested clip.
     async fn try_get_clip(&mut self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
@@ -379,6 +474,16 @@ impl<C: Clock> SunoClient<C> {
         path: &str,
         body: Vec<u8>,
     ) -> Result<Vec<u8>> {
+        // Crate-wide POST allow-list. Every mutating Suno API request funnels
+        // through here, so refusing any POST to a path outside the known-safe
+        // set means a destructive or credit-spending endpoint can never be sent,
+        // even by a future edit that forgets the invariant. GETs are free and
+        // unrestricted; only POSTs are gated.
+        if method == Method::Post && !post_path_allowed(path) {
+            return Err(Error::Refused(format!(
+                "POST to {path} is not on the allow-list"
+            )));
+        }
         let url = format!("{SUNO_API_BASE_URL}{path}");
         let mut auth_refreshed = false;
         loop {
@@ -437,6 +542,120 @@ fn unwrap_clip(value: &Value) -> &Value {
         .get("clip")
         .filter(|clip| clip.is_object())
         .unwrap_or(value)
+}
+
+/// Whether a Suno API path may be the target of a POST (the crate-wide POST
+/// allow-list). Membership is deliberately narrow so a mutating request is only
+/// ever sent to a vetted endpoint:
+///
+/// - [`FEED_V3_PATH`] — the cursor-paginated library listing (a POST by design).
+/// - `…/convert_wav/` — the per-clip server-side lossless WAV render.
+///
+/// A GET is never gated (reads are free and non-mutating). Any credit-spending
+/// generation endpoint is deliberately absent here.
+fn post_path_allowed(path: &str) -> bool {
+    if path == FEED_V3_PATH {
+        return true;
+    }
+    // The per-clip WAV render: /api/gen/{id}/convert_wav/ with a single id.
+    if let Some(rest) = path.strip_prefix("/api/gen/")
+        && let Some(id) = rest.strip_suffix("/convert_wav/")
+    {
+        return is_single_id_segment(id);
+    }
+    false
+}
+
+/// Whether `segment` is a single, non-empty path id segment: no slash, no query,
+/// and no `..` traversal, so an allow-list match can never be smuggled past by a
+/// crafted path.
+fn is_single_id_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && !segment.contains('/')
+        && !segment.contains('?')
+        && !segment.contains("..")
+}
+
+/// Whether an error is Suno's "this clip has no stems" answer on the stems
+/// page-count endpoint: a `400` (it returns `400 "Invalid page number"` for a
+/// clip with zero stems). Distinguished from a transient `5xx` (also
+/// [`Error::Api`]) so a server error is never mistaken for "no stems".
+fn is_invalid_page_error(err: &Error) -> bool {
+    matches!(err, Error::Api(msg) if msg.contains("returned 400") || msg.contains("Invalid page"))
+}
+
+/// Parse the stems page count from `GET /api/clip/{id}/stems/pages`
+/// (`{"pages": N}`).
+///
+/// A missing, non-numeric, or negative `pages` reads as `0` (no stems), so a
+/// malformed body is treated as indeterminate rather than guessing a count.
+fn parse_stem_page_count(body: &[u8]) -> u32 {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|data| data.get("pages").and_then(Value::as_u64))
+        .and_then(|pages| u32::try_from(pages).ok())
+        .unwrap_or(0)
+}
+
+/// Parse one page of the stems listing (`{"stems": [<clip>, ...]}`) into
+/// [`Stem`]s.
+///
+/// Each stem is a full clip object, so it is mapped with [`Clip::from_json`]:
+/// the id is the stem clip id, the label is the trailing parenthetical of its
+/// title, and the download URL is its public CDN MP3. Only stems carrying both a
+/// non-empty id and URL are kept — a stem with no id cannot be WAV-rendered, and
+/// one with no URL cannot be mirrored. Malformed JSON yields no stems (never a
+/// panic), so a bad body is treated as an empty, non-authoritative page.
+fn parse_stems_page(body: &[u8]) -> Vec<Stem> {
+    let Ok(data) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    let items = if let Some(array) = data.as_array() {
+        array.as_slice()
+    } else {
+        data.get("stems")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    };
+    items
+        .iter()
+        .map(parse_stem)
+        .filter(|stem| !stem.id.is_empty() && !stem.url.is_empty())
+        .collect()
+}
+
+/// Map one raw stem clip element to a [`Stem`]: its clip id, the trailing
+/// parenthetical of its title as the label, and its public CDN MP3 URL.
+fn parse_stem(raw: &Value) -> Stem {
+    let clip = Clip::from_json(raw);
+    Stem {
+        id: clip.id.clone(),
+        label: stem_label_from_title(&clip.title),
+        url: clip.mp3_url(),
+    }
+}
+
+/// The stem label carried in a stem clip's title: the text inside its trailing
+/// parenthetical (`"My Song (Backing Vocals)"` -> `Backing Vocals`). Returns an
+/// empty string when the title has no closing parenthetical, so the caller falls
+/// back to the stem id for naming.
+fn stem_label_from_title(title: &str) -> String {
+    let trimmed = title.trim_end();
+    let Some(before_close) = trimmed.strip_suffix(')') else {
+        return String::new();
+    };
+    match before_close.rfind('(') {
+        Some(open) => before_close[open + 1..].trim().to_string(),
+        None => String::new(),
+    }
+}
+
+/// Drop stems that repeat across pages, keeping the first occurrence of each
+/// download URL so a paged listing counts a stem once.
+fn dedupe_stems(stems: &mut Vec<Stem>) {
+    let mut seen = BTreeSet::new();
+    stems.retain(|stem| seen.insert(stem.url.clone()));
 }
 
 /// Parse a single-clip response body, accepting either a bare clip object or a
@@ -1442,5 +1661,218 @@ mod tests {
             pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
         assert!(clips.is_empty());
         assert!(!complete, "a missing total is never fully enumerated");
+    }
+
+    /// A stems page body: each stem is a full clip object whose title carries
+    /// the label in a trailing parenthetical, as the live endpoint returns.
+    fn stem_page(stems: &[(&str, &str, &str)]) -> String {
+        let entries: Vec<Value> = stems
+            .iter()
+            .map(|(id, label, url)| {
+                serde_json::json!({
+                    "id": id,
+                    "title": format!("My Song ({label})"),
+                    "status": "complete",
+                    "audio_url": url,
+                })
+            })
+            .collect();
+        serde_json::json!({ "stems": entries }).to_string()
+    }
+
+    /// The page-count body for `GET /api/clip/{id}/stems/pages`.
+    fn stem_pages(pages: u32) -> String {
+        serde_json::json!({ "pages": pages }).to_string()
+    }
+
+    #[test]
+    fn list_stems_drains_all_declared_pages_and_is_authoritative() {
+        // Two 0-indexed pages, both drained: the stems concatenate in order and
+        // the listing is authoritative (it declared its pages and held stems).
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("stems/pages", Reply::json(&stem_pages(2)))
+            .route(
+                "stems?page=0",
+                Reply::json(&stem_page(&[
+                    ("s1", "Vocals", "https://cdn1.suno.ai/s1.mp3"),
+                    ("s2", "Drums", "https://cdn1.suno.ai/s2.mp3"),
+                ])),
+            )
+            .route(
+                "stems?page=1",
+                Reply::json(&stem_page(&[("s3", "Bass", "https://cdn1.suno.ai/s3.mp3")])),
+            );
+        let mut client = scripted_client(&http, RecordingClock::new());
+
+        let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
+        assert_eq!(stems.len(), 3);
+        assert_eq!(stems[0].id, "s1");
+        assert_eq!(stems[0].label, "Vocals");
+        assert_eq!(stems[0].url, "https://cdn1.suno.ai/s1.mp3");
+        assert_eq!(stems[2].label, "Bass");
+        assert!(
+            complete,
+            "a fully drained listing that returned stems is authoritative"
+        );
+    }
+
+    #[test]
+    fn list_stems_zero_pages_is_indeterminate_never_empty() {
+        // A clip with no stems answers `{"pages": 0}`. That must NOT be read as an
+        // authoritative empty set, or it could delete local stems.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("stems/pages", Reply::json(&stem_pages(0)));
+        let mut client = scripted_client(&http, RecordingClock::new());
+
+        let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
+        assert!(stems.is_empty());
+        assert!(
+            !complete,
+            "an empty listing is indeterminate, so existing stems are kept"
+        );
+    }
+
+    #[test]
+    fn list_stems_missing_page_count_is_indeterminate() {
+        // A `400`/`404` on the page-count endpoint (Suno's "no stems" answer) is
+        // indeterminate, never an authoritative empty set.
+        for status in [400u16, 404] {
+            let http = ScriptedHttp::new()
+                .with_auth()
+                .route("stems/pages", Reply::status(status));
+            let mut client = scripted_client(&http, RecordingClock::new());
+            let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
+            assert!(stems.is_empty(), "status {status}");
+            assert!(!complete, "status {status} is indeterminate, not empty");
+        }
+    }
+
+    #[test]
+    fn list_stems_page_error_mid_enumeration_propagates() {
+        // A transient 5xx on a page mid-drain is indeterminate, not an end: it
+        // surfaces as an error rather than a (partial) authoritative set, so the
+        // caller keeps existing stems.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("stems/pages", Reply::json(&stem_pages(2)))
+            .route(
+                "stems?page=0",
+                Reply::json(&stem_page(&[(
+                    "s1",
+                    "Vocals",
+                    "https://cdn1.suno.ai/s1.mp3",
+                )])),
+            )
+            .route("stems?page=1", Reply::status(500));
+        let mut client = scripted_client(&http, RecordingClock::new());
+
+        let result = pollster::block_on(client.list_stems(&http, "clip1"));
+        assert!(result.is_err(), "a 5xx page is not a clean drain");
+    }
+
+    #[test]
+    fn list_stems_over_max_pages_is_truncated_never_authoritative() {
+        // A clip that declares more pages than the `MAX_PAGES` cap can only be
+        // drained partially, so even though the fetched pages hold stems the
+        // listing is TRUNCATED and must not be authoritative: its un-fetched
+        // stems on pages beyond the cap would otherwise be delete-reconciled.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("stems/pages", Reply::json(&stem_pages(MAX_PAGES + 1)))
+            .route(
+                "stems?page=",
+                Reply::json(&stem_page(&[(
+                    "s1",
+                    "Vocals",
+                    "https://cdn1.suno.ai/s1.mp3",
+                )])),
+            );
+        let mut client = scripted_client(&http, RecordingClock::new());
+
+        let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
+        assert!(!stems.is_empty(), "the fetched pages still yield stems");
+        assert!(
+            !complete,
+            "a listing declaring more than MAX_PAGES is truncated, never authoritative"
+        );
+    }
+
+    #[test]
+    fn parse_stems_page_maps_full_clips_and_skips_idless() {
+        // A stem is a full clip: id, label from the title parenthetical, and the
+        // public CDN MP3 url.
+        let page = stem_page(&[("x", "Backing Vocals", "https://cdn1.suno.ai/x.mp3")]);
+        let stems = parse_stems_page(page.as_bytes());
+        assert_eq!(stems.len(), 1);
+        assert_eq!(stems[0].id, "x");
+        assert_eq!(stems[0].label, "Backing Vocals");
+        assert_eq!(stems[0].url, "https://cdn1.suno.ai/x.mp3");
+        // An entry with no id cannot be keyed or WAV-rendered and is dropped.
+        let no_id = br#"{"stems": [{"title": "Ghost (Vocals)", "audio_url": "https://cdn1.suno.ai/g.mp3"}]}"#;
+        assert!(parse_stems_page(no_id).is_empty());
+        // A stem with an id but no audio_url still resolves a deterministic CDN
+        // url from its id, so it remains downloadable.
+        let no_url = br#"{"stems": [{"id": "y", "title": "Song (Bass)"}]}"#;
+        let recovered = parse_stems_page(no_url);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].url, "https://cdn1.suno.ai/y.mp3");
+        // Malformed JSON never panics; it yields no stems.
+        assert!(parse_stems_page(b"not json").is_empty());
+    }
+
+    #[test]
+    fn parse_stem_page_count_reads_pages_field() {
+        assert_eq!(parse_stem_page_count(br#"{"pages": 12}"#), 12);
+        assert_eq!(parse_stem_page_count(br#"{"pages": 0}"#), 0);
+        // Missing, negative, or non-numeric pages read as 0 (indeterminate).
+        assert_eq!(parse_stem_page_count(br#"{}"#), 0);
+        assert_eq!(parse_stem_page_count(br#"{"pages": -1}"#), 0);
+        assert_eq!(parse_stem_page_count(b"not json"), 0);
+    }
+
+    #[test]
+    fn stem_label_from_title_extracts_trailing_parenthetical() {
+        assert_eq!(stem_label_from_title("My Song (Vocals)"), "Vocals");
+        assert_eq!(
+            stem_label_from_title("A (b) Song (Backing Vocals)"),
+            "Backing Vocals"
+        );
+        assert_eq!(stem_label_from_title("My Song (Drums) "), "Drums");
+        // No parenthetical: empty, so the caller falls back to the stem id.
+        assert_eq!(stem_label_from_title("My Song"), "");
+        assert_eq!(stem_label_from_title(""), "");
+    }
+
+    #[test]
+    fn post_allow_list_permits_only_feed_and_wav_render() {
+        assert!(post_path_allowed(FEED_V3_PATH));
+        assert!(post_path_allowed("/api/gen/abc123/convert_wav/"));
+        // No generation endpoint is on the list.
+        assert!(!post_path_allowed("/api/gen/abc123/stem_task"));
+        assert!(!post_path_allowed("/api/gen/abc123/separate"));
+        // Path traversal or extra segments can't smuggle a match.
+        assert!(!post_path_allowed("/api/gen/a/../evil/convert_wav/"));
+        assert!(!post_path_allowed("/api/gen/a/b/convert_wav/"));
+        // The stems endpoints are GET-only and never on the POST allow-list.
+        assert!(!post_path_allowed("/api/clip/x/stems/pages"));
+        assert!(!post_path_allowed("/api/clip/x/stems?page=0"));
+    }
+
+    #[test]
+    fn api_request_refuses_a_post_off_the_allow_list() {
+        // The single POST chokepoint rejects an off-list POST before the wire, so
+        // a credit-spending endpoint can never be reached by accident.
+        let http = MockHttp::new(auth_rules());
+        let mut client = authed_client(&http);
+        let err = pollster::block_on(client.api_request(
+            &http,
+            Method::Post,
+            "/api/gen/x/stem_task",
+            b"{}".to_vec(),
+        ))
+        .unwrap_err();
+        assert!(matches!(err, Error::Refused(_)));
     }
 }

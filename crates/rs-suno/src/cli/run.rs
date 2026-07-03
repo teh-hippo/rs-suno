@@ -20,7 +20,7 @@ use suno_core::{
     AdoptDecision, AlbumArt, AlbumDesired, AlignedLyrics, ClerkAuth, Clip, Config,
     Error as CoreError, ExecOptions, Filesystem, FlagOverrides, LineageContext, LocalFile,
     Manifest, NamingConfig, Owner, OwnerGate, PlaylistDesired, PlaylistState, Ports, ResolveOpts,
-    RunStatus, SourceMode, SourceStatus, SunoClient, adopt_decision, album_desired,
+    RunStatus, SourceMode, SourceStatus, Stem, SunoClient, adopt_decision, album_desired,
     deletion_allowed, is_downloadable, owner_gate, plan_album_artifacts, plan_playlist_artifacts,
     reconcile, resolve_roots,
 };
@@ -28,8 +28,9 @@ use suno_core::{
 use crate::cli::args::{GlobalArgs, SyncArgs};
 use crate::cli::desired::{
     ArtifactToggles, Confirm, ExitCode, LIKED_PLAYLIST_ID, PlaylistInput, PlaylistPolicy,
-    ResolvedSelection, build_desired, build_modes_by_id, build_playlist_desired, confirm_decision,
-    confirmed, is_narrowed, mass_delete_abort, resolve_playlist, resolve_selection, run_exit_code,
+    ResolvedSelection, build_desired, build_modes_by_id, build_playlist_desired, clip_stems,
+    confirm_decision, confirmed, is_narrowed, mass_delete_abort, resolve_playlist,
+    resolve_selection, run_exit_code,
 };
 use crate::cli::logs;
 use crate::cli::output;
@@ -481,9 +482,50 @@ fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
         lyrics_sidecar: args.lyrics_sidecar.then_some(true),
         lrc_sidecar: args.lrc_sidecar.then_some(true),
         video_mp4: args.video_mp4.then_some(true),
+        download_stems: args.download_stems.then_some(true),
+        stem_format: args.stem_format.map(Into::into),
         naming_template: args.naming_template.clone(),
         character_set: args.character_set.map(Into::into),
     }
+}
+
+/// Strip the resolved format's extension from an audio path, giving the
+/// extensionless base the sidecars and the `.stems` folder are built from.
+/// Falls back to the whole path if the extension is somehow absent.
+fn strip_format_ext(path: &str, format: suno_core::AudioFormat) -> &str {
+    path.strip_suffix(&format!(".{format}")).unwrap_or(path)
+}
+
+/// List existing stems for the selected clips, when the feature is on.
+///
+/// Read-only and free: it pages the stems listing (`GET`) and NEVER generates or
+/// spends credits. Returns a map from clip id to its AUTHORITATIVE stem set. A
+/// clip is present ONLY when its listing fully enumerated at least one stem; a
+/// clip absent from the map (feature off, `has_stem` false, or an
+/// indeterminate/failed/partial/`400` listing) means "keep existing local
+/// stems", so this can never drive a stem deletion. `has_stem` is the
+/// precondition, so a clip Suno reports as stemless is never even queried.
+async fn list_existing_stems(
+    enabled: bool,
+    clips: &[&Clip],
+    client: &mut SunoClient<TokioClock>,
+    http: &ReqwestHttp,
+) -> HashMap<String, Vec<Stem>> {
+    let mut out = HashMap::new();
+    if !enabled {
+        return out;
+    }
+    for clip in clips {
+        if !clip.has_stem {
+            continue;
+        }
+        if let Ok((stems, true)) = client.list_stems(http, &clip.id).await
+            && !stems.is_empty()
+        {
+            out.insert(clip.id.clone(), stems);
+        }
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -883,6 +925,22 @@ async fn run_one(
             ..NamingConfig::default()
         },
     );
+    // Stems (#100): existing stems are a per-clip keyed set that needs a network
+    // listing (free, read-only), so they are threaded in after the pure
+    // `build_desired`. Off by default; the listing only touches clips whose
+    // `has_stem` is true, and only an authoritative set drives removals — an
+    // absent/indeterminate listing leaves a clip's `stems` at `None` so existing
+    // local stems are kept. This path never generates or spends credits.
+    let stems_by_id =
+        list_existing_stems(settings.download_stems, &selected, &mut client, &http).await;
+    if settings.download_stems {
+        for d in &mut desired {
+            let base = strip_format_ext(&d.path, settings.format);
+            d.stems = stems_by_id
+                .get(&d.clip.id)
+                .map(|stems| clip_stems(base, stems, settings.stem_format, settings.character_set));
+        }
+    }
     // Folder-level album art is keyed on the stable root id and chosen purely
     // from the selected clips. Without an authoritative Library the folder view
     // is partial, so leave folder art entirely untouched (no rewrites, no
@@ -1026,7 +1084,7 @@ async fn run_one(
     let is_sync = verb == Verb::Sync && !force_additive;
     // The mass-delete cap counts every destructive action, audio and sidecar
     // alike (HARDENING B2), so a run that would mass-delete artifacts aborts too.
-    let delete_count = plan.deletes() + plan.artifact_deletes();
+    let delete_count = plan.deletes() + plan.artifact_deletes() + plan.stem_deletes();
     if is_sync
         && mass_delete_abort(
             desired.len(),
@@ -1865,6 +1923,8 @@ fn plan_has_changes(plan: &suno_core::Plan) -> bool {
         + plan.deletes()
         + plan.artifact_writes()
         + plan.artifact_deletes()
+        + plan.stem_writes()
+        + plan.stem_deletes()
         > 0
 }
 
@@ -1876,7 +1936,8 @@ fn deletion_paths(plan: &suno_core::Plan) -> Vec<String> {
         .iter()
         .filter_map(|action| match action {
             suno_core::Action::Delete { path, .. }
-            | suno_core::Action::DeleteArtifact { path, .. } => Some(path.clone()),
+            | suno_core::Action::DeleteArtifact { path, .. }
+            | suno_core::Action::DeleteStem { path, .. } => Some(path.clone()),
             _ => None,
         })
         .collect()
@@ -2075,6 +2136,8 @@ mod tests {
             lyrics_sidecar: false,
             lrc_sidecar: false,
             video_mp4: false,
+            download_stems: false,
+            stem_format: suno_core::StemFormat::Wav,
             naming_template: "{title}".to_owned(),
             character_set: suno_core::CharacterSet::Unicode,
             areas: None,

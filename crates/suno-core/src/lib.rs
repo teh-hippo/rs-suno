@@ -37,11 +37,11 @@ mod testutil;
 mod sync_chaos;
 
 pub use auth::{ClerkAuth, TOKEN_EXPIRY_WARN_DAYS, TokenExpiry, classify_token_expiry};
-pub use client::{BillingInfo, Playlist, SunoClient};
+pub use client::{BillingInfo, Playlist, Stem, SunoClient};
 pub use clock::Clock;
 pub use config::{
     AccountConfig, AreaMode, AreasConfig, AudioFormat, Config, Defaults, EffectiveSettings,
-    FlagOverrides, SourceConfig,
+    FlagOverrides, SourceConfig, StemFormat,
 };
 pub use downloadable::is_downloadable;
 pub use error::{Error, Result};
@@ -69,12 +69,12 @@ pub use manifest::{ArtifactState, Manifest, ManifestEntry, SyncedLyricsCheck};
 pub use model::{Clip, HistoryEntry};
 pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,
-    render_clip_names, sanitise_name,
+    render_clip_names, sanitise_name, stem_file_path, stems_folder,
 };
 pub use reconcile::{
-    Action, AlbumDesired, ArtifactKind, Desired, DesiredArtifact, LocalFile, Plan, PlaylistDesired,
-    SourceMode, SourceStatus, album_desired, deletion_allowed, plan_album_artifacts,
-    plan_playlist_artifacts, reconcile,
+    Action, AlbumDesired, ArtifactKind, Desired, DesiredArtifact, DesiredStem, LocalFile, Plan,
+    PlaylistDesired, SourceMode, SourceStatus, album_desired, deletion_allowed,
+    plan_album_artifacts, plan_playlist_artifacts, reconcile,
 };
 pub use synced::{
     PendingCheck, SYNCED_LRC_RECHECK_SECS, apply_synced_lrc, preview_synced_lrc,

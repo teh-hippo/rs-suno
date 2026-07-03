@@ -40,7 +40,7 @@ use futures_util::stream::{self, StreamExt};
 use crate::backoff::{backoff_delay, retry_after};
 use crate::client::SunoClient;
 use crate::clock::Clock;
-use crate::config::AudioFormat;
+use crate::config::{AudioFormat, StemFormat};
 use crate::error::Error;
 use crate::ffmpeg::{Ffmpeg, WebpEncodeSettings};
 use crate::fs::Filesystem;
@@ -50,7 +50,9 @@ use crate::lineage::LineageContext;
 use crate::lyrics::AlignedLyrics;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
-use crate::reconcile::{Action, ArtifactKind, Desired, Plan, SourceMode, set_manifest_artifact};
+use crate::reconcile::{
+    Action, ArtifactKind, Desired, Plan, SourceMode, set_manifest_artifact, set_manifest_stem,
+};
 use crate::tag::{TrackMetadata, tag_flac, tag_mp3};
 
 /// The shared Suno client behind an async mutex, so concurrent audio work can
@@ -231,7 +233,8 @@ where
         .filter_map(|a| match a {
             Action::Download { path, .. }
             | Action::Reformat { path, .. }
-            | Action::WriteArtifact { path, .. } => Some(path.clone()),
+            | Action::WriteArtifact { path, .. }
+            | Action::WriteStem { path, .. } => Some(path.clone()),
             Action::Rename { to, .. } => Some(to.clone()),
             _ => None,
         })
@@ -317,8 +320,15 @@ where
                 None => unreachable!("buffered yields one result per audio action"),
             }
         } else {
-            ctx.apply(action, manifest, albums, playlists, &mut tracked_paths)
-                .await
+            ctx.apply(
+                client_lock_ref,
+                action,
+                manifest,
+                albums,
+                playlists,
+                &mut tracked_paths,
+            )
+            .await
         };
         match result {
             Ok(effect) => outcome.record(effect),
@@ -559,6 +569,7 @@ where
     /// [`prepare_audio`](Self::prepare_audio) and never reach here.
     async fn apply(
         &self,
+        client_lock: &ClientLock<'_, C>,
         action: &Action,
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
@@ -607,6 +618,31 @@ where
                 path,
                 owner_id,
             } => self.delete_artifact(manifest, albums, playlists, *kind, path, owner_id),
+            Action::WriteStem {
+                clip_id,
+                key,
+                stem_id,
+                path,
+                source_url,
+                format,
+                hash,
+            } => {
+                self.write_stem(
+                    client_lock,
+                    manifest,
+                    clip_id,
+                    key,
+                    stem_id,
+                    path,
+                    source_url,
+                    *format,
+                    hash,
+                )
+                .await
+            }
+            Action::DeleteStem { clip_id, key, path } => {
+                self.delete_stem(manifest, clip_id, key, path)
+            }
         }
     }
 
@@ -1029,6 +1065,136 @@ where
         Ok(Effect::ArtifactDeleted)
     }
 
+    /// Fetch one stem's bytes, write them atomically, then record the stem on
+    /// the owning clip's keyed stem map.
+    ///
+    /// Mirrors [`write_artifact`](Self::write_artifact) for the keyed-stem case,
+    /// sharing the fetch resilience (`fetch_bytes` retries and verifies
+    /// `Content-Length`) and the atomic size-verified write. A stem is only ever
+    /// written for a clip whose audio is present, so an absent owning manifest
+    /// entry means the audio failed or never existed this run; we skip rather
+    /// than strand an untracked stem with no owning audio.
+    ///
+    /// Stems are stored RAW in their native container and are NEVER transcoded to
+    /// FLAC, even when the song's own format is FLAC — they are the deliberate
+    /// exception. A `Wav` stem is rendered through the free `convert_wav` flow
+    /// (see [`fetch_stem_bytes`](Self::fetch_stem_bytes)); an `Mp3` stem is fetched
+    /// straight from its public CDN url. Either way the bytes land verbatim at
+    /// `path`, whose extension already matches the stem format.
+    ///
+    /// When a title/album change moves the song, reconcile re-emits this write at
+    /// the NEW path; this handler then removes the stem left at the previously
+    /// tracked path, moving it rather than orphaning it. The removal happens only
+    /// after the new file is safely written and only when nothing else this run
+    /// writes that path, and a remove failure returns before the slot advances so
+    /// the next run re-plans the identical write and retries — self-healing.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_stem(
+        &self,
+        client_lock: &ClientLock<'_, C>,
+        manifest: &mut Manifest,
+        clip_id: &str,
+        key: &str,
+        stem_id: &str,
+        path: &str,
+        source_url: &str,
+        format: StemFormat,
+        hash: &str,
+    ) -> Result<Effect, Fail> {
+        // A stem needs its owning clip's manifest entry (its audio must exist).
+        if manifest.get(clip_id).is_none() {
+            return Ok(Effect::Skipped);
+        }
+        let old_path = manifest
+            .get(clip_id)
+            .and_then(|e| e.stems.get(key))
+            .map(|s| s.path.clone());
+        let bytes = self
+            .fetch_stem_bytes(client_lock, clip_id, stem_id, source_url, format)
+            .await?;
+        self.write_verify(clip_id, path, &bytes)?;
+        // The new stem is in place; only now drop a stale copy left at the old
+        // path (the song moved, or the stem format changed). `remove` is
+        // idempotent. A path this run also writes is never removed (the
+        // non-planned twin of `suppress_path_aliasing`). On a genuine remove
+        // failure we return BEFORE updating the slot, so the next run re-plans the
+        // same write and retries the cleanup — no orphan.
+        if let Some(old) = old_path.as_deref()
+            && !old.is_empty()
+            && old != path
+            && !self.write_targets.contains(old)
+        {
+            self.fs.remove(old).map_err(|err| {
+                permanent_fail(clip_id, format!("could not remove old stem {old}: {err}"))
+            })?;
+        }
+        if let Some(entry) = manifest.entries.get_mut(clip_id) {
+            set_manifest_stem(
+                entry,
+                key,
+                Some(ArtifactState {
+                    path: path.to_owned(),
+                    hash: hash.to_owned(),
+                }),
+            );
+        }
+        Ok(Effect::ArtifactWritten)
+    }
+
+    /// Resolve a stem's RAW bytes in its native container, never transcoding.
+    ///
+    /// A `Wav` stem renders the stem clip's lossless WAV through the very same
+    /// free `convert_wav` + poll flow the main FLAC/WAV audio uses
+    /// ([`resolve_wav_url`](Self::resolve_wav_url)), keyed on the stem's own
+    /// `stem_id`, then downloads that WAV. An `Mp3` stem (or a degenerate `Wav`
+    /// stem with no id to render) downloads its public CDN url directly. Stems
+    /// are the deliberate exception to the source format: the bytes are returned
+    /// exactly as delivered and are never re-encoded to FLAC.
+    async fn fetch_stem_bytes(
+        &self,
+        client_lock: &ClientLock<'_, C>,
+        clip_id: &str,
+        stem_id: &str,
+        source_url: &str,
+        format: StemFormat,
+    ) -> Result<Vec<u8>, Fail> {
+        let url = match format {
+            StemFormat::Wav if !stem_id.is_empty() => {
+                match self.resolve_wav_url(client_lock, stem_id).await? {
+                    Some(url) => url,
+                    None => return Err(transient_fail(clip_id, "stem WAV render was not ready")),
+                }
+            }
+            // Mp3, or a Wav stem with no id to render, downloads the CDN mp3.
+            _ => source_url.to_owned(),
+        };
+        self.fetch_bytes(&url)
+            .await
+            .map_err(|err| err.attribute(clip_id))
+    }
+
+    /// Remove one stem file and clear its slot in the owning clip's stem map.
+    ///
+    /// `remove` is idempotent, so an already-absent stem is not a failure. When
+    /// the owning entry is already gone (its audio was deleted earlier this run,
+    /// co-deleting the stem), there is no slot to clear and that is fine; the
+    /// emptied `.stems` folder is pruned by the end-of-run directory sweep.
+    fn delete_stem(
+        &self,
+        manifest: &mut Manifest,
+        clip_id: &str,
+        key: &str,
+        path: &str,
+    ) -> Result<Effect, Fail> {
+        self.fs
+            .remove(path)
+            .map_err(|err| permanent_fail(clip_id, format!("stem delete failed: {err}")))?;
+        if let Some(entry) = manifest.entries.get_mut(clip_id) {
+            set_manifest_stem(entry, key, None);
+        }
+        Ok(Effect::ArtifactDeleted)
+    }
+
     /// Download (and transcode/tag) the audio for `clip` in `format`.
     async fn produce_audio(
         &self,
@@ -1357,9 +1523,11 @@ fn classify_core(id: &str, err: Error) -> Fail {
     match err {
         Error::Auth(_) => auth_fail(id, reason),
         Error::RateLimited { .. } | Error::Connection(_) => transient_fail(id, reason),
-        Error::Api(_) | Error::NotFound(_) | Error::Tag(_) | Error::Config(_) => {
-            permanent_fail(id, reason)
-        }
+        Error::Api(_)
+        | Error::NotFound(_)
+        | Error::Tag(_)
+        | Error::Config(_)
+        | Error::Refused(_) => permanent_fail(id, reason),
     }
 }
 
@@ -1412,6 +1580,7 @@ mod tests {
             trashed: false,
             private: false,
             artifacts: Vec::new(),
+            stems: None,
         }
     }
 
@@ -3408,6 +3577,521 @@ mod tests {
         assert!(!fs.exists("gone.mp3"));
         assert!(!fs.exists("gone/cover.jpg"));
         assert!(manifest.get("gone").is_none());
+    }
+
+    #[test]
+    fn write_stem_mp3_stores_raw_and_records_slot() {
+        // An MP3 stem is downloaded straight from its CDN url and stored verbatim
+        // (no transcode, no WAV render): the bytes land at the `.mp3` path and the
+        // keyed slot records the path and hash.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac));
+        let plan = Plan {
+            actions: vec![Action::WriteStem {
+                clip_id: "a".to_owned(),
+                key: "voc".to_owned(),
+                stem_id: "voc".to_owned(),
+                path: "a.stems/a - Vocals [voc].mp3".to_owned(),
+                source_url: "https://cdn1.suno.ai/voc.mp3".to_owned(),
+                format: StemFormat::Mp3,
+                hash: "vh".to_owned(),
+            }],
+        };
+        let http = ScriptedHttp::new().route("voc.mp3", Reply::ok(b"stem-bytes".to_vec()));
+        let fs = MemFs::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(outcome.failed(), 0);
+        // Bytes are stored exactly as delivered (no transcode applied).
+        assert_eq!(
+            fs.read_file("a.stems/a - Vocals [voc].mp3").unwrap(),
+            b"stem-bytes"
+        );
+        // An MP3 stem never renders WAV: no convert_wav, no generation.
+        assert_eq!(http.count("convert_wav"), 0);
+        assert_eq!(http.count("/api/gen/"), 0);
+        assert_eq!(
+            manifest.get("a").unwrap().stems.get("voc"),
+            Some(&ArtifactState {
+                path: "a.stems/a - Vocals [voc].mp3".to_owned(),
+                hash: "vh".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn write_stem_wav_renders_via_convert_wav_and_stores_raw() {
+        // A WAV stem (the default) renders the stem clip's lossless WAV through the
+        // free convert_wav flow keyed on the stem id, then downloads and stores it
+        // RAW as `.wav` — it is NEVER transcoded to FLAC, even for a FLAC song.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac));
+        let plan = Plan {
+            actions: vec![Action::WriteStem {
+                clip_id: "a".to_owned(),
+                key: "voc".to_owned(),
+                stem_id: "stemvoc".to_owned(),
+                path: "a.stems/a - Vocals [stemvoc].wav".to_owned(),
+                source_url: "https://cdn1.suno.ai/stemvoc.mp3".to_owned(),
+                format: StemFormat::Wav,
+                hash: "vh".to_owned(),
+            }],
+        };
+        // wav_file is not ready on the first poll, so the flow POSTs convert_wav
+        // (free) and polls again — exactly the main FLAC/WAV render path.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route_seq(
+                "stemvoc/wav_file/",
+                vec![
+                    Reply::json("{}"),
+                    Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/stemvoc.wav"}"#),
+                ],
+            )
+            .route("stemvoc/convert_wav/", Reply::status(200))
+            .route("stemvoc.wav", Reply::ok(b"RIFFwav-bytes".to_vec()));
+        let fs = MemFs::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &small_poll(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(outcome.failed(), 0);
+        // The rendered WAV is stored verbatim; ffmpeg (WAV->FLAC) is never invoked,
+        // so the stored bytes are the raw WAV, not a FLAC transcode.
+        assert_eq!(
+            fs.read_file("a.stems/a - Vocals [stemvoc].wav").unwrap(),
+            b"RIFFwav-bytes"
+        );
+        assert!(!fs.exists("a.stems/a - Vocals [stemvoc].flac"));
+        // The free WAV render ran; no credit-spending generation endpoint did.
+        assert_eq!(http.count("convert_wav"), 1);
+        assert_eq!(http.count("stem_task"), 0);
+        assert_eq!(http.count("separate"), 0);
+        assert_eq!(
+            manifest.get("a").unwrap().stems.get("voc").unwrap().path,
+            "a.stems/a - Vocals [stemvoc].wav"
+        );
+    }
+
+    #[test]
+    fn write_stem_is_skipped_when_owner_audio_is_absent() {
+        // No owning manifest entry (audio failed or never existed) => skip with
+        // no fetch and no write, so a stem is never stranded without its song.
+        let mut manifest = Manifest::new();
+        let plan = Plan {
+            actions: vec![Action::WriteStem {
+                clip_id: "ghost".to_owned(),
+                key: "voc".to_owned(),
+                stem_id: "voc".to_owned(),
+                path: "ghost.stems/voc.mp3".to_owned(),
+                source_url: "https://cdn1.suno.ai/voc.mp3".to_owned(),
+                format: StemFormat::Mp3,
+                hash: "vh".to_owned(),
+            }],
+        };
+        // Empty HTTP script: any fetch would error, proving none happens.
+        let http = ScriptedHttp::new();
+        let fs = MemFs::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.skipped, 1);
+        assert_eq!(outcome.artifacts_written, 0);
+        assert_eq!(outcome.failed(), 0);
+        assert!(!fs.exists("ghost.stems/voc.mp3"));
+    }
+
+    #[test]
+    fn write_stem_relocates_the_old_file_on_a_path_move() {
+        // The song was renamed, so the stem moves: the new file is written and the
+        // stale copy at the previously tracked path is removed (moved, not orphaned).
+        let fs = MemFs::new().with_file("old.stems/voc.mp3", b"old".to_vec());
+        let mut manifest = Manifest::new();
+        let mut e = entry("new.flac", AudioFormat::Flac);
+        e.stems.insert(
+            "voc".to_owned(),
+            ArtifactState {
+                path: "old.stems/voc.mp3".to_owned(),
+                hash: "vh".to_owned(),
+            },
+        );
+        manifest.insert("a", e);
+        let plan = Plan {
+            actions: vec![Action::WriteStem {
+                clip_id: "a".to_owned(),
+                key: "voc".to_owned(),
+                stem_id: "voc".to_owned(),
+                path: "new.stems/voc.mp3".to_owned(),
+                source_url: "https://cdn1.suno.ai/voc.mp3".to_owned(),
+                format: StemFormat::Mp3,
+                hash: "vh".to_owned(),
+            }],
+        };
+        let http = ScriptedHttp::new().route("voc.mp3", Reply::ok(b"new".to_vec()));
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 1);
+        assert!(fs.exists("new.stems/voc.mp3"));
+        assert!(
+            !fs.exists("old.stems/voc.mp3"),
+            "the old stem is moved, not left behind"
+        );
+        assert_eq!(
+            manifest.get("a").unwrap().stems.get("voc").unwrap().path,
+            "new.stems/voc.mp3"
+        );
+    }
+
+    #[test]
+    fn delete_stem_removes_file_and_clears_slot() {
+        let fs = MemFs::new().with_file("a.stems/voc.mp3", b"stem".to_vec());
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac);
+        e.stems.insert(
+            "voc".to_owned(),
+            ArtifactState {
+                path: "a.stems/voc.mp3".to_owned(),
+                hash: "vh".to_owned(),
+            },
+        );
+        manifest.insert("a", e);
+        let plan = Plan {
+            actions: vec![Action::DeleteStem {
+                clip_id: "a".to_owned(),
+                key: "voc".to_owned(),
+                path: "a.stems/voc.mp3".to_owned(),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_deleted, 1);
+        assert!(!fs.exists("a.stems/voc.mp3"));
+        assert!(manifest.get("a").unwrap().stems.is_empty());
+    }
+
+    #[test]
+    fn co_deleting_the_last_stem_prunes_the_stems_folder() {
+        // Deleting a song co-deletes its stems; the emptied `.stems` folder is
+        // pruned by the end-of-run sweep, so it can never be orphaned.
+        let fs = MemFs::new()
+            .with_file("song.flac", b"DATA".to_vec())
+            .with_file("song.stems/voc.mp3", b"stem".to_vec());
+        assert!(fs.has_dir("song.stems"));
+        let mut manifest = Manifest::new();
+        let mut e = entry("song.flac", AudioFormat::Flac);
+        e.stems.insert(
+            "voc".to_owned(),
+            ArtifactState {
+                path: "song.stems/voc.mp3".to_owned(),
+                hash: "vh".to_owned(),
+            },
+        );
+        manifest.insert("a", e);
+        let plan = Plan {
+            actions: vec![
+                Action::Delete {
+                    path: "song.flac".to_owned(),
+                    clip_id: "a".to_owned(),
+                },
+                Action::DeleteStem {
+                    clip_id: "a".to_owned(),
+                    key: "voc".to_owned(),
+                    path: "song.stems/voc.mp3".to_owned(),
+                },
+            ],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.deleted, 1);
+        assert_eq!(outcome.artifacts_deleted, 1);
+        assert!(!fs.exists("song.flac"));
+        assert!(!fs.exists("song.stems/voc.mp3"));
+        assert!(
+            !fs.has_dir("song.stems"),
+            "the emptied .stems folder is pruned"
+        );
+        assert!(manifest.get("a").is_none());
+    }
+
+    #[test]
+    fn write_stem_mp3_never_issues_a_generation_post() {
+        // The MP3 stem path is GET-only: writing a stem fetches its CDN url and
+        // never POSTs, let alone to any generation or WAV-render endpoint.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.flac", AudioFormat::Flac));
+        let plan = Plan {
+            actions: vec![Action::WriteStem {
+                clip_id: "a".to_owned(),
+                key: "voc".to_owned(),
+                stem_id: "voc".to_owned(),
+                path: "a.stems/voc.mp3".to_owned(),
+                source_url: "https://cdn1.suno.ai/voc.mp3".to_owned(),
+                format: StemFormat::Mp3,
+                hash: "vh".to_owned(),
+            }],
+        };
+        let http = ScriptedHttp::new().route("voc.mp3", Reply::ok(b"stem".to_vec()));
+
+        run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &MemFs::new(),
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(
+            http.count("stem_task"),
+            0,
+            "no generation endpoint is ever hit"
+        );
+        assert_eq!(http.count("convert_wav"), 0);
+        assert_eq!(http.count("/api/gen/"), 0);
+    }
+
+    #[test]
+    fn full_stems_mirror_mp3_is_get_only_with_zero_gen_traffic() {
+        // End-to-end #100 path with MP3 stems: list a clip's existing stems (free
+        // GET over the live page-count + 0-indexed page shape), reconcile them into
+        // WriteStem actions, and execute (download) them. With MP3 the whole flow
+        // is GET-only and touches NO `/api/gen/` endpoint at all.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("clip1/stems/pages", Reply::json(r#"{"pages": 1}"#))
+            .route(
+                "clip1/stems?page=0",
+                Reply::json(
+                    r#"{"stems":[
+                        {"id":"s1","title":"Song (Vocals)","status":"complete","audio_url":"https://cdn1.suno.ai/s1.mp3"},
+                        {"id":"s2","title":"Song (Drums)","status":"complete","audio_url":"https://cdn1.suno.ai/s2.mp3"}
+                    ]}"#,
+                ),
+            )
+            .route("s1.mp3", Reply::ok(b"vocals-bytes".to_vec()))
+            .route("s2.mp3", Reply::ok(b"drums-bytes".to_vec()));
+
+        // List the existing stems through the client (GET-only, free).
+        let mut auth = ClerkAuth::new("eyJtoken");
+        pollster::block_on(auth.authenticate(&http)).unwrap();
+        let mut client = SunoClient::new(auth, RecordingClock::new());
+        let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
+        assert!(complete);
+        assert_eq!(stems.len(), 2);
+        assert_eq!(stems[0].label, "Vocals");
+
+        // Reconcile the listed MP3 stems into a plan (audio already present -> Skip).
+        let mut manifest = Manifest::new();
+        manifest.insert("clip1", entry("clip1.flac", AudioFormat::Flac));
+        let desired_stems: Vec<crate::reconcile::DesiredStem> = stems
+            .iter()
+            .map(|s| crate::reconcile::DesiredStem {
+                key: s.id.clone(),
+                stem_id: s.id.clone(),
+                path: format!("clip1.stems/{}.mp3", s.id),
+                source_url: s.url.clone(),
+                format: StemFormat::Mp3,
+                hash: crate::art_url_hash(&s.url),
+            })
+            .collect();
+        let d = Desired {
+            path: "clip1.flac".to_owned(),
+            stems: Some(desired_stems),
+            ..desired(clip("clip1"), AudioFormat::Flac)
+        };
+        let local: HashMap<String, crate::reconcile::LocalFile> = [(
+            "clip1".to_owned(),
+            crate::reconcile::LocalFile {
+                exists: true,
+                size: 100,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let sources = [crate::reconcile::SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: true,
+        }];
+        let plan =
+            crate::reconcile::reconcile(&manifest, std::slice::from_ref(&d), &local, &sources);
+        assert_eq!(plan.stem_writes(), 2);
+
+        let fs = MemFs::new();
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            std::slice::from_ref(&d),
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 2, "both stems downloaded");
+        assert_eq!(fs.read_file("clip1.stems/s1.mp3").unwrap(), b"vocals-bytes");
+        assert_eq!(fs.read_file("clip1.stems/s2.mp3").unwrap(), b"drums-bytes");
+        // The MP3 mirror path never touches any /api/gen/ endpoint (no render, no
+        // generation, no separation).
+        assert_eq!(http.count("/api/gen/"), 0);
+        assert_eq!(http.count("stem_task"), 0);
+        assert_eq!(http.count("separate"), 0);
+        assert_eq!(http.count("generate"), 0);
+        // No stem is ever written as FLAC.
+        assert!(!fs.exists("clip1.stems/s1.flac"));
+    }
+
+    #[test]
+    fn full_stems_mirror_wav_default_renders_free_wav_and_no_generation() {
+        // End-to-end #100 path with WAV stems (the default): each stem's lossless
+        // WAV is rendered through the FREE convert_wav flow and stored RAW as
+        // `.wav`. The mirror makes NO credit-spending generation POST.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("clip1/stems/pages", Reply::json(r#"{"pages": 1}"#))
+            .route(
+                "clip1/stems?page=0",
+                Reply::json(
+                    r#"{"stems":[
+                        {"id":"s1","title":"Song (Vocals)","status":"complete","audio_url":"https://cdn1.suno.ai/s1.mp3"},
+                        {"id":"s2","title":"Song (Drums)","status":"complete","audio_url":"https://cdn1.suno.ai/s2.mp3"}
+                    ]}"#,
+                ),
+            )
+            // Each stem's WAV is already rendered, so wav_file returns the url and
+            // no convert_wav POST is even needed (still free either way).
+            .route(
+                "s1/wav_file/",
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/s1.wav"}"#),
+            )
+            .route(
+                "s2/wav_file/",
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/s2.wav"}"#),
+            )
+            .route("s1.wav", Reply::ok(b"RIFFvocals".to_vec()))
+            .route("s2.wav", Reply::ok(b"RIFFdrums".to_vec()));
+
+        let mut auth = ClerkAuth::new("eyJtoken");
+        pollster::block_on(auth.authenticate(&http)).unwrap();
+        let mut client = SunoClient::new(auth, RecordingClock::new());
+        let (stems, _complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
+
+        let mut manifest = Manifest::new();
+        manifest.insert("clip1", entry("clip1.flac", AudioFormat::Flac));
+        let desired_stems: Vec<crate::reconcile::DesiredStem> = stems
+            .iter()
+            .map(|s| crate::reconcile::DesiredStem {
+                key: s.id.clone(),
+                stem_id: s.id.clone(),
+                path: format!("clip1.stems/{}.wav", s.id),
+                source_url: s.url.clone(),
+                format: StemFormat::Wav,
+                hash: crate::art_url_hash(&s.url),
+            })
+            .collect();
+        let d = Desired {
+            path: "clip1.flac".to_owned(),
+            stems: Some(desired_stems),
+            ..desired(clip("clip1"), AudioFormat::Flac)
+        };
+        let local: HashMap<String, crate::reconcile::LocalFile> = [(
+            "clip1".to_owned(),
+            crate::reconcile::LocalFile {
+                exists: true,
+                size: 100,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let sources = [crate::reconcile::SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: true,
+        }];
+        let plan =
+            crate::reconcile::reconcile(&manifest, std::slice::from_ref(&d), &local, &sources);
+
+        let fs = MemFs::new();
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            std::slice::from_ref(&d),
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &small_poll(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 2);
+        // Stems are stored RAW as WAV (no FLAC transcode, even for a FLAC song).
+        assert_eq!(fs.read_file("clip1.stems/s1.wav").unwrap(), b"RIFFvocals");
+        assert_eq!(fs.read_file("clip1.stems/s2.wav").unwrap(), b"RIFFdrums");
+        assert!(!fs.exists("clip1.stems/s1.flac"));
+        // No credit-spending generation/separation endpoint is ever hit.
+        assert_eq!(http.count("stem_task"), 0);
+        assert_eq!(http.count("separate"), 0);
+        assert_eq!(http.count("generate"), 0);
     }
 
     #[test]

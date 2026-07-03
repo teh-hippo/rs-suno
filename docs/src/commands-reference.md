@@ -73,6 +73,8 @@ configured `root` is used.
 | `--retries <N>` | `3` | Download retry attempts per clip. |
 | `--animated-covers` | off | Also write animated WebP covers from video previews. |
 | `--video-mp4` | off | Also download the standalone `.mp4` music video beside each song, when available. |
+| `--download-stems` | off | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder. Download-only: it lists and downloads existing stems and never triggers separation or spends credits. |
+| `--stem-format <FORMAT>` | `wav` | Container for downloaded stems: `wav` (lossless, via the free WAV render) or `mp3`. Stems are stored RAW and are never transcoded to FLAC. |
 
 When `sync` would delete files and `--yes` was not passed, it lists them and
 asks for confirmation on an interactive terminal. Without a terminal it refuses

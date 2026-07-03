@@ -210,6 +210,16 @@ fn action_line(action: &Action, failed_ids: &HashSet<&str>) -> String {
                 artifact_label(*kind)
             ),
         ),
+        Action::WriteStem {
+            clip_id, path, key, ..
+        } => mark(
+            clip_id,
+            format!("stem      {}  {}  -> {path}", short_id(clip_id), key),
+        ),
+        Action::DeleteStem { clip_id, path, key } => mark(
+            clip_id,
+            format!("stem      {}  {}  removed {path}", short_id(clip_id), key),
+        ),
     }
 }
 
@@ -240,14 +250,14 @@ fn short_id(id: &str) -> String {
 /// so the counters are never mistaken for a finished mirror.
 ///
 /// The `sidecars` line counts external artifact writes (`.lrc`, `.lyrics.txt`,
-/// `.details.txt`, covers, `.mp4`, playlists), which are otherwise invisible: a
-/// clip whose audio is untouched but which gains a sidecar records as a skip on
-/// the audio, so without this line enabling a sidecar on a synced library would
-/// read as "skipped" (#105). Artifact deletes fold into `deleted` alongside
-/// audio deletes, matching the confirmation prompt and mass-delete cap, which
-/// already treat both as one destructive footprint. Every counted action lands
-/// in exactly one bucket, so on a completed run `total` equals the plan's
-/// `applying N action(s)` figure.
+/// `.details.txt`, covers, `.mp4`, playlists, and `.stems/` stem files), which
+/// are otherwise invisible: a clip whose audio is untouched but which gains a
+/// sidecar records as a skip on the audio, so without this line enabling a
+/// sidecar on a synced library would read as "skipped" (#105). Artifact and stem
+/// deletes fold into `deleted` alongside audio deletes, matching the confirmation
+/// prompt and mass-delete cap, which already treat both as one destructive
+/// footprint. Every counted action lands in exactly one bucket, so on a completed
+/// run `total` equals the plan's `applying N action(s)` figure.
 pub fn run_summary(verb_label: &str, account: &str, outcome: &ExecOutcome, secs: f64) -> String {
     let downloaded = outcome.downloaded + outcome.reformatted;
     let tagged = outcome.retagged;
@@ -282,8 +292,8 @@ pub fn dry_summary(account: &str, plan: &Plan) -> String {
     let to_download = plan.downloads() + plan.reformats();
     let to_tag = plan.retags();
     let to_rename = plan.renames();
-    let to_delete = plan.deletes() + plan.artifact_deletes();
-    let sidecars = plan.artifact_writes();
+    let to_delete = plan.deletes() + plan.artifact_deletes() + plan.stem_deletes();
+    let sidecars = plan.artifact_writes() + plan.stem_writes();
     let up_to_date = plan.skips();
     let total = to_download + to_tag + to_rename + to_delete + sidecars + up_to_date;
     format!(
@@ -523,6 +533,8 @@ mod tests {
                 Action::Skip { .. } => outcome.skipped += 1,
                 Action::WriteArtifact { .. } => outcome.artifacts_written += 1,
                 Action::DeleteArtifact { .. } => outcome.artifacts_deleted += 1,
+                Action::WriteStem { .. } => outcome.artifacts_written += 1,
+                Action::DeleteStem { .. } => outcome.artifacts_deleted += 1,
             }
         }
         outcome
