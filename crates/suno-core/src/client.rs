@@ -406,8 +406,6 @@ impl<C: Clock> SunoClient<C> {
     }
 }
 
-/// Parse a single-clip response body, accepting either a bare clip object or a
-/// `{"clip": {...}}` wrapper. Returns `None` when no clip id is present.
 /// Unwrap a `{ "clip": {...} }` wrapper to the inner clip object, or return
 /// `value` unchanged when it carries no object `clip` key (it is already bare).
 fn unwrap_clip(value: &Value) -> &Value {
@@ -417,6 +415,8 @@ fn unwrap_clip(value: &Value) -> &Value {
         .unwrap_or(value)
 }
 
+/// Parse a single-clip response body, accepting either a bare clip object or a
+/// `{"clip": {...}}` wrapper. Returns `None` when no clip id is present.
 fn parse_clip(body: &[u8]) -> Option<Clip> {
     let data: Value = serde_json::from_slice(body).ok()?;
     let raw = unwrap_clip(&data);
