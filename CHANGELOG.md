@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.1](https://github.com/teh-hippo/rs-suno/compare/v0.20.0...v0.20.1) (2026-07-03)
+
+
+### Performance Improvements
+
+* shrink the release binary with fat LTO, one codegen unit, and strip ([da5a341](https://github.com/teh-hippo/rs-suno/commit/da5a34116edd2242a6ac46f3aa05d5ff287ba3dc))
+
 ## [0.20.0](https://github.com/teh-hippo/rs-suno/compare/v0.19.0...v0.20.0) (2026-07-03)
 
 
