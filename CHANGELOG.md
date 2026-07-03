@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/teh-hippo/rs-suno/compare/v0.17.1...v0.18.0) (2026-07-03)
+
+
+### Features
+
+* synced (timed) lyrics — line-level .lrc sidecar and MP3 SYLT ([#48](https://github.com/teh-hippo/rs-suno/issues/48)) ([c3fd0eb](https://github.com/teh-hippo/rs-suno/commit/c3fd0ebd11af19c06348f9b21a89c800799b4e2d))
+
 ## [0.17.1](https://github.com/teh-hippo/rs-suno/compare/v0.17.0...v0.17.1) (2026-07-03)
 
 
