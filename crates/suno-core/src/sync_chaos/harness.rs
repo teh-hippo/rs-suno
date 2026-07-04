@@ -311,7 +311,7 @@ pub(super) fn drive(
     fs: &MemFs,
     opts: &ExecOptions,
 ) -> ExecOutcome {
-    let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+    let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
     let clock = RecordingClock::new();
     let ffmpeg = StubFfmpeg::flac();
     let mut albums = std::collections::BTreeMap::new();
@@ -325,7 +325,7 @@ pub(super) fn drive(
         desired,
         &synced,
         Ports {
-            client: &mut client,
+            client: &client,
             http,
             fs,
             ffmpeg: &ffmpeg,

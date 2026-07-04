@@ -102,7 +102,7 @@ proptest! {
         let http = ChaosHttp::new()
             .with_auth()
             .program("/api/feed/v3", vec![Outcome::ok(body)]);
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+        let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let _ = pollster::block_on(client.list_clips(&http, false, Some(3)));
     }
 
@@ -115,7 +115,7 @@ proptest! {
         let http = ChaosHttp::new()
             .with_auth()
             .program("/api/feed/v3", vec![Outcome::ok(body)]);
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+        let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let _ = pollster::block_on(client.list_clips(&http, true, Some(3)));
     }
 

@@ -44,7 +44,7 @@ fn drive_capturing(
     fs: &MemFs,
     opts: &ExecOptions,
 ) -> (ExecOutcome, Vec<Duration>) {
-    let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+    let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
     let clock = RecordingClock::new();
     let ffmpeg = StubFfmpeg::flac();
     let mut albums = std::collections::BTreeMap::new();
@@ -58,7 +58,7 @@ fn drive_capturing(
         desired,
         &synced,
         Ports {
-            client: &mut client,
+            client: &client,
             http,
             fs,
             ffmpeg: &ffmpeg,

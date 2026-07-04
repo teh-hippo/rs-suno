@@ -936,6 +936,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "futures-util",
  "reqwest",
  "rustls",
  "serde",
@@ -1248,6 +1249,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "toml",
  "unicode-normalization",
 ]

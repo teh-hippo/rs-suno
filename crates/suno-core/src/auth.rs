@@ -2,8 +2,11 @@
 //!
 //! The cookie is sent only to Clerk. The Suno API ever sees only the minted JWT.
 
+use std::sync::Mutex;
+
 use base64::Engine;
 use serde_json::Value;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::consts::{CLERK_BASE_URL, CLERK_JS_VERSION, JWT_REFRESH_BUFFER};
 use crate::error::{Error, Result};
@@ -165,6 +168,12 @@ fn parse_token_response(data: &Value) -> Result<String> {
 /// Manages the Clerk cookie and the JWT lifecycle for one account.
 pub struct ClerkAuth {
     cookie: String,
+    state: Mutex<AuthState>,
+    refresh_flight: AsyncMutex<()>,
+}
+
+#[derive(Default)]
+struct AuthState {
     jwt: Option<String>,
     jwt_exp: i64,
     session_id: Option<String>,
@@ -177,22 +186,24 @@ impl ClerkAuth {
     pub fn new(token: &str) -> Self {
         Self {
             cookie: normalise_token(token),
-            jwt: None,
-            jwt_exp: 0,
-            session_id: None,
-            user_id: None,
-            display_name: None,
+            state: Mutex::new(AuthState::default()),
+            refresh_flight: AsyncMutex::new(()),
         }
     }
 
     /// The Suno user ID, available after [`authenticate`](Self::authenticate).
-    pub fn user_id(&self) -> Option<&str> {
-        self.user_id.as_deref()
+    pub fn user_id(&self) -> Option<String> {
+        self.state.lock().unwrap().user_id.clone()
     }
 
     /// The account display name, or `"Suno"` when none is known.
-    pub fn display_name(&self) -> &str {
-        self.display_name.as_deref().unwrap_or("Suno")
+    pub fn display_name(&self) -> String {
+        self.state
+            .lock()
+            .unwrap()
+            .display_name
+            .clone()
+            .unwrap_or_else(|| "Suno".to_owned())
     }
 
     /// Decode the `exp` claim of the stored `__client` cookie, if it decodes.
@@ -213,56 +224,69 @@ impl ClerkAuth {
     }
 
     /// Fetch the Clerk session and a first JWT, returning the user ID.
-    pub async fn authenticate(&mut self, http: &impl Http) -> Result<String> {
+    pub async fn authenticate(&self, http: &impl Http) -> Result<String> {
+        let _guard = self.refresh_flight.lock().await;
         self.fetch_session(http).await?;
         self.refresh_jwt(http).await?;
-        self.user_id.clone().ok_or_else(|| {
+        self.state.lock().unwrap().user_id.clone().ok_or_else(|| {
             Error::Auth("could not determine the user ID from the Clerk session".into())
         })
     }
 
     /// Return a valid JWT, refreshing it when missing or near expiry.
-    pub async fn ensure_jwt(&mut self, now_unix: i64, http: &impl Http) -> Result<String> {
-        if self.jwt.is_none() || now_unix >= self.jwt_exp - JWT_REFRESH_BUFFER {
-            self.refresh_jwt(http).await?;
+    pub async fn ensure_jwt(&self, now_unix: i64, http: &impl Http) -> Result<String> {
+        if !self.jwt_is_fresh(now_unix) {
+            let _guard = self.refresh_flight.lock().await;
+            if !self.jwt_is_fresh(now_unix) {
+                self.refresh_jwt(http).await?;
+            }
         }
-        self.jwt
+        self.state
+            .lock()
+            .unwrap()
+            .jwt
             .clone()
             .ok_or_else(|| Error::Auth("failed to obtain a JWT".into()))
     }
 
-    /// Drop the cached JWT so the next [`ensure_jwt`](Self::ensure_jwt) refreshes.
-    pub fn invalidate_jwt(&mut self) {
-        self.jwt = None;
+    fn jwt_is_fresh(&self, now_unix: i64) -> bool {
+        let state = self.state.lock().unwrap();
+        state.jwt.is_some() && now_unix < state.jwt_exp - JWT_REFRESH_BUFFER
     }
 
-    async fn fetch_session(&mut self, http: &impl Http) -> Result<()> {
+    /// Drop the cached JWT so the next [`ensure_jwt`](Self::ensure_jwt) refreshes.
+    pub fn invalidate_jwt(&self) {
+        self.state.lock().unwrap().jwt = None;
+    }
+
+    async fn fetch_session(&self, http: &impl Http) -> Result<()> {
         let cookie = self.cookie.clone();
         let url = format!("{CLERK_BASE_URL}/v1/client?_clerk_js_version={CLERK_JS_VERSION}");
         let data = clerk_request_json(http, &cookie, Method::Get, url).await?;
         let info = parse_client_response(&data)?;
-        self.session_id = Some(info.session_id);
-        self.user_id = info.user_id;
-        self.display_name = info.display_name;
+        let mut state = self.state.lock().unwrap();
+        state.session_id = Some(info.session_id);
+        state.user_id = info.user_id;
+        state.display_name = info.display_name;
         Ok(())
     }
 
-    async fn refresh_jwt(&mut self, http: &impl Http) -> Result<()> {
-        if self.session_id.is_none() {
+    async fn refresh_jwt(&self, http: &impl Http) -> Result<()> {
+        let mut session_id = self.state.lock().unwrap().session_id.clone();
+        if session_id.is_none() {
             self.fetch_session(http).await?;
+            session_id = self.state.lock().unwrap().session_id.clone();
         }
-        let session_id = self
-            .session_id
-            .clone()
-            .ok_or_else(|| Error::Auth("no Clerk session".into()))?;
+        let session_id = session_id.ok_or_else(|| Error::Auth("no Clerk session".into()))?;
         let cookie = self.cookie.clone();
         let url = format!(
             "{CLERK_BASE_URL}/v1/client/sessions/{session_id}/tokens?_clerk_js_version={CLERK_JS_VERSION}"
         );
         let data = clerk_request_json(http, &cookie, Method::Post, url).await?;
         let jwt = parse_token_response(&data)?;
-        self.jwt_exp = decode_jwt_exp(&jwt);
-        self.jwt = Some(jwt);
+        let mut state = self.state.lock().unwrap();
+        state.jwt_exp = decode_jwt_exp(&jwt);
+        state.jwt = Some(jwt);
         Ok(())
     }
 }
@@ -296,7 +320,7 @@ async fn clerk_request_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockHttp, Rule};
+    use crate::testutil::{MockHttp, Reply, Rule, ScriptedHttp};
 
     fn jwt_with_exp(exp: i64) -> String {
         let payload =
@@ -452,7 +476,7 @@ mod tests {
             Rule::new("/v1/client", 200, client_body),
         ]);
 
-        let mut auth = ClerkAuth::new("eyJtoken");
+        let auth = ClerkAuth::new("eyJtoken");
         let user_id = pollster::block_on(auth.authenticate(&http)).unwrap();
         assert_eq!(user_id, "user_1");
         assert_eq!(auth.display_name(), "teh-hippo");
@@ -467,8 +491,8 @@ mod tests {
         let exp = 1_000_000i64;
         // No rules: any HTTP call would return an error.
         let http = MockHttp::new(vec![]);
-        let mut auth = ClerkAuth {
-            cookie: "__client=eyJtoken".into(),
+        let auth = ClerkAuth::new("eyJtoken");
+        *auth.state.lock().unwrap() = AuthState {
             jwt: Some(jwt_with_exp(exp)),
             jwt_exp: exp,
             session_id: Some("sess_1".into()),
@@ -485,8 +509,8 @@ mod tests {
         let new_exp = exp + 3_600;
         let token_body = serde_json::json!({"jwt": jwt_with_exp(new_exp)}).to_string();
         let http = MockHttp::new(vec![Rule::new("/v1/client/sessions/", 200, token_body)]);
-        let mut auth = ClerkAuth {
-            cookie: "__client=eyJtoken".into(),
+        let auth = ClerkAuth::new("eyJtoken");
+        *auth.state.lock().unwrap() = AuthState {
             jwt: Some(jwt_with_exp(exp)),
             jwt_exp: exp,
             session_id: Some("sess_1".into()),
@@ -496,5 +520,29 @@ mod tests {
         // At the refresh boundary: a new JWT with new_exp is issued.
         let jwt = pollster::block_on(auth.ensure_jwt(exp - JWT_REFRESH_BUFFER, &http)).unwrap();
         assert_eq!(decode_jwt_exp(&jwt), new_exp);
+    }
+
+    #[test]
+    fn ensure_jwt_refresh_is_single_flight_under_concurrency() {
+        let exp = 1_000_000i64;
+        let new_exp = exp + 3_600;
+        let token_body = serde_json::json!({"jwt": jwt_with_exp(new_exp)}).to_string();
+        let auth = ClerkAuth::new("eyJtoken");
+        *auth.state.lock().unwrap() = AuthState {
+            jwt: Some(jwt_with_exp(exp)),
+            jwt_exp: exp,
+            session_id: Some("sess_1".into()),
+            user_id: Some("user_1".into()),
+            display_name: None,
+        };
+        let http = ScriptedHttp::new().route("/v1/client/sessions/", Reply::json(&token_body));
+        let now = exp - JWT_REFRESH_BUFFER;
+        let (first, second) = pollster::block_on(async {
+            futures_util::future::join(auth.ensure_jwt(now, &http), auth.ensure_jwt(now, &http))
+                .await
+        });
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        assert_eq!(http.count("/v1/client/sessions/"), 1);
     }
 }

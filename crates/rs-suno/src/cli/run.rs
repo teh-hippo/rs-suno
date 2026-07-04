@@ -15,6 +15,7 @@ use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use futures_util::stream::{self, StreamExt};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
     AdoptDecision, AlbumArt, AlbumDesired, AlignedLyrics, ArtifactToggles, ClerkAuth, Clip, Config,
@@ -606,21 +607,36 @@ fn strip_format_ext(path: &str, format: suno_core::AudioFormat) -> &str {
 async fn list_existing_stems(
     enabled: bool,
     clips: &[&Clip],
-    client: &mut SunoClient<TokioClock>,
+    client: &SunoClient<TokioClock>,
     http: &ReqwestHttp,
+    concurrency: u32,
 ) -> HashMap<String, Vec<Stem>> {
     let mut out = HashMap::new();
     if !enabled {
         return out;
     }
-    for clip in clips {
-        if !clip.has_stem {
-            continue;
-        }
-        if let Ok((stems, true)) = client.list_stems(http, &clip.id).await
+    let candidates: Vec<(usize, &Clip)> = clips
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, clip)| clip.has_stem)
+        .collect();
+    let fetched = stream::iter(candidates.iter().copied())
+        .map(|(idx, clip)| async move {
+            (
+                idx,
+                clip.id.clone(),
+                client.list_stems(http, &clip.id).await.ok(),
+            )
+        })
+        .buffered(concurrency.max(1) as usize)
+        .collect::<Vec<_>>()
+        .await;
+    for (_idx, id, result) in fetched {
+        if let Some((stems, true)) = result
             && !stems.is_empty()
         {
-            out.insert(clip.id.clone(), stems);
+            out.insert(id, stems);
         }
     }
     out
@@ -699,7 +715,7 @@ async fn run_one(
 
     let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
     let dest = &target.dest;
-    let mut auth = ClerkAuth::new(&token);
+    let auth = ClerkAuth::new(&token);
     if let Err(err) = auth.authenticate(&http).await {
         return Ok(report_auth_failure(&target.label, &err));
     }
@@ -708,7 +724,7 @@ async fn run_one(
     // Fail closed: the identity guard cannot run without an authenticated id,
     // and proceeding would delete against an unverified account. authenticate()
     // already errors on a missing id; this makes the invariant explicit.
-    let Some(user_id) = auth.user_id().map(str::to_owned) else {
+    let Some(user_id) = auth.user_id() else {
         eprint_t!(
             "error: could not determine the authenticated account for '{}'. Refusing to run to protect the library.",
             target.label
@@ -800,7 +816,7 @@ async fn run_one(
         OwnerGate::FirstUse => {}
     }
 
-    let mut client = SunoClient::new(auth, TokioClock);
+    let client = SunoClient::new(auth, TokioClock);
 
     // Resolve which areas this run touches and their modes (pure). CLI scope
     // flags win over `[areas]` config; a copy verb or a force-additive run
@@ -824,11 +840,12 @@ async fn run_one(
     // unresolvable explicit `--playlist X` typo keeps today's hard failure.
     let areas = match enumerate_areas(
         &selection,
-        &mut client,
+        &client,
         &http,
         &target.label,
         args,
         verbosity,
+        settings.concurrency,
     )
     .await
     {
@@ -863,9 +880,12 @@ async fn run_one(
     let resolution = match resolve_roots(
         &clips,
         &archived_parents,
-        &mut client,
+        &client,
         &http,
-        ResolveOpts::default(),
+        ResolveOpts {
+            concurrency: settings.concurrency,
+            ..ResolveOpts::default()
+        },
     )
     .await
     {
@@ -1067,8 +1087,14 @@ async fn run_one(
     // `has_stem` is true, and only an authoritative set drives removals — an
     // absent/indeterminate listing leaves a clip's `stems` at `None` so existing
     // local stems are kept. This path never generates or spends credits.
-    let stems_by_id =
-        list_existing_stems(settings.download_stems, &selected, &mut client, &http).await;
+    let stems_by_id = list_existing_stems(
+        settings.download_stems,
+        &selected,
+        &client,
+        &http,
+        settings.concurrency,
+    )
+    .await;
     if settings.download_stems {
         for d in &mut desired {
             let base = strip_format_ext(&d.path, settings.format);
@@ -1102,11 +1128,12 @@ async fn run_one(
     let (playlist_desired, playlists_enumerated) =
         if selection.is_plain_library() && library_authoritative {
             fetch_playlist_desired(
-                &mut client,
+                &client,
                 &http,
                 &desired,
                 &mut protected_playlists,
                 verbosity,
+                settings.concurrency,
             )
             .await
         } else {
@@ -1190,10 +1217,11 @@ async fn run_one(
     let (synced, pending_checks) = resolve_synced_lyrics(
         &mut desired,
         &manifest,
-        &mut client,
+        &client,
         &http,
         settings.lrc_sidecar,
         verbosity,
+        settings.concurrency,
     )
     .await;
     let plan = reconcile_run(
@@ -1290,7 +1318,7 @@ async fn run_one(
         synced,
         pending_checks,
         &mut store,
-        &mut client,
+        &client,
         &http,
         dest,
         &settings,
@@ -1310,7 +1338,7 @@ async fn execute_plan(
     synced: HashMap<String, AlignedLyrics>,
     pending_checks: Vec<suno_core::PendingCheck>,
     store: &mut suno_core::LineageStore,
-    client: &mut SunoClient<TokioClock>,
+    client: &SunoClient<TokioClock>,
     http: &ReqwestHttp,
     dest: &Path,
     settings: &suno_core::EffectiveSettings,
@@ -1480,20 +1508,24 @@ const SYNCED_LYRICS_FETCH_WARNING: &str = "could not fetch synced lyrics for a c
 async fn resolve_synced_lyrics(
     desired: &mut [suno_core::Desired],
     manifest: &Manifest,
-    client: &mut SunoClient<TokioClock>,
+    client: &SunoClient<TokioClock>,
     http: &ReqwestHttp,
     enabled: bool,
     verbosity: i8,
+    concurrency: u32,
 ) -> (HashMap<String, AlignedLyrics>, Vec<suno_core::PendingCheck>) {
     let mut synced: HashMap<String, AlignedLyrics> = HashMap::new();
-    for id in suno_core::synced_lyrics_targets(desired, manifest, now_secs(), enabled) {
-        match client.aligned_lyrics(http, &id).await {
+    let targets = suno_core::synced_lyrics_targets(desired, manifest, now_secs(), enabled);
+    let fetched = stream::iter(targets.iter().enumerate())
+        .map(|(idx, id)| async move { (idx, id.clone(), client.aligned_lyrics(http, id).await) })
+        .buffered(concurrency.max(1) as usize)
+        .collect::<Vec<_>>()
+        .await;
+    for (_idx, id, result) in fetched {
+        match result {
             Ok(aligned) => {
                 synced.insert(id, aligned);
             }
-            // Keep the message free of the clip id, request URL, and token: a
-            // transport error's `Display` can carry the full `/api/gen/{id}/...`
-            // URL, so it must never be interpolated here.
             Err(_) => {
                 if verbosity >= -1 {
                     eprint_t!("warning: {SYNCED_LYRICS_FETCH_WARNING}");
@@ -1655,11 +1687,12 @@ fn unresolved_playlist_area(mode: SourceMode) -> AreaListing {
 /// hard [`ExitCode::Config`].
 async fn enumerate_areas(
     selection: &ResolvedSelection,
-    client: &mut SunoClient<TokioClock>,
+    client: &SunoClient<TokioClock>,
     http: &ReqwestHttp,
     label: &str,
     args: &SyncArgs,
     verbosity: i8,
+    concurrency: u32,
 ) -> std::result::Result<Vec<AreaListing>, ExitCode> {
     let mut areas: Vec<AreaListing> = Vec::new();
     // A `--limit`/`--since` narrowing is a deliberate act, so a narrowed Library
@@ -1749,6 +1782,7 @@ async fn enumerate_areas(
         };
         match (&selection.playlists, playlists) {
             (PlaylistPolicy::Explicit(list), Some(pls)) => {
+                let mut to_fetch: Vec<(String, String, SourceMode)> = Vec::new();
                 for (value, mode) in list {
                     let playlist = match resolve_playlist(value, &pls) {
                         Ok(playlist) => playlist,
@@ -1767,36 +1801,38 @@ async fn enumerate_areas(
                             continue;
                         }
                     };
-                    areas.push(
-                        list_playlist_area(
-                            client,
-                            http,
-                            &playlist.id,
-                            &playlist.name,
-                            *mode,
-                            narrowed,
-                            verbosity,
-                        )
-                        .await,
-                    );
+                    to_fetch.push((playlist.id.clone(), playlist.name.clone(), *mode));
                 }
+                let fetched = stream::iter(to_fetch)
+                    .map(|(id, name, mode)| async move {
+                        list_playlist_area(client, http, &id, &name, mode, narrowed, verbosity)
+                            .await
+                    })
+                    .buffered(concurrency.max(1) as usize)
+                    .collect::<Vec<_>>()
+                    .await;
+                areas.extend(fetched);
             }
             (PlaylistPolicy::All { default, overrides }, Some(pls)) => {
-                for playlist in &pls {
-                    let mode = overrides.get(&playlist.id).copied().unwrap_or(*default);
-                    areas.push(
-                        list_playlist_area(
-                            client,
-                            http,
-                            &playlist.id,
-                            &playlist.name,
-                            mode,
-                            narrowed,
-                            verbosity,
+                let to_fetch: Vec<(String, String, SourceMode)> = pls
+                    .iter()
+                    .map(|playlist| {
+                        (
+                            playlist.id.clone(),
+                            playlist.name.clone(),
+                            overrides.get(&playlist.id).copied().unwrap_or(*default),
                         )
-                        .await,
-                    );
-                }
+                    })
+                    .collect();
+                let fetched = stream::iter(to_fetch)
+                    .map(|(id, name, mode)| async move {
+                        list_playlist_area(client, http, &id, &name, mode, narrowed, verbosity)
+                            .await
+                    })
+                    .buffered(concurrency.max(1) as usize)
+                    .collect::<Vec<_>>()
+                    .await;
+                areas.extend(fetched);
             }
             (PlaylistPolicy::Explicit(list), None) => {
                 for (_, mode) in list {
@@ -1818,7 +1854,7 @@ async fn enumerate_areas(
 /// downloadable filter marks the area non-authoritative so its Mirror cannot
 /// delete this run (§4).
 async fn list_playlist_area(
-    client: &mut SunoClient<TokioClock>,
+    client: &SunoClient<TokioClock>,
     http: &ReqwestHttp,
     id: &str,
     name: &str,
@@ -1948,11 +1984,12 @@ fn print_visible_playlists(playlists: &[suno_core::Playlist], verbosity: i8) {
 /// neither rewritten nor removed. The synthetic liked feed is appended last, in
 /// liked order, under the id [`LIKED_PLAYLIST_ID`].
 async fn fetch_playlist_desired(
-    client: &mut SunoClient<TokioClock>,
+    client: &SunoClient<TokioClock>,
     http: &ReqwestHttp,
     desired: &[suno_core::Desired],
     protected: &mut BTreeSet<String>,
     verbosity: i8,
+    concurrency: u32,
 ) -> (Vec<PlaylistDesired>, bool) {
     let playlists = match client.get_playlists(http).await {
         Ok(playlists) => playlists,
@@ -1970,28 +2007,38 @@ async fn fetch_playlist_desired(
     // playlist whose single page did not return its whole member set (D5) is
     // protected rather than rendered from a truncated page (B2).
     let mut fetched: Vec<(String, String, Vec<Clip>)> = Vec::new();
-    for playlist in &playlists {
-        match client.get_playlist_clips(http, &playlist.id).await {
-            Ok((members, true)) => {
-                fetched.push((playlist.id.clone(), playlist.name.clone(), members))
-            }
+    let member_results = stream::iter(playlists.iter().enumerate())
+        .map(|(idx, playlist)| async move {
+            (
+                idx,
+                playlist.id.clone(),
+                playlist.name.clone(),
+                client.get_playlist_clips(http, &playlist.id).await,
+            )
+        })
+        .buffered(concurrency.max(1) as usize)
+        .collect::<Vec<_>>()
+        .await;
+    for (_idx, id, name, result) in member_results {
+        match result {
+            Ok((members, true)) => fetched.push((id, name, members)),
             Ok((_, false)) => {
                 if verbosity >= -1 {
                     eprint_t!(
                         "warning: playlist '{}' returned an incomplete member page; keeping its .m3u8 unchanged",
-                        playlist.name
+                        name
                     );
                 }
-                protected.insert(playlist.id.clone());
+                protected.insert(id);
             }
             Err(err) => {
                 if verbosity >= -1 {
                     eprint_t!(
                         "warning: playlist '{}' members failed to list ({err}); keeping its .m3u8 unchanged",
-                        playlist.name
+                        name
                     );
                 }
-                protected.insert(playlist.id.clone());
+                protected.insert(id);
             }
         }
     }

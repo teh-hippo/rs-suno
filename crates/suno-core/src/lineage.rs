@@ -101,6 +101,8 @@ pub struct ResolveOpts {
     pub max_gap_fills: u32,
     /// Maximum hops to walk up a single chain before giving up.
     pub hop_cap: u32,
+    /// Maximum concurrent by-id clip fetches during one gap-fill batch.
+    pub concurrency: u32,
 }
 
 impl Default for ResolveOpts {
@@ -108,6 +110,7 @@ impl Default for ResolveOpts {
         Self {
             max_gap_fills: 200,
             hop_cap: 64,
+            concurrency: 4,
         }
     }
 }
@@ -420,7 +423,7 @@ pub fn lineage_edges(clip: &Clip) -> Vec<Edge> {
 pub async fn resolve_roots(
     clips: &[Clip],
     archived_parents: &HashMap<String, String>,
-    client: &mut SunoClient<impl Clock>,
+    client: &SunoClient<impl Clock>,
     http: &impl Http,
     opts: ResolveOpts,
 ) -> Result<Resolution> {
@@ -525,6 +528,7 @@ struct Resolver<'a> {
     targets: Vec<String>,
     budget: u32,
     hop_cap: u32,
+    concurrency: u32,
 }
 
 impl<'a> Resolver<'a> {
@@ -548,12 +552,13 @@ impl<'a> Resolver<'a> {
             targets,
             budget: opts.max_gap_fills,
             hop_cap: opts.hop_cap,
+            concurrency: opts.concurrency,
         }
     }
 
     /// Resolve every target, gap-filling missing ancestors until the whole set
     /// is settled or the budget runs out.
-    async fn run(&mut self, client: &mut SunoClient<impl Clock>, http: &impl Http) -> Result<()> {
+    async fn run(&mut self, client: &SunoClient<impl Clock>, http: &impl Http) -> Result<()> {
         let targets = self.targets.clone();
         loop {
             let mut frontier: Vec<String> = Vec::new();
@@ -664,7 +669,7 @@ impl<'a> Resolver<'a> {
     /// grew, so the caller can detect a stalled resolution.
     async fn gap_fill(
         &mut self,
-        client: &mut SunoClient<impl Clock>,
+        client: &SunoClient<impl Clock>,
         http: &impl Http,
         frontier: &[String],
     ) -> Result<bool> {
@@ -682,7 +687,9 @@ impl<'a> Resolver<'a> {
         self.budget -= batch.len() as u32;
 
         let refs: Vec<&str> = batch.iter().map(String::as_str).collect();
-        let fetched = client.get_clips_by_ids(http, &refs).await?;
+        let fetched = client
+            .get_clips_by_ids(http, &refs, self.concurrency as usize)
+            .await?;
 
         let mut returned: HashSet<String> = HashSet::new();
         let mut progressed = false;
@@ -883,7 +890,7 @@ mod tests {
     }
 
     fn authed_client(http: &ScriptedHttp) -> SunoClient<RecordingClock> {
-        let mut auth = ClerkAuth::new("eyJtoken");
+        let auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(http)).unwrap();
         SunoClient::new(auth, RecordingClock::new())
     }
@@ -1293,13 +1300,13 @@ mod tests {
     #[test]
     fn resolve_roots_walks_a_connected_chain_with_no_http() {
         let http = ScriptedHttp::new();
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+        let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let clips = chain1_clips();
 
         let roots = pollster::block_on(resolve_roots(
             &clips,
             &HashMap::new(),
-            &mut client,
+            &client,
             &http,
             ResolveOpts::default(),
         ))
@@ -1338,12 +1345,12 @@ mod tests {
         let http = ScriptedHttp::new()
             .with_auth()
             .route("/api/clip/root", Reply::json(&root_clip));
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let roots = pollster::block_on(resolve_roots(
             &[cover],
             &HashMap::new(),
-            &mut client,
+            &client,
             &http,
             ResolveOpts::default(),
         ))
@@ -1389,12 +1396,12 @@ mod tests {
             .into_iter()
             .collect();
         let http = ScriptedHttp::new().with_auth();
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let resolution = pollster::block_on(resolve_roots(
             &[child, root],
             &archived,
-            &mut client,
+            &client,
             &http,
             ResolveOpts::default(),
         ))
@@ -1441,12 +1448,12 @@ mod tests {
             .into_iter()
             .collect();
         let http = ScriptedHttp::new().with_auth();
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let info = pollster::block_on(resolve_roots(
             &[child, live_root],
             &archived,
-            &mut client,
+            &client,
             &http,
             ResolveOpts::default(),
         ))
@@ -1481,12 +1488,12 @@ mod tests {
         .into_iter()
         .collect();
         let http = ScriptedHttp::new().with_auth();
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let info = pollster::block_on(resolve_roots(
             &[child],
             &archived,
-            &mut client,
+            &client,
             &http,
             ResolveOpts::default(),
         ))
@@ -1521,11 +1528,12 @@ mod tests {
         let opts = ResolveOpts {
             max_gap_fills: 0,
             hop_cap: 2,
+            concurrency: 4,
         };
         let http = ScriptedHttp::new().with_auth();
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
-        let info = pollster::block_on(resolve_roots(&[child], &archived, &mut client, &http, opts))
+        let info = pollster::block_on(resolve_roots(&[child], &archived, &client, &http, opts))
             .unwrap()
             .roots["child"]
             .clone();
@@ -1567,12 +1575,12 @@ mod tests {
             .with_auth()
             .route("/api/clip/mid", Reply::status(404))
             .route("/api/clips/parent", Reply::status(404));
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let info = pollster::block_on(resolve_roots(
             &[child, root],
             &HashMap::new(),
-            &mut client,
+            &client,
             &http,
             ResolveOpts::default(),
         ))
@@ -1613,12 +1621,12 @@ mod tests {
         let http = ScriptedHttp::new()
             .with_auth()
             .route("/api/clip/root", Reply::json(&root_clip));
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let resolution = pollster::block_on(resolve_roots(
             &[cover],
             &HashMap::new(),
-            &mut client,
+            &client,
             &http,
             ResolveOpts::default(),
         ))
@@ -1656,12 +1664,12 @@ mod tests {
             .with_auth()
             .route("/api/clip/missing", Reply::status(404))
             .route("/api/clips/parent", Reply::json(&parent_body));
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let roots = pollster::block_on(resolve_roots(
             &[cover],
             &HashMap::new(),
-            &mut client,
+            &client,
             &http,
             ResolveOpts::default(),
         ))
@@ -1699,12 +1707,12 @@ mod tests {
             ..Default::default()
         };
         let http = ScriptedHttp::new();
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+        let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
 
         let roots = pollster::block_on(resolve_roots(
             &[a, b],
             &HashMap::new(),
-            &mut client,
+            &client,
             &http,
             ResolveOpts::default(),
         ))
@@ -1736,16 +1744,17 @@ mod tests {
         let http = ScriptedHttp::new()
             .with_auth()
             .route("/api/clip/m1", Reply::json(&m1_clip));
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
         let opts = ResolveOpts {
             max_gap_fills: 1,
             hop_cap: 64,
+            concurrency: 4,
         };
 
         let roots = pollster::block_on(resolve_roots(
             &[child],
             &HashMap::new(),
-            &mut client,
+            &client,
             &http,
             opts,
         ))
@@ -1783,12 +1792,12 @@ mod tests {
             .with_auth()
             .route("/api/clip/outside", Reply::status(404))
             .route("/api/clips/parent", Reply::status(404));
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let roots = pollster::block_on(resolve_roots(
             &[cover],
             &HashMap::new(),
-            &mut client,
+            &client,
             &http,
             ResolveOpts::default(),
         ))

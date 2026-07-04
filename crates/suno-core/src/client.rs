@@ -1,7 +1,9 @@
 //! The Suno API client: lists the library behind the [`Http`](crate::Http) port.
 
 use std::collections::BTreeSet;
+use std::sync::Mutex;
 
+use futures_util::stream::{self, StreamExt};
 use serde_json::Value;
 
 use crate::auth::ClerkAuth;
@@ -74,7 +76,7 @@ pub struct Stem {
 pub struct SunoClient<C> {
     auth: ClerkAuth,
     clock: C,
-    limiter: AdaptiveLimiter,
+    limiter: Mutex<AdaptiveLimiter>,
 }
 
 impl<C: Clock> SunoClient<C> {
@@ -83,7 +85,7 @@ impl<C: Clock> SunoClient<C> {
         Self {
             auth,
             clock,
-            limiter: AdaptiveLimiter::new(FEED_INITIAL_RATE),
+            limiter: Mutex::new(AdaptiveLimiter::new(FEED_INITIAL_RATE)),
         }
     }
 
@@ -97,7 +99,7 @@ impl<C: Clock> SunoClient<C> {
     /// under concurrent WAV-render calls serialised through the executor).
     #[cfg(test)]
     pub(crate) fn limiter_rate(&self) -> f64 {
-        self.limiter.rate()
+        self.limiter.lock().unwrap().rate()
     }
 
     /// List clips across the whole library, or only liked clips.
@@ -116,7 +118,7 @@ impl<C: Clock> SunoClient<C> {
     /// transport error all yield `false` (or propagate) so the caller can refuse
     /// to treat a truncated listing as authoritative for deletion.
     pub async fn list_clips(
-        &mut self,
+        &self,
         http: &impl Http,
         liked: bool,
         limit: Option<usize>,
@@ -157,7 +159,7 @@ impl<C: Clock> SunoClient<C> {
     /// Tries the dedicated `/api/clip/{id}` endpoint first, then falls back to
     /// scanning the library feed, since that endpoint's exact shape is not yet
     /// confirmed against the live API.
-    pub async fn get_clip(&mut self, http: &impl Http, id: &str) -> Result<Clip> {
+    pub async fn get_clip(&self, http: &impl Http, id: &str) -> Result<Clip> {
         if let Some(clip) = self.try_get_clip(http, id).await? {
             return Ok(clip);
         }
@@ -165,7 +167,7 @@ impl<C: Clock> SunoClient<C> {
     }
 
     /// Ask Suno to render a clip to lossless WAV (server-side, asynchronous).
-    pub async fn request_wav(&mut self, http: &impl Http, id: &str) -> Result<()> {
+    pub async fn request_wav(&self, http: &impl Http, id: &str) -> Result<()> {
         let path = format!("/api/gen/{id}/convert_wav/");
         self.api_request(http, Method::Post, &path, Vec::new())
             .await?;
@@ -173,7 +175,7 @@ impl<C: Clock> SunoClient<C> {
     }
 
     /// Read the rendered WAV URL for a clip, or `None` while it is not ready.
-    pub async fn wav_url(&mut self, http: &impl Http, id: &str) -> Result<Option<String>> {
+    pub async fn wav_url(&self, http: &impl Http, id: &str) -> Result<Option<String>> {
         let path = format!("/api/gen/{id}/wav_file/");
         let body = self.api_get(http, &path).await?;
         let data: Value = serde_json::from_slice(&body)
@@ -199,7 +201,7 @@ impl<C: Clock> SunoClient<C> {
     /// lyrics" rather than a run failure — the caller then writes no synced
     /// artefact, exactly as an empty cover URL writes no cover. Rides the
     /// adaptive rate limiter like the other reads.
-    pub async fn aligned_lyrics(&mut self, http: &impl Http, id: &str) -> Result<AlignedLyrics> {
+    pub async fn aligned_lyrics(&self, http: &impl Http, id: &str) -> Result<AlignedLyrics> {
         let path = format!("/api/gen/{id}/aligned_lyrics/v2/");
         match self.api_get_retrying(http, &path).await {
             Ok(body) => Ok(AlignedLyrics::from_bytes(&body)),
@@ -219,23 +221,38 @@ impl<C: Clock> SunoClient<C> {
     /// lineage walk must still traverse. Clips returned here are ancestors for
     /// resolution only and must never be treated as download candidates. Ids are
     /// deduplicated in order, and an id that cannot be retrieved (a `404`) is
-    /// skipped so the caller can fall back to the parent endpoint.
-    pub async fn get_clips_by_ids(&mut self, http: &impl Http, ids: &[&str]) -> Result<Vec<Clip>> {
-        let mut clips = Vec::new();
+    /// skipped so the caller can fall back to the parent endpoint. Requests are
+    /// issued with bounded concurrency, preserving the de-duplicated input order.
+    pub async fn get_clips_by_ids(
+        &self,
+        http: &impl Http,
+        ids: &[&str],
+        concurrency: usize,
+    ) -> Result<Vec<Clip>> {
         let mut seen: BTreeSet<&str> = BTreeSet::new();
-        for id in ids {
-            if id.is_empty() || !seen.insert(id) {
-                continue;
-            }
-            let path = format!("/api/clip/{id}");
-            match self.api_get_retrying(http, &path).await {
-                Ok(body) => {
-                    if let Some(clip) = parse_clip(&body) {
-                        clips.push(clip);
-                    }
+        let ordered: Vec<&str> = ids
+            .iter()
+            .copied()
+            .filter(|id| !id.is_empty() && seen.insert(id))
+            .collect();
+        let limit = concurrency.max(1);
+        let fetched = stream::iter(ordered.iter().copied().enumerate())
+            .map(|(idx, id)| async move {
+                let path = format!("/api/clip/{id}");
+                match self.api_get_retrying(http, &path).await {
+                    Ok(body) => Ok((idx, parse_clip(&body))),
+                    Err(Error::NotFound(_)) => Ok((idx, None)),
+                    Err(err) => Err(err),
                 }
-                Err(Error::NotFound(_)) => continue,
-                Err(err) => return Err(err),
+            })
+            .buffered(limit)
+            .collect::<Vec<_>>()
+            .await;
+        let mut clips = Vec::new();
+        for item in fetched {
+            let (_idx, clip) = item?;
+            if let Some(clip) = clip {
+                clips.push(clip);
             }
         }
         Ok(clips)
@@ -248,7 +265,7 @@ impl<C: Clock> SunoClient<C> {
     /// when a missing ancestor cannot be retrieved by id. Only a `404` (the clip
     /// has no parent) maps to `None`; any other failure, including a transient
     /// `5xx`, propagates as an error rather than being mistaken for a root.
-    pub async fn get_clip_parent(&mut self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
+    pub async fn get_clip_parent(&self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
         let path = format!("{CLIP_PARENT_PATH}?clip_id={id}");
         match self.api_get_retrying(http, &path).await {
             Ok(body) => Ok(parse_clip(&body)),
@@ -267,7 +284,7 @@ impl<C: Clock> SunoClient<C> {
     /// A hard failure propagates as an error; the caller treats that as "the
     /// playlist listing did not fully enumerate" and refuses every playlist
     /// deletion this run, so a dropped fetch can never remove a `.m3u8`.
-    pub async fn get_playlists(&mut self, http: &impl Http) -> Result<Vec<Playlist>> {
+    pub async fn get_playlists(&self, http: &impl Http) -> Result<Vec<Playlist>> {
         let mut playlists = Vec::new();
         for page in 1..=MAX_PAGES {
             let path =
@@ -298,7 +315,7 @@ impl<C: Clock> SunoClient<C> {
     /// playlist area under `library = "off"` is never treated as authoritative
     /// unless its whole member set was seen (D5).
     pub async fn get_playlist_clips(
-        &mut self,
+        &self,
         http: &impl Http,
         id: &str,
     ) -> Result<(Vec<Clip>, bool)> {
@@ -308,7 +325,7 @@ impl<C: Clock> SunoClient<C> {
     }
 
     /// Read the authenticated account's billing information.
-    pub async fn get_billing_info(&mut self, http: &impl Http) -> Result<BillingInfo> {
+    pub async fn get_billing_info(&self, http: &impl Http) -> Result<BillingInfo> {
         let body = self.api_get_retrying(http, BILLING_INFO_PATH).await?;
         parse_billing_info(&body)
     }
@@ -336,11 +353,7 @@ impl<C: Clock> SunoClient<C> {
     /// [`MAX_PAGES`] pages is likewise a truncated listing and never authoritative.
     /// A stem is only ever removed from an authoritative (`complete`) listing that
     /// omits it, or when its owning clip's audio is deleted.
-    pub async fn list_stems(
-        &mut self,
-        http: &impl Http,
-        clip_id: &str,
-    ) -> Result<(Vec<Stem>, bool)> {
+    pub async fn list_stems(&self, http: &impl Http, clip_id: &str) -> Result<(Vec<Stem>, bool)> {
         let declared = self.stem_page_count(http, clip_id).await?;
         // Zero pages (or no page count) is Suno's "this clip has no stems"
         // answer: indeterminate for deletion, never an authoritative empty.
@@ -376,7 +389,7 @@ impl<C: Clock> SunoClient<C> {
     /// map to `0` (indeterminate, never an authoritative empty set), while any
     /// other error (a transient `5xx`, a transport failure) propagates so the
     /// caller treats the stems as unknown and keeps them.
-    async fn stem_page_count(&mut self, http: &impl Http, clip_id: &str) -> Result<u32> {
+    async fn stem_page_count(&self, http: &impl Http, clip_id: &str) -> Result<u32> {
         let path = format!("/api/clip/{clip_id}/stems/pages");
         match self.api_get_retrying(http, &path).await {
             Ok(body) => Ok(parse_stem_page_count(&body)),
@@ -388,7 +401,7 @@ impl<C: Clock> SunoClient<C> {
 
     /// Try the dedicated clip endpoint, returning `None` when it is missing or
     /// returns a body that does not yield the requested clip.
-    async fn try_get_clip(&mut self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
+    async fn try_get_clip(&self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
         let path = format!("/api/clip/{id}");
         match self.api_get_retrying(http, &path).await {
             Ok(body) => Ok(parse_clip(&body).filter(|clip| clip.id == id)),
@@ -398,7 +411,7 @@ impl<C: Clock> SunoClient<C> {
     }
 
     /// Locate a clip by scanning the library feed.
-    async fn find_in_feed(&mut self, http: &impl Http, id: &str) -> Result<Clip> {
+    async fn find_in_feed(&self, http: &impl Http, id: &str) -> Result<Clip> {
         let (clips, _complete) = self.list_clips(http, false, None).await?;
         clips
             .into_iter()
@@ -407,12 +420,12 @@ impl<C: Clock> SunoClient<C> {
     }
 
     /// Perform an authenticated GET, refreshing the JWT once on a 401/403.
-    async fn api_get(&mut self, http: &impl Http, path: &str) -> Result<Vec<u8>> {
+    async fn api_get(&self, http: &impl Http, path: &str) -> Result<Vec<u8>> {
         self.api_request(http, Method::Get, path, Vec::new()).await
     }
 
     /// A retrying GET: [`api_send_retrying`](Self::api_send_retrying) with no body.
-    async fn api_get_retrying(&mut self, http: &impl Http, path: &str) -> Result<Vec<u8>> {
+    async fn api_get_retrying(&self, http: &impl Http, path: &str) -> Result<Vec<u8>> {
         self.api_send_retrying(http, Method::Get, path, Vec::new())
             .await
     }
@@ -436,13 +449,13 @@ impl<C: Clock> SunoClient<C> {
     /// place. Library, playlist, and lineage reads use this so a full-library
     /// walk is not aborted by a single throttled page.
     async fn api_send_retrying(
-        &mut self,
+        &self,
         http: &impl Http,
         method: Method,
         path: &str,
         body: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        let pace = self.limiter.pace();
+        let pace = self.limiter.lock().unwrap().pace();
         if !pace.is_zero() {
             self.clock.sleep(pace).await;
         }
@@ -468,7 +481,7 @@ impl<C: Clock> SunoClient<C> {
     /// `body` is sent only by the adapter when non-empty, so a GET or a bodyless
     /// POST reaches the network unchanged.
     async fn api_request(
-        &mut self,
+        &self,
         http: &impl Http,
         method: Method,
         path: &str,
@@ -501,7 +514,7 @@ impl<C: Clock> SunoClient<C> {
                 .map_err(|err| Error::Connection(err.to_string()))?;
             match response.status {
                 200..=299 => {
-                    self.limiter.on_success();
+                    self.limiter.lock().unwrap().on_success();
                     return Ok(response.body);
                 }
                 401 | 403 if !auth_refreshed => {
@@ -515,7 +528,7 @@ impl<C: Clock> SunoClient<C> {
                     )));
                 }
                 429 => {
-                    self.limiter.on_rate_limit();
+                    self.limiter.lock().unwrap().on_rate_limit();
                     return Err(Error::RateLimited {
                         retry_after: retry_after(&response),
                     });
@@ -907,9 +920,9 @@ mod tests {
             Rule::new("/api/feed/v3", 200, feed_body()),
         ]);
 
-        let mut auth = ClerkAuth::new("eyJtoken");
+        let auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(&http)).unwrap();
-        let mut client = SunoClient::new(auth, RecordingClock::new());
+        let client = SunoClient::new(auth, RecordingClock::new());
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, "a");
@@ -942,9 +955,9 @@ mod tests {
 
         // At the refresh boundary: ensure_jwt triggers a second refresh_jwt call.
         let http = make_http();
-        let mut auth = ClerkAuth::new("eyJtoken");
+        let auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(&http)).unwrap();
-        let mut client = SunoClient::new(auth, RecordingClock::at(exp - JWT_REFRESH_BUFFER));
+        let client = SunoClient::new(auth, RecordingClock::at(exp - JWT_REFRESH_BUFFER));
         let (clips, _) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
         // authenticate + api_request refresh = 2 token calls.
@@ -952,9 +965,9 @@ mod tests {
 
         // Just before the boundary: no additional refresh.
         let http2 = make_http();
-        let mut auth2 = ClerkAuth::new("eyJtoken");
+        let auth2 = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth2.authenticate(&http2)).unwrap();
-        let mut client2 = SunoClient::new(auth2, RecordingClock::at(exp - JWT_REFRESH_BUFFER - 1));
+        let client2 = SunoClient::new(auth2, RecordingClock::at(exp - JWT_REFRESH_BUFFER - 1));
         let (clips2, _) = pollster::block_on(client2.list_clips(&http2, false, None)).unwrap();
         assert_eq!(clips2.len(), 1);
         // Only authenticate's token call; no extra refresh.
@@ -979,7 +992,7 @@ mod tests {
             .to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let (_clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(!complete);
@@ -1004,7 +1017,7 @@ mod tests {
     }
 
     fn authed_client(http: &MockHttp) -> SunoClient<RecordingClock> {
-        let mut auth = ClerkAuth::new("eyJtoken");
+        let auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(http)).unwrap();
         SunoClient::new(auth, RecordingClock::new())
     }
@@ -1018,7 +1031,7 @@ mod tests {
             r#"{"total_credits_left":500,"monthly_limit":1000,"monthly_usage":500}"#.to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let billing = pollster::block_on(client.get_billing_info(&http)).unwrap();
         assert_eq!(billing.total_credits_left, 500);
@@ -1033,7 +1046,7 @@ mod tests {
             r#"{"monthly_usage":12}"#.to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let err = pollster::block_on(client.get_billing_info(&http)).unwrap_err();
         assert!(err.to_string().contains("total_credits_left"));
@@ -1055,7 +1068,7 @@ mod tests {
         .to_string();
         rules.push(Rule::new("/aligned_lyrics/v2/", 200, body));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let aligned = pollster::block_on(client.aligned_lyrics(&http, "clip-1")).unwrap();
         assert_eq!(aligned.words.len(), 1);
@@ -1073,7 +1086,7 @@ mod tests {
             r#"{"aligned_words":[],"aligned_lyrics":[],"hoot_cer":1.0}"#.to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let aligned = pollster::block_on(client.aligned_lyrics(&http, "instr")).unwrap();
         assert!(aligned.is_empty());
@@ -1088,14 +1101,14 @@ mod tests {
             "not found".to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let aligned = pollster::block_on(client.aligned_lyrics(&http, "missing")).unwrap();
         assert!(aligned.is_empty());
     }
 
     fn scripted_client(http: &ScriptedHttp, clock: RecordingClock) -> SunoClient<RecordingClock> {
-        let mut auth = ClerkAuth::new("eyJtoken");
+        let auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(http)).unwrap();
         SunoClient::new(auth, clock)
     }
@@ -1122,7 +1135,7 @@ mod tests {
             vec![Reply::status(429), Reply::json(&feed_body())],
         );
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
@@ -1142,7 +1155,7 @@ mod tests {
             ],
         );
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let (clips, _complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
@@ -1162,7 +1175,7 @@ mod tests {
             ],
         );
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
@@ -1188,7 +1201,7 @@ mod tests {
             ],
         );
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
@@ -1219,7 +1232,7 @@ mod tests {
             .with_auth()
             .route("/api/feed/v3", Reply::json(&page));
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(!complete);
@@ -1241,7 +1254,7 @@ mod tests {
             .with_auth()
             .route("/api/feed/v3", Reply::json(&page));
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(!complete);
@@ -1259,7 +1272,7 @@ mod tests {
             ],
         );
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let result = pollster::block_on(client.list_clips(&http, false, None));
         assert!(matches!(result, Err(Error::Api(_))));
@@ -1274,7 +1287,7 @@ mod tests {
             .with_auth()
             .route("/api/feed/v3", Reply::json(&page));
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
@@ -1287,7 +1300,7 @@ mod tests {
             .with_auth()
             .route("/api/feed/v3", Reply::json(&feed_body()));
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let _ = pollster::block_on(client.list_clips(&http, true, None)).unwrap();
         let bodies = http.bodies();
@@ -1307,7 +1320,7 @@ mod tests {
             ],
         );
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
@@ -1328,7 +1341,7 @@ mod tests {
             ],
         );
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
@@ -1347,7 +1360,7 @@ mod tests {
             .with_auth()
             .route("/api/feed/v3", Reply::status(429));
         let clock = RecordingClock::new();
-        let mut client = scripted_client(&http, clock.clone());
+        let client = scripted_client(&http, clock.clone());
 
         let result = pollster::block_on(client.list_clips(&http, false, None));
         assert!(matches!(result, Err(Error::RateLimited { .. })));
@@ -1379,7 +1392,7 @@ mod tests {
         let mut rules = auth_rules();
         rules.push(Rule::new("/api/clip/", 200, clip_body));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let clip = pollster::block_on(client.get_clip(&http, "z")).unwrap();
         assert_eq!(clip.id, "z");
@@ -1397,7 +1410,7 @@ mod tests {
         ));
         rules.push(Rule::new("/api/feed/v3", 200, feed_body()));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let clip = pollster::block_on(client.get_clip(&http, "a")).unwrap();
         assert_eq!(clip.id, "a");
@@ -1409,7 +1422,7 @@ mod tests {
         let mut rules = auth_rules();
         rules.push(Rule::new("/convert_wav/", 201, "{}".to_string()));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         assert!(pollster::block_on(client.request_wav(&http, "z")).is_ok());
     }
@@ -1423,7 +1436,7 @@ mod tests {
             r#"{"wav_file_url": "https://cdn1.suno.ai/z.wav"}"#.to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let url = pollster::block_on(client.wav_url(&http, "z")).unwrap();
         assert_eq!(url.as_deref(), Some("https://cdn1.suno.ai/z.wav"));
@@ -1434,7 +1447,7 @@ mod tests {
         let mut rules = auth_rules();
         rules.push(Rule::new("/wav_file/", 200, "{}".to_string()));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let url = pollster::block_on(client.wav_url(&http, "z")).unwrap();
         assert_eq!(url, None);
@@ -1459,9 +1472,9 @@ mod tests {
         rules.push(Rule::new("/api/clip/p1", 200, p1));
         rules.push(Rule::new("/api/clip/p2", 200, p2));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
-        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["p1", "p2"])).unwrap();
+        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["p1", "p2"], 4)).unwrap();
         assert_eq!(
             clips.len(),
             2,
@@ -1483,9 +1496,9 @@ mod tests {
         let mut rules = auth_rules();
         rules.push(Rule::new("/api/clip/t1", 200, trashed));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
-        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["t1"])).unwrap();
+        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["t1"], 4)).unwrap();
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, "t1");
         assert!(clips[0].is_trashed);
@@ -1501,15 +1514,47 @@ mod tests {
             .with_auth()
             .route("/api/clip/gone", Reply::status(404))
             .route("/api/clip/only", Reply::json(&only));
-        let mut client = scripted_client(&http, RecordingClock::new());
+        let client = scripted_client(&http, RecordingClock::new());
 
         let clips =
-            pollster::block_on(client.get_clips_by_ids(&http, &["only", "gone", "only"])).unwrap();
+            pollster::block_on(client.get_clips_by_ids(&http, &["only", "gone", "only"], 4))
+                .unwrap();
         assert_eq!(clips.len(), 1, "the 404 id is skipped");
         assert_eq!(clips[0].id, "only");
         // "only" is fetched once despite appearing twice; "gone" is attempted once.
         assert_eq!(http.count("/api/clip/only"), 1);
         assert_eq!(http.count("/api/clip/gone"), 1);
+    }
+
+    #[test]
+    fn get_clips_by_ids_matches_serial_results_and_keeps_order_when_concurrent() {
+        let a = serde_json::json!({
+            "id": "a", "title": "A", "status": "complete", "metadata": {"type": "gen"}
+        })
+        .to_string();
+        let b = serde_json::json!({
+            "id": "b", "title": "B", "status": "complete", "metadata": {"type": "gen"}
+        })
+        .to_string();
+        let c = serde_json::json!({
+            "id": "c", "title": "C", "status": "complete", "metadata": {"type": "gen"}
+        })
+        .to_string();
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/clip/a", Reply::json(&a))
+            .route("/api/clip/b", Reply::json(&b))
+            .route("/api/clip/c", Reply::json(&c));
+        let client = scripted_client(&http, RecordingClock::new());
+        let ids = ["b", "a", "c", "a"];
+
+        let serial = pollster::block_on(client.get_clips_by_ids(&http, &ids, 1)).unwrap();
+        let concurrent = pollster::block_on(client.get_clips_by_ids(&http, &ids, 4)).unwrap();
+
+        let serial_ids: Vec<&str> = serial.iter().map(|clip| clip.id.as_str()).collect();
+        let concurrent_ids: Vec<&str> = concurrent.iter().map(|clip| clip.id.as_str()).collect();
+        assert_eq!(serial_ids, vec!["b", "a", "c"]);
+        assert_eq!(concurrent_ids, serial_ids);
     }
 
     #[test]
@@ -1522,7 +1567,7 @@ mod tests {
         let mut rules = auth_rules();
         rules.push(Rule::new("/api/clips/parent?clip_id=child", 200, parent));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let clip = pollster::block_on(client.get_clip_parent(&http, "child")).unwrap();
         assert_eq!(clip.unwrap().id, "par");
@@ -1537,7 +1582,7 @@ mod tests {
             r#"{"detail": "no parent"}"#.to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let clip = pollster::block_on(client.get_clip_parent(&http, "root")).unwrap();
         assert!(clip.is_none());
@@ -1556,7 +1601,7 @@ mod tests {
                 r#"{"detail": "server error"}"#.to_string(),
             ));
             let http = MockHttp::new(rules);
-            let mut client = authed_client(&http);
+            let client = authed_client(&http);
 
             let result = pollster::block_on(client.get_clip_parent(&http, "child"));
             assert!(
@@ -1585,7 +1630,7 @@ mod tests {
             r#"{"playlists": []}"#.to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let playlists = pollster::block_on(client.get_playlists(&http)).unwrap();
         assert_eq!(playlists.len(), 1, "entries without an id are dropped");
@@ -1613,7 +1658,7 @@ mod tests {
             r#"{"playlists": []}"#.to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let playlists = pollster::block_on(client.get_playlists(&http)).unwrap();
         assert_eq!(playlists[0].name, "Untitled");
@@ -1640,7 +1685,7 @@ mod tests {
         let mut rules = auth_rules();
         rules.push(Rule::new("/api/playlist/pl1/", 200, body));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let (clips, complete) =
             pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
@@ -1669,7 +1714,7 @@ mod tests {
         let mut rules = auth_rules();
         rules.push(Rule::new("/api/playlist/pl1/", 200, body));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let (clips, complete) =
             pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
@@ -1686,7 +1731,7 @@ mod tests {
             r#"{"num_total_results": 0, "playlist_clips": []}"#.to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let (clips, complete) =
             pollster::block_on(client.get_playlist_clips(&http, "empty")).unwrap();
@@ -1709,7 +1754,7 @@ mod tests {
             r#"{"playlist_clips": []}"#.to_string(),
         ));
         let http = MockHttp::new(rules);
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
 
         let (clips, complete) =
             pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
@@ -1757,7 +1802,7 @@ mod tests {
                 "stems?page=1",
                 Reply::json(&stem_page(&[("s3", "Bass", "https://cdn1.suno.ai/s3.mp3")])),
             );
-        let mut client = scripted_client(&http, RecordingClock::new());
+        let client = scripted_client(&http, RecordingClock::new());
 
         let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
         assert_eq!(stems.len(), 3);
@@ -1778,7 +1823,7 @@ mod tests {
         let http = ScriptedHttp::new()
             .with_auth()
             .route("stems/pages", Reply::json(&stem_pages(0)));
-        let mut client = scripted_client(&http, RecordingClock::new());
+        let client = scripted_client(&http, RecordingClock::new());
 
         let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
         assert!(stems.is_empty());
@@ -1796,7 +1841,7 @@ mod tests {
             let http = ScriptedHttp::new()
                 .with_auth()
                 .route("stems/pages", Reply::status(status));
-            let mut client = scripted_client(&http, RecordingClock::new());
+            let client = scripted_client(&http, RecordingClock::new());
             let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
             assert!(stems.is_empty(), "status {status}");
             assert!(!complete, "status {status} is indeterminate, not empty");
@@ -1810,7 +1855,7 @@ mod tests {
         let http = ScriptedHttp::new()
             .with_auth()
             .route("stems/pages", Reply::status(400));
-        let mut client = scripted_client(&http, RecordingClock::new());
+        let client = scripted_client(&http, RecordingClock::new());
 
         let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
         assert!(stems.is_empty());
@@ -1828,7 +1873,7 @@ mod tests {
         let http = ScriptedHttp::new()
             .with_auth()
             .route("stems/pages", Reply::with_body(500, "Invalid page"));
-        let mut client = scripted_client(&http, RecordingClock::new());
+        let client = scripted_client(&http, RecordingClock::new());
 
         let result = pollster::block_on(client.list_stems(&http, "clip1"));
         assert!(
@@ -1854,7 +1899,7 @@ mod tests {
                 )])),
             )
             .route("stems?page=1", Reply::status(500));
-        let mut client = scripted_client(&http, RecordingClock::new());
+        let client = scripted_client(&http, RecordingClock::new());
 
         let result = pollster::block_on(client.list_stems(&http, "clip1"));
         assert!(result.is_err(), "a 5xx page is not a clean drain");
@@ -1877,7 +1922,7 @@ mod tests {
                     "https://cdn1.suno.ai/s1.mp3",
                 )])),
             );
-        let mut client = scripted_client(&http, RecordingClock::new());
+        let client = scripted_client(&http, RecordingClock::new());
 
         let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
         assert!(!stems.is_empty(), "the fetched pages still yield stems");
@@ -1953,7 +1998,7 @@ mod tests {
         // The single POST chokepoint rejects an off-list POST before the wire, so
         // a credit-spending endpoint can never be reached by accident.
         let http = MockHttp::new(auth_rules());
-        let mut client = authed_client(&http);
+        let client = authed_client(&http);
         let err = pollster::block_on(client.api_request(
             &http,
             Method::Post,

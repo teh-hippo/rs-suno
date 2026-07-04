@@ -61,7 +61,7 @@ use crate::tag::{TrackMetadata, tag_flac, tag_mp3, tag_wav};
 /// serialise its order-sensitive API calls (JWT refresh, adaptive limiter)
 /// without a runtime-specific lock. Held only for the brief WAV-render calls;
 /// the heavy CDN/transcode/tag work runs unlocked.
-type ClientLock<'a, C> = AsyncMutex<&'a mut SunoClient<C>>;
+type ClientLock<'a, C> = AsyncMutex<&'a SunoClient<C>>;
 
 /// Tunables for one [`execute`] run.
 #[derive(Debug, Clone)]
@@ -154,11 +154,11 @@ impl ExecOutcome {
 
 /// The IO ports the executor drives, grouped so one value threads them through.
 ///
-/// `client` is the only `&mut` port: it performs the authenticated WAV render
-/// flow and so mutates its cached session. The rest are shared references.
+/// `client` performs the authenticated WAV render flow. The rest are shared
+/// references.
 pub struct Ports<'a, H, F, G, C> {
     /// Performs the authenticated WAV render and poll flow.
-    pub client: &'a mut SunoClient<C>,
+    pub client: &'a SunoClient<C>,
     /// The public network port (CDN audio, rendered WAV, cover art).
     pub http: &'a H,
     /// The disk port.
@@ -1759,7 +1759,7 @@ where
         let mut attempt: u32 = 0;
         loop {
             let result = {
-                let mut client = client_lock.lock().await;
+                let client = client_lock.lock().await;
                 client.wav_url(self.http, id).await
             };
             match result {
@@ -1781,7 +1781,7 @@ where
         let mut attempt: u32 = 0;
         loop {
             let result = {
-                let mut client = client_lock.lock().await;
+                let client = client_lock.lock().await;
                 client.request_wav(self.http, id).await
             };
             match result {
@@ -2119,7 +2119,7 @@ mod tests {
         clock: &RecordingClock,
         opts: &ExecOptions,
     ) -> ExecOutcome {
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+        let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let synced = HashMap::new();
         pollster::block_on(execute(
             plan,
@@ -2129,7 +2129,7 @@ mod tests {
             desired,
             &synced,
             Ports {
-                client: &mut client,
+                client: &client,
                 http,
                 fs,
                 ffmpeg,
@@ -2234,7 +2234,7 @@ mod tests {
                 ]
             })),
         );
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+        let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let outcome = pollster::block_on(execute(
             &plan,
             &mut manifest,
@@ -2243,7 +2243,7 @@ mod tests {
             &[d],
             &synced,
             Ports {
-                client: &mut client,
+                client: &client,
                 http: &http,
                 fs: &fs,
                 ffmpeg: &ffmpeg,
@@ -2290,7 +2290,7 @@ mod tests {
         let mut manifest = Manifest::new();
         let mut albums = BTreeMap::new();
         let mut playlists = BTreeMap::new();
-        let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+        let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
         let outcome = pollster::block_on(execute(
             &plan,
             &mut manifest,
@@ -2299,7 +2299,7 @@ mod tests {
             &[d],
             &HashMap::new(),
             Ports {
-                client: &mut client,
+                client: &client,
                 http: &http,
                 fs: &fs,
                 ffmpeg: &ffmpeg,
@@ -5007,9 +5007,9 @@ mod tests {
             .route("s2.mp3", Reply::ok(b"drums-bytes".to_vec()));
 
         // List the existing stems through the client (GET-only, free).
-        let mut auth = ClerkAuth::new("eyJtoken");
+        let auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(&http)).unwrap();
-        let mut client = SunoClient::new(auth, RecordingClock::new());
+        let client = SunoClient::new(auth, RecordingClock::new());
         let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
         assert!(complete);
         assert_eq!(stems.len(), 2);
@@ -5106,9 +5106,9 @@ mod tests {
             .route("s1.wav", Reply::ok(b"RIFFvocals".to_vec()))
             .route("s2.wav", Reply::ok(b"RIFFdrums".to_vec()));
 
-        let mut auth = ClerkAuth::new("eyJtoken");
+        let auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(&http)).unwrap();
-        let mut client = SunoClient::new(auth, RecordingClock::new());
+        let client = SunoClient::new(auth, RecordingClock::new());
         let (stems, _complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
 
         let mut manifest = Manifest::new();
@@ -6198,7 +6198,7 @@ mod tests {
             let clock = RecordingClock::new();
             let mut albums = BTreeMap::new();
             let mut playlists = BTreeMap::new();
-            let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+            let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
             pollster::block_on(execute(
                 plan,
                 manifest,
@@ -6207,7 +6207,7 @@ mod tests {
                 desired,
                 &HashMap::new(),
                 Ports {
-                    client: &mut client,
+                    client: &client,
                     http,
                     fs,
                     ffmpeg: &ffmpeg,
@@ -6405,7 +6405,7 @@ mod tests {
             let mut albums = BTreeMap::new();
             let mut playlists = BTreeMap::new();
             let mut manifest = Manifest::new();
-            let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+            let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
 
             let outcome = pollster::block_on(execute(
                 &plan,
@@ -6415,7 +6415,7 @@ mod tests {
                 &desireds,
                 &HashMap::new(),
                 Ports {
-                    client: &mut client,
+                    client: &client,
                     http: &scripted,
                     fs: &fs,
                     ffmpeg: &ffmpeg,
@@ -6710,7 +6710,7 @@ mod tests {
             let mut albums = BTreeMap::new();
             let mut playlists = BTreeMap::new();
             let mut manifest = Manifest::new();
-            let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+            let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
             let plan = Plan { actions };
 
             let outcome = pollster::block_on(execute(
@@ -6721,7 +6721,7 @@ mod tests {
                 &desireds,
                 &HashMap::new(),
                 Ports {
-                    client: &mut client,
+                    client: &client,
                     http: &http,
                     fs: &fs,
                     ffmpeg: &ffmpeg,
@@ -6984,7 +6984,7 @@ mod tests {
             let mut manifest = Manifest::new();
             let mut albums = BTreeMap::new();
             let mut playlists = BTreeMap::new();
-            let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+            let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
             pollster::block_on(execute(
                 &plan,
                 &mut manifest,
@@ -6993,7 +6993,7 @@ mod tests {
                 &desireds,
                 &HashMap::new(),
                 Ports {
-                    client: &mut client,
+                    client: &client,
                     http: &http,
                     fs: &MemFs::new(),
                     ffmpeg: &ffmpeg,
