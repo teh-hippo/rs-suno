@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.2](https://github.com/teh-hippo/rs-suno/compare/v0.26.1...v0.26.2) (2026-07-04)
+
+
+### Performance Improvements
+
+* **naming:** fuse sanitise_component into one allocation-light pass ([1b104d8](https://github.com/teh-hippo/rs-suno/commit/1b104d8fecd3eb2d3aab90bdf803a8f34a623dd0))
+* **reconcile:** skip the mass Desired clone on the common no-merge path ([d97d8eb](https://github.com/teh-hippo/rs-suno/commit/d97d8eb4f53a1541338398acfd669514e33d9867))
+
 ## [0.26.1](https://github.com/teh-hippo/rs-suno/compare/v0.26.0...v0.26.1) (2026-07-04)
 
 
