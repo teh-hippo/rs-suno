@@ -160,7 +160,11 @@ fn creator_change_renames_and_retags() {
     // old sentinel omitted the creator, so it renamed without retagging and
     // left a stale artist tag behind.
     assert_eq!(plan.renames(), 1);
-    assert_eq!(plan.retags(), 1, "a creator change refreshes the artist tag");
+    assert_eq!(
+        plan.retags(),
+        1,
+        "a creator change refreshes the artist tag"
+    );
     assert_eq!(outcome.renamed, 1);
     assert_eq!(outcome.retagged, 1);
     assert!(!fs.exists(&old_path));
