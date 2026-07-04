@@ -58,11 +58,13 @@ lyrics) frame is embedded in the file as well with word-level timing, so players
 that read `SYLT` show karaoke-style per-word lyrics. FLAC and WAV carry no ID3,
 so they get no `SYLT`; the line-level `.lrc` covers them.
 
-The alignment is fetched from Suno once per song (the result is immutable), so
-enabling the feature does a one-off fetch per song with lyrics; a steady-state
-re-sync fetches nothing more. A clip Suno cannot align, an **instrumental**,
-writes no `.lrc` and embeds no `SYLT`, exactly as a clip with no cover writes no
-cover; such clips are re-checked occasionally in case Suno adds alignment later.
+The alignment is fetched from Suno once per clip (the result is immutable), so
+enabling the feature probes every clip once on the first pass (cached thereafter);
+a steady-state re-sync fetches nothing more. A clip Suno cannot align, an
+**instrumental**, writes no `.lrc` and embeds no `SYLT`, exactly as a clip with no
+cover writes no cover. A clip with lyrics but no alignment yet receives an untimed
+plain-text fallback; both instrumentals and untimed-fallback clips are re-checked
+occasionally so a later-available alignment upgrades the `.lrc` and `SYLT`.
 If a fetch fails (a network or server error), the song's existing `.lrc` and
 tags are left untouched and it is retried on the next run, so a good timed file
 is never downgraded. Turning `lrc_sidecar` off writes no `.lrc`, embeds nothing,

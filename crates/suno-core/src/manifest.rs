@@ -31,10 +31,8 @@ pub struct ArtifactState {
 ///
 /// Suno's forced alignment for a clip is immutable in practice, so once a clip's
 /// alignment has been fetched it need not be fetched again until the render
-/// [`version`](Self::version) bumps. A clip that resolved to no lyrics (an
-/// instrumental) writes no `.lrc`, so without this marker it would be re-fetched
-/// every run; the marker records the check so it is not. A genuinely-empty clip
-/// is re-checked only after [`checked_unix`](Self::checked_unix) ages past the
+/// [`version`](Self::version) bumps. Instrumentals and untimed-fallback clips
+/// are re-checked after [`checked_unix`](Self::checked_unix) ages past the
 /// re-check window, to pick up alignment Suno may compute after generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -42,11 +40,17 @@ pub struct SyncedLyricsCheck {
     /// The render version this clip's synced lyrics were last resolved at. A
     /// bump forces a re-fetch and re-render (the `.lrc` format changed).
     pub version: u32,
-    /// Unix seconds of the last alignment fetch, for the bounded empty re-check.
+    /// Unix seconds of the last alignment fetch, for the bounded re-check.
     pub checked_unix: u64,
     /// Whether the clip resolved to no lyrics (an instrumental): no `.lrc` was
-    /// written, and only such clips are re-checked once the window elapses.
+    /// written.
     pub empty: bool,
+    /// Whether the written `.lrc` carries timed (word/line) alignment, as
+    /// opposed to an untimed plain-text fallback. Untimed clips are re-checked
+    /// after the window, the same as instrumentals, so a later-available
+    /// alignment upgrades the `.lrc` and `SYLT`. Defaults to `false` so
+    /// pre-existing manifests written before this field existed are re-checked.
+    pub timed: bool,
 }
 
 /// One manifest record: the prior known state of a single downloaded clip.
@@ -383,6 +387,7 @@ mod tests {
             version: 1,
             checked_unix: 1_700_000_000,
             empty: true,
+            timed: false,
         });
         m.insert("a", e);
         let back: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
