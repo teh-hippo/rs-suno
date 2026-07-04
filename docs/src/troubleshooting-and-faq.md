@@ -36,13 +36,10 @@ suno auth refresh <account>
 ```
 
 If that still fails, the session was rotated (you logged out, or Suno reset it).
-Get a fresh `__client` token and update the account:
-
-```bash
-suno config add-account <account> --token <new-token>
-```
-
-See [Authentication](authentication.md).
+Get a fresh `__client` token and set the account's `token` in your config file
+to the new value (run `suno version` to print the config path). If the account
+uses `token_command`, the refreshed secret is picked up automatically on the
+next run. See [Authentication](authentication.md).
 
 ### "multiple accounts configured; pass --account"
 

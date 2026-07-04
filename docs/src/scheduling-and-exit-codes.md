@@ -8,16 +8,16 @@ correctly.
 
 | Code | Meaning | When |
 |---|---|---|
-| 0 | Success | All requested work completed. |
-| 1 | General error | An unexpected, uncategorised failure. |
-| 2 | Usage error | Unknown command, invalid flag, or missing argument (for example `--allow-account-change` on `check` or `--dry-run`). |
-| 3 | Config error | Missing or invalid config, unknown account, conflicting flags. |
-| 4 | Authentication failure | The token expired or was rejected and could not be refreshed. |
-| 5 | Partial failure | Some clips failed after all retries; others succeeded. |
-| 6 | Transient failure (exhausted) | Every clip failed with transient errors; nothing progressed. |
-| 7 | Safety abort | A deletion safety rule triggered, or the token authenticates as a different account than the library is pinned to; no files were changed. |
-| 8 | Interrupted | The run received an interrupt; partial progress is preserved. |
-| 9 | Disk full | The destination ran out of space; free space and re-run. The library is unchanged for the failing action. |
+| 0 | ok | All requested work completed. |
+| 1 | general error | An unexpected, uncategorised failure. |
+| 2 | usage | Unknown command, invalid flag, or missing argument, for example `--allow-account-change` on `check` or `--dry-run`. |
+| 3 | config | Missing or invalid config, unknown account, conflicting flags. |
+| 4 | auth | The token expired or was rejected and could not be refreshed. |
+| 5 | partial | Some clips failed after all retries; others succeeded. |
+| 6 | transient-exhausted | Every clip failed with transient errors; nothing progressed. |
+| 7 | safety abort | A deletion safety rule triggered, or the token authenticates as a different account than the library is pinned to; no files were changed. |
+| 8 | interrupted | The run received an interrupt; partial progress is preserved. |
+| 9 | disk full | The destination ran out of space; free space and re-run. The library is unchanged for the failing action. |
 
 `check --exit-code` is the exception to this table: it exits 1 to signal that
 changes are pending, and 0 when the destination is already up to date.

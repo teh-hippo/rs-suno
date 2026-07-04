@@ -60,7 +60,7 @@ so they get no `SYLT`; the line-level `.lrc` covers them.
 
 The alignment is fetched from Suno once per song (the result is immutable), so
 enabling the feature does a one-off fetch per song with lyrics; a steady-state
-re-sync fetches nothing more. A clip Suno cannot align — an **instrumental** —
+re-sync fetches nothing more. A clip Suno cannot align, an **instrumental**,
 writes no `.lrc` and embeds no `SYLT`, exactly as a clip with no cover writes no
 cover; such clips are re-checked occasionally in case Suno adds alignment later.
 If a fetch fails (a network or server error), the song's existing `.lrc` and

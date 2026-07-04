@@ -239,7 +239,7 @@ off:
   stem is stored RAW: with the default `stem_format = "wav"` the lossless WAV is
   fetched through the same free `convert_wav` render the FLAC pipeline uses (0 credits),
   and with `stem_format = "mp3"` the public CDN MP3 is downloaded directly. A stem is
-  never transcoded to FLAC, even for a FLAC song — stems are the deliberate exception.
+  never transcoded to FLAC, even for a FLAC song. Stems are the deliberate exception.
   A stem is removed only when Suno's *authoritative* listing for the song no longer
   contains it, or alongside its own song when the audio is deleted (which also prunes
   the emptied `.stems` folder). A listing is authoritative only when its whole page
