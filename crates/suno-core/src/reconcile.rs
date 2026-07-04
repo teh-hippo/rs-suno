@@ -33,6 +33,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::config::{AudioFormat, StemFormat};
 use crate::graph::{AlbumArt, PlaylistState};
@@ -495,15 +496,27 @@ pub fn reconcile(
     local: &HashMap<String, LocalFile>,
     sources: &[SourceStatus],
 ) -> Plan {
-    let mut actions: Vec<Action> = Vec::new();
-
-    // Aggregate duplicate ids, then process in clip-id order for determinism.
-    let desired = aggregate_desired(desired);
-    let desired_ids: BTreeSet<&str> = desired.iter().map(|d| d.clip.id.as_str()).collect();
+    // Aggregate duplicate ids and order by clip id for deterministic output. A
+    // normal run has unique ids with canonical modes, so there is nothing to
+    // merge: sort borrowed references and clone nothing. The owned merge runs
+    // only when a duplicate id or a non-canonical mode list is actually present.
+    let merged: Vec<Desired>;
+    let ordered: Vec<&Desired> = if needs_aggregation(desired) {
+        merged = aggregate_desired(desired);
+        merged.iter().collect()
+    } else {
+        let mut refs: Vec<&Desired> = desired.iter().collect();
+        refs.sort_unstable_by(|a, b| a.clip.id.cmp(&b.clip.id));
+        refs
+    };
+    let desired_ids: HashSet<&str> = ordered.iter().map(|d| d.clip.id.as_str()).collect();
+    // One audio action per desired clip (plus its sidecars) and one per absent
+    // manifest entry; pre-size to cut reallocations on a large library.
+    let mut actions: Vec<Action> = Vec::with_capacity(ordered.len() + manifest.len());
 
     let can_delete = deletion_allowed(sources);
 
-    for d in &desired {
+    for &d in &ordered {
         // Decide the audio action(s) first (unchanged), then reconcile the
         // clip's artifacts alongside. A clip whose audio is being deleted this
         // run has its sidecars co-deleted under the same gate; otherwise its
@@ -1142,6 +1155,26 @@ fn aggregate_desired(desired: &[Desired]) -> Vec<Desired> {
     out
 }
 
+/// Whether [`aggregate_desired`] must build an owned, merged copy: true when a
+/// clip id repeats or any entry's modes are not already in canonical
+/// `[Mirror, Copy]` order. When this is false the input is already the
+/// aggregated result and can be used as-is.
+fn needs_aggregation(desired: &[Desired]) -> bool {
+    let mut seen: HashSet<&str> = HashSet::with_capacity(desired.len());
+    desired
+        .iter()
+        .any(|d| !seen.insert(d.clip.id.as_str()) || !modes_are_canonical(&d.modes))
+}
+
+/// Whether a mode list is already in the canonical, deduplicated order that the
+/// owned merge would produce (`[Mirror]`, `[Copy]`, `[Mirror, Copy]`, or empty).
+fn modes_are_canonical(modes: &[SourceMode]) -> bool {
+    matches!(
+        modes,
+        [] | [SourceMode::Mirror] | [SourceMode::Copy] | [SourceMode::Mirror, SourceMode::Copy]
+    )
+}
+
 /// A deterministic, order-independent sort key for choosing the representative
 /// non-safety fields when aggregating duplicate desired entries.
 fn rep_key(d: &Desired) -> (&str, &str, &str, u8) {
@@ -1165,41 +1198,46 @@ fn rep_key(d: &Desired) -> (&str, &str, &str, u8) {
 /// every artifact [`Action::DeleteArtifact`] class, and every
 /// [`Action::DeleteStem`].
 fn suppress_path_aliasing(actions: &mut [Action]) {
-    let targets: BTreeSet<String> = actions
-        .iter()
-        .filter_map(|a| match a {
-            Action::Download { path, .. }
-            | Action::Reformat { path, .. }
-            | Action::WriteArtifact { path, .. }
-            | Action::WriteStem { path, .. } => Some(path.clone()),
-            Action::Rename { to, .. }
-            | Action::MoveArtifact { to, .. }
-            | Action::MoveStem { to, .. } => Some(to.clone()),
-            _ => None,
-        })
-        .collect();
-    for a in actions.iter_mut() {
-        if let Action::Delete { path, clip_id } = a
-            && targets.contains(path.as_str())
-        {
-            *a = Action::Skip {
+    // Collect the delete indices whose path a write or move also targets this
+    // run, borrowing the paths rather than cloning them. Only aliased deletes
+    // are rewritten below, so the common (no-alias) case allocates nothing.
+    let aliased: Vec<usize> = {
+        let targets: BTreeSet<&str> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Download { path, .. }
+                | Action::Reformat { path, .. }
+                | Action::WriteArtifact { path, .. }
+                | Action::WriteStem { path, .. } => Some(path.as_str()),
+                Action::Rename { to, .. }
+                | Action::MoveArtifact { to, .. }
+                | Action::MoveStem { to, .. } => Some(to.as_str()),
+                _ => None,
+            })
+            .collect();
+        actions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, a)| match a {
+                Action::Delete { path, .. }
+                | Action::DeleteArtifact { path, .. }
+                | Action::DeleteStem { path, .. } => {
+                    targets.contains(path.as_str()).then_some(index)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    for index in aliased {
+        actions[index] = match &actions[index] {
+            Action::Delete { clip_id, .. } | Action::DeleteStem { clip_id, .. } => Action::Skip {
                 clip_id: clip_id.clone(),
-            };
-        }
-        if let Action::DeleteArtifact { path, owner_id, .. } = a
-            && targets.contains(path.as_str())
-        {
-            *a = Action::Skip {
+            },
+            Action::DeleteArtifact { owner_id, .. } => Action::Skip {
                 clip_id: owner_id.clone(),
-            };
-        }
-        if let Action::DeleteStem { path, clip_id, .. } = a
-            && targets.contains(path.as_str())
-        {
-            *a = Action::Skip {
-                clip_id: clip_id.clone(),
-            };
-        }
+            },
+            _ => unreachable!("only delete actions are collected as aliased"),
+        };
     }
 }
 
