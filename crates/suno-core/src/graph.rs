@@ -39,11 +39,11 @@ pub struct LineageStore {
     /// On-disk schema version, so a future migration can branch on it.
     pub schema_version: u32,
     /// Every clip ever seen (including trashed ancestors), keyed by clip id.
-    pub nodes: BTreeMap<String, Node>,
+    pub(crate) nodes: BTreeMap<String, Node>,
     /// Every observed parent link, as a flat relational list.
-    pub edges: Vec<StoredEdge>,
+    pub(crate) edges: Vec<StoredEdge>,
     /// The last resolved (or last-known) root per clip, keyed by clip id.
-    pub resolution_cache: BTreeMap<String, CacheEntry>,
+    pub(crate) resolution_cache: BTreeMap<String, CacheEntry>,
     /// The reconciled folder-art state per album, keyed by the album's stable
     /// root id (HARDENING H2). Additive: absent in older stores, defaults empty.
     pub albums: BTreeMap<String, AlbumArt>,
@@ -78,6 +78,11 @@ pub struct LineageStore {
     /// [`update`]: LineageStore::update
     #[serde(skip)]
     eligible_root_ids: HashSet<String>,
+    /// Runtime index from edge identity to its row in `edges`, rebuilt from the
+    /// vector and kept in sync so upserts are O(1) without changing on-disk
+    /// shape.
+    #[serde(skip)]
+    edge_index: HashMap<EdgeKey, usize>,
 }
 
 impl Default for LineageStore {
@@ -92,6 +97,7 @@ impl Default for LineageStore {
             owner: None,
             album_overrides: BTreeMap::new(),
             eligible_root_ids: HashSet::new(),
+            edge_index: HashMap::new(),
         }
     }
 }
@@ -125,17 +131,6 @@ impl PartialEq for LineageStore {
 pub struct Owner {
     pub user_id: String,
     pub display_name: String,
-}
-
-/// The verdict of comparing an authenticated account against a library's owner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnerCheck {
-    /// The library is not pinned yet, so it can be adopted (trust-on-first-use).
-    FirstUse,
-    /// The authenticated account owns this library.
-    Match,
-    /// The authenticated account differs from the pinned owner.
-    Mismatch,
 }
 
 /// The PHASE 1 identity verdict: whether an authenticated account may run
@@ -396,6 +391,37 @@ pub struct StoredEdge {
     pub last_seen_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EdgeKey {
+    child_id: String,
+    parent_id: String,
+    edge_type: String,
+    role: String,
+    ordinal: u32,
+}
+
+impl EdgeKey {
+    fn new(child_id: &str, parent_id: &str, edge_type: &str, role: &str, ordinal: u32) -> Self {
+        Self {
+            child_id: child_id.to_owned(),
+            parent_id: parent_id.to_owned(),
+            edge_type: edge_type.to_owned(),
+            role: role.to_owned(),
+            ordinal,
+        }
+    }
+
+    fn from_stored(edge: &StoredEdge) -> Self {
+        Self::new(
+            &edge.child_id,
+            &edge.parent_id,
+            &edge.edge_type,
+            &edge.role,
+            edge.ordinal,
+        )
+    }
+}
+
 impl Default for StoredEdge {
     fn default() -> Self {
         Self {
@@ -512,15 +538,6 @@ impl LineageStore {
     /// The account this library is pinned to, if any.
     pub fn owner(&self) -> Option<&Owner> {
         self.owner.as_ref()
-    }
-
-    /// Compare an authenticated `user_id` against the pinned owner.
-    pub fn owner_check(&self, user_id: &str) -> OwnerCheck {
-        match &self.owner {
-            None => OwnerCheck::FirstUse,
-            Some(owner) if owner.user_id == user_id => OwnerCheck::Match,
-            Some(_) => OwnerCheck::Mismatch,
-        }
     }
 
     /// Pin this library to `owner`, replacing any prior pin.
@@ -755,6 +772,8 @@ impl LineageStore {
     /// [`lineage_edges`] link, and refreshes the monotonic resolution cache.
     /// `edges` is left sorted so the serialised form is deterministic.
     pub fn update(&mut self, clips: &[Clip], resolution: &Resolution, now: &str) {
+        self.rebuild_edge_index();
+
         for clip in clips {
             self.upsert_node(clip, now);
         }
@@ -794,6 +813,7 @@ impl LineageStore {
                 .then(a.edge_type.cmp(&b.edge_type))
                 .then(a.role.cmp(&b.role))
         });
+        self.rebuild_edge_index();
 
         for (child_id, info) in &resolution.roots {
             self.upsert_cache(child_id, info, now);
@@ -838,13 +858,9 @@ impl LineageStore {
     fn upsert_edge(&mut self, child_id: &str, edge: &Edge, now: &str) {
         let edge_type = edge_type_slug(edge.edge_type);
         let role = edge_role_slug(edge.role);
-        if let Some(existing) = self.edges.iter_mut().find(|stored| {
-            stored.child_id == child_id
-                && stored.parent_id == edge.parent_id
-                && stored.edge_type == edge_type
-                && stored.role == role
-                && stored.ordinal == edge.ordinal
-        }) {
+        let key = EdgeKey::new(child_id, &edge.parent_id, edge_type, role, edge.ordinal);
+        if let Some(&index) = self.edge_index.get(&key) {
+            let existing = &mut self.edges[index];
             existing.source_field = edge.source_field.to_owned();
             existing.status = "active".to_owned();
             existing.last_seen_at = now.to_owned();
@@ -860,6 +876,16 @@ impl LineageStore {
                 first_seen_at: now.to_owned(),
                 last_seen_at: now.to_owned(),
             });
+            self.edge_index.insert(key, self.edges.len() - 1);
+        }
+    }
+
+    fn rebuild_edge_index(&mut self) {
+        self.edge_index.clear();
+        for (index, edge) in self.edges.iter().enumerate() {
+            self.edge_index
+                .entry(EdgeKey::from_stored(edge))
+                .or_insert(index);
         }
     }
 
@@ -1182,6 +1208,7 @@ mod tests {
         assert!(value.get("nodes").unwrap().is_object());
         assert!(value.get("edges").unwrap().is_array());
         assert!(value.get("resolution_cache").unwrap().is_object());
+        assert!(value.get("edge_index").is_none());
 
         // Relational, not adjacency: a node carries no edges/parent of its own,
         // and an edge is a flat row keyed by child and parent.
@@ -2279,17 +2306,6 @@ mod tests {
     }
 
     #[test]
-    fn owner_check_covers_first_use_match_and_mismatch() {
-        let mut store = LineageStore::new();
-        assert_eq!(store.owner_check("user_a"), OwnerCheck::FirstUse);
-
-        store.pin_owner(owner("user_a", "Alice"));
-        assert_eq!(store.owner_check("user_a"), OwnerCheck::Match);
-        assert_eq!(store.owner_check("user_b"), OwnerCheck::Mismatch);
-        assert_eq!(store.owner().unwrap().display_name, "Alice");
-    }
-
-    #[test]
     fn refresh_display_name_only_when_changed_and_never_when_unpinned() {
         let mut store = LineageStore::new();
         // Unpinned: nothing to refresh.
@@ -2356,6 +2372,28 @@ mod tests {
         ] {
             assert!(!gate.is_additive());
         }
+    }
+
+    #[test]
+    fn update_after_roundtrip_rebuilds_edge_index_without_duplicates() {
+        let clips = chain_clips();
+        let resolution = chain_resolution();
+
+        let mut store = LineageStore::new();
+        store.update(&clips, &resolution, "first");
+
+        let json = serde_json::to_string(&store).unwrap();
+        let mut store: LineageStore = serde_json::from_str(&json).unwrap();
+
+        store.update(&clips, &resolution, "second");
+
+        assert_eq!(store.edges.len(), 2);
+        let cb = edge(&store, "c", "b");
+        assert_eq!(cb.first_seen_at, "first");
+        assert_eq!(cb.last_seen_at, "second");
+        let ba = edge(&store, "b", "a");
+        assert_eq!(ba.first_seen_at, "first");
+        assert_eq!(ba.last_seen_at, "second");
     }
 
     #[test]
