@@ -573,11 +573,11 @@ fn delete_artifact_action(
     })
 }
 
-/// Whether an artifact kind is a per-song sidecar reconciled per clip.
+/// Whether an artifact kind is a per-clip sidecar reconciled per clip.
 ///
-/// Only cover art lives on the manifest entry today; album/library classes
-/// (folder art, playlists) are owned by later phases and reconciled elsewhere,
-/// so per-clip planning ignores them.
+/// The per-clip sidecars (cover art, details, lyrics, `.lrc`, video) live on the
+/// manifest entry; album/library classes (folder art, playlists) are owned by
+/// later phases and reconciled elsewhere, so per-clip planning ignores them.
 fn is_per_clip_kind(kind: ArtifactKind) -> bool {
     matches!(
         kind,
@@ -745,9 +745,10 @@ fn plan_clip_artifacts(
     let entry = manifest.get(owner_id);
 
     for artifact in &d.artifacts {
-        // Per-clip reconcile owns only the per-song sidecars (cover.jpg/.webp).
-        // Album/library classes (folder art, playlists) belong to later phases;
-        // ignore them here so they are not rewritten every run.
+        // Per-clip reconcile owns the per-clip sidecars (cover art, details,
+        // lyrics, .lrc, video). Album/library classes (folder art, playlists)
+        // belong to later phases; ignore them here so they are not rewritten
+        // every run.
         if !is_per_clip_kind(artifact.kind) {
             continue;
         }
