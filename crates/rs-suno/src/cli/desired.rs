@@ -150,7 +150,7 @@ pub fn build_desired(
                 meta_hash,
                 art_hash: art_hash(clip),
                 modes,
-                trashed: false,
+                trashed: clip.is_trashed,
                 private: false,
                 artifacts,
                 // Stems are threaded in after this pure pass (they need a network
@@ -903,6 +903,28 @@ mod tests {
         assert_eq!(desired[0].art_hash, art_hash(&a));
         // A clip absent from the contexts map is treated as its own root.
         assert_eq!(desired[0].lineage, lineage);
+    }
+
+    #[test]
+    fn build_desired_carries_the_trashed_flag_from_the_clip() {
+        // SYNC-12: a trashed clip that still appears in a listing must reach
+        // reconcile as `trashed` so its local file is removed through the gated
+        // delete, rather than being treated as a normal desired clip (#150).
+        let mut gone = clip("id-gone", "Removed", "alice");
+        gone.is_trashed = true;
+        let live = clip("id-live", "Kept", "alice");
+        let clips = [&gone, &live];
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            &modes_for(&clips, SourceMode::Mirror),
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles::default(),
+            &NamingConfig::default(),
+        );
+        assert!(desired[0].trashed, "a trashed clip is marked trashed");
+        assert!(!desired[1].trashed, "a live clip is not");
     }
 
     #[test]
