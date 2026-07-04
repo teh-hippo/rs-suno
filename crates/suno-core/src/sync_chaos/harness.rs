@@ -263,23 +263,42 @@ pub(super) fn fast_opts() -> ExecOptions {
     }
 }
 
-/// Probe the in-memory disk for each manifest path, building the `local` map
-/// [`reconcile`] consumes. This is the bridge the CLI performs between the
-/// persisted manifest and the real filesystem.
+/// Probe the in-memory disk for each manifest path and all tracked artifact
+/// paths, building the `local` map [`reconcile`] consumes.  This is the bridge
+/// the CLI performs between the persisted manifest and the real filesystem.
 pub(super) fn probe_local(manifest: &Manifest, fs: &MemFs) -> HashMap<String, LocalFile> {
-    manifest
-        .iter()
-        .map(|(id, entry)| {
-            let local = match fs.metadata(&entry.path) {
-                Some(stat) => LocalFile {
-                    exists: stat.exists,
-                    size: stat.size,
-                },
-                None => LocalFile::default(),
-            };
-            (id.clone(), local)
-        })
-        .collect()
+    let probe = |path: &str| -> LocalFile {
+        match fs.metadata(path) {
+            Some(stat) => LocalFile {
+                exists: stat.exists,
+                size: stat.size,
+            },
+            None => LocalFile::default(),
+        }
+    };
+
+    let mut map = HashMap::new();
+    for (id, entry) in manifest.iter() {
+        // Audio file, keyed by clip_id.
+        map.insert(id.clone(), probe(&entry.path));
+
+        // Per-clip sidecars, keyed by their stored path.
+        for path in [
+            entry.cover_jpg.as_ref().map(|s| s.path.as_str()),
+            entry.cover_webp.as_ref().map(|s| s.path.as_str()),
+            entry.details_txt.as_ref().map(|s| s.path.as_str()),
+            entry.lyrics_txt.as_ref().map(|s| s.path.as_str()),
+            entry.lrc.as_ref().map(|s| s.path.as_str()),
+            entry.video_mp4.as_ref().map(|s| s.path.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|p| !p.is_empty())
+        {
+            map.entry(path.to_owned()).or_insert_with(|| probe(path));
+        }
+    }
+    map
 }
 
 /// Apply a plan through [`execute`], blocking on the future with the in-memory

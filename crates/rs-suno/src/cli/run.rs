@@ -1974,34 +1974,92 @@ fn reconcile_run(
     library_authoritative: bool,
     playlists_enumerated: bool,
 ) -> suno_core::Plan {
-    let local = stat_manifest(dest, manifest);
+    let local = stat_manifest(dest, manifest, albums, playlists);
     let can_delete = deletion_allowed(sources);
     let art_can_delete = can_delete && library_authoritative;
     let mut plan = reconcile(manifest, desired, &local, sources);
-    plan.actions
-        .extend(plan_album_artifacts(albums_desired, albums, art_can_delete));
+    plan.actions.extend(plan_album_artifacts(
+        albums_desired,
+        albums,
+        art_can_delete,
+        &local,
+    ));
     plan.actions.extend(plan_playlist_artifacts(
         playlist_desired,
         playlists,
         can_delete,
         playlists_enumerated,
+        &local,
     ));
     plan
 }
 
-/// Stat every manifest path so reconcile can spot missing or empty files.
-fn stat_manifest(dest: &Path, manifest: &suno_core::Manifest) -> HashMap<String, LocalFile> {
-    manifest
-        .iter()
-        .map(|(clip_id, entry)| {
-            let stat = std::fs::metadata(dest.join(&entry.path)).ok();
-            let local = LocalFile {
-                exists: stat.is_some(),
-                size: stat.map(|m| m.len()).unwrap_or(0),
-            };
-            (clip_id.clone(), local)
-        })
-        .collect()
+/// Stat every manifest path and all tracked artifact paths so reconcile can
+/// spot missing or empty files.
+///
+/// Returns a combined map keyed by both clip-id (for audio) and file path (for
+/// per-clip sidecars, folder art, and playlist files). Statting absent paths is
+/// harmless; the caller's destination directory need not exist yet.
+fn stat_manifest(
+    dest: &Path,
+    manifest: &suno_core::Manifest,
+    albums: &BTreeMap<String, AlbumArt>,
+    playlists: &BTreeMap<String, PlaylistState>,
+) -> HashMap<String, LocalFile> {
+    let stat = |path: &str| -> LocalFile {
+        let meta = std::fs::metadata(dest.join(path)).ok();
+        LocalFile {
+            exists: meta.is_some(),
+            size: meta.map(|m| m.len()).unwrap_or(0),
+        }
+    };
+
+    let mut map = HashMap::new();
+
+    for (clip_id, entry) in manifest.iter() {
+        // Audio file, keyed by clip_id.
+        map.insert(clip_id.clone(), stat(&entry.path));
+
+        // Per-clip sidecars, keyed by their stored path.
+        for path in [
+            entry.cover_jpg.as_ref().map(|s| s.path.as_str()),
+            entry.cover_webp.as_ref().map(|s| s.path.as_str()),
+            entry.details_txt.as_ref().map(|s| s.path.as_str()),
+            entry.lyrics_txt.as_ref().map(|s| s.path.as_str()),
+            entry.lrc.as_ref().map(|s| s.path.as_str()),
+            entry.video_mp4.as_ref().map(|s| s.path.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|p| !p.is_empty())
+        {
+            map.entry(path.to_owned()).or_insert_with(|| stat(path));
+        }
+    }
+
+    // Folder art paths, keyed by their stored path.
+    for art in albums.values() {
+        for state in [
+            art.folder_jpg.as_ref(),
+            art.folder_webp.as_ref(),
+            art.folder_mp4.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.path.is_empty())
+        {
+            map.entry(state.path.clone())
+                .or_insert_with(|| stat(&state.path));
+        }
+    }
+
+    // Playlist file paths, keyed by their stored path.
+    for state in playlists.values().filter(|s| !s.path.is_empty()) {
+        map.entry(state.path.clone())
+            .or_insert_with(|| stat(&state.path));
+    }
+
+    map
 }
 
 /// True when the plan would change disk (anything but skips).

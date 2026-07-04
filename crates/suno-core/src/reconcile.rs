@@ -471,7 +471,7 @@ pub fn reconcile(
             co_delete_artifacts(d.clip.id.as_str(), manifest, can_delete, &mut actions);
             co_delete_stems(d.clip.id.as_str(), manifest, can_delete, &mut actions);
         } else {
-            plan_clip_artifacts(d, manifest, can_delete, &mut actions);
+            plan_clip_artifacts(d, manifest, local, can_delete, &mut actions);
             plan_clip_stems(d, manifest, can_delete, &mut actions);
         }
     }
@@ -722,13 +722,25 @@ pub(crate) fn set_manifest_stem(
 /// Reconcile the artifacts of a clip whose audio is kept this run.
 ///
 /// Writes each desired per-clip artifact that the manifest lacks, whose stored
-/// hash drifts, or whose stored path drifts (the audio moved). Delete-reconciles
-/// each manifest artifact whose kind is no longer desired (a removed kind)
-/// through the shared [`delete_artifact_action`] gate, unless the clip is
-/// protected this run, and unless the kind opts out of removed-kind deletion
-/// ([`removed_kind_delete_eligible`]) — cover art does, so a transient empty URL
-/// keeps its sidecar rather than deleting it.
-fn plan_clip_artifacts(d: &Desired, manifest: &Manifest, can_delete: bool, out: &mut Vec<Action>) {
+/// hash drifts, whose stored path drifts (the audio moved), or whose file is
+/// absent on disk. Delete-reconciles each manifest artifact whose kind is no
+/// longer desired (a removed kind) through the shared [`delete_artifact_action`]
+/// gate, unless the clip is protected this run, and unless the kind opts out of
+/// removed-kind deletion ([`removed_kind_delete_eligible`]) — cover art does, so
+/// a transient empty URL keeps its sidecar rather than deleting it.
+///
+/// `local` is the same path-keyed probe map that [`reconcile`] received,
+/// extended by the caller to include the artifact paths in the manifest. A
+/// manifest slot whose path resolves to a missing or zero-size file forces
+/// `needs_write = true`. A path absent from `local` (probe unavailable) falls
+/// back to hash/path comparison only.
+fn plan_clip_artifacts(
+    d: &Desired,
+    manifest: &Manifest,
+    local: &HashMap<String, LocalFile>,
+    can_delete: bool,
+    out: &mut Vec<Action>,
+) {
     let owner_id = d.clip.id.as_str();
     let entry = manifest.get(owner_id);
 
@@ -740,16 +752,19 @@ fn plan_clip_artifacts(d: &Desired, manifest: &Manifest, can_delete: bool, out: 
             continue;
         }
         // A write is needed when the manifest lacks the sidecar, its bytes drift
-        // (hash), or the clip moved so the sidecar belongs at a new path (audio
-        // renamed to a new album/name). On a move the executor's WriteArtifact
-        // relocates the sidecar: it writes the new path, then removes the copy
-        // left at the previously tracked path (see `Ctx::write_artifact`).
-        // Self-healing a sidecar that is missing on disk despite a matching
-        // manifest record is deferred beyond P7 (it needs a local-artifact
-        // presence probe, as audio has).
+        // (hash), the clip moved so the sidecar belongs at a new path, or the
+        // tracked file is absent (or empty) on disk. On a move the executor's
+        // WriteArtifact relocates the sidecar: it writes the new path, then
+        // removes the copy left at the previously tracked path.
         let needs_write = match entry.and_then(|e| manifest_artifact_by_kind(e, artifact.kind)) {
             None => true,
-            Some(state) => state.hash != artifact.hash || state.path != artifact.path,
+            Some(state) => {
+                state.hash != artifact.hash
+                    || state.path != artifact.path
+                    || local
+                        .get(&state.path)
+                        .is_some_and(|f| !f.exists || f.size == 0)
+            }
         };
         if needs_write {
             out.push(Action::WriteArtifact {
@@ -1280,9 +1295,14 @@ fn album_child(album_dir: &str, name: &str) -> String {
 /// Writes are keyed on the CHOSEN ART CONTENT HASH (and the target path), never
 /// the source clip id: for each present desired kind, a [`Action::WriteArtifact`]
 /// is emitted only when the album store lacks that kind, its stored hash differs,
-/// or its stored path differs. When both hash and path match, nothing is written,
-/// so a most-played flip that resolves to the same art content is a no-op
+/// its stored path differs, or the tracked file is absent (or empty) on disk.
+/// When hash, path, and disk presence all match, nothing is written, so a
+/// most-played flip that resolves to the same art content is a no-op
 /// (HARDENING H1). Exactly one write can be emitted per album per kind.
+///
+/// `local` is a path-keyed probe map built by the caller. A stored path that
+/// resolves to a missing or zero-size file forces `needs_write = true`.  A path
+/// absent from `local` (probe unavailable) falls back to hash/path comparison.
 ///
 /// Deletes cover any stored album/kind no longer desired — the album emptied (no
 /// selected clips root there this run) or the kind's source disappeared (no
@@ -1297,6 +1317,7 @@ pub fn plan_album_artifacts(
     desired: &[AlbumDesired],
     albums: &BTreeMap<String, AlbumArt>,
     can_delete: bool,
+    local: &HashMap<String, LocalFile>,
 ) -> Vec<Action> {
     let mut actions: Vec<Action> = Vec::new();
     let by_root: BTreeMap<&str, &AlbumDesired> =
@@ -1314,7 +1335,13 @@ pub fn plan_album_artifacts(
         {
             let needs_write = match stored.and_then(|a| a.artifact(artifact.kind)) {
                 None => true,
-                Some(state) => state.hash != artifact.hash || state.path != artifact.path,
+                Some(state) => {
+                    state.hash != artifact.hash
+                        || state.path != artifact.path
+                        || local
+                            .get(&state.path)
+                            .is_some_and(|f| !f.exists || f.size == 0)
+                }
             };
             if needs_write {
                 actions.push(Action::WriteArtifact {
@@ -1399,9 +1426,14 @@ fn album_action_key(action: &Action) -> (&str, ArtifactKind) {
 /// For each desired playlist a single [`Action::WriteArtifact`] of kind
 /// [`Playlist`](ArtifactKind::Playlist) is emitted (carrying the rendered body
 /// inline in `content`) when the store lacks the playlist, its stored hash
-/// differs, or its stored path differs. The hash is taken over the full rendered
-/// text, so a name, order, path, title, or duration change all trigger a rewrite
-/// (HARDENING B1); an unchanged playlist writes nothing (idempotent).
+/// differs, its stored path differs, or the tracked file is absent (or empty)
+/// on disk. The hash is taken over the full rendered text, so a name, order,
+/// path, title, or duration change all trigger a rewrite (HARDENING B1); an
+/// unchanged, present playlist writes nothing (idempotent).
+///
+/// `local` is a path-keyed probe map built by the caller. A stored path that
+/// resolves to a missing or zero-size file forces `needs_write = true`.  A path
+/// absent from `local` (probe unavailable) falls back to hash/path comparison.
 ///
 /// A **rename** (the same id whose sanitised name, and so path, changed) writes
 /// the new file and, gated exactly like a stale delete (`can_delete &&
@@ -1429,6 +1461,7 @@ pub fn plan_playlist_artifacts(
     stored: &BTreeMap<String, PlaylistState>,
     can_delete: bool,
     list_fully_enumerated: bool,
+    local: &HashMap<String, LocalFile>,
 ) -> Vec<Action> {
     let mut actions: Vec<Action> = Vec::new();
     let desired_ids: BTreeSet<&str> = desired.iter().map(|d| d.id.as_str()).collect();
@@ -1440,7 +1473,13 @@ pub fn plan_playlist_artifacts(
         let stored_here = stored.get(&d.id);
         let needs_write = match stored_here {
             None => true,
-            Some(state) => state.hash != d.hash || state.path != d.path,
+            Some(state) => {
+                state.hash != d.hash
+                    || state.path != d.path
+                    || local
+                        .get(&state.path)
+                        .is_some_and(|f| !f.exists || f.size == 0)
+            }
         };
         if needs_write {
             actions.push(Action::WriteArtifact {
@@ -3411,6 +3450,193 @@ mod tests {
         assert_eq!(plan.artifact_deletes(), 0);
     }
 
+    // ── Self-heal: missing-on-disk sidecar / folder-art / playlist ──
+
+    /// A local probe map that marks `path` as missing (exists=false).
+    fn local_with_missing(audio_id: &str, missing_path: &str) -> HashMap<String, LocalFile> {
+        let mut m = local_present(audio_id);
+        m.insert(missing_path.to_owned(), LocalFile::default());
+        m
+    }
+
+    /// A local probe map that marks `path` as present (exists=true, size>0).
+    fn local_with_present_artifact(
+        audio_id: &str,
+        artifact_path: &str,
+    ) -> HashMap<String, LocalFile> {
+        let mut m = local_present(audio_id);
+        m.insert(artifact_path.to_owned(), present(50));
+        m
+    }
+
+    #[test]
+    fn sidecar_missing_on_disk_forces_rewrite() {
+        // Manifest and desired agree on hash+path, but the file is absent on
+        // disk: the probe forces needs_write = true and a WriteArtifact is
+        // emitted to self-heal it.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "a/cover.jpg",
+                "https://art/a",
+                "h1",
+            )],
+        )];
+        let local = local_with_missing("a", "a/cover.jpg");
+        let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+        assert_eq!(
+            plan.artifact_writes(),
+            1,
+            "missing sidecar must be rewritten"
+        );
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn sidecar_present_on_disk_with_matching_hash_no_churn() {
+        // Same manifest / desired / hash — but the file IS present. No write.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "a/cover.jpg",
+                "https://art/a",
+                "h1",
+            )],
+        )];
+        let local = local_with_present_artifact("a", "a/cover.jpg");
+        let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+        assert_eq!(plan.artifact_writes(), 0, "present sidecar must not churn");
+        assert_eq!(plan.artifact_deletes(), 0);
+    }
+
+    #[test]
+    fn sidecar_probe_absent_falls_back_to_hash_comparison_no_write() {
+        // When the artifact path is not in the local map (probe unavailable),
+        // the engine falls back to hash/path comparison only. A matching entry
+        // must NOT trigger a write, and must NOT trigger a delete.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "a/cover.jpg",
+                "https://art/a",
+                "h1",
+            )],
+        )];
+        // local only has the audio entry; cover path is unprobeable.
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(
+            plan.artifact_writes(),
+            0,
+            "no write when probe unavailable and hash matches"
+        );
+        assert_eq!(
+            plan.artifact_deletes(),
+            0,
+            "missing probe must never trigger a delete"
+        );
+    }
+
+    #[test]
+    fn folder_art_missing_on_disk_forces_rewrite() {
+        // The album store records a matching folder.jpg, but the file is absent:
+        // the probe must force a WriteArtifact.
+        let members = vec![album_member(
+            album_clip("a", 1, "t0", "art-a", ""),
+            "root",
+            "c/al/a.flac",
+        )];
+        let desired = album_desired(&members, false, false);
+        let mut albums = BTreeMap::new();
+        albums.insert(
+            "root".to_string(),
+            AlbumArt {
+                folder_jpg: Some(stored("c/al/folder.jpg", &art_url_hash("art-a"))),
+                folder_webp: None,
+                folder_mp4: None,
+            },
+        );
+        let mut local: HashMap<String, LocalFile> = HashMap::new();
+        local.insert("c/al/folder.jpg".to_owned(), LocalFile::default());
+        let actions = plan_album_artifacts(&desired, &albums, true, &local);
+        assert_eq!(actions.len(), 1, "missing folder art must be rewritten");
+        assert!(matches!(
+            &actions[0],
+            Action::WriteArtifact {
+                kind: ArtifactKind::FolderJpg,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn folder_art_present_on_disk_no_churn() {
+        // Matching hash+path and the file is present: no write.
+        let members = vec![album_member(
+            album_clip("a", 1, "t0", "art-a", ""),
+            "root",
+            "c/al/a.flac",
+        )];
+        let desired = album_desired(&members, false, false);
+        let mut albums = BTreeMap::new();
+        albums.insert(
+            "root".to_string(),
+            AlbumArt {
+                folder_jpg: Some(stored("c/al/folder.jpg", &art_url_hash("art-a"))),
+                folder_webp: None,
+                folder_mp4: None,
+            },
+        );
+        let mut local: HashMap<String, LocalFile> = HashMap::new();
+        local.insert("c/al/folder.jpg".to_owned(), present(5000));
+        let actions = plan_album_artifacts(&desired, &albums, true, &local);
+        assert!(
+            actions.is_empty(),
+            "present folder art with matching hash must not churn"
+        );
+    }
+
+    #[test]
+    fn playlist_missing_on_disk_forces_rewrite() {
+        // The playlist store records a matching entry, but the file is absent:
+        // the probe must force a WriteArtifact.
+        let desired = vec![pl_desired("pl1", "Mix", "Mix.m3u8", "h1")];
+        let stored = pl_store(&[("pl1", pl_state("Mix", "Mix.m3u8", "h1"))]);
+        let mut local: HashMap<String, LocalFile> = HashMap::new();
+        local.insert("Mix.m3u8".to_owned(), LocalFile::default());
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true, &local);
+        assert_eq!(actions.len(), 1, "missing playlist file must be rewritten");
+        assert!(matches!(
+            &actions[0],
+            Action::WriteArtifact {
+                kind: ArtifactKind::Playlist,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn playlist_present_on_disk_no_churn() {
+        // Matching hash+path and the file is present: no write.
+        let desired = vec![pl_desired("pl1", "Mix", "Mix.m3u8", "h1")];
+        let stored = pl_store(&[("pl1", pl_state("Mix", "Mix.m3u8", "h1"))]);
+        let mut local: HashMap<String, LocalFile> = HashMap::new();
+        local.insert("Mix.m3u8".to_owned(), present(200));
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true, &local);
+        assert!(
+            actions.is_empty(),
+            "present playlist with matching hash must not churn"
+        );
+    }
+
     // ── Phase 8: folder art (album-scoped) ──────────────────────────
 
     fn album_clip(id: &str, play_count: u64, created_at: &str, image: &str, video: &str) -> Clip {
@@ -3632,7 +3858,7 @@ mod tests {
             "c/al/a.flac",
         )];
         let desired = album_desired(&members, true, false);
-        let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true);
+        let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true, &HashMap::new());
         assert_eq!(
             actions,
             vec![
@@ -3673,7 +3899,7 @@ mod tests {
                 folder_mp4: None,
             },
         );
-        assert!(plan_album_artifacts(&desired, &albums, true).is_empty());
+        assert!(plan_album_artifacts(&desired, &albums, true, &HashMap::new()).is_empty());
     }
 
     #[test]
@@ -3693,7 +3919,7 @@ mod tests {
                 folder_mp4: None,
             },
         );
-        let actions = plan_album_artifacts(&desired, &albums, true);
+        let actions = plan_album_artifacts(&desired, &albums, true, &HashMap::new());
         assert_eq!(actions.len(), 1);
         assert!(matches!(
             &actions[0],
@@ -3717,7 +3943,7 @@ mod tests {
             ),
         ];
         let desired1 = album_desired(&run1, false, false);
-        let write1 = plan_album_artifacts(&desired1, &BTreeMap::new(), true);
+        let write1 = plan_album_artifacts(&desired1, &BTreeMap::new(), true, &HashMap::new());
         assert_eq!(write1.len(), 1);
 
         // Persist the winner's state as the executor would.
@@ -3754,7 +3980,7 @@ mod tests {
         ];
         let desired2 = album_desired(&run2, false, false);
         // The winner flipped, but the chosen art content hash did not: no churn.
-        assert!(plan_album_artifacts(&desired2, &albums, true).is_empty());
+        assert!(plan_album_artifacts(&desired2, &albums, true, &HashMap::new()).is_empty());
     }
 
     #[test]
@@ -3782,7 +4008,7 @@ mod tests {
             ),
         ];
         let desired = album_desired(&members, false, false);
-        let actions = plan_album_artifacts(&desired, &albums, true);
+        let actions = plan_album_artifacts(&desired, &albums, true, &HashMap::new());
         assert_eq!(actions.len(), 1);
         assert!(matches!(
             &actions[0],
@@ -3809,7 +4035,7 @@ mod tests {
             .collect();
         let desired = album_desired(&members, true, false);
         assert_eq!(desired.len(), 1);
-        let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true);
+        let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true, &HashMap::new());
         // Exactly one folder.jpg and one cover.webp for the whole 200-clip album.
         assert_eq!(actions.len(), 2);
         assert_eq!(
@@ -3836,10 +4062,10 @@ mod tests {
         let desired: Vec<AlbumDesired> = Vec::new();
 
         // Gated off: an incomplete/unsafe listing removes nothing.
-        assert!(plan_album_artifacts(&desired, &albums, false).is_empty());
+        assert!(plan_album_artifacts(&desired, &albums, false, &HashMap::new()).is_empty());
 
         // Gated on: every stored kind is removed, sorted by kind.
-        let actions = plan_album_artifacts(&desired, &albums, true);
+        let actions = plan_album_artifacts(&desired, &albums, true, &HashMap::new());
         assert_eq!(
             actions,
             vec![
@@ -3882,9 +4108,9 @@ mod tests {
         )];
         let desired = album_desired(&members, false, false);
 
-        assert!(plan_album_artifacts(&desired, &albums, false).is_empty());
+        assert!(plan_album_artifacts(&desired, &albums, false, &HashMap::new()).is_empty());
 
-        let actions = plan_album_artifacts(&desired, &albums, true);
+        let actions = plan_album_artifacts(&desired, &albums, true, &HashMap::new());
         assert_eq!(
             actions,
             vec![Action::DeleteArtifact {
@@ -3916,10 +4142,10 @@ mod tests {
         let desired = album_desired(&members, true, false);
 
         // Gated off: nothing removed on an unsafe listing.
-        assert!(plan_album_artifacts(&desired, &albums, false).is_empty());
+        assert!(plan_album_artifacts(&desired, &albums, false, &HashMap::new()).is_empty());
 
         // Gated on: only the raw cover goes; folder.jpg and cover.webp stay.
-        let actions = plan_album_artifacts(&desired, &albums, true);
+        let actions = plan_album_artifacts(&desired, &albums, true, &HashMap::new());
         assert_eq!(
             actions,
             vec![Action::DeleteArtifact {
@@ -3945,7 +4171,7 @@ mod tests {
             ),
         ];
         let desired = album_desired(&members, true, true);
-        let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true);
+        let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true, &HashMap::new());
         let keys: Vec<(&str, ArtifactKind)> = actions
             .iter()
             .map(|a| match a {
@@ -3996,7 +4222,8 @@ mod tests {
     #[test]
     fn playlist_write_emitted_for_a_new_playlist() {
         let desired = vec![pl_desired("pl1", "Road Trip", "Road Trip.m3u8", "h1")];
-        let actions = plan_playlist_artifacts(&desired, &BTreeMap::new(), true, true);
+        let actions =
+            plan_playlist_artifacts(&desired, &BTreeMap::new(), true, true, &HashMap::new());
         assert_eq!(
             actions,
             vec![Action::WriteArtifact {
@@ -4016,7 +4243,7 @@ mod tests {
         // flip, a new path) — the m3u8 is rewritten (B1).
         let desired = vec![pl_desired("pl1", "Mix", "Mix.m3u8", "h2")];
         let stored = pl_store(&[("pl1", pl_state("Mix", "Mix.m3u8", "h1"))]);
-        let actions = plan_playlist_artifacts(&desired, &stored, true, true);
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true, &HashMap::new());
         assert_eq!(actions.len(), 1);
         assert!(matches!(
             &actions[0],
@@ -4028,7 +4255,7 @@ mod tests {
     fn playlist_unchanged_is_idempotent() {
         let desired = vec![pl_desired("pl1", "Mix", "Mix.m3u8", "h1")];
         let stored = pl_store(&[("pl1", pl_state("Mix", "Mix.m3u8", "h1"))]);
-        let actions = plan_playlist_artifacts(&desired, &stored, true, true);
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true, &HashMap::new());
         assert!(actions.is_empty(), "an unchanged playlist plans nothing");
     }
 
@@ -4038,7 +4265,7 @@ mod tests {
         // the new file and delete the old one, both under the full delete gate.
         let desired = vec![pl_desired("pl1", "Summer", "Summer.m3u8", "h2")];
         let stored = pl_store(&[("pl1", pl_state("Spring", "Spring.m3u8", "h1"))]);
-        let actions = plan_playlist_artifacts(&desired, &stored, true, true);
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true, &HashMap::new());
         assert_eq!(
             actions,
             vec![
@@ -4065,7 +4292,7 @@ mod tests {
         // delete and is gated: no can_delete means no removal (B2).
         let desired = vec![pl_desired("pl1", "Summer", "Summer.m3u8", "h2")];
         let stored = pl_store(&[("pl1", pl_state("Spring", "Spring.m3u8", "h1"))]);
-        let actions = plan_playlist_artifacts(&desired, &stored, false, true);
+        let actions = plan_playlist_artifacts(&desired, &stored, false, true, &HashMap::new());
         assert_eq!(actions.len(), 1);
         assert!(matches!(
             &actions[0],
@@ -4085,7 +4312,7 @@ mod tests {
         // BOTH can_delete and list_fully_enumerated hold.
         let stored = pl_store(&[("gone", pl_state("Gone", "Gone.m3u8", "h1"))]);
 
-        let deleted = plan_playlist_artifacts(&[], &stored, true, true);
+        let deleted = plan_playlist_artifacts(&[], &stored, true, true, &HashMap::new());
         assert_eq!(
             deleted,
             vec![Action::DeleteArtifact {
@@ -4096,9 +4323,9 @@ mod tests {
         );
 
         // Any gate off → no delete.
-        assert!(plan_playlist_artifacts(&[], &stored, false, true).is_empty());
-        assert!(plan_playlist_artifacts(&[], &stored, true, false).is_empty());
-        assert!(plan_playlist_artifacts(&[], &stored, false, false).is_empty());
+        assert!(plan_playlist_artifacts(&[], &stored, false, true, &HashMap::new()).is_empty());
+        assert!(plan_playlist_artifacts(&[], &stored, true, false, &HashMap::new()).is_empty());
+        assert!(plan_playlist_artifacts(&[], &stored, false, false, &HashMap::new()).is_empty());
     }
 
     #[test]
@@ -4111,7 +4338,7 @@ mod tests {
             ("pl1", pl_state("Mix", "Mix.m3u8", "h1")),
             ("pl2", pl_state("Chill", "Chill.m3u8", "h2")),
         ]);
-        let actions = plan_playlist_artifacts(&[], &stored, true, false);
+        let actions = plan_playlist_artifacts(&[], &stored, true, false, &HashMap::new());
         assert!(
             actions.is_empty(),
             "a failed playlist listing must plan zero actions, got {actions:?}"
@@ -4130,11 +4357,11 @@ mod tests {
         ]);
 
         // Not fully enumerated: zero deletes (the safety valve).
-        assert!(plan_playlist_artifacts(&[], &stored, true, false).is_empty());
+        assert!(plan_playlist_artifacts(&[], &stored, true, false, &HashMap::new()).is_empty());
 
         // Fully enumerated and allowed: both are deleted (the caller's cap
         // catches this mass removal).
-        let wiped = plan_playlist_artifacts(&[], &stored, true, true);
+        let wiped = plan_playlist_artifacts(&[], &stored, true, true, &HashMap::new());
         assert_eq!(
             wiped
                 .iter()
@@ -4152,7 +4379,7 @@ mod tests {
         // `pl_ok` reconciles; `pl_fail` is simply absent from both maps.
         let desired = vec![pl_desired("pl_ok", "Ok", "Ok.m3u8", "h2")];
         let stored = pl_store(&[("pl_ok", pl_state("Ok", "Ok.m3u8", "h1"))]);
-        let actions = plan_playlist_artifacts(&desired, &stored, true, true);
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true, &HashMap::new());
         // Only the healthy playlist is rewritten; nothing references pl_fail.
         assert_eq!(actions.len(), 1);
         assert!(matches!(
@@ -4181,7 +4408,7 @@ mod tests {
             pl_desired("pl2", "Shared", "Shared.m3u8", "h3"),
         ];
         let stored = pl_store(&[("pl1", pl_state("Old", "Shared.m3u8", "h1"))]);
-        let actions = plan_playlist_artifacts(&desired, &stored, true, true);
+        let actions = plan_playlist_artifacts(&desired, &stored, true, true, &HashMap::new());
         // No DeleteArtifact survives against a path some write produces.
         let write_paths: BTreeSet<&str> = actions
             .iter()
