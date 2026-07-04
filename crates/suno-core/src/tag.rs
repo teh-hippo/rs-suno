@@ -891,7 +891,7 @@ mod tests {
         let cover = b"\xFF\xD8\xFFwav-cover".to_vec();
         let tagged = tag_wav(&audio, &meta, Some(&cover), None).unwrap();
 
-        let tag = id3::Tag::read_from_wav(Cursor::new(&tagged)).unwrap();
+        let tag = id3::Tag::read_from2(Cursor::new(&tagged)).unwrap();
         assert_eq!(tag.title(), Some("Electric Storm"));
         assert_eq!(tag.artist(), Some("alice"));
         assert_eq!(tag.album(), Some("Weather Series"));
@@ -934,7 +934,7 @@ mod tests {
         let once = tag_wav(&audio, &meta, None, None).unwrap();
         let twice = tag_wav(&once, &meta, None, None).unwrap();
 
-        let tag = id3::Tag::read_from_wav(Cursor::new(&twice)).unwrap();
+        let tag = id3::Tag::read_from2(Cursor::new(&twice)).unwrap();
         assert_eq!(tag.title(), Some("Electric Storm"));
         let title_count = tag.frames().filter(|f| f.id() == "TIT2").count();
         assert_eq!(title_count, 1, "prior tag replaced, not stacked");
@@ -950,7 +950,7 @@ mod tests {
         let mut retag_meta = meta.clone();
         retag_meta.lyrics = String::new();
         let retagged = tag_wav(&with_lyrics, &retag_meta, None, None).unwrap();
-        let tag = id3::Tag::read_from_wav(Cursor::new(&retagged)).unwrap();
+        let tag = id3::Tag::read_from2(Cursor::new(&retagged)).unwrap();
         assert_eq!(
             tag.lyrics().next().map(|f| f.text.as_str()),
             Some("first embedded lyrics"),
