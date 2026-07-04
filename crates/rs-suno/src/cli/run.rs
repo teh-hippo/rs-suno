@@ -50,6 +50,36 @@ const PROMPT_PATH_LIMIT: usize = 3;
 const LAST_RUN_NAME: &str = ".suno-last-run";
 #[cfg(unix)]
 const PRIVATE_STATE_FILE_MODE: u32 = 0o600;
+/// Maximum number of accounts processed concurrently when `--all` targets
+/// multiple accounts. Accounts share no mutable state (separate clients,
+/// tokens, destination roots, manifests, and lineage files), so per-account
+/// isolation is what makes this data-safe: each account's serial commit and
+/// deletion-safety logic is entirely unaffected by the concurrency between
+/// accounts.
+const ACCOUNT_CONCURRENCY: usize = 4;
+
+std::thread_local! {
+    /// Per-account stderr buffer. When active (multi-account concurrent path),
+    /// `eprint_t!` writes here instead of directly to stderr, so concurrent
+    /// accounts' output lines never interleave. Flushed atomically after each
+    /// account's thread completes.
+    static TASK_STDERR: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Write a formatted line to the per-account buffer when in a concurrent thread,
+/// or directly to stderr for single-account (sequential) runs.
+macro_rules! eprint_t {
+    ($($arg:tt)*) => {{
+        TASK_STDERR.with(|b| {
+            let mut guard = b.borrow_mut();
+            if let Some(buf) = guard.as_mut() {
+                buf.push(format!($($arg)*));
+            } else {
+                eprintln!($($arg)*);
+            }
+        });
+    }};
+}
 
 /// Which verb is running; it sets the source mode and whether the run executes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,23 +296,84 @@ async fn run(
         }
     };
 
-    let flags = flag_overrides(global, args);
     let mut worst = ExitCode::Ok;
-    for target in targets {
-        let code = run_one(
-            verb,
-            global,
-            args,
-            &target,
-            config.as_ref(),
-            &flags,
-            &env,
-            exit_code,
-        )
-        .await?;
-        worst = worse(worst, code);
-        if code == ExitCode::Interrupted || code == ExitCode::DiskFull {
-            break;
+    if targets.len() <= 1 {
+        // Single account: sequential with streaming output (unchanged behaviour).
+        let flags = flag_overrides(global, args);
+        for target in targets {
+            let code = run_one(
+                verb,
+                global,
+                args,
+                &target,
+                config.as_ref(),
+                &flags,
+                &env,
+                exit_code,
+            )
+            .await?;
+            worst = worse(worst, code);
+            if code == ExitCode::Interrupted || code == ExitCode::DiskFull {
+                break;
+            }
+        }
+    } else {
+        // Multiple accounts: bounded concurrency via OS threads (one per
+        // account, each with its own current-thread tokio runtime), with
+        // per-account buffered output flushed atomically on completion.
+        // Accounts share no mutable state (separate clients, tokens,
+        // destination roots, manifests, and lineage files), so per-account
+        // isolation is what makes this data-safe — each account's serial
+        // commit and deletion-safety logic is entirely unaffected by the
+        // concurrency between accounts.
+        use std::sync::Arc;
+        let global = Arc::new(global.clone());
+        let args = Arc::new(args.clone());
+        let config = Arc::new(config);
+        let env = Arc::new(env);
+        let sem = Arc::new(tokio::sync::Semaphore::new(ACCOUNT_CONCURRENCY));
+        let mut handles = Vec::new();
+        for target in targets {
+            let g = Arc::clone(&global);
+            let a = Arc::clone(&args);
+            let c = Arc::clone(&config);
+            let e = Arc::clone(&env);
+            // Acquire a slot before spawning; the permit is moved into the
+            // thread and released when it exits.
+            let permit = Arc::clone(&sem)
+                .acquire_owned()
+                .await
+                .expect("semaphore closed");
+            handles.push(std::thread::spawn(move || {
+                TASK_STDERR.with(|b| *b.borrow_mut() = Some(Vec::new()));
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+                let flags = flag_overrides(&g, &a);
+                let result = rt.block_on(run_one(
+                    verb,
+                    &g,
+                    &a,
+                    &target,
+                    (*c).as_ref(),
+                    &flags,
+                    &e,
+                    exit_code,
+                ));
+                drop(permit);
+                let lines = TASK_STDERR.with(|b| b.borrow_mut().take().unwrap_or_default());
+                result.map(|code| (code, lines))
+            }));
+        }
+        for handle in handles {
+            let (code, lines) = handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("account thread panicked"))??;
+            for line in lines {
+                eprintln!("{line}");
+            }
+            worst = worse(worst, code);
         }
     }
     Ok(worst)
@@ -552,7 +643,7 @@ async fn run_one(
     // executing run: check and dry-run never persist a pin, so accepting the
     // flag there would print a re-pin that silently never happens.
     if args.allow_account_change && (global.dry_run || verb == Verb::Check) {
-        eprintln!(
+        eprint_t!(
             "error: --allow-account-change only applies to an executing sync or copy, not check or --dry-run."
         );
         return Ok(ExitCode::Usage);
@@ -569,7 +660,7 @@ async fn run_one(
         match resolved {
             Ok(settings) => settings,
             Err(err) => {
-                eprintln!("error: {err}");
+                eprint_t!("error: {err}");
                 return Ok(ExitCode::Config);
             }
         }
@@ -578,20 +669,20 @@ async fn run_one(
     let token = match resolve_token(&target.label, &settings).await {
         Ok(Some(token)) => token,
         Ok(None) => {
-            eprintln!(
+            eprint_t!(
                 "error: no token for account '{}'; pass --token, set SUNO_TOKEN or SUNO_TOKEN_COMMAND, or set token/token_command in config",
                 target.label
             );
             return Ok(ExitCode::Config);
         }
         Err(err) => {
-            eprintln!("error: {err}");
+            eprint_t!("error: {err}");
             return Ok(ExitCode::Config);
         }
     };
 
     if settings.requires_ffmpeg() && version::ffmpeg_version().is_none() {
-        eprintln!(
+        eprint_t!(
             "error: ffmpeg is required for {} output{} but was not found on PATH; \
              install ffmpeg or switch to mp3 format",
             settings.format,
@@ -618,7 +709,7 @@ async fn run_one(
     // and proceeding would delete against an unverified account. authenticate()
     // already errors on a missing id; this makes the invariant explicit.
     let Some(user_id) = auth.user_id().map(str::to_owned) else {
-        eprintln!(
+        eprint_t!(
             "error: could not determine the authenticated account for '{}'. Refusing to run to protect the library.",
             target.label
         );
@@ -656,7 +747,7 @@ async fn run_one(
     let mut force_additive = gate.is_additive();
     match gate {
         OwnerGate::AbortConfigMismatch => {
-            eprintln!(
+            eprint_t!(
                 "error: the configured account_id ({}) does not match the authenticated account (id {}). Refusing to run to protect the library.",
                 short_id(settings.account_id.as_deref().unwrap_or_default()),
                 short_id(&user_id)
@@ -665,7 +756,7 @@ async fn run_one(
         }
         OwnerGate::AbortMismatch => {
             let pinned = store.owner().expect("mismatch implies a pinned owner");
-            eprintln!(
+            eprint_t!(
                 "error: this library belongs to {} (id {}) but the token authenticates as {} (id {}). Refusing to run to protect the library. Pass --allow-account-change to re-pin it to the authenticated account, or use a different destination.",
                 pinned.display_name,
                 short_id(&pinned.user_id),
@@ -679,27 +770,27 @@ async fn run_one(
                 .owner()
                 .map(|owner| owner.display_name.clone())
                 .unwrap_or_default();
-            store.pin_owner(Owner {
-                user_id: user_id.clone(),
-                display_name: account.clone(),
-            });
-            owner_dirty = true;
-            pending_pin = Some(PendingPin {
-                action: "REPIN",
-                notice: format!(
+            set_pin(
+                &mut store,
+                &mut owner_dirty,
+                &mut pending_pin,
+                &user_id,
+                &account,
+                "REPIN",
+                format!(
                     "notice: re-pinned this library from {} to {} (id {}); this run is additive (no deletions). Run 'sync' again to mirror.",
                     previous,
                     account,
                     short_id(&user_id)
                 ),
-            });
+            );
         }
         OwnerGate::Proceed => {
             if store.refresh_display_name(&account) {
                 owner_dirty = true;
             }
             if args.allow_account_change && verbosity >= 0 {
-                eprintln!(
+                eprint_t!(
                     "notice: --allow-account-change had no effect; this library already belongs to {} (id {}).",
                     account,
                     short_id(&user_id)
@@ -753,7 +844,7 @@ async fn run_one(
     // today's notice rather than fall through to an empty plan.
     if clips.is_empty() && selection.library.is_none() {
         if verbosity >= -1 {
-            eprintln!("notice: nothing to do; the requested scope holds no downloadable clips.");
+            eprint_t!("notice: nothing to do; the requested scope holds no downloadable clips.");
         }
         return Ok(ExitCode::Ok);
     }
@@ -781,7 +872,7 @@ async fn run_one(
         Ok(resolution) => Some(resolution),
         Err(err) => {
             if verbosity >= -1 {
-                eprintln!(
+                eprint_t!(
                     "warning: lineage resolution failed ({err}); using the last-known-good graph"
                 );
             }
@@ -829,52 +920,52 @@ async fn run_one(
         force_additive = force_additive || decision.is_additive();
         match decision {
             AdoptDecision::PinFresh => {
-                store.pin_owner(Owner {
-                    user_id: user_id.clone(),
-                    display_name: account.clone(),
-                });
-                owner_dirty = true;
-                pending_pin = Some(PendingPin {
-                    action: "PIN",
-                    notice: format!(
+                set_pin(
+                    &mut store,
+                    &mut owner_dirty,
+                    &mut pending_pin,
+                    &user_id,
+                    &account,
+                    "PIN",
+                    format!(
                         "notice: pinned this library to {} (id {}).",
                         account,
                         short_id(&user_id)
                     ),
-                });
+                );
             }
             AdoptDecision::PinAdopt => {
-                store.pin_owner(Owner {
-                    user_id: user_id.clone(),
-                    display_name: account.clone(),
-                });
-                owner_dirty = true;
-                pending_pin = Some(PendingPin {
-                    action: "ADOPT",
-                    notice: format!(
+                set_pin(
+                    &mut store,
+                    &mut owner_dirty,
+                    &mut pending_pin,
+                    &user_id,
+                    &account,
+                    "ADOPT",
+                    format!(
                         "notice: adopted this existing library for {} (id {}).",
                         account,
                         short_id(&user_id)
                     ),
-                });
+                );
             }
             AdoptDecision::AdoptForced => {
-                store.pin_owner(Owner {
-                    user_id: user_id.clone(),
-                    display_name: account.clone(),
-                });
-                owner_dirty = true;
-                pending_pin = Some(PendingPin {
-                    action: "ADOPT",
-                    notice: format!(
+                set_pin(
+                    &mut store,
+                    &mut owner_dirty,
+                    &mut pending_pin,
+                    &user_id,
+                    &account,
+                    "ADOPT",
+                    format!(
                         "notice: adopted this library for {} (id {}) despite no overlap; this run is additive (no deletions). Run 'sync' again to mirror.",
                         account,
                         short_id(&user_id)
                     ),
-                });
+                );
             }
             AdoptDecision::Abort => {
-                eprintln!(
+                eprint_t!(
                     "error: none of the authenticated account's clips ({}, id {}) match this library at {}. Refusing to run in case the token authenticates as a different Suno account. Pass --allow-account-change to adopt it, or use a different destination.",
                     account,
                     short_id(&user_id),
@@ -915,7 +1006,7 @@ async fn run_one(
     let since = match args.since.as_deref().map(RecencySpec::parse).transpose() {
         Ok(since) => since,
         Err(message) => {
-            eprintln!("error: {message}");
+            eprint_t!("error: {message}");
             return Ok(ExitCode::Config);
         }
     };
@@ -935,7 +1026,7 @@ async fn run_one(
         } else {
             ""
         };
-        eprintln!(
+        eprint_t!(
             "note: --limit/--since do not narrow this run (an authoritative full library is listed){deletes}"
         );
     }
@@ -1057,21 +1148,22 @@ async fn run_one(
             &sources,
             library_authoritative,
             playlists_enumerated,
-        );
+        )
+        .await;
         if verbosity >= 1 {
             let no_failures = HashSet::new();
             for line in output::action_lines(&plan, &no_failures, verbosity) {
-                eprintln!("{line}");
+                eprint_t!("{line}");
             }
         }
         if verbosity >= -1 {
-            eprintln!("{}", output::dry_summary(&account, &plan));
+            eprint_t!("{}", output::dry_summary(&account, &plan));
             // Read-only orphan report: audio files on disk that no manifest entry
             // tracks (moved or renamed by hand, or left from an older layout).
             // Listed only, never matched to a clip, renamed, or deleted (#146).
             let orphans = suno_core::untracked_audio(&manifest, &walk_audio_files(dest));
             if !orphans.is_empty() {
-                eprintln!("{}", output::orphan_report(&orphans));
+                eprint_t!("{}", output::orphan_report(&orphans));
             }
         }
         if verb == Verb::Check && exit_code && plan_has_changes(&plan) {
@@ -1115,7 +1207,8 @@ async fn run_one(
         &sources,
         library_authoritative,
         playlists_enumerated,
-    );
+    )
+    .await;
 
     // Persist the lineage graph *before* execute (durability H4), under the same
     // lock as the manifest. This run refreshed it when it folded in a fresh
@@ -1130,7 +1223,7 @@ async fn run_one(
     // (F1). The full id goes to the audit file, never to stderr.
     if let Some(pin) = &pending_pin {
         if verbosity >= -1 {
-            eprintln!("{}", pin.notice);
+            eprint_t!("{}", pin.notice);
         }
         if let Some(owner) = store.owner() {
             logs::append_owner_pin(dest, pin.action, &owner.user_id, &owner.display_name)?;
@@ -1151,7 +1244,7 @@ async fn run_one(
             global.yes,
         )
     {
-        eprintln!(
+        eprint_t!(
             "error: sync aborted -- deletion safety rule triggered\n\nThe listing yielded {} clip(s), which would delete {} of {} local file(s).\nThis is almost certainly a listing error. No files were deleted.\n\nIf you intended to delete everything, pass --min-newest 0 --yes to confirm.",
             desired.len(),
             delete_count,
@@ -1169,12 +1262,12 @@ async fn run_one(
         Confirm::Proceed => {}
         Confirm::Prompt => {
             if !prompt_delete(&plan, verbosity)? {
-                eprintln!("Aborted; no changes made.");
+                eprint_t!("Aborted; no changes made.");
                 return Ok(ExitCode::Ok);
             }
         }
         Confirm::RefuseNonInteractive => {
-            eprintln!(
+            eprint_t!(
                 "error: sync would delete {} file(s) but stdin is not a TTY and --yes was not passed\n  Pass --yes to confirm, or use 'copy' to skip deletions.",
                 delete_count
             );
@@ -1183,7 +1276,7 @@ async fn run_one(
     }
 
     if verbosity == 0 {
-        eprintln!(
+        eprint_t!(
             "{}",
             output::progress_start(verb.progress_word(), &account, &plan)
         );
@@ -1261,7 +1354,7 @@ async fn execute_plan(
         // prune; tidy any directories emptied by moves/deletes so far. The
         // completed path is already pruned inside `execute`.
         let _ = fs.prune_empty_dirs("");
-        eprintln!(
+        eprint_t!(
             "warning: interrupted -- partial run saved\n  Progress so far is recorded in the manifest; re-run to continue."
         );
         return Ok(ExitCode::Interrupted);
@@ -1278,7 +1371,7 @@ async fn execute_plan(
         // The counter block honours quiet mode, but the actionable error and its
         // specific reason always print (even under `-qq`), matching main.rs.
         if verbosity >= -1 {
-            eprintln!(
+            eprint_t!(
                 "{}",
                 output::run_summary(
                     verb.summary_label(),
@@ -1288,12 +1381,12 @@ async fn execute_plan(
                 )
             );
         }
-        eprintln!(
+        eprint_t!(
             "error: {} The library is unchanged for the failing action.",
             crate::diskspace::DISK_FULL_HINT
         );
         if let Some(last) = outcome.failures.last() {
-            eprintln!("  {}", last.reason);
+            eprint_t!("  {}", last.reason);
         }
         return Ok(ExitCode::DiskFull);
     }
@@ -1324,7 +1417,7 @@ async fn execute_plan(
         && let Err(err) = logs::save_index(dest, &manifest, store, &clips_by_id)
         && verbosity >= -1
     {
-        eprintln!("warning: could not write {}: {err}", logs::INDEX_NAME);
+        eprint_t!("warning: could not write {}: {err}", logs::INDEX_NAME);
     }
     logs::append_failures(dest, &outcome.failures, &clips_by_id)?;
     let failed: HashSet<&str> = outcome
@@ -1341,19 +1434,19 @@ async fn execute_plan(
 
     if verbosity >= 1 {
         for line in output::action_lines(&plan, &failed, verbosity) {
-            eprintln!("{line}");
+            eprint_t!("{line}");
         }
     }
 
     if !outcome.failures.is_empty() && verbosity >= -1 {
-        eprintln!(
+        eprint_t!(
             "warning: {} clip(s) failed after retries\n  See {} for details.",
             outcome.failures.len(),
             dest.join(".suno-failures.log").display()
         );
     }
     if verbosity >= -1 {
-        eprintln!(
+        eprint_t!(
             "{}",
             output::run_summary(
                 verb.summary_label(),
@@ -1403,7 +1496,7 @@ async fn resolve_synced_lyrics(
             // URL, so it must never be interpolated here.
             Err(_) => {
                 if verbosity >= -1 {
-                    eprintln!("warning: {SYNCED_LYRICS_FETCH_WARNING}");
+                    eprint_t!("warning: {SYNCED_LYRICS_FETCH_WARNING}");
                 }
             }
         }
@@ -1604,7 +1697,7 @@ async fn enumerate_areas(
                 }),
                 Err(err) => {
                     if verbosity >= -1 {
-                        eprintln!(
+                        eprint_t!(
                             "warning: library listing failed ({err}); suppressing deletion this run"
                         );
                     }
@@ -1641,7 +1734,7 @@ async fn enumerate_areas(
             }),
             Err(err) => {
                 if verbosity >= -1 {
-                    eprintln!(
+                    eprint_t!(
                         "warning: liked feed failed to list ({err}); suppressing deletion this run"
                     );
                 }
@@ -1664,7 +1757,7 @@ async fn enumerate_areas(
                     return Err(report_listing_failure(label, &err));
                 }
                 if verbosity >= -1 {
-                    eprintln!(
+                    eprint_t!(
                         "warning: playlist listing failed ({err}); suppressing deletion this run"
                     );
                 }
@@ -1678,12 +1771,12 @@ async fn enumerate_areas(
                         Ok(playlist) => playlist,
                         Err(err) => {
                             if selection.cli_scoped {
-                                eprintln!("error: {err}.");
+                                eprint_t!("error: {err}.");
                                 print_visible_playlists(&pls, verbosity);
                                 return Err(ExitCode::Config);
                             }
                             if verbosity >= -1 {
-                                eprintln!(
+                                eprint_t!(
                                     "warning: a configured playlist could not be resolved ({err}); leaving its .m3u8 untouched"
                                 );
                             }
@@ -1771,7 +1864,7 @@ async fn list_playlist_area(
         }
         Err(err) => {
             if verbosity >= -1 {
-                eprintln!(
+                eprint_t!(
                     "warning: playlist '{name}' members failed to list ({err}); suppressing deletion this run"
                 );
             }
@@ -1851,12 +1944,12 @@ fn print_visible_playlists(playlists: &[suno_core::Playlist], verbosity: i8) {
         return;
     }
     if playlists.is_empty() {
-        eprintln!("no playlists are visible for this account.");
+        eprint_t!("no playlists are visible for this account.");
         return;
     }
-    eprintln!("visible playlists:");
+    eprint_t!("visible playlists:");
     for playlist in playlists {
-        eprintln!("  {} ({})", playlist.name, playlist.id);
+        eprint_t!("  {} ({})", playlist.name, playlist.id);
     }
 }
 
@@ -1882,7 +1975,7 @@ async fn fetch_playlist_desired(
         Ok(playlists) => playlists,
         Err(err) => {
             if verbosity >= -1 {
-                eprintln!(
+                eprint_t!(
                     "warning: playlist listing failed ({err}); leaving existing .m3u8 files untouched"
                 );
             }
@@ -1901,7 +1994,7 @@ async fn fetch_playlist_desired(
             }
             Ok((_, false)) => {
                 if verbosity >= -1 {
-                    eprintln!(
+                    eprint_t!(
                         "warning: playlist '{}' returned an incomplete member page; keeping its .m3u8 unchanged",
                         playlist.name
                     );
@@ -1910,7 +2003,7 @@ async fn fetch_playlist_desired(
             }
             Err(err) => {
                 if verbosity >= -1 {
-                    eprintln!(
+                    eprint_t!(
                         "warning: playlist '{}' members failed to list ({err}); keeping its .m3u8 unchanged",
                         playlist.name
                     );
@@ -1933,13 +2026,13 @@ async fn fetch_playlist_desired(
         }
         Ok((_, false)) => {
             if verbosity >= -1 {
-                eprintln!("warning: liked feed was truncated; keeping Liked Songs.m3u8 unchanged");
+                eprint_t!("warning: liked feed was truncated; keeping Liked Songs.m3u8 unchanged");
             }
             protected.insert(LIKED_PLAYLIST_ID.to_owned());
         }
         Err(err) => {
             if verbosity >= -1 {
-                eprintln!(
+                eprint_t!(
                     "warning: liked feed failed to list ({err}); keeping Liked Songs.m3u8 unchanged"
                 );
             }
@@ -1982,7 +2075,7 @@ async fn fetch_playlist_desired(
 /// Library the folder view is partial, so art is neither rewritten (the caller
 /// passes an empty `albums_desired`) nor deleted.
 #[allow(clippy::too_many_arguments)]
-fn reconcile_run(
+async fn reconcile_run(
     manifest: &suno_core::Manifest,
     dest: &Path,
     desired: &[suno_core::Desired],
@@ -1994,7 +2087,7 @@ fn reconcile_run(
     library_authoritative: bool,
     playlists_enumerated: bool,
 ) -> suno_core::Plan {
-    let local = stat_manifest(dest, manifest, albums, playlists);
+    let local = stat_manifest(dest, manifest, albums, playlists).await;
     let can_delete = deletion_allowed(sources);
     let art_can_delete = can_delete && library_authoritative;
     let mut plan = reconcile(manifest, desired, &local, sources);
@@ -2020,27 +2113,21 @@ fn reconcile_run(
 /// Returns a combined map keyed by both clip-id (for audio) and file path (for
 /// per-clip sidecars, folder art, and playlist files). Statting absent paths is
 /// harmless; the caller's destination directory need not exist yet.
-fn stat_manifest(
+async fn stat_manifest(
     dest: &Path,
     manifest: &suno_core::Manifest,
     albums: &BTreeMap<String, AlbumArt>,
     playlists: &BTreeMap<String, PlaylistState>,
 ) -> HashMap<String, LocalFile> {
-    let stat = |path: &str| -> LocalFile {
-        let meta = std::fs::metadata(dest.join(path)).ok();
-        LocalFile {
-            exists: meta.is_some(),
-            size: meta.map(|m| m.len()).unwrap_or(0),
-        }
-    };
-
-    let mut map = HashMap::new();
+    // Collect (key, absolute_path) pairs to stat. Audio is keyed by clip_id;
+    // everything else is keyed by its stored relative path, deduplicated.
+    let mut to_stat: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (clip_id, entry) in manifest.iter() {
-        // Audio file, keyed by clip_id.
-        map.insert(clip_id.clone(), stat(&entry.path));
+        // Audio file, keyed by clip_id (may share a path with another clip; stat separately).
+        to_stat.push((clip_id.clone(), dest.join(&entry.path)));
 
-        // Per-clip sidecars, keyed by their stored path.
         for path in [
             entry.cover_jpg.as_ref().map(|s| s.path.as_str()),
             entry.cover_webp.as_ref().map(|s| s.path.as_str()),
@@ -2053,18 +2140,18 @@ fn stat_manifest(
         .flatten()
         .filter(|p| !p.is_empty())
         {
-            map.entry(path.to_owned()).or_insert_with(|| stat(path));
+            if seen.insert(path.to_owned()) {
+                to_stat.push((path.to_owned(), dest.join(path)));
+            }
         }
 
-        // Stem files, keyed by their stored path, so a pure stem relocation can
-        // be gated on the old file being present (#141).
         for state in entry.stems.values().filter(|s| !s.path.is_empty()) {
-            map.entry(state.path.clone())
-                .or_insert_with(|| stat(&state.path));
+            if seen.insert(state.path.clone()) {
+                to_stat.push((state.path.clone(), dest.join(&state.path)));
+            }
         }
     }
 
-    // Folder art paths, keyed by their stored path.
     for art in albums.values() {
         for state in [
             art.folder_jpg.as_ref(),
@@ -2075,18 +2162,33 @@ fn stat_manifest(
         .flatten()
         .filter(|s| !s.path.is_empty())
         {
-            map.entry(state.path.clone())
-                .or_insert_with(|| stat(&state.path));
+            if seen.insert(state.path.clone()) {
+                to_stat.push((state.path.clone(), dest.join(&state.path)));
+            }
         }
     }
 
-    // Playlist file paths, keyed by their stored path.
     for state in playlists.values().filter(|s| !s.path.is_empty()) {
-        map.entry(state.path.clone())
-            .or_insert_with(|| stat(&state.path));
+        if seen.insert(state.path.clone()) {
+            to_stat.push((state.path.clone(), dest.join(&state.path)));
+        }
     }
 
-    map
+    tokio::task::spawn_blocking(move || {
+        to_stat
+            .into_iter()
+            .map(|(key, path)| {
+                let meta = std::fs::metadata(&path).ok();
+                let local = LocalFile {
+                    exists: meta.is_some(),
+                    size: meta.map(|m| m.len()).unwrap_or(0),
+                };
+                (key, local)
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Whether a file extension names one of the audio formats we write.
@@ -2171,7 +2273,7 @@ fn prompt_delete(plan: &suno_core::Plan, verbosity: i8) -> Result<bool> {
 }
 
 pub(crate) fn report_auth_failure(label: &str, err: &CoreError) -> ExitCode {
-    eprintln!(
+    eprint_t!(
         "error: authentication failed for account '{label}'\n\nThe stored token may have expired. Re-authenticate with:\n  suno auth refresh {label}\n\nIf the token was rotated in Suno, update it with:\n  suno config add-account {label} --token <new-token>"
     );
     let _ = err;
@@ -2182,13 +2284,13 @@ pub(crate) fn report_listing_failure(label: &str, err: &CoreError) -> ExitCode {
     match err {
         CoreError::Auth(_) => report_auth_failure(label, err),
         CoreError::Connection(_) | CoreError::RateLimited { .. } => {
-            eprintln!(
+            eprint_t!(
                 "error: could not list the library for '{label}': {err}\n  No files were written. Re-run when connectivity is restored."
             );
             ExitCode::Transient
         }
         other => {
-            eprintln!("error: could not list the library for '{label}': {other}");
+            eprint_t!("error: could not list the library for '{label}': {other}");
             ExitCode::General
         }
     }
@@ -2221,6 +2323,26 @@ fn short_id(id: &str) -> &str {
 struct PendingPin {
     action: &'static str,
     notice: String,
+}
+
+/// Record a pin/adopt/re-pin: pin the owner in `store`, mark `owner_dirty`,
+/// and queue the `PendingPin` notice. Called from the four owner-gate arms
+/// that differ only in `action` and `notice`.
+fn set_pin(
+    store: &mut suno_core::LineageStore,
+    owner_dirty: &mut bool,
+    pending_pin: &mut Option<PendingPin>,
+    user_id: &str,
+    account: &str,
+    action: &'static str,
+    notice: String,
+) {
+    store.pin_owner(Owner {
+        user_id: user_id.to_owned(),
+        display_name: account.to_owned(),
+    });
+    *owner_dirty = true;
+    *pending_pin = Some(PendingPin { action, notice });
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -2404,8 +2526,8 @@ mod tests {
         assert_eq!(targets[0].dest, dest);
     }
 
-    #[test]
-    fn reconcile_run_reads_a_missing_destination_as_empty() {
+    #[tokio::test]
+    async fn reconcile_run_reads_a_missing_destination_as_empty() {
         // The dry-run / check path reads through a missing destination as an
         // empty manifest without creating it, so it never touches disk.
         let dir =
@@ -2428,7 +2550,8 @@ mod tests {
             &sources,
             false,
             false,
-        );
+        )
+        .await;
         assert!(manifest.is_empty());
         assert!(plan.actions.is_empty());
         assert!(
