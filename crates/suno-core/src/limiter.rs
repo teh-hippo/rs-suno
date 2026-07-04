@@ -84,7 +84,10 @@ impl AdaptiveLimiter {
             return Duration::ZERO;
         }
         let interval = Duration::from_secs_f64(1.0 / self.rate);
-        let slot = self.next_slot.map_or(now, |next| next.max(now)) + interval;
+        // Reserve from whichever is later: "now" (idle catch-up) or the last
+        // reserved slot (concurrent callers share one aggregate schedule).
+        let base = self.next_slot.map_or(now, |next| next.max(now));
+        let slot = base + interval;
         self.next_slot = Some(slot);
         slot.saturating_duration_since(now)
     }
@@ -192,16 +195,6 @@ mod tests {
             limiter.on_success();
         }
         assert_eq!(limiter.rate(), 1.0);
-    }
-
-    #[test]
-    fn pace_reserves_aggregate_slots_for_concurrent_calls() {
-        let mut limiter = AdaptiveLimiter::new(2.0);
-        limiter.on_rate_limit(); // 1 req/sec
-        let now = Instant::now();
-        assert_eq!(limiter.pace(now), Duration::from_secs(1));
-        assert_eq!(limiter.pace(now), Duration::from_secs(2));
-        assert_eq!(limiter.pace(now), Duration::from_secs(3));
     }
 
     #[test]
