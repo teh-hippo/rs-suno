@@ -362,7 +362,7 @@ where
     for action in &plan.actions {
         // Prepareable actions pull their pre-fetched bytes (yielded in plan order)
         // and commit them here; every other action applies its own effect. Both the
-        // concurrent commit and the serial apply run in the same serial loop, so all
+        // serial commit and the serial apply run in the same serial loop, so all
         // destination and manifest effects keep the plan's order exactly.
         let result = if is_prepareable(action, &pre_clip_ids) {
             match prepares.next().await {
