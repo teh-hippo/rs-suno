@@ -143,7 +143,7 @@ fn format_change_reformats_and_removes_the_old_file() {
 }
 
 #[test]
-fn creator_change_renames_without_retagging() {
+fn creator_change_renames_and_retags() {
     let spec = ClipSpec::mirror("c001", "Wander");
     let fs = MemFs::new();
     let mut manifest = Manifest::new();
@@ -155,9 +155,14 @@ fn creator_change_renames_without_retagging() {
     assert_ne!(old_path, new_path);
     let (plan, outcome) = run_clean(std::slice::from_ref(&renamed), &fs, &mut manifest);
 
+    // The creator feeds both the path (artist folder) and the embedded artist
+    // tag, so a change both moves the file and refreshes its tags (#135). The
+    // old sentinel omitted the creator, so it renamed without retagging and
+    // left a stale artist tag behind.
     assert_eq!(plan.renames(), 1);
-    assert_eq!(plan.retags(), 0, "a path-only change must not retag");
+    assert_eq!(plan.retags(), 1, "a creator change refreshes the artist tag");
     assert_eq!(outcome.renamed, 1);
+    assert_eq!(outcome.retagged, 1);
     assert!(!fs.exists(&old_path));
     assert!(fs.exists(&new_path));
     assert_eq!(manifest.get("c001").unwrap().path, new_path);

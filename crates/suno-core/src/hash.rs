@@ -5,15 +5,17 @@
 //! across runs, versions, and platforms, so they use FNV-1a over a fixed field
 //! encoding rather than the standard library's deliberately unspecified hasher.
 //!
-//! The field choices mirror the reference integration (ha-suno `clip_meta_hash`
-//! and `image_url_hash`): they capture everything that affects file *content*,
-//! and deliberately exclude path-affecting fields like `display_name`, since a
-//! path change is detected as a rename, not a retag.
+//! The hash inputs are the exact fields the tag writer embeds: [`meta_hash`]
+//! hashes the resolved [`TrackMetadata`], and [`art_hash`] tracks the chosen art
+//! URL. Anything embedded in the file is therefore in a hash, so an upstream
+//! change to it triggers a retag; anything not embedded (path-affecting or
+//! sidecar-only fields such as the animated-cover URL) is excluded.
 
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 
-use crate::lineage::{EdgeType, LineageContext};
+use crate::lineage::LineageContext;
 use crate::model::Clip;
+use crate::tag::TrackMetadata;
 
 /// A short, stable hex digest of `bytes` (FNV-1a, 64-bit).
 fn digest(bytes: &[u8]) -> String {
@@ -34,42 +36,26 @@ pub fn content_hash(text: &str) -> String {
     digest(text.as_bytes())
 }
 
-/// A sentinel for the clip's tag-bearing metadata and chosen art.
+/// A sentinel for the clip's embedded tag set.
 ///
-/// Covers every field that affects file *content*: title, tags, the selected
-/// art URL, video cover, the prompt, the lyrics and description, the account
-/// handle, and the *resolved* lineage that gets embedded (immediate parent and
-/// edge, root id and title, the album the clip folders under, and the release
-/// year the album groups under), so a change to any of them is detected as a
-/// needed retag. This takes the resolved [`LineageContext`] rather than the raw
-/// feed fields precisely because those resolved values are what end up in the
-/// file (HARDENING B1: if a value is embedded, it is in the change hash), so a
-/// retitle, re-point, album move, or year correction triggers a retag.
+/// Hashes the resolved [`TrackMetadata`] that is actually written into the file
+/// (title, artist, album, date/year, lyrics, prompt, model, handle, and the
+/// resolved lineage tags), so a change to any embedded tag — including the
+/// artist (`display_name`) and model label, which the old hand-listed field set
+/// omitted — is detected as a needed retag, while a change to a field that is
+/// *not* embedded in the audio (e.g. the animated-cover URL) is not. Taking
+/// [`TrackMetadata`] directly keeps this in lock-step with the tag writer
+/// (HARDENING B1: if a value is embedded, it is in the change hash), so a
+/// retitle, artist rename, re-point, album move, or year correction all trigger
+/// a retag. Chosen art is tracked separately by [`art_hash`].
 ///
-/// Path-affecting fields such as `display_name` are excluded on purpose: a path
-/// change is a rename, detected by comparing the rendered path with the stored
-/// one. `title` is included so a title change triggers both a rename and a
-/// retag.
+/// A pure path change (e.g. one driven only by a field that renames but does
+/// not embed) is still handled as a rename, by comparing the rendered path with
+/// the stored one, not by this hash.
 pub fn meta_hash(clip: &Clip, lineage: &LineageContext) -> String {
-    let edge_label = lineage.edge_type.map(EdgeType::label).unwrap_or("");
-    let fields = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        clip.title,
-        clip.tags,
-        clip.selected_image_url().unwrap_or(""),
-        clip.video_cover_url,
-        lineage.parent_id,
-        edge_label,
-        lineage.root_id,
-        lineage.root_title,
-        lineage.album(&clip.title),
-        lineage.year(&clip.created_at),
-        clip.prompt,
-        clip.lyrics,
-        clip.gpt_description_prompt,
-        clip.handle,
-    );
-    digest(fields.as_bytes())
+    let mut hasher = fnv::FnvHasher::default();
+    TrackMetadata::from_clip(clip, lineage).hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// A stable digest of an artifact source URL (FNV-1a), or the empty string when
@@ -117,7 +103,7 @@ pub fn art_hash(clip: &Clip) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lineage::ResolveStatus;
+    use crate::lineage::{EdgeType, ResolveStatus};
 
     fn sample() -> Clip {
         Clip {
@@ -156,7 +142,7 @@ mod tests {
         // Golden value: a change here means the sentinel encoding changed and
         // every existing manifest would see a spurious retag. Change with care.
         let h = meta_hash(&sample(), &sample_lineage());
-        assert_eq!(h, "f58211fa8ffcb22e");
+        assert_eq!(h, "c247d31f60378b86");
         assert_eq!(h.len(), 16);
         assert_eq!(h, meta_hash(&sample(), &sample_lineage()));
     }
@@ -189,22 +175,33 @@ mod tests {
     }
 
     #[test]
-    fn meta_hash_ignores_path_only_fields() {
+    fn meta_hash_tracks_the_artist_and_model_but_not_sidecar_only_fields() {
         let lineage = sample_lineage();
-        let mut other = sample();
-        other.display_name = "Someone Else".to_owned();
-        assert_eq!(meta_hash(&sample(), &lineage), meta_hash(&other, &lineage));
+        let base = meta_hash(&sample(), &lineage);
+        // The artist (`display_name`) and model label are embedded tags, so an
+        // upstream change to either must retag (#135) -- the old hand-listed
+        // hash omitted both, leaving stale tags on re-sync.
+        let mut artist = sample();
+        artist.display_name = "Someone Else".to_owned();
+        assert_ne!(meta_hash(&artist, &lineage), base);
+        let mut model = sample();
+        model.model_name = "chirp-v9".to_owned();
+        assert_ne!(meta_hash(&model, &lineage), base);
+        // The animated-cover URL is a sidecar source, not an audio tag: it has
+        // its own hash and must not force a needless audio retag (#136).
+        let mut cover = sample();
+        cover.video_cover_url = "https://cdn1.suno.ai/new_cover.mp4".to_owned();
+        assert_eq!(meta_hash(&cover, &lineage), base);
     }
 
     #[test]
     fn meta_hash_changes_when_a_content_field_changes() {
         let lineage = sample_lineage();
         let base = meta_hash(&sample(), &lineage);
-        // Clip-side content fields.
+        // Clip-side content fields. (Art lives in `art_hash`, not here.)
         for mutate in [
             |c: &mut Clip| c.title = "Different".to_owned(),
             |c: &mut Clip| c.tags = "lofi".to_owned(),
-            |c: &mut Clip| c.image_large_url = "https://cdn1.suno.ai/new.jpeg".to_owned(),
             |c: &mut Clip| c.handle = "bob".to_owned(),
             |c: &mut Clip| c.lyrics = "new words".to_owned(),
         ] {

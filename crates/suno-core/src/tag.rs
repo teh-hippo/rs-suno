@@ -22,7 +22,7 @@ const COVER_MIME: &str = "image/jpeg";
 const LANG: &str = "eng";
 
 /// The metadata tags written into a downloaded audio file.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
