@@ -769,6 +769,7 @@ mod tests {
         let resolution = Resolution {
             roots,
             gap_filled: Vec::new(),
+            bridges: Vec::new(),
         };
         let mut store = LineageStore::new();
         store.update(&[child, root], &resolution, "2024-06-01T00:00:00Z");
@@ -907,6 +908,7 @@ mod tests {
         let resolution = Resolution {
             roots,
             gap_filled: Vec::new(),
+            bridges: Vec::new(),
         };
         let mut store = LineageStore::new();
         store.update(&[child, raw_root], &resolution, "2024-06-01T00:00:00Z");

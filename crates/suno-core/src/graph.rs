@@ -17,7 +17,7 @@
 //! ~30-day trash purge.
 
 use std::collections::btree_map::Iter;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -764,10 +764,27 @@ impl LineageStore {
             self.upsert_node(clip, now);
         }
 
-        for clip in clips {
+        // Persist edges for the input clips AND the gap-filled ancestors. A
+        // gap-filled ancestor carries its own parent pointer, so recording its
+        // `lineage_edges` keeps the stored graph connected (an intermediate
+        // remix is no longer a disconnected root) and lets a later run resolve
+        // through it from the store, without re-fetching, even after Suno purges
+        // it. Parent-endpoint bridges have no clip of their own, so they are
+        // persisted directly below to keep that hop durable too.
+        for clip in clips.iter().chain(resolution.gap_filled.iter()) {
             for edge in lineage_edges(clip) {
                 self.upsert_edge(&clip.id, &edge, now);
             }
+        }
+        for (child_id, parent_id) in &resolution.bridges {
+            let edge = Edge {
+                parent_id: parent_id.clone(),
+                edge_type: EdgeType::Derived,
+                role: EdgeRole::Primary,
+                ordinal: 0,
+                source_field: "parent_endpoint",
+            };
+            self.upsert_edge(child_id, &edge, now);
         }
         self.edges.sort_by(|a, b| {
             a.child_id
@@ -782,6 +799,22 @@ impl LineageStore {
             self.upsert_cache(child_id, info, now);
         }
         self.refresh_eligible_roots();
+    }
+
+    /// The persisted `child_id -> parent_id` map from the active primary edges
+    /// (each clip's ordinal-0 lineage parent), for seeding
+    /// [`resolve_roots`](crate::resolve_roots).
+    ///
+    /// This lets a resolution walk hop through an ancestor whose clip is absent
+    /// this run (an intermediate remix, or one Suno has purged) using the link
+    /// captured on an earlier run, instead of self-rooting. It is resolution
+    /// input only: these ids are never download candidates.
+    pub fn archived_parents(&self) -> HashMap<String, String> {
+        self.edges
+            .iter()
+            .filter(|edge| edge.role == "primary" && edge.ordinal == 0 && edge.status == "active")
+            .map(|edge| (edge.child_id.clone(), edge.parent_id.clone()))
+            .collect()
     }
 
     /// Insert or refresh the node for `clip`. `first_seen_at` and `status` are
@@ -955,6 +988,7 @@ mod tests {
         Resolution {
             roots,
             gap_filled: Vec::new(),
+            bridges: Vec::new(),
         }
     }
 
@@ -1010,6 +1044,109 @@ mod tests {
             assert_eq!(cached.status, "resolved");
             assert_eq!(cached.algorithm_version, 1);
         }
+    }
+
+    #[test]
+    fn update_persists_edges_for_gap_filled_ancestors() {
+        // A gap-filled intermediate carries its own parent pointer; update()
+        // must record ITS edge (not only the input clips'), so the stored graph
+        // stays connected and a later run resolves through it without a fetch.
+        let child = Clip {
+            id: "child".into(),
+            title: "Cover".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "mid".into(),
+            edited_clip_id: "mid".into(),
+            ..Default::default()
+        };
+        let mid = Clip {
+            id: "mid".into(),
+            title: "Mid".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "root".into(),
+            edited_clip_id: "root".into(),
+            ..Default::default()
+        };
+        let mut roots = HashMap::new();
+        roots.insert(
+            "child".to_owned(),
+            RootInfo {
+                root_id: "root".into(),
+                root_title: "Original".into(),
+                status: ResolveStatus::Resolved,
+            },
+        );
+        let resolution = Resolution {
+            roots,
+            gap_filled: vec![mid],
+            bridges: Vec::new(),
+        };
+        let mut store = LineageStore::new();
+        store.update(std::slice::from_ref(&child), &resolution, "now");
+
+        // The gap-filled ancestor's own edge is persisted (pre-fix it was not).
+        let mid_edge = edge(&store, "mid", "root");
+        assert_eq!(mid_edge.role, "primary");
+        assert_eq!(mid_edge.ordinal, 0);
+        // Both hops are now reachable from the archive for a later resolve.
+        let archived = store.archived_parents();
+        assert_eq!(archived.get("child").map(String::as_str), Some("mid"));
+        assert_eq!(archived.get("mid").map(String::as_str), Some("root"));
+    }
+
+    #[test]
+    fn update_persists_bridges_as_edges() {
+        // A parent-endpoint bridge has no clip of its own, so it is persisted
+        // directly as a primary edge to keep that hop durable.
+        let child = Clip {
+            id: "child".into(),
+            title: "Cover".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "gone".into(),
+            edited_clip_id: "gone".into(),
+            ..Default::default()
+        };
+        let mut roots = HashMap::new();
+        roots.insert(
+            "child".to_owned(),
+            RootInfo {
+                root_id: "found".into(),
+                root_title: String::new(),
+                status: ResolveStatus::External,
+            },
+        );
+        let resolution = Resolution {
+            roots,
+            gap_filled: Vec::new(),
+            bridges: vec![("gone".to_owned(), "found".to_owned())],
+        };
+        let mut store = LineageStore::new();
+        store.update(std::slice::from_ref(&child), &resolution, "now");
+
+        let bridged = edge(&store, "gone", "found");
+        assert_eq!(bridged.source_field, "parent_endpoint");
+        assert_eq!(bridged.role, "primary");
+        assert_eq!(bridged.ordinal, 0);
+        assert_eq!(
+            store.archived_parents().get("gone").map(String::as_str),
+            Some("found")
+        );
+    }
+
+    #[test]
+    fn archived_parents_maps_children_to_primary_parents_only() {
+        let mut store = LineageStore::new();
+        store.update(&chain_clips(), &chain_resolution(), "now");
+        let archived = store.archived_parents();
+        assert_eq!(archived.get("c").map(String::as_str), Some("b"));
+        assert_eq!(archived.get("b").map(String::as_str), Some("a"));
+        assert!(
+            !archived.contains_key("a"),
+            "a root has no primary parent edge"
+        );
     }
 
     #[test]
@@ -1145,6 +1282,7 @@ mod tests {
         let resolution = Resolution {
             roots,
             gap_filled: Vec::new(),
+            bridges: Vec::new(),
         };
         store.update(&[child], &resolution, "second");
 
@@ -1192,6 +1330,7 @@ mod tests {
         let resolution = Resolution {
             roots,
             gap_filled: vec![trashed],
+            bridges: Vec::new(),
         };
         store_update_and_assert_trashed(child, resolution);
     }
@@ -1465,6 +1604,7 @@ mod tests {
         let resolution = Resolution {
             roots,
             gap_filled: Vec::new(),
+            bridges: Vec::new(),
         };
         let mut store = LineageStore::new();
         store.update(&clips, &resolution, "now");
@@ -1529,6 +1669,7 @@ mod tests {
         let resolution = Resolution {
             roots,
             gap_filled: vec![trashed],
+            bridges: Vec::new(),
         };
         let mut store = LineageStore::new();
         store.update(std::slice::from_ref(&child), &resolution, "now");
@@ -1591,6 +1732,7 @@ mod tests {
         let resolution = Resolution {
             roots,
             gap_filled: Vec::new(),
+            bridges: Vec::new(),
         };
         let mut store = LineageStore::new();
         store.update(&clips, &resolution, "now");
@@ -1641,6 +1783,7 @@ mod tests {
             &Resolution {
                 roots,
                 gap_filled: Vec::new(),
+                bridges: Vec::new(),
             },
             "now",
         );
@@ -1767,6 +1910,7 @@ mod tests {
                 .into_iter()
                 .collect(),
                 gap_filled: Vec::new(),
+                bridges: Vec::new(),
             },
             "now",
         );
@@ -1915,6 +2059,7 @@ mod tests {
                 .into_iter()
                 .collect(),
                 gap_filled: Vec::new(),
+                bridges: Vec::new(),
             },
             "now",
         );
@@ -2049,6 +2194,7 @@ mod tests {
             &Resolution {
                 roots,
                 gap_filled: vec![gap_ancestor],
+                bridges: Vec::new(),
             },
             "now",
         );
@@ -2108,6 +2254,7 @@ mod tests {
                     clip_type: "gen".into(),
                     ..Default::default()
                 }],
+                bridges: Vec::new(),
             },
             "now",
         );

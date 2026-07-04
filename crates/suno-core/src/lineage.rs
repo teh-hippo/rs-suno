@@ -146,6 +146,11 @@ pub struct Resolution {
     /// Ancestor clips fetched during gap-fill, sorted by id. Not download
     /// candidates: they were pulled solely to complete the lineage walk.
     pub gap_filled: Vec<Clip>,
+    /// Parent links discovered via the parent endpoint (`get_clip_parent`) as
+    /// `(child_id, parent_id)`, sorted. The child is a bridged id that may have
+    /// no clip of its own, so it is persisted as an archived edge (never a
+    /// download candidate) to keep the parent-endpoint hop durable.
+    pub bridges: Vec<(String, String)>,
 }
 
 /// The resolved lineage of a single clip, threaded into naming, tagging, and
@@ -404,11 +409,12 @@ pub fn lineage_edges(clip: &Clip) -> Vec<Edge> {
 /// every input clip, plus the gap-filled ancestor clips it fetched.
 pub async fn resolve_roots(
     clips: &[Clip],
+    archived_parents: &HashMap<String, String>,
     client: &mut SunoClient<impl Clock>,
     http: &impl Http,
     opts: ResolveOpts,
 ) -> Result<Resolution> {
-    let mut resolver = Resolver::new(clips, opts);
+    let mut resolver = Resolver::new(clips, opts, archived_parents);
     resolver.run(client, http).await?;
     Ok(resolver.into_resolution(clips))
 }
@@ -495,8 +501,13 @@ enum Walk {
 /// later phases can tell ancestors apart from download candidates. `bridges`
 /// maps a missing id to the known parent that the parent endpoint returned in
 /// its place, and `external` records ids the API reported as parentless roots.
-struct Resolver {
+struct Resolver<'a> {
     index: HashMap<String, Clip>,
+    /// Persisted `child_id -> parent_id` links from the durable store's primary
+    /// edges. Consulted before any network gap-fill so a walk can hop through an
+    /// ancestor whose clip is absent (e.g. an intermediate remix, or one Suno
+    /// has since purged) using data captured on an earlier run.
+    archived_parents: &'a HashMap<String, String>,
     gap_filled: HashSet<String>,
     bridges: HashMap<String, String>,
     external: HashSet<String>,
@@ -506,8 +517,12 @@ struct Resolver {
     hop_cap: u32,
 }
 
-impl Resolver {
-    fn new(clips: &[Clip], opts: ResolveOpts) -> Self {
+impl<'a> Resolver<'a> {
+    fn new(
+        clips: &[Clip],
+        opts: ResolveOpts,
+        archived_parents: &'a HashMap<String, String>,
+    ) -> Self {
         let index = clips
             .iter()
             .map(|clip| (clip.id.clone(), clip.clone()))
@@ -515,6 +530,7 @@ impl Resolver {
         let targets = clips.iter().map(|clip| clip.id.clone()).collect();
         Self {
             index,
+            archived_parents,
             gap_filled: HashSet::new(),
             bridges: HashMap::new(),
             external: HashSet::new(),
@@ -587,15 +603,24 @@ impl Resolver {
                 return Walk::Resolved;
             }
 
-            let (parent, title) = match self.index.get(&current) {
-                Some(clip) => (immediate_parent(clip), clip.title.clone()),
-                None => return Walk::Blocked(current),
+            // The parent of `current` comes from its live/fetched clip, or from
+            // a persisted archived edge when the clip itself is not in hand. An
+            // id known through neither is unknown locally and must be gap-filled
+            // (this is the guard: an edgeless archived node is fetched, never
+            // assumed a root, so a not-yet-persisted remix still gets its real
+            // parent).
+            let parent_id = if let Some(clip) = self.index.get(&current) {
+                immediate_parent(clip).map(|(id, _edge)| id)
+            } else if let Some(parent) = self.archived_parents.get(&current) {
+                Some(parent.clone())
+            } else {
+                return Walk::Blocked(current);
             };
 
-            let Some((parent_id, _edge)) = parent else {
+            let Some(parent_id) = parent_id else {
                 let info = RootInfo {
                     root_id: current.clone(),
-                    root_title: title,
+                    root_title: self.title_of(&current),
                     status: ResolveStatus::Resolved,
                 };
                 self.assign(&chain, &info);
@@ -606,7 +631,8 @@ impl Resolver {
             visited.insert(current.clone());
             chain.push(current);
 
-            if self.index.contains_key(&parent_id) {
+            if self.index.contains_key(&parent_id) || self.archived_parents.contains_key(&parent_id)
+            {
                 current = parent_id;
             } else if let Some(bridged) = self.bridges.get(&parent_id).cloned() {
                 visited.insert(parent_id);
@@ -691,7 +717,10 @@ impl Resolver {
 
     /// Whether an id is already resolvable without another fetch.
     fn known(&self, id: &str) -> bool {
-        self.index.contains_key(id) || self.bridges.contains_key(id) || self.external.contains(id)
+        self.index.contains_key(id)
+            || self.archived_parents.contains_key(id)
+            || self.bridges.contains_key(id)
+            || self.external.contains(id)
     }
 
     /// Mark every still-unresolved blocked target as external at the ancestor it
@@ -753,7 +782,18 @@ impl Resolver {
             .collect();
         gap_filled.sort_by(|a, b| a.id.cmp(&b.id));
 
-        Resolution { roots, gap_filled }
+        let mut bridges: Vec<(String, String)> = self
+            .bridges
+            .iter()
+            .map(|(child, parent)| (child.clone(), parent.clone()))
+            .collect();
+        bridges.sort();
+
+        Resolution {
+            roots,
+            gap_filled,
+            bridges,
+        }
     }
 }
 
@@ -1248,6 +1288,7 @@ mod tests {
 
         let roots = pollster::block_on(resolve_roots(
             &clips,
+            &HashMap::new(),
             &mut client,
             &http,
             ResolveOpts::default(),
@@ -1291,6 +1332,7 @@ mod tests {
 
         let roots = pollster::block_on(resolve_roots(
             &[cover],
+            &HashMap::new(),
             &mut client,
             &http,
             ResolveOpts::default(),
@@ -1307,6 +1349,235 @@ mod tests {
             http.count("/api/clips/parent"),
             0,
             "the parent endpoint must not be used when the per-id fetch succeeds"
+        );
+    }
+
+    #[test]
+    fn resolve_roots_hops_through_a_purged_ancestor_via_the_archive() {
+        // A cover whose parent (an intermediate remix) is absent from this run's
+        // clips AND unfetchable from the network (Suno purged it), but whose
+        // parent link was persisted on an earlier run. The archived edge lets
+        // the walk hop through the purged intermediate to the true root, with no
+        // network call, instead of self-rooting into a duplicate album.
+        let child = Clip {
+            id: "child".into(),
+            title: "Neue Deutsche Harte".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "mid".into(),
+            edited_clip_id: "mid".into(),
+            ..Default::default()
+        };
+        let root = Clip {
+            id: "root".into(),
+            title: "Original".into(),
+            clip_type: "gen".into(),
+            ..Default::default()
+        };
+        // "mid" is neither a live clip nor routed on the network double.
+        let archived: HashMap<String, String> = [("mid".to_owned(), "root".to_owned())]
+            .into_iter()
+            .collect();
+        let http = ScriptedHttp::new().with_auth();
+        let mut client = authed_client(&http);
+
+        let resolution = pollster::block_on(resolve_roots(
+            &[child, root],
+            &archived,
+            &mut client,
+            &http,
+            ResolveOpts::default(),
+        ))
+        .unwrap();
+
+        let info = &resolution.roots["child"];
+        assert_eq!(info.status, ResolveStatus::Resolved);
+        assert_eq!(
+            info.root_id, "root",
+            "hopped through the purged intermediate"
+        );
+        assert_eq!(info.root_title, "Original");
+        assert_eq!(
+            http.count("/api/clip/mid"),
+            0,
+            "the purged intermediate is never fetched: the archived edge bridges it"
+        );
+        assert!(
+            resolution.gap_filled.is_empty(),
+            "an archived hop must not add a download candidate"
+        );
+    }
+
+    #[test]
+    fn resolve_roots_prefers_a_live_pointer_over_a_stale_archived_edge() {
+        // When a clip is present live, its own (fresh) pointer wins; a stale
+        // archived edge for that same clip is ignored (index before archive).
+        let child = Clip {
+            id: "child".into(),
+            title: "Cover".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "live_root".into(),
+            edited_clip_id: "live_root".into(),
+            ..Default::default()
+        };
+        let live_root = Clip {
+            id: "live_root".into(),
+            title: "Live Root".into(),
+            clip_type: "gen".into(),
+            ..Default::default()
+        };
+        let archived: HashMap<String, String> = [("child".to_owned(), "stale_root".to_owned())]
+            .into_iter()
+            .collect();
+        let http = ScriptedHttp::new().with_auth();
+        let mut client = authed_client(&http);
+
+        let info = pollster::block_on(resolve_roots(
+            &[child, live_root],
+            &archived,
+            &mut client,
+            &http,
+            ResolveOpts::default(),
+        ))
+        .unwrap()
+        .roots["child"]
+            .clone();
+
+        assert_eq!(
+            info.root_id, "live_root",
+            "the live pointer wins over a stale archived edge"
+        );
+        assert_eq!(info.status, ResolveStatus::Resolved);
+    }
+
+    #[test]
+    fn resolve_roots_terminates_on_a_cycle_through_archived_edges() {
+        // Archived edges form a cycle a -> b -> a; the walk must terminate via
+        // the visited guard, never loop.
+        let child = Clip {
+            id: "child".into(),
+            title: "Cover".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "a".into(),
+            edited_clip_id: "a".into(),
+            ..Default::default()
+        };
+        let archived: HashMap<String, String> = [
+            ("a".to_owned(), "b".to_owned()),
+            ("b".to_owned(), "a".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let http = ScriptedHttp::new().with_auth();
+        let mut client = authed_client(&http);
+
+        let info = pollster::block_on(resolve_roots(
+            &[child],
+            &archived,
+            &mut client,
+            &http,
+            ResolveOpts::default(),
+        ))
+        .unwrap()
+        .roots["child"]
+            .clone();
+
+        assert_eq!(
+            info.status,
+            ResolveStatus::Cycle,
+            "an archived cycle terminates as a cycle, not an infinite loop"
+        );
+    }
+
+    #[test]
+    fn resolve_roots_respects_the_hop_cap_through_archived_edges() {
+        // A long archived chain past the hop cap terminates as unresolved,
+        // without any network fetch.
+        let child = Clip {
+            id: "child".into(),
+            title: "Cover".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "a".into(),
+            edited_clip_id: "a".into(),
+            ..Default::default()
+        };
+        let archived: HashMap<String, String> = [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")]
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let opts = ResolveOpts {
+            max_gap_fills: 0,
+            hop_cap: 2,
+        };
+        let http = ScriptedHttp::new().with_auth();
+        let mut client = authed_client(&http);
+
+        let info = pollster::block_on(resolve_roots(&[child], &archived, &mut client, &http, opts))
+            .unwrap()
+            .roots["child"]
+            .clone();
+
+        assert_eq!(
+            info.status,
+            ResolveStatus::Unresolved,
+            "a chain past the hop cap terminates as unresolved"
+        );
+        assert_eq!(
+            http.count("/api/clip"),
+            0,
+            "archived hops need no clip fetch"
+        );
+    }
+
+    #[test]
+    fn resolve_roots_without_archive_self_roots_a_purged_intermediate() {
+        // The same clip WITHOUT the archived edge: the intermediate is missing
+        // and unfetchable, so resolution stalls at it (external) rather than
+        // reaching the true root. This is the pre-fix behaviour the archive
+        // prevents.
+        let child = Clip {
+            id: "child".into(),
+            title: "Neue Deutsche Harte".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "mid".into(),
+            edited_clip_id: "mid".into(),
+            ..Default::default()
+        };
+        let root = Clip {
+            id: "root".into(),
+            title: "Original".into(),
+            clip_type: "gen".into(),
+            ..Default::default()
+        };
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/clip/mid", Reply::status(404))
+            .route("/api/clips/parent", Reply::status(404));
+        let mut client = authed_client(&http);
+
+        let info = pollster::block_on(resolve_roots(
+            &[child, root],
+            &HashMap::new(),
+            &mut client,
+            &http,
+            ResolveOpts::default(),
+        ))
+        .unwrap()
+        .roots["child"]
+            .clone();
+
+        assert_ne!(
+            info.root_id, "root",
+            "without the archive, resolution cannot reach the true root"
+        );
+        assert_ne!(
+            info.status,
+            ResolveStatus::Resolved,
+            "the purged intermediate cannot be cleanly resolved without the archive"
         );
     }
 
@@ -1336,6 +1607,7 @@ mod tests {
 
         let resolution = pollster::block_on(resolve_roots(
             &[cover],
+            &HashMap::new(),
             &mut client,
             &http,
             ResolveOpts::default(),
@@ -1378,6 +1650,7 @@ mod tests {
 
         let roots = pollster::block_on(resolve_roots(
             &[cover],
+            &HashMap::new(),
             &mut client,
             &http,
             ResolveOpts::default(),
@@ -1420,6 +1693,7 @@ mod tests {
 
         let roots = pollster::block_on(resolve_roots(
             &[a, b],
+            &HashMap::new(),
             &mut client,
             &http,
             ResolveOpts::default(),
@@ -1458,9 +1732,15 @@ mod tests {
             hop_cap: 64,
         };
 
-        let roots = pollster::block_on(resolve_roots(&[child], &mut client, &http, opts))
-            .unwrap()
-            .roots;
+        let roots = pollster::block_on(resolve_roots(
+            &[child],
+            &HashMap::new(),
+            &mut client,
+            &http,
+            opts,
+        ))
+        .unwrap()
+        .roots;
 
         let info = &roots["child"];
         assert_eq!(info.status, ResolveStatus::External);
@@ -1497,6 +1777,7 @@ mod tests {
 
         let roots = pollster::block_on(resolve_roots(
             &[cover],
+            &HashMap::new(),
             &mut client,
             &http,
             ResolveOpts::default(),
@@ -1516,6 +1797,7 @@ mod tests {
                 .map(|(id, info)| (id.to_owned(), info))
                 .collect(),
             gap_filled: Vec::new(),
+            bridges: Vec::new(),
         }
     }
 

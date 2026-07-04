@@ -991,6 +991,7 @@ mod tests {
         let resolution = Resolution {
             roots,
             gap_filled: Vec::new(),
+            bridges: Vec::new(),
         };
         let mut store = LineageStore::new();
         store.update(&[root.clone(), child.clone()], &resolution, "t1");
