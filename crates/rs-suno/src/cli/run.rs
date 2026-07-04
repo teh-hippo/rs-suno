@@ -1066,6 +1066,13 @@ async fn run_one(
         }
         if verbosity >= -1 {
             eprintln!("{}", output::dry_summary(&account, &plan));
+            // Read-only orphan report: audio files on disk that no manifest entry
+            // tracks (moved or renamed by hand, or left from an older layout).
+            // Listed only, never matched to a clip, renamed, or deleted (#146).
+            let orphans = suno_core::untracked_audio(&manifest, &walk_audio_files(dest));
+            if !orphans.is_empty() {
+                eprintln!("{}", output::orphan_report(&orphans));
+            }
         }
         if verb == Verb::Check && exit_code && plan_has_changes(&plan) {
             return Ok(ExitCode::General);
@@ -2082,12 +2089,47 @@ fn stat_manifest(
     map
 }
 
+/// Whether a file extension names one of the audio formats we write.
+fn is_audio_ext(ext: &str) -> bool {
+    matches!(ext.to_ascii_lowercase().as_str(), "flac" | "mp3" | "wav")
+}
+
+/// Walk `dest` recursively for audio files, returning their paths relative to
+/// `dest` with forward slashes, for the orphan report. Best-effort and
+/// read-only: an unreadable directory (or an absent `dest`) contributes
+/// nothing, so a dry run never fails on a walk error.
+fn walk_audio_files(dest: &Path) -> Vec<String> {
+    fn recurse(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                recurse(root, &path, out);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(is_audio_ext)
+                && let Ok(rel) = path.strip_prefix(root)
+            {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    recurse(dest, dest, &mut out);
+    out
+}
+
 /// True when the plan would change disk (anything but skips).
 fn plan_has_changes(plan: &suno_core::Plan) -> bool {
     plan.downloads()
         + plan.reformats()
         + plan.retags()
         + plan.renames()
+        + plan.artifact_moves()
+        + plan.stem_moves()
         + plan.deletes()
         + plan.artifact_writes()
         + plan.artifact_deletes()
