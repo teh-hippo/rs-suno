@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.1](https://github.com/teh-hippo/rs-suno/compare/v0.24.0...v0.24.1) (2026-07-04)
+
+
+### Bug Fixes
+
+* address graph lineage technical debt issues ([38b4a44](https://github.com/teh-hippo/rs-suno/commit/38b4a441be3695b3fafb56ffd34ded69850ff7cd))
+* apply tracked_paths co-reference guard in write_stem ([1ccd5d8](https://github.com/teh-hippo/rs-suno/commit/1ccd5d8e1100a2d36ff6627c09cf1e11a8f30159)), closes [#174](https://github.com/teh-hippo/rs-suno/issues/174)
+* remove per-clip allocation churn in core hot paths ([03be211](https://github.com/teh-hippo/rs-suno/commit/03be2111ef3d2311c241638abd5006b8db02d47a))
+
 ## [0.24.0](https://github.com/teh-hippo/rs-suno/compare/v0.23.0...v0.24.0) (2026-07-04)
 
 
