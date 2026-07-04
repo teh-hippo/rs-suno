@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use futures_util::stream::{self, StreamExt};
 use serde_json::Value;
@@ -442,7 +443,8 @@ impl<C: Clock> SunoClient<C> {
     /// paged walk, so it composes with whatever listing calls it: a page or a
     /// cursor walk pace identically. The [`AdaptiveLimiter`] paces reactively:
     /// an unthrottled walk waits nowhere, and only after the first `429` does it
-    /// space out requests, widening that pace as the rate is halved again.
+    /// reserve shared request slots so concurrent callers are spaced in aggregate
+    /// at `1/rate`, widening that spacing as the rate is halved again.
     ///
     /// The WAV render flow deliberately keeps to the plain [`api_get`](Self::api_get):
     /// the executor owns that retry so its budget and poll interval stay in one
@@ -455,7 +457,7 @@ impl<C: Clock> SunoClient<C> {
         path: &str,
         body: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        let pace = self.limiter.lock().unwrap().pace();
+        let pace = self.limiter.lock().unwrap().pace(Instant::now());
         if !pace.is_zero() {
             self.clock.sleep(pace).await;
         }
@@ -1555,6 +1557,54 @@ mod tests {
         let concurrent_ids: Vec<&str> = concurrent.iter().map(|clip| clip.id.as_str()).collect();
         assert_eq!(serial_ids, vec!["b", "a", "c"]);
         assert_eq!(concurrent_ids, serial_ids);
+    }
+
+    #[test]
+    fn concurrent_reads_share_aggregate_pacing_after_first_rate_limit() {
+        let ids = ["a", "b", "c", "d"];
+        let a =
+            serde_json::json!({"id":"a","title":"A","status":"complete","metadata":{"type":"gen"}})
+                .to_string();
+        let b =
+            serde_json::json!({"id":"b","title":"B","status":"complete","metadata":{"type":"gen"}})
+                .to_string();
+        let c =
+            serde_json::json!({"id":"c","title":"C","status":"complete","metadata":{"type":"gen"}})
+                .to_string();
+        let d =
+            serde_json::json!({"id":"d","title":"D","status":"complete","metadata":{"type":"gen"}})
+                .to_string();
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route_seq(
+                "/api/feed/v3",
+                vec![
+                    Reply::status(429),
+                    Reply::json(&one_clip_page("seed", None)),
+                ],
+            )
+            .route("/api/clip/a", Reply::json(&a))
+            .route("/api/clip/b", Reply::json(&b))
+            .route("/api/clip/c", Reply::json(&c))
+            .route("/api/clip/d", Reply::json(&d));
+        let clock = RecordingClock::new();
+        let client = scripted_client(&http, clock.clone());
+        pollster::block_on(client.list_clips(&http, false, Some(1))).unwrap();
+        let before = clock.sleeps().len();
+
+        let clips = pollster::block_on(client.get_clips_by_ids(&http, &ids, ids.len())).unwrap();
+        assert_eq!(clips.len(), ids.len());
+        let sleeps = clock.sleeps();
+        let paced = &sleeps[before..];
+        assert_eq!(paced.len(), ids.len());
+        let min = paced.iter().copied().min().unwrap();
+        let max = paced.iter().copied().max().unwrap();
+        let span = max.saturating_sub(min);
+        // After the first 429, rate halves from 2 -> 1 req/s. Under shared slot
+        // pacing, four concurrent reads are dispatched one second apart in
+        // aggregate, so the first-to-last spacing is about three seconds.
+        assert!(span >= Duration::from_millis(2950));
+        assert!(span <= Duration::from_millis(3050));
     }
 
     #[test]

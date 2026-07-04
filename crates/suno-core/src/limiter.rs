@@ -15,7 +15,7 @@
 //! whose proactive pacing suited many small requests; a cursor walk makes few,
 //! large requests, so pacing is deferred until Suno actually pushes back.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Never pace slower than this: one request every two seconds is the hard floor.
 pub(crate) const RATE_FLOOR: f64 = 0.5;
@@ -49,6 +49,7 @@ pub(crate) struct AdaptiveLimiter {
     ceiling: Option<f64>,
     successes: u32,
     throttled: bool,
+    next_slot: Option<Instant>,
 }
 
 impl AdaptiveLimiter {
@@ -69,6 +70,7 @@ impl AdaptiveLimiter {
             ceiling: None,
             successes: 0,
             throttled: false,
+            next_slot: None,
         }
     }
 
@@ -77,11 +79,14 @@ impl AdaptiveLimiter {
     /// Returns [`Duration::ZERO`] until the first `429`, so an unthrottled sync
     /// is never paced. Once [`on_rate_limit`](Self::on_rate_limit) has fired,
     /// pacing engages and this returns the inter-request delay `1 / rate`.
-    pub(crate) fn pace(&mut self) -> Duration {
+    pub(crate) fn pace(&mut self, now: Instant) -> Duration {
         if !self.throttled {
             return Duration::ZERO;
         }
-        Duration::from_secs_f64(1.0 / self.rate)
+        let interval = Duration::from_secs_f64(1.0 / self.rate);
+        let slot = self.next_slot.map_or(now, |next| next.max(now)) + interval;
+        self.next_slot = Some(slot);
+        slot.saturating_duration_since(now)
     }
 
     /// The current rate in requests per second.
@@ -134,31 +139,34 @@ mod tests {
     #[test]
     fn pace_is_zero_until_the_first_rate_limit() {
         let mut limiter = AdaptiveLimiter::new(2.0);
-        assert_eq!(limiter.pace(), Duration::ZERO);
+        let now = Instant::now();
+        assert_eq!(limiter.pace(now), Duration::ZERO);
         for _ in 0..100 {
             limiter.on_success();
-            assert_eq!(limiter.pace(), Duration::ZERO);
+            assert_eq!(limiter.pace(now), Duration::ZERO);
         }
         limiter.on_rate_limit();
-        assert!(limiter.pace() > Duration::ZERO);
+        assert!(limiter.pace(now) > Duration::ZERO);
     }
 
     #[test]
     fn a_rate_limit_halves_the_rate_records_a_ceiling_and_engages_pacing() {
         let mut limiter = AdaptiveLimiter::new(4.0);
+        let now = Instant::now();
         limiter.on_rate_limit();
         assert_eq!(limiter.rate(), 2.0);
-        assert_eq!(limiter.pace(), Duration::from_millis(500));
+        assert_eq!(limiter.pace(now), Duration::from_millis(500));
     }
 
     #[test]
     fn the_rate_never_drops_below_the_floor() {
         let mut limiter = AdaptiveLimiter::new(1.0);
+        let now = Instant::now();
         for _ in 0..10 {
             limiter.on_rate_limit();
         }
         assert_eq!(limiter.rate(), RATE_FLOOR);
-        assert_eq!(limiter.pace(), Duration::from_secs(2));
+        assert_eq!(limiter.pace(now), Duration::from_secs(2));
     }
 
     #[test]
@@ -184,6 +192,16 @@ mod tests {
             limiter.on_success();
         }
         assert_eq!(limiter.rate(), 1.0);
+    }
+
+    #[test]
+    fn pace_reserves_aggregate_slots_for_concurrent_calls() {
+        let mut limiter = AdaptiveLimiter::new(2.0);
+        limiter.on_rate_limit(); // 1 req/sec
+        let now = Instant::now();
+        assert_eq!(limiter.pace(now), Duration::from_secs(1));
+        assert_eq!(limiter.pace(now), Duration::from_secs(2));
+        assert_eq!(limiter.pace(now), Duration::from_secs(3));
     }
 
     #[test]
