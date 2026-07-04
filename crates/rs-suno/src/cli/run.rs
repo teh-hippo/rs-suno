@@ -17,21 +17,21 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
-    AdoptDecision, AlbumArt, AlbumDesired, AlignedLyrics, ClerkAuth, Clip, Config,
-    Error as CoreError, ExecOptions, Filesystem, FlagOverrides, LineageContext, LocalFile,
-    Manifest, NamingConfig, Owner, OwnerGate, PlaylistDesired, PlaylistState, Ports, ResolveOpts,
-    RunStatus, SourceMode, SourceStatus, Stem, SunoClient, adopt_decision, album_desired,
-    deletion_allowed, is_downloadable, owner_gate, plan_album_artifacts, plan_playlist_artifacts,
-    reconcile, resolve_roots,
+    AdoptDecision, AlbumArt, AlbumDesired, AlignedLyrics, ArtifactToggles, ClerkAuth, Clip, Config,
+    Error as CoreError, ExecOptions, Filesystem, FlagOverrides, LIKED_PLAYLIST_ID, LineageContext,
+    LocalFile, Manifest, NamingConfig, Owner, OwnerGate, PlaylistDesired, PlaylistInput,
+    PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode, SourceStatus, Stem, SunoClient,
+    adopt_decision, album_desired, area_fully_enumerated, build_desired, build_playlist_desired,
+    clip_stems, deletion_allowed, is_downloadable, narrows_downloads, owner_gate,
+    plan_album_artifacts, plan_playlist_artifacts, playlist_authoritative, reconcile,
+    resolve_roots,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
 use crate::cli::commands::version;
 use crate::cli::desired::{
-    ArtifactToggles, Confirm, ExitCode, LIKED_PLAYLIST_ID, PlaylistInput, PlaylistPolicy,
-    ResolvedSelection, build_desired, build_modes_by_id, build_playlist_desired, clip_stems,
-    confirm_decision, confirmed, is_narrowed, mass_delete_abort, resolve_playlist,
-    resolve_selection, run_exit_code,
+    Confirm, ExitCode, PlaylistPolicy, ResolvedSelection, build_modes_by_id, confirm_decision,
+    confirmed, is_narrowed, mass_delete_abort, resolve_playlist, resolve_selection, run_exit_code,
 };
 use crate::cli::logs;
 use crate::cli::output;
@@ -1576,28 +1576,11 @@ fn area_mode(area: &AreaListing, force_copy: bool) -> SourceMode {
 /// Whether this area is authoritative for deletion, applying the empty-mirror
 /// guard (§5) against the final mode.
 fn area_enumerated(area: &AreaListing, force_copy: bool) -> bool {
-    let mode = area_mode(area, force_copy);
-    area.authoritative_ignoring_empty && !(area.clips.is_empty() && mode == SourceMode::Mirror)
-}
-
-/// Whether a playlist listing is authoritative for deletion, before the
-/// empty-mirror guard: it drained its whole page set, lost no member to the
-/// downloadable filter, and was not deliberately narrowed by `--limit`/`--since`.
-/// A narrowed playlist mirror disarms exactly as a narrowed library or liked
-/// feed does, so `--limit`/`--since` never delete against the full playlist and
-/// deletion always needs a full run, uniformly across every source (#148).
-fn playlist_authoritative(complete: bool, any_filtered: bool, narrowed: bool) -> bool {
-    complete && !any_filtered && !narrowed
-}
-
-/// Whether `--limit`/`--since` may narrow the download selection. Only a run
-/// that neither deletes nor lists an authoritative full library may truncate the
-/// union: narrowing while a mirror is armed would drop a mirror/protector clip
-/// into a deletion (D2), and narrowing when a full library is listed would
-/// regress the library index and folder art built from the complete set. So
-/// truncation structurally implies no deletion.
-fn narrows_downloads(can_delete: bool, library_authoritative: bool) -> bool {
-    !can_delete && !library_authoritative
+    area_fully_enumerated(
+        area.authoritative_ignoring_empty,
+        area.clips.is_empty(),
+        area_mode(area, force_copy),
+    )
 }
 
 /// Whether a Library area is present and fully enumerated (the implicit
@@ -3055,29 +3038,6 @@ mod tests {
         )
     }
 
-    // #148: a narrowed (`--limit`/`--since`) playlist mirror is not authoritative,
-    // exactly as a narrowed library or liked feed, so it cannot delete against the
-    // full playlist; `playlist_authoritative` folds the narrowing flag in.
-    #[test]
-    fn playlist_authoritative_folds_narrowed() {
-        assert!(
-            playlist_authoritative(true, false, false),
-            "full, unfiltered, not narrowed"
-        );
-        assert!(
-            !playlist_authoritative(true, false, true),
-            "narrowed -> not authoritative"
-        );
-        assert!(
-            !playlist_authoritative(false, false, false),
-            "the page set did not drain"
-        );
-        assert!(
-            !playlist_authoritative(true, true, false),
-            "a member was lost to the downloadable filter"
-        );
-    }
-
     // The #148 behaviour change at the area level: a narrowed playlist mirror
     // neither enumerates nor arms deletion; the same listing un-narrowed does both.
     #[test]
@@ -3157,21 +3117,6 @@ mod tests {
             !truncate,
             "the full library is listed, so downloads are not narrowed"
         );
-    }
-
-    // The invariant `narrows_downloads` encodes: download narrowing may never
-    // co-occur with an armed deletion, or a truncated union would drop clips into
-    // deletion candidates.
-    #[test]
-    fn narrowing_never_coexists_with_deletion() {
-        for can_delete in [false, true] {
-            for lib_auth in [false, true] {
-                assert!(
-                    !(narrows_downloads(can_delete, lib_auth) && can_delete),
-                    "truncate must imply !can_delete"
-                );
-            }
-        }
     }
 
     // A narrowed `library="off"` mirror playlist cannot delete (#148), so first-use

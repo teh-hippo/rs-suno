@@ -10,6 +10,7 @@ mod client;
 mod clock;
 pub mod config;
 mod consts;
+pub mod desired;
 mod downloadable;
 mod error;
 mod executor;
@@ -44,6 +45,10 @@ pub use config::{
     AccountConfig, AreaMode, AreasConfig, AudioFormat, Config, Defaults, EffectiveSettings,
     FlagOverrides, SourceConfig, StemFormat, VideoCoverRetention,
 };
+pub use desired::{
+    ArtifactToggles, LIKED_PLAYLIST_ID, PlaylistInput, build_desired, build_playlist_desired,
+    clip_stems,
+};
 pub use downloadable::is_downloadable;
 pub use error::{Error, Result};
 pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute};
@@ -75,8 +80,9 @@ pub use naming::{
 pub use orphans::untracked_audio;
 pub use reconcile::{
     Action, AlbumDesired, ArtifactKind, Desired, DesiredArtifact, DesiredStem, LocalFile, Plan,
-    PlaylistDesired, SourceMode, SourceStatus, album_desired, deletion_allowed,
-    plan_album_artifacts, plan_playlist_artifacts, reconcile,
+    PlaylistDesired, SourceMode, SourceStatus, album_desired, area_fully_enumerated,
+    deletion_allowed, narrows_downloads, plan_album_artifacts, plan_playlist_artifacts,
+    playlist_authoritative, reconcile,
 };
 pub use synced::{
     PendingCheck, SYNCED_LRC_RECHECK_SECS, apply_synced_lrc, preview_synced_lrc,
