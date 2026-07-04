@@ -570,6 +570,46 @@ pub fn deletion_allowed(sources: &[SourceStatus]) -> bool {
     saw_mirror
 }
 
+/// Whether a playlist listing is authoritative for deletion, before the
+/// empty-mirror guard.
+///
+/// A playlist area is authoritative only when its page set drained completely
+/// (`complete`), no member was lost to the downloadable filter (`any_filtered`),
+/// and no `--limit`/`--since` narrowing was applied (`narrowed`). A narrowed
+/// playlist mirror disarms exactly as a narrowed library or liked feed does, so
+/// `--limit`/`--since` never delete against the full playlist and deletion
+/// always needs a full run, uniformly across every source (#148).
+pub fn playlist_authoritative(complete: bool, any_filtered: bool, narrowed: bool) -> bool {
+    complete && !any_filtered && !narrowed
+}
+
+/// Whether an area that was not deliberately narrowed is fully enumerated after
+/// applying the empty-mirror guard (§5).
+///
+/// An empty Mirror area is never authoritative: an empty listing and a dropped
+/// listing are indistinguishable, so this guard is always applied. An empty Copy
+/// area is authoritative (it protects nothing) and is treated as fully
+/// enumerated so it does not suppress deletion.
+///
+/// `authoritative` is the area's completeness verdict before this guard (the
+/// listing drained, no narrowing, no filter loss). `clips_empty` is whether the
+/// area returned zero clips. `mode` is the area's final mode after any
+/// copy-verb override.
+pub fn area_fully_enumerated(authoritative: bool, clips_empty: bool, mode: SourceMode) -> bool {
+    authoritative && !(clips_empty && mode == SourceMode::Mirror)
+}
+
+/// Whether `--limit`/`--since` may narrow the download selection.
+///
+/// Only a run that neither deletes nor lists an authoritative full library may
+/// truncate the union: narrowing while a mirror is armed would drop a
+/// mirror/protector clip into a deletion (D2), and narrowing when a full library
+/// is listed would regress the library index and folder art built from the
+/// complete set. So truncation structurally implies no deletion.
+pub fn narrows_downloads(can_delete: bool, library_authoritative: bool) -> bool {
+    !can_delete && !library_authoritative
+}
+
 /// The single gate every `Delete` passes through.
 ///
 /// Returns a [`Action::Delete`] only when deletion is allowed for the run, a
@@ -2194,6 +2234,59 @@ mod tests {
             reconcile(&manifest, &[], &HashMap::new(), &sources).deletes(),
             0
         );
+    }
+
+    #[test]
+    fn playlist_authoritative_requires_all_conditions() {
+        // All three conditions satisfied: authoritative.
+        assert!(playlist_authoritative(true, false, false));
+        // Incomplete page drain: not authoritative.
+        assert!(!playlist_authoritative(false, false, false));
+        // A member lost to the downloadable filter: not authoritative.
+        assert!(!playlist_authoritative(true, true, false));
+        // Narrowed with --limit/--since: not authoritative.
+        assert!(!playlist_authoritative(true, false, true));
+        // Multiple conditions: any failure disarms.
+        assert!(!playlist_authoritative(false, true, true));
+    }
+
+    #[test]
+    fn area_fully_enumerated_applies_empty_mirror_guard() {
+        // A non-empty Mirror that fully listed is authoritative.
+        assert!(area_fully_enumerated(true, false, SourceMode::Mirror));
+        // An empty Mirror is never authoritative (indistinguishable from a drop).
+        assert!(!area_fully_enumerated(true, true, SourceMode::Mirror));
+        // An empty Copy is still authoritative (it protects nothing).
+        assert!(area_fully_enumerated(true, true, SourceMode::Copy));
+        // A non-empty Copy is authoritative.
+        assert!(area_fully_enumerated(true, false, SourceMode::Copy));
+        // A non-authoritative (narrowed/incomplete) area is not enumerated regardless.
+        assert!(!area_fully_enumerated(false, false, SourceMode::Mirror));
+        assert!(!area_fully_enumerated(false, true, SourceMode::Copy));
+    }
+
+    #[test]
+    fn narrows_downloads_only_when_no_deletion_and_no_full_library() {
+        // Neither deleting nor a full library: narrowing is allowed.
+        assert!(narrows_downloads(false, false));
+        // Armed deletion: narrowing must not occur (D2).
+        assert!(!narrows_downloads(true, false));
+        // Full library listed: narrowing regresses the index.
+        assert!(!narrows_downloads(false, true));
+        // Both: definitely no narrowing.
+        assert!(!narrows_downloads(true, true));
+    }
+
+    #[test]
+    fn narrowing_never_coexists_with_deletion() {
+        for can_delete in [false, true] {
+            for lib_auth in [false, true] {
+                assert!(
+                    !(narrows_downloads(can_delete, lib_auth) && can_delete),
+                    "truncate must imply !can_delete"
+                );
+            }
+        }
     }
 
     #[test]
