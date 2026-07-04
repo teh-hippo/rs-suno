@@ -80,8 +80,9 @@ listing is not authoritative, so deletion is disabled for that run. Run a plain
 `rs-suno` refuses to run against a damaged `.suno-manifest.json` or
 `.suno-lineage.json` rather than risk re-downloading everything or losing
 archived lineage. Restore the file from a backup, or move it aside to start
-fresh (a fresh manifest will re-verify existing files rather than re-download
-unchanged ones).
+fresh. Starting fresh re-downloads every file: without the manifest there is no
+recorded digest to verify existing files against, so the safe choice is to
+re-fetch rather than trust unverified local copies.
 
 ## FAQ
 
