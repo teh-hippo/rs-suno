@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.2](https://github.com/teh-hippo/rs-suno/compare/v0.20.1...v0.20.2) (2026-07-04)
+
+
+### Performance Improvements
+
+* add opt-level = "s" to the release profile ([d5a8528](https://github.com/teh-hippo/rs-suno/commit/d5a8528a6a3353e100be8560358cee18f487c254)), closes [#115](https://github.com/teh-hippo/rs-suno/issues/115)
+
 ## [0.20.1](https://github.com/teh-hippo/rs-suno/compare/v0.20.0...v0.20.1) (2026-07-03)
 
 
