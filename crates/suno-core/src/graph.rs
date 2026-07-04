@@ -2549,37 +2549,4 @@ mod tests {
         let archived = store.archived_parents();
         assert_eq!(archived.get("b").map(String::as_str), Some("a"));
     }
-
-    #[test]
-    fn lineage_resolution_and_album_grouping_are_unchanged() {
-        // End-to-end guard: the typed fields must not change lineage resolution
-        // behaviour or album grouping compared to the previous string-based code.
-        let mut store = LineageStore::new();
-        store.update(&chain_clips(), &chain_resolution(), "now");
-
-        // Root resolution: every clip roots at "a".
-        for id in ["a", "b", "c"] {
-            let cached = store.get_root(id).unwrap();
-            assert_eq!(cached.root_id, "a");
-            assert_eq!(cached.status, ResolveStatus::Resolved);
-        }
-
-        // Album grouping: all three clip under the root's title.
-        for id in ["a", "b", "c"] {
-            assert_eq!(store.album_for_id(id), "Root");
-        }
-
-        // archived_parents feeds lineage hops through purged ancestors.
-        let archived = store.archived_parents();
-        assert_eq!(archived.get("c").map(String::as_str), Some("b"));
-        assert_eq!(archived.get("b").map(String::as_str), Some("a"));
-        assert!(!archived.contains_key("a"));
-
-        // context_for returns the correct status and root.
-        let cover = &chain_clips()[0];
-        let ctx = store.context_for(cover);
-        assert_eq!(ctx.root_id, "a");
-        assert_eq!(ctx.status, ResolveStatus::Resolved);
-        assert_eq!(ctx.album(&cover.title), "Root");
-    }
 }

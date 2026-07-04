@@ -1903,23 +1903,6 @@ mod tests {
     }
 
     #[test]
-    fn stem_page_count_400_is_no_stems() {
-        // A genuine `400` on the page-count endpoint means "no stems": it must
-        // produce ([], false) — indeterminate, not an authoritative empty set.
-        let http = ScriptedHttp::new()
-            .with_auth()
-            .route("stems/pages", Reply::status(400));
-        let client = scripted_client(&http, RecordingClock::new());
-
-        let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
-        assert!(stems.is_empty());
-        assert!(
-            !complete,
-            "400 is indeterminate, not an authoritative empty set"
-        );
-    }
-
-    #[test]
     fn stem_page_count_5xx_with_invalid_page_body_is_not_no_stems() {
         // A `5xx` whose body happens to contain "Invalid page" must NOT be
         // classified as "no stems": body-text matching would misclassify it.

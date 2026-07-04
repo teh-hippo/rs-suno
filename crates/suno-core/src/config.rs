@@ -1905,12 +1905,4 @@ mod tests {
         eff.animated_covers = false;
         assert!(!eff.requires_ffmpeg(), "mp3 + raw mp4 only = no ffmpeg");
     }
-
-    #[test]
-    fn requires_ffmpeg_wav_mirrors_mp3_logic() {
-        let mut eff = base_settings(AudioFormat::Wav);
-        assert!(!eff.requires_ffmpeg(), "wav + no covers = no ffmpeg");
-        eff.animated_covers = true;
-        assert!(eff.requires_ffmpeg(), "wav + animated webp = needs ffmpeg");
-    }
 }

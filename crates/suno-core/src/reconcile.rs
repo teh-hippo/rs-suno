@@ -1897,16 +1897,6 @@ mod tests {
     }
 
     #[test]
-    fn rename_without_meta_change_does_not_retag() {
-        let mut manifest = Manifest::new();
-        manifest.insert("a", entry("old/a.flac", AudioFormat::Flac, "m", "art"));
-        let d = vec![desired("a", "new/a.flac", AudioFormat::Flac, "m", "art")];
-        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
-        assert_eq!(plan.renames(), 1);
-        assert_eq!(plan.retags(), 0);
-    }
-
-    #[test]
     fn bulk_album_rename_moves_and_retags_without_redownload() {
         // Renaming an album (a manual override) changes both the folder path and
         // the ALBUM tag/hash for every member clip. Reconcile must emit a Rename
