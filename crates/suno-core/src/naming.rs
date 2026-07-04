@@ -116,8 +116,12 @@ pub fn render_clip_names(
     for indexes in collisions.into_values().filter(|indexes| indexes.len() > 1) {
         for index in indexes {
             let suffix = &requests[index].clip.id;
-            rendered[index] =
-                with_suffix(rendered[index].clone(), suffix, config.max_component_len);
+            rendered[index] = with_suffix(
+                rendered[index].clone(),
+                suffix,
+                config.character_set,
+                config.max_component_len,
+            );
         }
     }
 
@@ -155,8 +159,9 @@ fn album_for(
     let album = sanitise_component(&raw_album, config.character_set, config.max_component_len);
     if colliding_albums.contains(raw_album.trim()) {
         let suffix = truncate_chars(&request.lineage.root_id, 8);
-        sanitise_component(
-            &format!("{album} [{suffix}]"),
+        append_suffix(
+            &album,
+            &suffix,
             config.character_set,
             config.max_component_len,
         )
@@ -213,8 +218,12 @@ fn render_with_album(
                 .replace("{root_id8}", &root_id8)
                 .replace("{id8}", &id8)
                 .replace("{id}", &id);
-            let sanitised =
-                sanitise_component(&rendered, config.character_set, config.max_component_len);
+            let sanitised = sanitise_segment(
+                &rendered,
+                config.character_set,
+                config.max_component_len,
+                [id8.as_str(), root_id8.as_str()],
+            );
             (!sanitised.is_empty()).then_some(sanitised)
         })
         .collect::<Vec<_>>();
@@ -229,7 +238,12 @@ fn render_with_album(
         .unwrap_or_else(|| title.clone());
     // Guarantee a non-empty file name even when every token sanitises away.
     if base_name.is_empty() {
-        base_name = append_suffix(&base_name, &clip.id, config.max_component_len);
+        base_name = append_suffix(
+            &base_name,
+            &clip.id,
+            config.character_set,
+            config.max_component_len,
+        );
     }
 
     let mut relative_path = PathBuf::new();
@@ -244,8 +258,18 @@ fn render_with_album(
     }
 }
 
-fn with_suffix(mut rendered: RenderedName, suffix: &str, max_component_len: usize) -> RenderedName {
-    rendered.base_name = append_suffix(&rendered.base_name, suffix, max_component_len);
+fn with_suffix(
+    mut rendered: RenderedName,
+    suffix: &str,
+    character_set: CharacterSet,
+    max_component_len: usize,
+) -> RenderedName {
+    rendered.base_name = append_suffix(
+        &rendered.base_name,
+        suffix,
+        character_set,
+        max_component_len,
+    );
     rendered.relative_path.set_file_name(&rendered.base_name);
     rendered
 }
@@ -266,18 +290,52 @@ fn title_name(clip: &Clip) -> String {
     }
 }
 
-fn append_suffix(base: &str, suffix: &str, max_component_len: usize) -> String {
+fn append_suffix(
+    base: &str,
+    suffix: &str,
+    character_set: CharacterSet,
+    max_component_len: usize,
+) -> String {
     let suffix_pattern = format!(" [{suffix}]");
     if base.ends_with(&suffix_pattern) {
-        return sanitise_component(base, CharacterSet::Unicode, max_component_len);
+        return sanitise_component(base, character_set, max_component_len);
     }
 
     let max_len =
         max_component_len.max(suffix_pattern.chars().count() + MIN_BASE_CHARS_WITH_SUFFIX);
     let allowed = max_len.saturating_sub(suffix_pattern.chars().count());
+    // Sanitise the base before measuring it. The character set can expand a
+    // character (ascii turns `ß` into `ss`), so budgeting the cut on the raw
+    // length could let the sanitised prefix grow back over the room reserved for
+    // the suffix and slice through it again (#120).
+    let base = sanitise_component(base, character_set, max_len);
     let truncated = truncate_chars(base.trim_end(), allowed);
     let combined = format!("{truncated}{suffix_pattern}");
-    sanitise_component(&combined, CharacterSet::Unicode, max_len)
+    sanitise_component(&combined, character_set, max_len)
+}
+
+/// Sanitise a rendered template segment, preserving a trailing ` [id]`
+/// disambiguator (the `[{id8}]` or `[{root_id8}]` the template embeds) when the
+/// segment would otherwise be truncated through it. Only the title portion is
+/// shortened, so two long-titled siblings keep their distinguishing id and the
+/// closing bracket is never left unbalanced (#120). A segment that does not end
+/// in a disambiguator is sanitised exactly as before.
+fn sanitise_segment(
+    rendered: &str,
+    character_set: CharacterSet,
+    max_component_len: usize,
+    disambiguators: [&str; 2],
+) -> String {
+    for suffix in disambiguators {
+        if suffix.is_empty() {
+            continue;
+        }
+        let pattern = format!(" [{suffix}]");
+        if let Some(prefix) = rendered.strip_suffix(&pattern) {
+            return append_suffix(prefix, suffix, character_set, max_component_len);
+        }
+    }
+    sanitise_component(rendered, character_set, max_component_len)
 }
 
 /// Sanitise a free-form playlist name into a single safe path component.
@@ -603,6 +661,117 @@ mod tests {
                 "component {text:?} exceeds 24 chars"
             );
         }
+        // The trailing [id8] must survive the truncation intact (#120).
+        assert!(
+            rendered.base_name.ends_with(" [abcdef12]"),
+            "id8 disambiguator was sliced; base_name was {:?}",
+            rendered.base_name
+        );
+    }
+
+    #[test]
+    fn long_names_keep_the_full_id8_disambiguator() {
+        // A creator+title long enough to overflow the cap keeps the whole
+        // trailing [id8]: the title is shortened, not the id, so the name stays
+        // complete and the bracket stays balanced (#120).
+        let clip = test_clip("1234abcd-tail", &"a".repeat(120));
+        let config = NamingConfig {
+            max_component_len: 40,
+            ..NamingConfig::default()
+        };
+        let rendered = render_own(&clip, &config);
+
+        assert!(
+            rendered.base_name.ends_with(" [1234abcd]"),
+            "base_name must end with the full disambiguator, was {:?}",
+            rendered.base_name
+        );
+        assert_eq!(rendered.base_name.chars().count(), 40);
+    }
+
+    #[test]
+    fn long_titled_siblings_stay_distinct_with_balanced_brackets() {
+        // Two same-(long-)titled clips sharing a root must remain distinct: only
+        // the title is shortened, so their [id8] suffixes differ and neither name
+        // ends up with an unbalanced bracket (#120).
+        let lineage = LineageContext {
+            root_id: "root-42".to_string(),
+            root_title: "Origin".to_string(),
+            root_date: String::new(),
+            parent_id: "root-42".to_string(),
+            edge_type: Some(EdgeType::Cover),
+            status: ResolveStatus::Resolved,
+        };
+        let title = "z".repeat(200);
+        let first = test_clip("aaaa1111-x", &title);
+        let second = test_clip("bbbb2222-y", &title);
+        let requests = [
+            NamingRequest {
+                clip: &first,
+                lineage: &lineage,
+            },
+            NamingRequest {
+                clip: &second,
+                lineage: &lineage,
+            },
+        ];
+
+        let names = render_clip_names(&requests, &NamingConfig::default(), &BTreeSet::new());
+
+        assert!(names[0].base_name.ends_with(" [aaaa1111]"));
+        assert!(names[1].base_name.ends_with(" [bbbb2222]"));
+        assert_ne!(names[0].relative_path, names[1].relative_path);
+        for name in &names {
+            assert!(name.base_name.chars().count() <= 80);
+            assert_eq!(name.base_name.matches('[').count(), 1, "unbalanced '['");
+            assert_eq!(name.base_name.matches(']').count(), 1, "unbalanced ']'");
+        }
+    }
+
+    #[test]
+    fn long_colliding_album_keeps_its_root_id8() {
+        // The album [root_id8] disambiguator is preserved when a long album title
+        // must be truncated, mirroring the file-name fix (#120).
+        let long = "Break Through ".repeat(20);
+        let title = long.trim().to_string();
+        let clip = Clip {
+            id: "aaaa1111-x".to_string(),
+            title: title.clone(),
+            display_name: "München".to_string(),
+            ..Clip::default()
+        };
+        let colliding: BTreeSet<String> = [title].into_iter().collect();
+        let names = render_all_own(&[clip], &NamingConfig::default(), &colliding);
+
+        let album = names[0]
+            .relative_path
+            .components()
+            .nth(1)
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert!(album.ends_with(" [aaaa1111]"), "album was {album:?}");
+        assert!(album.chars().count() <= 80);
+    }
+
+    #[test]
+    fn ascii_expanding_chars_do_not_slice_the_disambiguator() {
+        // A literal expanding character (`ß` -> `ss` under ascii) in a custom
+        // template, right before the trailing ` [{id8}]`, must not grow back over
+        // the suffix and slice it: the base is sized after expansion (#120).
+        let clip = test_clip("1234abcd", "Title");
+        let config = NamingConfig {
+            template: format!("{}{{title}} [{{id8}}]", "ß".repeat(80)),
+            character_set: CharacterSet::Ascii,
+            max_component_len: 40,
+        };
+        let rendered = render_own(&clip, &config);
+
+        assert!(
+            rendered.base_name.ends_with(" [1234abcd]"),
+            "expansion sliced the id8; base_name was {:?}",
+            rendered.base_name
+        );
+        assert!(rendered.base_name.chars().count() <= 40);
     }
 
     #[test]
