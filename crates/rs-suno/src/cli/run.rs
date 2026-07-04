@@ -345,6 +345,7 @@ async fn run(
                 .await
                 .expect("semaphore closed");
             handles.push(std::thread::spawn(move || {
+                let _permit = permit;
                 TASK_STDERR.with(|b| *b.borrow_mut() = Some(Vec::new()));
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -361,7 +362,6 @@ async fn run(
                     &e,
                     exit_code,
                 ));
-                drop(permit);
                 let lines = TASK_STDERR.with(|b| b.borrow_mut().take().unwrap_or_default());
                 result.map(|code| (code, lines))
             }));
@@ -2188,7 +2188,7 @@ async fn stat_manifest(
             .collect()
     })
     .await
-    .unwrap_or_default()
+    .expect("stat_manifest blocking task panicked")
 }
 
 /// Whether a file extension names one of the audio formats we write.
