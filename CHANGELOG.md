@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.26.1](https://github.com/teh-hippo/rs-suno/compare/v0.26.0...v0.26.1) (2026-07-04)
+
+
+### Bug Fixes
+
+* enforce aggregate pacing across concurrent API reads ([e885e75](https://github.com/teh-hippo/rs-suno/commit/e885e75fd9f9c043d3d8af770728daabb62f7965))
+* enforce shared limiter slots across concurrent reads ([c6cfb3a](https://github.com/teh-hippo/rs-suno/commit/c6cfb3a3f26373ff190bab6ed2038a23612a41f9))
+* make SunoClient interior-mutable and parallelize read fetches ([fdfa19e](https://github.com/teh-hippo/rs-suno/commit/fdfa19e7921b08f30b577407eedcccde6c7d38e5))
+* remove unused ordering indices in concurrent fetch streams ([41cf217](https://github.com/teh-hippo/rs-suno/commit/41cf217ac7cb90b993035c129e58dd75416d6c63))
+
 ## [0.26.0](https://github.com/teh-hippo/rs-suno/compare/v0.25.1...v0.26.0) (2026-07-04)
 
 
