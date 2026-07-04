@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.8](https://github.com/teh-hippo/rs-suno/compare/v0.22.7...v0.22.8) (2026-07-04)
+
+
+### Bug Fixes
+
+* correct ffmpeg preflight for both-retention and drop deprecated id3 call ([8233d12](https://github.com/teh-hippo/rs-suno/commit/8233d129ae424bbc1c462165984bd17b9e91244e))
+* implement WAV ID3v2 tagging and add ffmpeg preflight config check ([8a01eae](https://github.com/teh-hippo/rs-suno/commit/8a01eaede9515d54345da13c83282ab2b5f782c0)), closes [#151](https://github.com/teh-hippo/rs-suno/issues/151) [#152](https://github.com/teh-hippo/rs-suno/issues/152)
+
 ## [0.22.7](https://github.com/teh-hippo/rs-suno/compare/v0.22.6...v0.22.7) (2026-07-04)
 
 
