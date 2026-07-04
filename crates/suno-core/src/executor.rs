@@ -747,6 +747,7 @@ where
                     source_url,
                     *format,
                     hash,
+                    tracked_paths,
                     committed,
                 )
                 .await
@@ -1365,6 +1366,7 @@ where
         source_url: &str,
         format: StemFormat,
         hash: &str,
+        tracked_paths: &mut HashMap<String, u32>,
         committed: &BTreeSet<String>,
     ) -> Result<Effect, Fail> {
         // A stem needs its owning clip's manifest entry (its audio must exist).
@@ -1381,19 +1383,31 @@ where
         self.write_verify(clip_id, path, &bytes)?;
         // The new stem is in place; only now drop a stale copy left at the old
         // path (the song moved, or the stem format changed). `remove` is
-        // idempotent. A path a *committed* write this run has already placed is
-        // never removed (the commit-tracked twin of `suppress_path_aliasing`); a
-        // merely planned write that later fails no longer protects a stale file
-        // (#142). On a genuine remove failure we return BEFORE updating the slot,
-        // so the next run re-plans the same write and retries the cleanup.
+        // idempotent. On a genuine remove failure we return BEFORE updating the
+        // slot, so the next run re-plans the same write and retries the cleanup.
+        //
+        // The removal is gated by the same twin guards as `write_artifact` (#76,
+        // #142): this slot decrements its reference in `tracked_paths`, and the
+        // file is removed only when nothing else holds it (count reaches zero)
+        // and no committed write this run already placed a file there. This
+        // keeps the shared file alive when two clips co-reference the same stem
+        // path after a partially-failed swap.
         if let Some(old) = old_path.as_deref()
             && !old.is_empty()
             && old != path
-            && !committed.contains(old)
         {
-            self.fs.remove(old).map_err(|err| {
-                permanent_fail(clip_id, format!("could not remove old stem {old}: {err}"))
-            })?;
+            let still_referenced = tracked_paths
+                .get_mut(old)
+                .map(|count| {
+                    *count = count.saturating_sub(1);
+                    *count > 0
+                })
+                .unwrap_or(false);
+            if !still_referenced && !committed.contains(old) {
+                self.fs.remove(old).map_err(|err| {
+                    permanent_fail(clip_id, format!("could not remove old stem {old}: {err}"))
+                })?;
+            }
         }
         if let Some(entry) = manifest.entries.get_mut(clip_id) {
             set_manifest_stem(
@@ -1476,6 +1490,7 @@ where
             source_url,
             format,
             hash,
+            tracked_paths,
             committed,
         )
         .await
@@ -4436,6 +4451,69 @@ mod tests {
         assert_eq!(outcome.failed(), 0);
         // b's new stem carries b's freshly fetched bytes, never a's renamed bytes.
         assert_eq!(fs.read_file("b.stems/voc.mp3").unwrap(), b"B-STEM");
+        assert_eq!(
+            fs.read_file("shared.stems/voc.mp3").unwrap(),
+            b"A-STEM",
+            "the co-referenced stem must survive"
+        );
+    }
+
+    #[test]
+    fn write_stem_keeps_shared_stem_when_co_referenced() {
+        // Two clips share shared.stems/voc.mp3 after a prior partially-failed swap.
+        // When `b` writes to a new path, write_stem must NOT remove the shared file;
+        // clip `a` still references it and its stem must survive.
+        let mut manifest = Manifest::new();
+        let mut a = entry("a.flac", AudioFormat::Flac);
+        a.stems.insert(
+            "voc".to_owned(),
+            ArtifactState {
+                path: "shared.stems/voc.mp3".to_owned(),
+                hash: "h".to_owned(),
+            },
+        );
+        manifest.insert("a", a);
+        let mut b = entry("b.flac", AudioFormat::Flac);
+        b.stems.insert(
+            "voc".to_owned(),
+            ArtifactState {
+                path: "shared.stems/voc.mp3".to_owned(),
+                hash: "h".to_owned(),
+            },
+        );
+        manifest.insert("b", b);
+        let fs = MemFs::new().with_file("shared.stems/voc.mp3", b"A-STEM".to_vec());
+        let http = ScriptedHttp::new().route("bvoc.mp3", Reply::ok(b"B-STEM".to_vec()));
+        let plan = Plan {
+            actions: vec![Action::WriteStem {
+                clip_id: "b".to_owned(),
+                key: "voc".to_owned(),
+                stem_id: "bvoc".to_owned(),
+                path: "b.stems/voc.mp3".to_owned(),
+                source_url: "https://cdn1.suno.ai/bvoc.mp3".to_owned(),
+                format: StemFormat::Mp3,
+                hash: "bh".to_owned(),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(fs.read_file("b.stems/voc.mp3").unwrap(), b"B-STEM");
+        assert_eq!(
+            fs.read_file("shared.stems/voc.mp3").unwrap(),
+            b"A-STEM",
+            "the co-referenced stem must survive"
+        );
     }
 
     #[test]
