@@ -750,7 +750,22 @@ async fn run_one(
     // the universe). Resolution is best-effort: a hard IO failure degrades to
     // the last-known-good roots already in the durable store rather than
     // aborting the sync or rewriting the library from a dropped call (H3).
-    let resolution = match resolve_roots(&clips, &mut client, &http, ResolveOpts::default()).await {
+    //
+    // Seed the resolver with the store's persisted parent links so a walk can
+    // hop through an ancestor whose clip is absent this run (an intermediate
+    // remix, or one Suno has purged) using data captured earlier, instead of
+    // self-rooting into a duplicate album. Read before `store.update` so it
+    // reflects the prior run's archive.
+    let archived_parents = store.archived_parents();
+    let resolution = match resolve_roots(
+        &clips,
+        &archived_parents,
+        &mut client,
+        &http,
+        ResolveOpts::default(),
+    )
+    .await
+    {
         Ok(resolution) => Some(resolution),
         Err(err) => {
             if verbosity >= -1 {

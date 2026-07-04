@@ -476,6 +476,7 @@ mod tests {
         let resolution = Resolution {
             roots,
             gap_filled: Vec::new(),
+            bridges: Vec::new(),
         };
         let mut store = LineageStore::new();
         store.update(&[clip], &resolution, "2024-01-01T00:00:00Z");
