@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/teh-hippo/rs-suno/compare/v0.21.0...v0.22.0) (2026-07-04)
+
+
+### Features
+
+* retain the raw album cover.mp4 (video_cover_url verbatim) ([27fa8c9](https://github.com/teh-hippo/rs-suno/commit/27fa8c908d8d38fa85f17539764cd934c5504421)), closes [#90](https://github.com/teh-hippo/rs-suno/issues/90)
+
 ## [0.21.0](https://github.com/teh-hippo/rs-suno/compare/v0.20.4...v0.21.0) (2026-07-04)
 
 
