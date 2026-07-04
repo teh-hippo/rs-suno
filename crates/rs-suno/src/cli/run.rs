@@ -615,16 +615,10 @@ async fn list_existing_stems(
     if !enabled {
         return out;
     }
-    let candidates: Vec<(usize, &Clip)> = clips
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(_, clip)| clip.has_stem)
-        .collect();
-    let fetched = stream::iter(candidates.iter().copied())
-        .map(|(idx, clip)| async move {
+    let candidates: Vec<&Clip> = clips.iter().copied().filter(|clip| clip.has_stem).collect();
+    let fetched = stream::iter(candidates)
+        .map(|clip| async move {
             (
-                idx,
                 clip.id.clone(),
                 client.list_stems(http, &clip.id).await.ok(),
             )
@@ -632,7 +626,7 @@ async fn list_existing_stems(
         .buffered(concurrency.max(1) as usize)
         .collect::<Vec<_>>()
         .await;
-    for (_idx, id, result) in fetched {
+    for (id, result) in fetched {
         if let Some((stems, true)) = result
             && !stems.is_empty()
         {
@@ -1516,12 +1510,12 @@ async fn resolve_synced_lyrics(
 ) -> (HashMap<String, AlignedLyrics>, Vec<suno_core::PendingCheck>) {
     let mut synced: HashMap<String, AlignedLyrics> = HashMap::new();
     let targets = suno_core::synced_lyrics_targets(desired, manifest, now_secs(), enabled);
-    let fetched = stream::iter(targets.iter().enumerate())
-        .map(|(idx, id)| async move { (idx, id.clone(), client.aligned_lyrics(http, id).await) })
+    let fetched = stream::iter(targets.iter())
+        .map(|id| async move { (id.clone(), client.aligned_lyrics(http, id).await) })
         .buffered(concurrency.max(1) as usize)
         .collect::<Vec<_>>()
         .await;
-    for (_idx, id, result) in fetched {
+    for (id, result) in fetched {
         match result {
             Ok(aligned) => {
                 synced.insert(id, aligned);
@@ -2007,10 +2001,9 @@ async fn fetch_playlist_desired(
     // playlist whose single page did not return its whole member set (D5) is
     // protected rather than rendered from a truncated page (B2).
     let mut fetched: Vec<(String, String, Vec<Clip>)> = Vec::new();
-    let member_results = stream::iter(playlists.iter().enumerate())
-        .map(|(idx, playlist)| async move {
+    let member_results = stream::iter(playlists.iter())
+        .map(|playlist| async move {
             (
-                idx,
                 playlist.id.clone(),
                 playlist.name.clone(),
                 client.get_playlist_clips(http, &playlist.id).await,
@@ -2019,7 +2012,7 @@ async fn fetch_playlist_desired(
         .buffered(concurrency.max(1) as usize)
         .collect::<Vec<_>>()
         .await;
-    for (_idx, id, name, result) in member_results {
+    for (id, name, result) in member_results {
         match result {
             Ok((members, true)) => fetched.push((id, name, members)),
             Ok((_, false)) => {
