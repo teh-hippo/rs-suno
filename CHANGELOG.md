@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.9](https://github.com/teh-hippo/rs-suno/compare/v0.22.8...v0.22.9) (2026-07-04)
+
+
+### Bug Fixes
+
+* gate old-sidecar cleanup on committed writes, not planned ones ([228d943](https://github.com/teh-hippo/rs-suno/commit/228d943a412a3d3cebd8c9cb5a14e29cee3ab9e3)), closes [#142](https://github.com/teh-hippo/rs-suno/issues/142)
+
 ## [0.22.8](https://github.com/teh-hippo/rs-suno/compare/v0.22.7...v0.22.8) (2026-07-04)
 
 
