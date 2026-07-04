@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.3](https://github.com/teh-hippo/rs-suno/compare/v0.22.2...v0.22.3) (2026-07-04)
+
+
+### Bug Fixes
+
+* hash the embedded tag set so metadata edits re-tag on sync ([126c7ba](https://github.com/teh-hippo/rs-suno/commit/126c7ba8feb5fe2337b8d1b15ed4b78d61b028c7)), closes [#135](https://github.com/teh-hippo/rs-suno/issues/135) [#136](https://github.com/teh-hippo/rs-suno/issues/136)
+
 ## [0.22.2](https://github.com/teh-hippo/rs-suno/compare/v0.22.1...v0.22.2) (2026-07-04)
 
 
