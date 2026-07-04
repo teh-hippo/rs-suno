@@ -27,15 +27,16 @@ use crate::testutil::{ChaosHttp, MemFs, Outcome, RecordingClock, StubFfmpeg};
 /// A test author's description of one remote clip.
 ///
 /// The fields chosen here are exactly the ones that drive engine decisions: the
-/// title feeds the path (so changing it forces a rename), the tags and art feed
-/// the content hashes (so changing them forces a retag), and the modes, trashed,
-/// and private flags drive the deletion guards.
+/// title feeds the path (so changing it forces a rename) and the embedded tags,
+/// the creator feeds both the path and the artist tag, the tags and art feed the
+/// content hashes (so changing them forces a retag), and the modes, trashed, and
+/// private flags drive the deletion guards.
 #[derive(Clone, Debug)]
 pub(super) struct ClipSpec {
     pub id: String,
     pub title: String,
-    /// The account display name; feeds the path but never `meta_hash` (which
-    /// excludes path-only fields), so changing it forces a pure rename.
+    /// The account display name; feeds both the path (creator folder) and the
+    /// embedded artist tag, so changing it forces a rename and a retag.
     pub creator: String,
     /// Feeds `meta_hash`; bump to force a retag.
     pub tags: String,
@@ -126,8 +127,9 @@ fn slug(title: &str) -> String {
 
 /// The deterministic relative path for a spec: a creator slug, then a title
 /// slug plus the id (so it is unique per clip and stable across runs) and the
-/// format extension. The creator component is path-only, so changing it forces
-/// a pure rename while changing the title forces a rename plus a retag.
+/// format extension. The creator feeds both the path and the embedded artist
+/// tag, so changing either the creator or the title forces a rename plus a
+/// retag.
 pub(super) fn path_of(spec: &ClipSpec) -> String {
     format!(
         "{}/{}-{}.{}",
