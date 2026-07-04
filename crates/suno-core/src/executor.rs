@@ -182,19 +182,24 @@ pub struct Ports<'a, H, F, G, C> {
 /// never aborts the run, except an auth failure or a full disk, which stop it
 /// with [`RunStatus::AuthAborted`] or [`RunStatus::DiskFull`].
 ///
-/// The audio-producing actions ([`Download`](Action::Download) and
-/// [`Reformat`](Action::Reformat)) run concurrently, bounded by
-/// [`ExecOptions::concurrency`]: their slow parts (WAV render, CDN download,
-/// transcode, tag) overlap while the order-sensitive Suno API calls are
-/// serialised behind an async mutex over the shared [`SunoClient`], keeping the
-/// adaptive limiter and JWT refresh correct. The remaining actions (retag,
-/// rename, delete, and artifact writes/deletes) then run serially in plan order.
+/// Audio-producing ([`Download`](Action::Download) /
+/// [`Reformat`](Action::Reformat)), fetched-artifact
+/// ([`WriteArtifact`](Action::WriteArtifact) with no inline content), and stem
+/// ([`WriteStem`](Action::WriteStem)) actions all run their slow,
+/// side-effect-free work concurrently, bounded by
+/// [`ExecOptions::concurrency`]: WAV render + CDN download + transcode + tag for
+/// audio; CDN fetch + optional WebP transcode for artifacts; WAV render + CDN
+/// download for stems. Order-sensitive Suno API calls (WAV render initiation and
+/// poll) are serialised behind an async mutex over the shared [`SunoClient`],
+/// keeping the adaptive limiter and JWT refresh correct. The remaining actions
+/// (retag, rename, delete, artifact deletes, and inline artifact writes) run
+/// serially in plan order.
 ///
-/// The outcome is deterministic regardless of completion order: concurrent audio
+/// The outcome is deterministic regardless of completion order: all prepared
 /// results are committed to the manifest in plan-index order, so the same plan
 /// always yields the same manifest and counts whatever the concurrency level. A
 /// per-clip failure is recorded and the run continues; only an auth failure or a
-/// full disk aborts, and it does so promptly by stopping further audio work.
+/// full disk aborts, and it does so promptly by stopping further concurrent work.
 ///
 /// `synced` carries this run's fetched aligned (synced) lyrics keyed by clip id;
 /// it is the caller's IO result, not part of the pure plan. Audio tagging embeds
@@ -318,47 +323,63 @@ where
     // also targets it (#142). Serial commit order makes this a clean prefix.
     let mut committed: BTreeSet<String> = BTreeSet::new();
 
-    // The audio-producing actions ([`Download`](Action::Download) /
-    // [`Reformat`](Action::Reformat)) render concurrently, but their work is
-    // deliberately split so that NO destination write, file removal, or manifest
-    // update happens off the plan's order:
+    // Audio (Download/Reformat), fetched-artifact (WriteArtifact with no inline
+    // content), and stem (WriteStem) actions all split their work to maintain the
+    // CRITICAL DELETION-SAFETY INVARIANT: NO destination write, file removal, or
+    // manifest/album/playlist mutation happens off plan order:
     //
-    // - the parallel producers ([`prepare_audio`](Ctx::prepare_audio)) do only
-    //   the slow, side-effect-free work (fetch the CDN/WAV bytes, transcode, and
-    //   tag), returning the tagged bytes; and
+    // - concurrent preparers ([`prepare`](Ctx::prepare)) do only the slow,
+    //   side-effect-free work — fetch CDN/WAV bytes, transcode, tag — returning
+    //   bytes and the routing metadata the committer needs; and
     // - a single serial committer below writes those bytes to the destination,
-    //   removes any superseded file, and records the manifest entry, in strict
-    //   plan-index order, interleaved with the non-audio actions.
+    //   removes any superseded file, and records the manifest/album/playlist
+    //   entry, in strict plan-index order, interleaved with the remaining serial
+    //   actions.
     //
     // The shared client is the only `&mut` port and its API calls must stay
     // ordered, so it rides behind an async mutex; each producer locks it only for
-    // the brief WAV-render calls and runs the heavy work unlocked. Renders are
+    // the brief WAV-render calls and runs the heavy work unlocked. Prepares are
     // yielded in plan order and bounded to `concurrency` in flight (and buffered),
-    // so at most about `concurrency` tagged payloads are ever held in memory -
-    // never the whole library.
+    // so at most about `concurrency` payloads are ever held in memory — never the
+    // whole library.
     let client_lock = AsyncMutex::new(client);
     let concurrency = opts.concurrency.max(1) as usize;
     let ctx_ref = &ctx;
     let client_lock_ref = &client_lock;
-    let mut renders = stream::iter(
+    // Clip IDs already in the manifest before this plan runs. Per-clip
+    // artifacts and stems for these clips are prepared concurrently; for new
+    // clips (not yet in the manifest) the serial apply path handles them after
+    // the audio commit, so the owner-absent guard fires correctly.
+    let pre_clip_ids: HashSet<String> = manifest.entries.keys().cloned().collect();
+    let mut prepares = stream::iter(
         plan.actions
             .iter()
-            .filter(|action| is_audio_action(action))
-            .map(|action| async move { ctx_ref.prepare_audio(client_lock_ref, action).await }),
+            .filter(|action| is_prepareable(action, &pre_clip_ids))
+            .map(|action| async move { ctx_ref.prepare(client_lock_ref, action).await }),
     )
     .buffered(concurrency);
 
     for action in &plan.actions {
-        // Audio actions pull their pre-rendered bytes (yielded in plan order) and
-        // commit them here; every other action applies its own effect. Both the
-        // audio commit and the non-audio apply run serially, so all destination
-        // and manifest effects keep the plan's order exactly as the sequential
-        // executor did.
-        let result = if is_audio_action(action) {
-            match renders.next().await {
-                Some(Ok(rendered)) => ctx.commit_audio(manifest, rendered),
+        // Prepareable actions pull their pre-fetched bytes (yielded in plan order)
+        // and commit them here; every other action applies its own effect. Both the
+        // concurrent commit and the serial apply run in the same serial loop, so all
+        // destination and manifest effects keep the plan's order exactly.
+        let result = if is_prepareable(action, &pre_clip_ids) {
+            match prepares.next().await {
+                Some(Ok(Prepared::Audio(rendered))) => ctx.commit_audio(manifest, rendered),
+                Some(Ok(Prepared::Artifact(prepared))) => ctx.commit_artifact(
+                    manifest,
+                    albums,
+                    playlists,
+                    prepared,
+                    &mut tracked_paths,
+                    &committed,
+                ),
+                Some(Ok(Prepared::Stem(prepared))) => {
+                    ctx.commit_stem(manifest, prepared, &mut tracked_paths, &committed)
+                }
                 Some(Err(fail)) => Err(fail),
-                None => unreachable!("buffered yields one result per audio action"),
+                None => unreachable!("buffered yields one result per prepareable action"),
             }
         } else {
             ctx.apply(
@@ -391,7 +412,7 @@ where
                     reason: fail.reason,
                 });
                 if let Some(status) = abort {
-                    // A systemic abort stops the run. Dropping the render stream
+                    // A systemic abort stops the run. Dropping the prepare stream
                     // cancels any in-flight or completed-but-uncommitted producer;
                     // because producers touch nothing on disk, the destination and
                     // manifest are left exactly as the committed prefix wrote them,
@@ -402,7 +423,7 @@ where
             }
         }
     }
-    drop(renders);
+    drop(prepares);
 
     // Renames and deletes can leave an album directory empty; prune those ghost
     // directories bottom-up. This runs on both the completed and the aborted
@@ -412,12 +433,28 @@ where
     outcome
 }
 
-/// Whether an action produces audio: it fetches, transcodes, and tags a clip's
-/// file. Its slow render runs in the concurrent phase; its destination write and
-/// manifest update are committed serially in plan order. Everything else touches
-/// the manifest, album, or playlist stores directly and runs serially.
-fn is_audio_action(action: &Action) -> bool {
-    matches!(action, Action::Download { .. } | Action::Reformat { .. })
+/// Whether an action has a slow, side-effect-free network or transcode phase
+/// that benefits from concurrent preparation. Audio actions (Download/Reformat)
+/// are always prepareable. A fetched artifact (WriteArtifact with no inline
+/// content) or stem write (WriteStem) is prepareable only when its owning clip
+/// was already in the manifest before this plan started: a new clip's sidecar
+/// cannot be prepared concurrently because its audio has not committed yet (the
+/// manifest entry doesn't exist at prepare time), so it falls through to the
+/// serial apply path which checks the manifest after the audio commits.
+/// Album-kind artifacts (FolderJpg, FolderWebp, FolderMp4) have no per-clip
+/// manifest guard and are always prepareable.
+fn is_prepareable(action: &Action, pre_clip_ids: &HashSet<String>) -> bool {
+    match action {
+        Action::Download { .. } | Action::Reformat { .. } => true,
+        Action::WriteArtifact {
+            kind,
+            owner_id,
+            content: None,
+            ..
+        } => !is_per_clip_kind(*kind) || pre_clip_ids.contains(owner_id.as_str()),
+        Action::WriteStem { clip_id, .. } => pre_clip_ids.contains(clip_id.as_str()),
+        _ => false,
+    }
 }
 
 /// The destination path an action writes on success, or `None` for actions that
@@ -450,6 +487,37 @@ struct RenderedAudio {
     from_path: Option<String>,
     effect: Effect,
     bytes: Vec<u8>,
+}
+
+/// A fetched-but-uncommitted artifact result: bytes for one
+/// [`WriteArtifact`](Action::WriteArtifact) with no inline content. Produced
+/// concurrently and side-effect-free; [`commit_artifact`](Ctx::commit_artifact)
+/// applies all filesystem and manifest/album/playlist effects in plan order.
+struct PreparedArtifact {
+    kind: ArtifactKind,
+    path: String,
+    hash: String,
+    owner_id: String,
+    bytes: Vec<u8>,
+}
+
+/// A fetched-but-uncommitted stem result: bytes for one
+/// [`WriteStem`](Action::WriteStem) action (including any WAV render + poll).
+/// Produced concurrently and side-effect-free; [`commit_stem`](Ctx::commit_stem)
+/// applies all filesystem and manifest effects in plan order.
+struct PreparedStem {
+    clip_id: String,
+    key: String,
+    path: String,
+    hash: String,
+    bytes: Vec<u8>,
+}
+
+/// The result of one concurrent preparation: audio, an artifact, or a stem.
+enum Prepared {
+    Audio(RenderedAudio),
+    Artifact(PreparedArtifact),
+    Stem(PreparedStem),
 }
 
 /// What an applied action did, for the outcome counters.
@@ -646,11 +714,14 @@ where
     G: Ffmpeg,
     C: Clock,
 {
-    /// Apply one non-audio action, returning what it did or why it failed.
+    /// Apply one serial action, returning what it did or why it failed.
     ///
-    /// Audio actions ([`Download`](Action::Download) /
-    /// [`Reformat`](Action::Reformat)) run in the concurrent phase through
-    /// [`prepare_audio`](Self::prepare_audio) and never reach here.
+    /// Audio actions ([`Download`](Action::Download) and
+    /// [`Reformat`](Action::Reformat)) are always prepared concurrently and never
+    /// reach here. Fetched [`WriteArtifact`](Action::WriteArtifact) and
+    /// [`WriteStem`](Action::WriteStem) actions reach here only when their owning
+    /// clip was NOT in the manifest at plan start (new clips); those for existing
+    /// clips are prepared concurrently and commit through the stream path.
     #[allow(clippy::too_many_arguments)]
     async fn apply(
         &self,
@@ -664,7 +735,7 @@ where
     ) -> Result<Effect, Fail> {
         match action {
             Action::Download { .. } | Action::Reformat { .. } => {
-                unreachable!("audio actions are applied in the concurrent phase")
+                unreachable!("audio actions are prepared concurrently")
             }
             Action::Retag {
                 clip,
@@ -685,20 +756,38 @@ where
                 owner_id,
                 content,
             } => {
-                self.write_artifact(
+                // Inline text sidecars carry their body in the plan.
+                // Fetched artifacts for clips already in the manifest are prepared
+                // concurrently and never reach here. Fetched artifacts for new clips
+                // (owner not in the manifest at plan start) are handled here in the
+                // serial path, with the owner-absent guard fired before any fetch.
+                let bytes = match content.as_deref() {
+                    Some(text) => text.as_bytes().to_vec(),
+                    None => {
+                        if is_per_clip_kind(*kind) && manifest.get(owner_id).is_none() {
+                            // Owner never landed (audio failed or never existed).
+                            // Drain any stale cache entry so it doesn't outlive
+                            // this clip, then skip without fetching.
+                            self.cover_cache_lock().remove(source_url);
+                            return Ok(Effect::Skipped);
+                        }
+                        self.artifact_bytes(*kind, source_url, owner_id).await?
+                    }
+                };
+                self.commit_artifact(
                     manifest,
                     albums,
                     playlists,
-                    *kind,
-                    path,
-                    source_url,
-                    hash,
-                    owner_id,
-                    content.as_deref(),
+                    PreparedArtifact {
+                        kind: *kind,
+                        path: path.clone(),
+                        hash: hash.clone(),
+                        owner_id: owner_id.clone(),
+                        bytes,
+                    },
                     tracked_paths,
                     committed,
                 )
-                .await
             }
             Action::DeleteArtifact {
                 kind,
@@ -737,20 +826,29 @@ where
                 format,
                 hash,
             } => {
-                self.write_stem(
-                    client_lock,
+                // Stems for clips already in the manifest at plan start are
+                // prepared concurrently and never reach here. Stems for new
+                // clips (owner not yet in the manifest) are fetched here in the
+                // serial path, after the audio commit, with the same owner-absent
+                // guard as the old serial write_stem.
+                if manifest.get(clip_id).is_none() {
+                    return Ok(Effect::Skipped);
+                }
+                let bytes = self
+                    .fetch_stem_bytes(client_lock, clip_id, stem_id, source_url, *format)
+                    .await?;
+                self.commit_stem(
                     manifest,
-                    clip_id,
-                    key,
-                    stem_id,
-                    path,
-                    source_url,
-                    *format,
-                    hash,
+                    PreparedStem {
+                        clip_id: clip_id.clone(),
+                        key: key.clone(),
+                        path: path.clone(),
+                        hash: hash.clone(),
+                        bytes,
+                    },
                     tracked_paths,
                     committed,
                 )
-                .await
             }
             Action::DeleteStem { clip_id, key, path } => {
                 self.delete_stem(manifest, clip_id, key, path)
@@ -877,6 +975,237 @@ where
         Ok(effect)
     }
 
+    /// Lock the cover cache, panicking on poison (uniform access point, no repeated magic string).
+    fn cover_cache_lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<u8>>> {
+        self.cover_cache.lock().expect("cover cache mutex poisoned")
+    }
+
+    /// Prepare one concurrent action side-effect-free, returning the bytes and
+    /// routing metadata the serial committer needs. Only actions that pass
+    /// [`is_prepareable`] reach here.
+    async fn prepare(
+        &self,
+        client_lock: &ClientLock<'_, C>,
+        action: &Action,
+    ) -> Result<Prepared, Fail> {
+        match action {
+            Action::Download { .. } | Action::Reformat { .. } => self
+                .prepare_audio(client_lock, action)
+                .await
+                .map(Prepared::Audio),
+            Action::WriteArtifact {
+                kind,
+                path,
+                source_url,
+                hash,
+                owner_id,
+                content: None,
+            } => {
+                let bytes = self.artifact_bytes(*kind, source_url, owner_id).await?;
+                Ok(Prepared::Artifact(PreparedArtifact {
+                    kind: *kind,
+                    path: path.clone(),
+                    hash: hash.clone(),
+                    owner_id: owner_id.clone(),
+                    bytes,
+                }))
+            }
+            Action::WriteStem {
+                clip_id,
+                key,
+                stem_id,
+                path,
+                source_url,
+                format,
+                hash,
+            } => {
+                let bytes = self
+                    .fetch_stem_bytes(client_lock, clip_id, stem_id, source_url, *format)
+                    .await?;
+                Ok(Prepared::Stem(PreparedStem {
+                    clip_id: clip_id.clone(),
+                    key: key.clone(),
+                    path: path.clone(),
+                    hash: hash.clone(),
+                    bytes,
+                }))
+            }
+            _ => unreachable!("prepare only handles prepareable actions"),
+        }
+    }
+
+    /// Commit one prepared artifact result serially, in plan order.
+    ///
+    /// Writes the pre-fetched bytes, removes any stale copy left at the previously
+    /// tracked path (when the audio moved), then records the slot on the manifest,
+    /// album, or playlist store. All filesystem and state effects are identical to
+    /// what the former serial [`write_artifact`] did; moving the slow fetch (and
+    /// optional transcode) into [`prepare`] is the only change.
+    ///
+    /// A per-clip sidecar is skipped when its owning clip's audio is absent from
+    /// the manifest: the audio failed or never existed this run, so the sidecar
+    /// must not land without an owner (the preparation was speculative).
+    fn commit_artifact(
+        &self,
+        manifest: &mut Manifest,
+        albums: &mut BTreeMap<String, AlbumArt>,
+        playlists: &mut BTreeMap<String, PlaylistState>,
+        prepared: PreparedArtifact,
+        tracked_paths: &mut HashMap<String, u32>,
+        committed: &BTreeSet<String>,
+    ) -> Result<Effect, Fail> {
+        let PreparedArtifact {
+            kind,
+            path,
+            hash,
+            owner_id,
+            bytes,
+        } = prepared;
+        if is_per_clip_kind(kind) && manifest.get(&owner_id).is_none() {
+            return Ok(Effect::Skipped);
+        }
+        let old_path = match kind {
+            ArtifactKind::CoverJpg => manifest
+                .get(&owner_id)
+                .and_then(|e| e.cover_jpg.as_ref())
+                .map(|s| s.path.clone()),
+            ArtifactKind::CoverWebp => manifest
+                .get(&owner_id)
+                .and_then(|e| e.cover_webp.as_ref())
+                .map(|s| s.path.clone()),
+            ArtifactKind::DetailsTxt => manifest
+                .get(&owner_id)
+                .and_then(|e| e.details_txt.as_ref())
+                .map(|s| s.path.clone()),
+            ArtifactKind::LyricsTxt => manifest
+                .get(&owner_id)
+                .and_then(|e| e.lyrics_txt.as_ref())
+                .map(|s| s.path.clone()),
+            ArtifactKind::Lrc => manifest
+                .get(&owner_id)
+                .and_then(|e| e.lrc.as_ref())
+                .map(|s| s.path.clone()),
+            ArtifactKind::VideoMp4 => manifest
+                .get(&owner_id)
+                .and_then(|e| e.video_mp4.as_ref())
+                .map(|s| s.path.clone()),
+            ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::FolderMp4 => albums
+                .get(&owner_id)
+                .and_then(|a| a.artifact(kind))
+                .map(|s| s.path.clone()),
+            ArtifactKind::Playlist => None,
+        };
+        self.write_verify(&owner_id, &path, &bytes)?;
+        if let Some(old) = old_path.as_deref()
+            && !old.is_empty()
+            && old != path
+        {
+            let still_referenced = tracked_paths
+                .get_mut(old)
+                .map(|count| {
+                    *count = count.saturating_sub(1);
+                    *count > 0
+                })
+                .unwrap_or(false);
+            if !still_referenced && !committed.contains(old) {
+                self.fs.remove(old).map_err(|err| {
+                    permanent_fail(
+                        &owner_id,
+                        format!("could not remove old sidecar {old}: {err}"),
+                    )
+                })?;
+            }
+        }
+        if is_album_kind(kind) {
+            albums.entry(owner_id.to_owned()).or_default().set(
+                kind,
+                Some(ArtifactState {
+                    path: path.to_owned(),
+                    hash: hash.to_owned(),
+                }),
+            );
+        } else if is_playlist_kind(kind) {
+            playlists.insert(
+                owner_id.to_owned(),
+                PlaylistState {
+                    name: playlist_name_from_path(&path),
+                    path: path.to_owned(),
+                    hash: hash.to_owned(),
+                },
+            );
+        } else if let Some(entry) = manifest.entries.get_mut(&owner_id) {
+            set_manifest_artifact(
+                entry,
+                kind,
+                Some(ArtifactState {
+                    path: path.to_owned(),
+                    hash: hash.to_owned(),
+                }),
+            );
+        }
+        Ok(Effect::ArtifactWritten)
+    }
+
+    /// Commit one prepared stem result serially, in plan order.
+    ///
+    /// Writes the pre-fetched bytes (including any WAV render), removes any stale
+    /// copy left at the previously tracked path, and records the stem slot.
+    /// All filesystem and manifest effects are identical to what the former serial
+    /// [`write_stem`] did; moving the slow fetch into [`prepare`] is the only change.
+    ///
+    /// Skipped when the owning clip's audio is absent from the manifest.
+    fn commit_stem(
+        &self,
+        manifest: &mut Manifest,
+        prepared: PreparedStem,
+        tracked_paths: &mut HashMap<String, u32>,
+        committed: &BTreeSet<String>,
+    ) -> Result<Effect, Fail> {
+        let PreparedStem {
+            clip_id,
+            key,
+            path,
+            hash,
+            bytes,
+        } = prepared;
+        if manifest.get(&clip_id).is_none() {
+            return Ok(Effect::Skipped);
+        }
+        let old_path = manifest
+            .get(&clip_id)
+            .and_then(|e| e.stems.get(&key))
+            .map(|s| s.path.clone());
+        self.write_verify(&clip_id, &path, &bytes)?;
+        if let Some(old) = old_path.as_deref()
+            && !old.is_empty()
+            && old != path
+        {
+            let still_referenced = tracked_paths
+                .get_mut(old)
+                .map(|count| {
+                    *count = count.saturating_sub(1);
+                    *count > 0
+                })
+                .unwrap_or(false);
+            if !still_referenced && !committed.contains(old) {
+                self.fs.remove(old).map_err(|err| {
+                    permanent_fail(&clip_id, format!("could not remove old stem {old}: {err}"))
+                })?;
+            }
+        }
+        if let Some(entry) = manifest.entries.get_mut(&clip_id) {
+            set_manifest_stem(
+                entry,
+                &key,
+                Some(ArtifactState {
+                    path: path.to_owned(),
+                    hash: hash.to_owned(),
+                }),
+            );
+        }
+        Ok(Effect::ArtifactWritten)
+    }
+
     /// Re-tag the existing file in place to match current metadata and art.
     async fn retag(
         &self,
@@ -964,179 +1293,6 @@ where
         Ok(Effect::Deleted)
     }
 
-    /// Fetch an artifact's bytes, write them atomically, then record the sidecar
-    /// on the owning manifest entry.
-    ///
-    /// The fetch and write share the audio path's resilience: `fetch_bytes`
-    /// retries transient failures and verifies `Content-Length`, and
-    /// `write_verify` confirms the on-disk size. A failure is attributed to the
-    /// owning clip and returned as a per-clip [`Fail`], so a bad sidecar never
-    /// aborts the whole run (only an auth failure or a full disk does, matching
-    /// audio).
-    ///
-    /// The bytes written depend on the kind: a static cover is the fetched image
-    /// verbatim, while an animated cover is the clip's MP4 preview transcoded to
-    /// WebP through the ffmpeg port (see [`artifact_bytes`](Self::artifact_bytes)).
-    ///
-    /// A sidecar is only ever written for a clip whose audio is present: a
-    /// successful `Download`/`Reformat` creates the manifest entry earlier in
-    /// this run, and a prior-run clip already has one. So an absent owning entry
-    /// means the audio failed or never existed this run; we skip (no fetch, no
-    /// write) rather than strand an untracked sidecar with no owning audio.
-    ///
-    /// Folder art ([`FolderJpg`](ArtifactKind::FolderJpg),
-    /// [`FolderWebp`](ArtifactKind::FolderWebp), and
-    /// [`FolderMp4`](ArtifactKind::FolderMp4)) is album-scoped: its `owner_id`
-    /// is the album's stable root id, not a manifest clip, so it skips the
-    /// manifest presence guard and records its state on the album store instead.
-    ///
-    /// When a title or album change moves the audio, reconcile re-emits this
-    /// write at the NEW path; this handler then removes the sidecar left at the
-    /// artifact's previously tracked path, moving it rather than orphaning it.
-    /// The removal happens only after the new file is safely written, and a
-    /// remove failure returns before the state slot advances, so the next run
-    /// re-plans the identical write and retries — self-healing, never an orphan.
-    #[allow(clippy::too_many_arguments)]
-    async fn write_artifact(
-        &self,
-        manifest: &mut Manifest,
-        albums: &mut BTreeMap<String, AlbumArt>,
-        playlists: &mut BTreeMap<String, PlaylistState>,
-        kind: ArtifactKind,
-        path: &str,
-        source_url: &str,
-        hash: &str,
-        owner_id: &str,
-        content: Option<&str>,
-        tracked_paths: &mut HashMap<String, u32>,
-        committed: &BTreeSet<String>,
-    ) -> Result<Effect, Fail> {
-        // A per-song sidecar needs its owning clip's manifest entry; album and
-        // playlist kinds are keyed elsewhere and skip this guard.
-        if is_per_clip_kind(kind) && manifest.get(owner_id).is_none() {
-            // The owning audio never landed this run, so this sidecar is skipped
-            // and will never drain a cover the producer cached for it. Drop that
-            // entry now: an insert without a matching sidecar write must not
-            // outlive its clip, keeping `cover_cache` bounded to the clips in
-            // flight (#89). A non-cover kind has no entry here, so this is a
-            // harmless no-op for them.
-            self.cover_cache
-                .lock()
-                .expect("cover cache mutex poisoned")
-                .remove(source_url);
-            return Ok(Effect::Skipped);
-        }
-        // Capture the path this artifact was last tracked at, BEFORE the slot is
-        // overwritten below, so a path-changing write (a title/album rename that
-        // moves the audio) can clean up the old sidecar it left behind. Cover
-        // kinds live on the manifest, folder kinds on the album store; playlists
-        // reconcile their own old-path delete and so opt out here.
-        let old_path = match kind {
-            ArtifactKind::CoverJpg => manifest
-                .get(owner_id)
-                .and_then(|e| e.cover_jpg.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::CoverWebp => manifest
-                .get(owner_id)
-                .and_then(|e| e.cover_webp.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::DetailsTxt => manifest
-                .get(owner_id)
-                .and_then(|e| e.details_txt.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::LyricsTxt => manifest
-                .get(owner_id)
-                .and_then(|e| e.lyrics_txt.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::Lrc => manifest
-                .get(owner_id)
-                .and_then(|e| e.lrc.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::VideoMp4 => manifest
-                .get(owner_id)
-                .and_then(|e| e.video_mp4.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::FolderMp4 => albums
-                .get(owner_id)
-                .and_then(|a| a.artifact(kind))
-                .map(|s| s.path.clone()),
-            ArtifactKind::Playlist => None,
-        };
-        // A generated artifact (a playlist) carries its body inline and never
-        // touches the network; a fetched one pulls (and transcodes) its source.
-        let bytes = match content {
-            Some(text) => text.as_bytes().to_vec(),
-            None => self.artifact_bytes(kind, source_url, owner_id).await?,
-        };
-        self.write_verify(owner_id, path, &bytes)?;
-        // The new sidecar is safely in place; only now drop a stale copy left at
-        // the previous path (the audio moved). `remove` is idempotent, so an
-        // already-absent old file is fine. On a genuine remove failure we return
-        // BEFORE updating the slot, leaving the manifest/album pointing at the
-        // old path: the next run sees the same path drift, re-plans this write,
-        // and retries the cleanup — convergent, no orphan persists.
-        //
-        // The removal is gated so it can never delete a live file (#76). This
-        // slot is releasing `old`, so drop its reference in `tracked_paths`; the
-        // file is removed only once nothing else holds it — no other tracked slot
-        // still references it (count now zero) and no *committed* write this run
-        // has already placed a file there (`committed`, the commit-tracked twin of
-        // `suppress_path_aliasing`). On a path swap (A: x -> y while B: y -> x)
-        // the earlier write commits its path, so the later mover keeps it; when
-        // two slots share a path after a prior failed swap, the reference count
-        // keeps it. But a merely *planned* colliding write that later fails no
-        // longer protects a stale file, so it is cleaned up rather than orphaned
-        // (#142).
-        if let Some(old) = old_path.as_deref()
-            && !old.is_empty()
-            && old != path
-        {
-            let still_referenced = tracked_paths
-                .get_mut(old)
-                .map(|count| {
-                    *count = count.saturating_sub(1);
-                    *count > 0
-                })
-                .unwrap_or(false);
-            if !still_referenced && !committed.contains(old) {
-                self.fs.remove(old).map_err(|err| {
-                    permanent_fail(
-                        owner_id,
-                        format!("could not remove old sidecar {old}: {err}"),
-                    )
-                })?;
-            }
-        }
-        if is_album_kind(kind) {
-            albums.entry(owner_id.to_owned()).or_default().set(
-                kind,
-                Some(ArtifactState {
-                    path: path.to_owned(),
-                    hash: hash.to_owned(),
-                }),
-            );
-        } else if is_playlist_kind(kind) {
-            playlists.insert(
-                owner_id.to_owned(),
-                PlaylistState {
-                    name: playlist_name_from_path(path),
-                    path: path.to_owned(),
-                    hash: hash.to_owned(),
-                },
-            );
-        } else if let Some(entry) = manifest.entries.get_mut(owner_id) {
-            set_manifest_artifact(
-                entry,
-                kind,
-                Some(ArtifactState {
-                    path: path.to_owned(),
-                    hash: hash.to_owned(),
-                }),
-            );
-        }
-        Ok(Effect::ArtifactWritten)
-    }
-
     /// Relocate a fetched per-clip sidecar with a local rename, falling back to a
     /// fetch-and-write when the move is unsafe or the old file has vanished.
     ///
@@ -1145,10 +1301,9 @@ where
     /// rather than re-downloading a cover or re-transcoding an animated WebP
     /// (#141). The in-place rename is taken only when `from` is this slot's alone
     /// to give up (no other tracked slot references it and no committed write has
-    /// placed a file there); otherwise, or if the rename fails, the ordinary
-    /// [`write_artifact`](Self::write_artifact) fetches fresh bytes and runs the
-    /// gated old-path cleanup, so a swap or co-reference is handled exactly as
-    /// before.
+    /// placed a file there); otherwise, or if the rename fails, fresh bytes are
+    /// fetched and [`commit_artifact`](Self::commit_artifact) runs the gated
+    /// old-path cleanup, so a swap or co-reference is handled exactly as before.
     #[allow(clippy::too_many_arguments)]
     async fn move_artifact(
         &self,
@@ -1164,8 +1319,7 @@ where
         tracked_paths: &mut HashMap<String, u32>,
         committed: &BTreeSet<String>,
     ) -> Result<Effect, Fail> {
-        // A per-clip sidecar needs its owning clip's audio present, exactly as
-        // write_artifact requires.
+        // A per-clip sidecar needs its owning clip's audio present.
         if is_per_clip_kind(kind) && manifest.get(owner_id).is_none() {
             return Ok(Effect::Skipped);
         }
@@ -1205,20 +1359,21 @@ where
                 Err(_) => {}
             }
         }
-        self.write_artifact(
+        let bytes = self.artifact_bytes(kind, source_url, owner_id).await?;
+        self.commit_artifact(
             manifest,
             albums,
             playlists,
-            kind,
-            to,
-            source_url,
-            hash,
-            owner_id,
-            None,
+            PreparedArtifact {
+                kind,
+                path: to.to_owned(),
+                hash: hash.to_owned(),
+                owner_id: owner_id.to_owned(),
+                bytes,
+            },
             tracked_paths,
             committed,
         )
-        .await
     }
     ///
     /// An animated cover — a per-clip [`CoverWebp`](ArtifactKind::CoverWebp) or an
@@ -1239,11 +1394,7 @@ where
         // Reuse the cover the audio producer already fetched for the embedded tag
         // when it cached this exact URL (#89); otherwise fetch it now. The guard
         // is taken and dropped in its own statement so it never spans the await.
-        let cached = self
-            .cover_cache
-            .lock()
-            .expect("cover cache mutex poisoned")
-            .remove(source_url);
+        let cached = self.cover_cache_lock().remove(source_url);
         let source = match cached {
             Some(bytes) => bytes,
             None => {
@@ -1256,9 +1407,7 @@ where
                 // it is fetched exactly once. Bounded to shared URLs and drained
                 // on the sibling's use.
                 if self.shared_cover_urls.contains(source_url) {
-                    self.cover_cache
-                        .lock()
-                        .expect("cover cache mutex poisoned")
+                    self.cover_cache_lock()
                         .insert(source_url.to_owned(), fetched.clone());
                 }
                 fetched
@@ -1331,97 +1480,6 @@ where
         Ok(Effect::ArtifactDeleted)
     }
 
-    /// Fetch one stem's bytes, write them atomically, then record the stem on
-    /// the owning clip's keyed stem map.
-    ///
-    /// Mirrors [`write_artifact`](Self::write_artifact) for the keyed-stem case,
-    /// sharing the fetch resilience (`fetch_bytes` retries and verifies
-    /// `Content-Length`) and the atomic size-verified write. A stem is only ever
-    /// written for a clip whose audio is present, so an absent owning manifest
-    /// entry means the audio failed or never existed this run; we skip rather
-    /// than strand an untracked stem with no owning audio.
-    ///
-    /// Stems are stored RAW in their native container and are NEVER transcoded to
-    /// FLAC, even when the song's own format is FLAC — they are the deliberate
-    /// exception. A `Wav` stem is rendered through the free `convert_wav` flow
-    /// (see [`fetch_stem_bytes`](Self::fetch_stem_bytes)); an `Mp3` stem is fetched
-    /// straight from its public CDN url. Either way the bytes land verbatim at
-    /// `path`, whose extension already matches the stem format.
-    ///
-    /// When a title/album change moves the song, reconcile re-emits this write at
-    /// the NEW path; this handler then removes the stem left at the previously
-    /// tracked path, moving it rather than orphaning it. The removal happens only
-    /// after the new file is safely written and only when nothing else this run
-    /// writes that path, and a remove failure returns before the slot advances so
-    /// the next run re-plans the identical write and retries — self-healing.
-    #[allow(clippy::too_many_arguments)]
-    async fn write_stem(
-        &self,
-        client_lock: &ClientLock<'_, C>,
-        manifest: &mut Manifest,
-        clip_id: &str,
-        key: &str,
-        stem_id: &str,
-        path: &str,
-        source_url: &str,
-        format: StemFormat,
-        hash: &str,
-        tracked_paths: &mut HashMap<String, u32>,
-        committed: &BTreeSet<String>,
-    ) -> Result<Effect, Fail> {
-        // A stem needs its owning clip's manifest entry (its audio must exist).
-        if manifest.get(clip_id).is_none() {
-            return Ok(Effect::Skipped);
-        }
-        let old_path = manifest
-            .get(clip_id)
-            .and_then(|e| e.stems.get(key))
-            .map(|s| s.path.clone());
-        let bytes = self
-            .fetch_stem_bytes(client_lock, clip_id, stem_id, source_url, format)
-            .await?;
-        self.write_verify(clip_id, path, &bytes)?;
-        // The new stem is in place; only now drop a stale copy left at the old
-        // path (the song moved, or the stem format changed). `remove` is
-        // idempotent. On a genuine remove failure we return BEFORE updating the
-        // slot, so the next run re-plans the same write and retries the cleanup.
-        //
-        // The removal is gated by the same twin guards as `write_artifact` (#76,
-        // #142): this slot decrements its reference in `tracked_paths`, and the
-        // file is removed only when nothing else holds it (count reaches zero)
-        // and no committed write this run already placed a file there. This
-        // keeps the shared file alive when two clips co-reference the same stem
-        // path after a partially-failed swap.
-        if let Some(old) = old_path.as_deref()
-            && !old.is_empty()
-            && old != path
-        {
-            let still_referenced = tracked_paths
-                .get_mut(old)
-                .map(|count| {
-                    *count = count.saturating_sub(1);
-                    *count > 0
-                })
-                .unwrap_or(false);
-            if !still_referenced && !committed.contains(old) {
-                self.fs.remove(old).map_err(|err| {
-                    permanent_fail(clip_id, format!("could not remove old stem {old}: {err}"))
-                })?;
-            }
-        }
-        if let Some(entry) = manifest.entries.get_mut(clip_id) {
-            set_manifest_stem(
-                entry,
-                key,
-                Some(ArtifactState {
-                    path: path.to_owned(),
-                    hash: hash.to_owned(),
-                }),
-            );
-        }
-        Ok(Effect::ArtifactWritten)
-    }
-
     /// Relocate a stem with a local rename, falling back to a fetch-and-write
     /// when the move is unsafe or the old file has vanished (#141).
     ///
@@ -1480,20 +1538,21 @@ where
                 Err(_) => {}
             }
         }
-        self.write_stem(
-            client_lock,
+        let bytes = self
+            .fetch_stem_bytes(client_lock, clip_id, stem_id, source_url, format)
+            .await?;
+        self.commit_stem(
             manifest,
-            clip_id,
-            key,
-            stem_id,
-            to,
-            source_url,
-            format,
-            hash,
+            PreparedStem {
+                clip_id: clip_id.to_owned(),
+                key: key.to_owned(),
+                path: to.to_owned(),
+                hash: hash.to_owned(),
+                bytes,
+            },
             tracked_paths,
             committed,
         )
-        .await
     }
 
     /// Resolve a stem's RAW bytes in its native container, never transcoding.
@@ -1749,9 +1808,7 @@ where
                 // bytes so its write reuses them instead of fetching again (#89).
                 // The lock guards only the insert, never the await above.
                 if self.cover_wanted.contains(url) {
-                    self.cover_cache
-                        .lock()
-                        .expect("cover cache mutex poisoned")
+                    self.cover_cache_lock()
                         .insert(url.to_owned(), response.body.clone());
                 }
                 return Some(response.body);
@@ -6655,6 +6712,199 @@ mod tests {
                 "the render should genuinely overlap, peak was {}",
                 peak.load(Ordering::SeqCst)
             );
+        }
+
+        #[test]
+        fn artifact_fetches_run_concurrently() {
+            // Four CoverJpg sidecars whose owning clips are already in the manifest.
+            // With concurrency=2 the two HTTP fetches should overlap, so the peak
+            // in-flight count must reach at least 2.
+            let count = 4usize;
+            let concurrency = 2u32;
+            let mut scripted = ScriptedHttp::new().with_auth();
+            let mut actions = Vec::new();
+            let mut manifest = Manifest::new();
+            for i in 0..count {
+                let id = format!("a{i}");
+                scripted = scripted.route(&format!("{id}.jpg"), Reply::ok(b"jpg-bytes".to_vec()));
+                manifest.insert(&id, entry(&format!("{id}.mp3"), AudioFormat::Mp3));
+                actions.push(Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: format!("{id}/cover.jpg"),
+                    source_url: format!("https://art.suno.ai/{id}.jpg"),
+                    hash: format!("h{i}"),
+                    owner_id: id,
+                    content: None,
+                });
+            }
+            let http = GatedHttp::new(scripted);
+            let fs = MemFs::new();
+            let plan = Plan { actions };
+
+            let outcome = run_gated_fs(
+                &plan,
+                &mut manifest,
+                &[],
+                &http,
+                &fs,
+                &opts_with(concurrency),
+            );
+
+            assert_eq!(outcome.artifacts_written, count);
+            assert_eq!(outcome.failed(), 0);
+            assert!(
+                http.peak() >= concurrency as usize,
+                "artifact fetches must overlap: peak {} < concurrency {}",
+                http.peak(),
+                concurrency,
+            );
+        }
+
+        #[test]
+        fn stem_fetches_run_concurrently() {
+            // Four Mp3 stem fetches whose owning clips are in the manifest.
+            // With concurrency=2 the peak in-flight HTTP count must reach at least 2.
+            let count = 4usize;
+            let concurrency = 2u32;
+            let mut scripted = ScriptedHttp::new().with_auth();
+            let mut actions = Vec::new();
+            let mut manifest = Manifest::new();
+            for i in 0..count {
+                let id = format!("s{i}");
+                scripted =
+                    scripted.route(&format!("{id}voc.mp3"), Reply::ok(b"stem-bytes".to_vec()));
+                manifest.insert(&id, entry(&format!("{id}.mp3"), AudioFormat::Mp3));
+                actions.push(Action::WriteStem {
+                    clip_id: id.clone(),
+                    key: "voc".to_owned(),
+                    stem_id: format!("{id}voc"),
+                    path: format!("{id}.stems/voc.mp3"),
+                    source_url: format!("https://cdn1.suno.ai/{id}voc.mp3"),
+                    format: StemFormat::Mp3,
+                    hash: format!("h{i}"),
+                });
+            }
+            let http = GatedHttp::new(scripted);
+            let fs = MemFs::new();
+            let plan = Plan { actions };
+
+            let outcome = run_gated_fs(
+                &plan,
+                &mut manifest,
+                &[],
+                &http,
+                &fs,
+                &opts_with(concurrency),
+            );
+
+            assert_eq!(outcome.artifacts_written, count);
+            assert_eq!(outcome.failed(), 0);
+            assert!(
+                http.peak() >= concurrency as usize,
+                "stem fetches must overlap: peak {} < concurrency {}",
+                http.peak(),
+                concurrency,
+            );
+        }
+
+        #[test]
+        fn prepareable_outcome_is_identical_across_concurrency_levels_with_artifacts_and_stems() {
+            // A plan mixing downloads, artifact writes, and stem writes. Both a
+            // failing clip and a serial-only action (delete) are included so all
+            // code paths contribute. Outcome and final manifest must be the same
+            // whether concurrency is 1 or 8, proving commits remain serial and
+            // deterministic while preparation runs in parallel.
+            fn build() -> (Plan, Vec<Desired>) {
+                let mut actions = Vec::new();
+                let mut desireds = Vec::new();
+                for id in ["x", "y", "z"] {
+                    let (_c, d, action) = download(id, AudioFormat::Mp3);
+                    desireds.push(d);
+                    actions.push(action);
+                    // A CoverJpg sidecar for each clip.
+                    actions.push(Action::WriteArtifact {
+                        kind: ArtifactKind::CoverJpg,
+                        path: format!("{id}/cover.jpg"),
+                        source_url: format!("https://art.suno.ai/{id}.jpg"),
+                        hash: format!("art-{id}"),
+                        owner_id: id.to_owned(),
+                        content: None,
+                    });
+                    // An Mp3 stem for each clip.
+                    actions.push(Action::WriteStem {
+                        clip_id: id.to_owned(),
+                        key: "voc".to_owned(),
+                        stem_id: format!("{id}voc"),
+                        path: format!("{id}.stems/voc.mp3"),
+                        source_url: format!("https://cdn1.suno.ai/{id}voc.mp3"),
+                        format: StemFormat::Mp3,
+                        hash: format!("stem-{id}"),
+                    });
+                }
+                // A failing download in the middle.
+                let (_f, df, af) = download("fail", AudioFormat::Mp3);
+                desireds.push(df);
+                actions.insert(3, af);
+                // A serial-only delete.
+                actions.push(Action::Delete {
+                    path: "old.mp3".to_owned(),
+                    clip_id: "old".to_owned(),
+                });
+                (Plan { actions }, desireds)
+            }
+
+            fn http() -> ScriptedHttp {
+                ScriptedHttp::new()
+                    .with_auth()
+                    .route("x.mp3", Reply::ok(b"x-audio".to_vec()))
+                    .route("y.mp3", Reply::ok(b"y-audio".to_vec()))
+                    .route("z.mp3", Reply::ok(b"z-audio".to_vec()))
+                    .route("fail.mp3", Reply::status(404))
+                    .route("x.jpg", Reply::ok(b"x-jpg".to_vec()))
+                    .route("y.jpg", Reply::ok(b"y-jpg".to_vec()))
+                    .route("z.jpg", Reply::ok(b"z-jpg".to_vec()))
+                    .route("xvoc.mp3", Reply::ok(b"x-voc".to_vec()))
+                    .route("yvoc.mp3", Reply::ok(b"y-voc".to_vec()))
+                    .route("zvoc.mp3", Reply::ok(b"z-voc".to_vec()))
+            }
+
+            fn seed_manifest() -> Manifest {
+                let mut m = Manifest::new();
+                m.insert("old".to_owned(), entry("old.mp3", AudioFormat::Mp3));
+                m
+            }
+
+            let (plan, desireds) = build();
+
+            let mut m1 = seed_manifest();
+            let fs1 = MemFs::new().with_file("old.mp3", b"x".to_vec());
+            let out1 = run_gated_fs(
+                &plan,
+                &mut m1,
+                &desireds,
+                &GatedHttp::new(http()),
+                &fs1,
+                &opts_with(1),
+            );
+
+            let mut m8 = seed_manifest();
+            let fs8 = MemFs::new().with_file("old.mp3", b"x".to_vec());
+            let out8 = run_gated_fs(
+                &plan,
+                &mut m8,
+                &desireds,
+                &GatedHttp::new(http()),
+                &fs8,
+                &opts_with(8),
+            );
+
+            assert_eq!(out1, out8, "outcome must not depend on concurrency");
+            assert_eq!(m1, m8, "final manifest must not depend on concurrency");
+            assert_eq!(out8.downloaded, 3);
+            assert_eq!(out8.deleted, 1);
+            assert_eq!(out8.failed(), 1);
+            // Covers and stems for the 3 successful clips.
+            assert_eq!(out8.artifacts_written, 6);
         }
     }
 }
