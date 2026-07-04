@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/teh-hippo/rs-suno/compare/v0.23.0...v0.24.0) (2026-07-04)
+
+
+### Features
+
+* report untracked audio orphans in check and dry-run ([ad31976](https://github.com/teh-hippo/rs-suno/commit/ad31976310c4d4bf612885a5ca67cdca33d5424e)), closes [#146](https://github.com/teh-hippo/rs-suno/issues/146)
+
 ## [0.23.0](https://github.com/teh-hippo/rs-suno/compare/v0.22.9...v0.23.0) (2026-07-04)
 
 
