@@ -26,6 +26,7 @@ use suno_core::{
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
+use crate::cli::commands::version;
 use crate::cli::desired::{
     ArtifactToggles, Confirm, ExitCode, LIKED_PLAYLIST_ID, PlaylistInput, PlaylistPolicy,
     ResolvedSelection, build_desired, build_modes_by_id, build_playlist_desired, clip_stems,
@@ -589,10 +590,20 @@ async fn run_one(
         }
     };
 
-    if settings.format == suno_core::AudioFormat::Wav && verbosity >= -1 {
+    if settings.requires_ffmpeg() && version::ffmpeg_version().is_none() {
         eprintln!(
-            "warning: WAV carries limited metadata; lyrics and album art will be omitted (use flac or mp3 for full tags)"
+            "error: ffmpeg is required for {} output{} but was not found on PATH; \
+             install ffmpeg or switch to mp3 format",
+            settings.format,
+            if settings.animated_covers && !settings.raw_animated_cover {
+                " and animated WebP covers"
+            } else if settings.animated_covers {
+                " and animated covers"
+            } else {
+                ""
+            }
         );
+        return Ok(ExitCode::Config);
     }
 
     let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
