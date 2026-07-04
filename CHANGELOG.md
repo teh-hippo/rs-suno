@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.7](https://github.com/teh-hippo/rs-suno/compare/v0.22.6...v0.22.7) (2026-07-04)
+
+
+### Bug Fixes
+
+* canonical collision guard, EXDEV fallback, case-only rename, stale .part cleanup ([126aa1b](https://github.com/teh-hippo/rs-suno/commit/126aa1ba184b9c26cee998ec016f24b6aba10712)), closes [#139](https://github.com/teh-hippo/rs-suno/issues/139) [#140](https://github.com/teh-hippo/rs-suno/issues/140) [#143](https://github.com/teh-hippo/rs-suno/issues/143) [#147](https://github.com/teh-hippo/rs-suno/issues/147)
+* self-heal missing sidecar, folder-art, and playlist files on re-sync ([7ea6f3a](https://github.com/teh-hippo/rs-suno/commit/7ea6f3a69452064c58462160496b6490071b0292)), closes [#145](https://github.com/teh-hippo/rs-suno/issues/145)
+
 ## [0.22.6](https://github.com/teh-hippo/rs-suno/compare/v0.22.5...v0.22.6) (2026-07-04)
 
 
