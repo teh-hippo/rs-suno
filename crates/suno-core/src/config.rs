@@ -807,12 +807,13 @@ pub struct EffectiveSettings {
 impl EffectiveSettings {
     /// Returns `true` when these settings require ffmpeg to be on `PATH`.
     ///
-    /// FLAC output transcodes WAV→FLAC; animated WebP covers transcode
-    /// MP4→WebP. The raw MP4 retention path copies the video verbatim and
-    /// needs no ffmpeg. An MP3 or WAV run with no animated-WebP covers can
-    /// proceed without ffmpeg.
+    /// FLAC output transcodes WAV→FLAC, and an animated WebP cover transcodes
+    /// MP4→WebP, so either needs ffmpeg. Keeping the raw MP4 alongside the WebP
+    /// (the `both` retention) still produces the WebP, so `animated_covers`
+    /// alone decides it; a raw-MP4-only run, or a plain MP3/WAV run with no
+    /// animated covers, needs no ffmpeg.
     pub fn requires_ffmpeg(&self) -> bool {
-        self.format == AudioFormat::Flac || (self.animated_covers && !self.raw_animated_cover)
+        self.format == AudioFormat::Flac || self.animated_covers
     }
 }
 
@@ -1911,8 +1912,14 @@ mod tests {
         assert!(!eff.requires_ffmpeg(), "mp3 + no covers = no ffmpeg");
         eff.animated_covers = true;
         assert!(eff.requires_ffmpeg(), "mp3 + animated webp = needs ffmpeg");
-        eff.animated_covers = false;
+        // `both` retention keeps the raw mp4 AND the transcoded webp, so ffmpeg
+        // is still required to produce the webp.
         eff.raw_animated_cover = true;
+        assert!(
+            eff.requires_ffmpeg(),
+            "mp3 + both (webp + raw mp4) = needs ffmpeg"
+        );
+        eff.animated_covers = false;
         assert!(!eff.requires_ffmpeg(), "mp3 + raw mp4 only = no ffmpeg");
     }
 
