@@ -222,8 +222,8 @@ impl ClerkAuth {
     }
 
     /// Return a valid JWT, refreshing it when missing or near expiry.
-    pub async fn ensure_jwt(&mut self, http: &impl Http) -> Result<String> {
-        if self.jwt.is_none() || now_unix() >= self.jwt_exp - JWT_REFRESH_BUFFER {
+    pub async fn ensure_jwt(&mut self, now_unix: i64, http: &impl Http) -> Result<String> {
+        if self.jwt.is_none() || now_unix >= self.jwt_exp - JWT_REFRESH_BUFFER {
             self.refresh_jwt(http).await?;
         }
         self.jwt
@@ -291,14 +291,6 @@ async fn clerk_request_json(
     }
     serde_json::from_slice(&response.body)
         .map_err(|err| Error::Connection(format!("invalid Clerk response: {err}")))
-}
-
-fn now_unix() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -465,7 +457,44 @@ mod tests {
         assert_eq!(user_id, "user_1");
         assert_eq!(auth.display_name(), "teh-hippo");
 
-        let jwt = pollster::block_on(auth.ensure_jwt(&http)).unwrap();
+        // Well before expiry — no refresh needed.
+        let jwt = pollster::block_on(auth.ensure_jwt(0, &http)).unwrap();
         assert!(jwt.starts_with("eyJ"));
+    }
+
+    #[test]
+    fn ensure_jwt_does_not_refresh_when_fresh() {
+        let exp = 1_000_000i64;
+        // No rules: any HTTP call would return an error.
+        let http = MockHttp::new(vec![]);
+        let mut auth = ClerkAuth {
+            cookie: "__client=eyJtoken".into(),
+            jwt: Some(jwt_with_exp(exp)),
+            jwt_exp: exp,
+            session_id: Some("sess_1".into()),
+            user_id: Some("user_1".into()),
+            display_name: None,
+        };
+        let jwt = pollster::block_on(auth.ensure_jwt(exp - JWT_REFRESH_BUFFER - 1, &http)).unwrap();
+        assert_eq!(decode_jwt_exp(&jwt), exp);
+    }
+
+    #[test]
+    fn ensure_jwt_refreshes_at_expiry_boundary() {
+        let exp = 1_000_000i64;
+        let new_exp = exp + 3_600;
+        let token_body = serde_json::json!({"jwt": jwt_with_exp(new_exp)}).to_string();
+        let http = MockHttp::new(vec![Rule::new("/v1/client/sessions/", 200, token_body)]);
+        let mut auth = ClerkAuth {
+            cookie: "__client=eyJtoken".into(),
+            jwt: Some(jwt_with_exp(exp)),
+            jwt_exp: exp,
+            session_id: Some("sess_1".into()),
+            user_id: Some("user_1".into()),
+            display_name: None,
+        };
+        // At the refresh boundary: a new JWT with new_exp is issued.
+        let jwt = pollster::block_on(auth.ensure_jwt(exp - JWT_REFRESH_BUFFER, &http)).unwrap();
+        assert_eq!(decode_jwt_exp(&jwt), new_exp);
     }
 }

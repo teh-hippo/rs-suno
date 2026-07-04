@@ -568,12 +568,22 @@ impl Ffmpeg for StubFfmpeg {
 #[derive(Clone)]
 pub(crate) struct RecordingClock {
     sleeps: Arc<Mutex<Vec<Duration>>>,
+    now: i64,
 }
 
 impl RecordingClock {
     pub(crate) fn new() -> Self {
         Self {
             sleeps: Arc::new(Mutex::new(Vec::new())),
+            now: 0,
+        }
+    }
+
+    /// A clock fixed at `now` seconds since the Unix epoch.
+    pub(crate) fn at(now: i64) -> Self {
+        Self {
+            sleeps: Arc::new(Mutex::new(Vec::new())),
+            now,
         }
     }
 
@@ -587,6 +597,10 @@ impl Clock for RecordingClock {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send {
         self.sleeps.lock().unwrap().push(duration);
         async {}
+    }
+
+    fn now_unix(&self) -> i64 {
+        self.now
     }
 }
 

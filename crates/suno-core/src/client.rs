@@ -487,7 +487,7 @@ impl<C: Clock> SunoClient<C> {
         let url = format!("{SUNO_API_BASE_URL}{path}");
         let mut auth_refreshed = false;
         loop {
-            let jwt = self.auth.ensure_jwt(http).await?;
+            let jwt = self.auth.ensure_jwt(self.clock.now_unix(), http).await?;
             let mut request = match method {
                 Method::Get => HttpRequest::get(url.clone()),
                 Method::Post => HttpRequest::post(url.clone(), body.clone()),
@@ -905,6 +905,51 @@ mod tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, "a");
         assert!(complete);
+    }
+
+    #[test]
+    fn api_request_uses_clock_now_unix_for_jwt_expiry() {
+        use crate::consts::JWT_REFRESH_BUFFER;
+        use base64::Engine;
+        let exp = 1_000_000i64;
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
+        let jwt_str = format!("hdr.{}.sig", payload);
+        let token_body = format!(r#"{{"jwt": "{jwt_str}"}}"#);
+        let client_body = serde_json::json!({
+            "response": {
+                "last_active_session_id": "s",
+                "sessions": [{"id": "s", "user": {"id": "u", "username": "h"}}]
+            }
+        })
+        .to_string();
+
+        let make_http = || {
+            ScriptedHttp::new()
+                .route("/v1/client/sessions/", Reply::json(&token_body))
+                .route("/v1/client", Reply::json(&client_body))
+                .route("/api/feed/v3", Reply::json(&feed_body()))
+        };
+
+        // At the refresh boundary: ensure_jwt triggers a second refresh_jwt call.
+        let http = make_http();
+        let mut auth = ClerkAuth::new("eyJtoken");
+        pollster::block_on(auth.authenticate(&http)).unwrap();
+        let mut client = SunoClient::new(auth, RecordingClock::at(exp - JWT_REFRESH_BUFFER));
+        let (clips, _) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert_eq!(clips.len(), 1);
+        // authenticate + api_request refresh = 2 token calls.
+        assert_eq!(http.count("/v1/client/sessions/"), 2);
+
+        // Just before the boundary: no additional refresh.
+        let http2 = make_http();
+        let mut auth2 = ClerkAuth::new("eyJtoken");
+        pollster::block_on(auth2.authenticate(&http2)).unwrap();
+        let mut client2 = SunoClient::new(auth2, RecordingClock::at(exp - JWT_REFRESH_BUFFER - 1));
+        let (clips2, _) = pollster::block_on(client2.list_clips(&http2, false, None)).unwrap();
+        assert_eq!(clips2.len(), 1);
+        // Only authenticate's token call; no extra refresh.
+        assert_eq!(http2.count("/v1/client/sessions/"), 1);
     }
 
     #[test]
