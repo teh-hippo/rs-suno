@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.26.0](https://github.com/teh-hippo/rs-suno/compare/v0.25.1...v0.26.0) (2026-07-04)
+
+
+### Features
+
+* concurrent artifact/stem prepare + cover_cache_lock accessor ([#178](https://github.com/teh-hippo/rs-suno/issues/178), [#195](https://github.com/teh-hippo/rs-suno/issues/195)) ([829294c](https://github.com/teh-hippo/rs-suno/commit/829294cb5278061667b30d2667623f4a97e0ee8e))
+
+
+### Bug Fixes
+
+* **executor:** restore cover_cache dedup invariant broken by concurrent prepare ([fc47834](https://github.com/teh-hippo/rs-suno/commit/fc47834dbb36db5789d88e35fcfc4c4f8ba90903))
+
 ## [0.25.1](https://github.com/teh-hippo/rs-suno/compare/v0.25.0...v0.25.1) (2026-07-04)
 
 
