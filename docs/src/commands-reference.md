@@ -63,7 +63,7 @@ configured `root` is used.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--format <mp3\|flac\|wav>` | `flac` | Audio format for downloads. WAV carries limited metadata, with no embedded lyrics or art. |
+| `--format <mp3\|flac\|wav>` | `flac` | Audio format for downloads. WAV carries full ID3v2.4 tags (lyrics, art, and all SUNO fields) embedded in a RIFF `id3 ` chunk. |
 | `--limit <N>` | | Mirror only the N most recent clips. |
 | `--since <SPEC>` | | Mirror clips newer than `7d`, `2w`, or `last-run`. |
 | `--liked` | off | Scope the run to your liked songs only (additive unless `--mode mirror`). |

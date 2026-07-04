@@ -55,7 +55,7 @@ use crate::model::Clip;
 use crate::reconcile::{
     Action, ArtifactKind, Desired, Plan, SourceMode, set_manifest_artifact, set_manifest_stem,
 };
-use crate::tag::{TrackMetadata, tag_flac, tag_mp3};
+use crate::tag::{TrackMetadata, tag_flac, tag_mp3, tag_wav};
 
 /// The shared Suno client behind an async mutex, so concurrent audio work can
 /// serialise its order-sensitive API calls (JWT refresh, adaptive limiter)
@@ -830,9 +830,15 @@ where
         };
 
         if format == AudioFormat::Wav {
-            // WAV carries no embedded tags; just record the new hashes so the
-            // next run sees them as current and stops retagging.
-            self.refresh_hashes(manifest, &clip.id, None);
+            let (meta, synced) = self.track_meta(clip, lineage);
+            let cover = self.fetch_cover(clip).await;
+            let existing = self.fs.read(path).map_err(|err| {
+                permanent_fail(&clip.id, format!("could not read for retag: {err}"))
+            })?;
+            let tagged = tag_wav(&existing, &meta, cover.as_deref(), synced)
+                .map_err(|err| permanent_fail(&clip.id, err.to_string()))?;
+            let size = self.write_verify(&clip.id, path, &tagged)?;
+            self.refresh_hashes(manifest, &clip.id, Some(size));
             return Ok(Effect::Retagged);
         }
 
@@ -1340,7 +1346,12 @@ where
                 tag_flac(&flac, &meta, cover.as_deref())
                     .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
-            AudioFormat::Wav => self.fetch_wav(client_lock, clip).await,
+            AudioFormat::Wav => {
+                let wav = self.fetch_wav(client_lock, clip).await?;
+                let cover = self.fetch_cover(clip).await;
+                tag_wav(&wav, &meta, cover.as_deref(), synced)
+                    .map_err(|err| permanent_fail(&clip.id, err.to_string()))
+            }
         }
     }
 

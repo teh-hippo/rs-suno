@@ -1,9 +1,10 @@
 //! Track metadata and pure, byte-to-byte audio tagging.
 //!
 //! [`TrackMetadata`] is the tag set derived from a [`Clip`], mirroring the
-//! `ha-suno` reference. [`tag_mp3`] and [`tag_flac`] take audio bytes plus
-//! metadata and return tagged bytes, working entirely in memory so the engine
-//! stays free of direct IO and the logic is unit-testable without a network.
+//! `ha-suno` reference. [`tag_mp3`], [`tag_flac`], and [`tag_wav`] take audio
+//! bytes plus metadata and return tagged bytes, working entirely in memory so
+//! the engine stays free of direct IO and the logic is unit-testable without a
+//! network.
 
 use std::io::Cursor;
 
@@ -101,8 +102,7 @@ impl TrackMetadata {
 /// as a front-cover `APIC` frame when provided. When `synced` carries aligned
 /// lyrics, a word-level `SYLT` (synchronised lyrics) frame is added alongside
 /// the plain `USLT` lyrics, so a player can render karaoke-style timed lyrics;
-/// an empty (instrumental) `synced` adds no `SYLT`. `SYLT` is MP3-only — FLAC
-/// and WAV carry no ID3, so they never receive it.
+/// an empty (instrumental) `synced` adds no `SYLT`.
 ///
 /// Because the whole tag is rebuilt, any existing `SYLT`/`USLT` lyrics would be
 /// lost on a plain retag that carries no new lyrics. To avoid downgrading a good
@@ -248,6 +248,91 @@ pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Res
         .map_err(|err| Error::Tag(format!("could not write FLAC metadata: {err}")))?;
     out.extend_from_slice(&audio_frames);
     Ok(out)
+}
+
+/// Tag `audio` (a WAV byte stream) with `meta`, returning the tagged bytes.
+///
+/// Writes an ID3v2.4 tag into the RIFF `id3 ` chunk, replacing any existing
+/// ID3 tag, and embeds `cover` as a front-cover `APIC` frame when provided.
+/// When `synced` carries aligned lyrics, a word-level `SYLT` frame is added
+/// alongside the plain `USLT` frame.
+///
+/// Existing `SYLT` frames are preserved when `synced` is `None`, and existing
+/// `USLT` frames are preserved when `meta` carries no lyrics text, so a retag
+/// never loses previously embedded lyrics.
+pub fn tag_wav(
+    audio: &[u8],
+    meta: &TrackMetadata,
+    cover: Option<&[u8]>,
+    synced: Option<&AlignedLyrics>,
+) -> Result<Vec<u8>> {
+    let existing = id3::Tag::read_from2(Cursor::new(audio)).ok();
+    let mut tag = id3::Tag::new();
+    tag.set_title(meta.title.clone());
+    tag.set_artist(meta.artist.clone());
+    if !meta.album.is_empty() {
+        tag.set_album(meta.album.clone());
+    }
+    if !meta.album_artist.is_empty() {
+        tag.set_album_artist(meta.album_artist.clone());
+    }
+    if !meta.date.is_empty() {
+        tag.set_text("TDRC", meta.date.as_str());
+    }
+    if !meta.year.is_empty() {
+        tag.set_text("TDRL", meta.year.as_str());
+    }
+    if !meta.comment.is_empty() {
+        tag.add_frame(Comment {
+            lang: LANG.to_owned(),
+            description: String::new(),
+            text: meta.comment.clone(),
+        });
+    }
+    if !meta.lyrics.is_empty() {
+        tag.add_frame(Lyrics {
+            lang: LANG.to_owned(),
+            description: String::new(),
+            text: meta.lyrics.clone(),
+        });
+    } else if let Some(existing) = &existing {
+        for lyrics in existing.lyrics() {
+            tag.add_frame(lyrics.clone());
+        }
+    }
+    for (desc, value) in meta.suno_fields() {
+        if !value.is_empty() {
+            tag.add_frame(ExtendedText {
+                description: desc.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+    }
+    if let Some(bytes) = cover {
+        tag.add_frame(Picture {
+            mime_type: COVER_MIME.to_owned(),
+            picture_type: PictureType::CoverFront,
+            description: String::new(),
+            data: bytes.to_vec(),
+        });
+    }
+    match synced.and_then(build_sylt) {
+        Some(sylt) => {
+            tag.add_frame(sylt);
+        }
+        None => {
+            if let Some(existing) = &existing {
+                for sylt in existing.synchronised_lyrics() {
+                    tag.add_frame(sylt.clone());
+                }
+            }
+        }
+    }
+
+    let mut cursor = Cursor::new(audio.to_vec());
+    tag.write_to_file(&mut cursor, id3::Version::Id3v24)
+        .map_err(|err| Error::Tag(format!("could not write WAV ID3 tag: {err}")))?;
+    Ok(cursor.into_inner())
 }
 
 /// The Vorbis comment fields, in `(KEY, value)` order.
@@ -767,5 +852,122 @@ mod tests {
         out.extend_from_slice(&streaminfo);
         out.extend_from_slice(FLAC_AUDIO_FRAMES);
         out
+    }
+
+    // A short stand-in audio payload for the WAV `data` chunk.
+    const WAV_AUDIO_DATA: &[u8] = b"\x00\x01\x02wav-sample-payload";
+
+    /// Minimal RIFF/WAVE container with a `fmt ` (PCM) chunk and a `data` chunk.
+    fn minimal_wav() -> Vec<u8> {
+        let audio_len = WAV_AUDIO_DATA.len() as u32;
+        // RIFF size = "WAVE" (4) + fmt chunk header (8) + fmt data (16)
+        //           + data chunk header (8) + audio data.
+        let riff_size = 4u32 + 8 + 16 + 8 + audio_len;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&riff_size.to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        // fmt chunk (PCM, 44100 Hz, mono, 16-bit).
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&1u16.to_le_bytes()); // mono
+        out.extend_from_slice(&44_100u32.to_le_bytes());
+        out.extend_from_slice(&88_200u32.to_le_bytes()); // byte rate
+        out.extend_from_slice(&2u16.to_le_bytes()); // block align
+        out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        // data chunk.
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&audio_len.to_le_bytes());
+        out.extend_from_slice(WAV_AUDIO_DATA);
+        out
+    }
+
+    #[test]
+    fn wav_round_trips_core_tags_and_cover() {
+        let audio = minimal_wav();
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+        let cover = b"\xFF\xD8\xFFwav-cover".to_vec();
+        let tagged = tag_wav(&audio, &meta, Some(&cover), None).unwrap();
+
+        let tag = id3::Tag::read_from_wav(Cursor::new(&tagged)).unwrap();
+        assert_eq!(tag.title(), Some("Electric Storm"));
+        assert_eq!(tag.artist(), Some("alice"));
+        assert_eq!(tag.album(), Some("Weather Series"));
+        assert_eq!(tag.album_artist(), Some("alice"));
+
+        let text = |id: &str| tag.get(id).and_then(|f| f.content().text());
+        assert_eq!(text("TDRC"), Some("2024-03-10"));
+        assert_eq!(text("TDRL"), Some("2023"));
+
+        let extended = |desc: &str| {
+            tag.extended_texts()
+                .find(|f| f.description == desc)
+                .map(|f| f.value.clone())
+        };
+        assert_eq!(
+            extended("SUNO_STYLE").as_deref(),
+            Some("ambient, cinematic")
+        );
+        assert_eq!(extended("SUNO_MODEL").as_deref(), Some("chirp-v4 (v4)"));
+        assert_eq!(
+            extended("SUNO_PROMPT").as_deref(),
+            Some("an orchestral storm")
+        );
+        assert_eq!(extended("SUNO_PARENT").as_deref(), Some("parentid1234"));
+        assert_eq!(extended("SUNO_ROOT").as_deref(), Some("rootid567890"));
+
+        let lyrics = tag.lyrics().next().map(|f| f.text.as_str());
+        assert_eq!(lyrics, Some("thunder rolls\nover the plains"));
+
+        let picture = tag.pictures().next().unwrap();
+        assert_eq!(picture.picture_type, PictureType::CoverFront);
+        assert_eq!(picture.mime_type, COVER_MIME);
+        assert_eq!(picture.data, cover);
+    }
+
+    #[test]
+    fn wav_retag_replaces_rather_than_stacks() {
+        let audio = minimal_wav();
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+        let once = tag_wav(&audio, &meta, None, None).unwrap();
+        let twice = tag_wav(&once, &meta, None, None).unwrap();
+
+        let tag = id3::Tag::read_from_wav(Cursor::new(&twice)).unwrap();
+        assert_eq!(tag.title(), Some("Electric Storm"));
+        let title_count = tag.frames().filter(|f| f.id() == "TIT2").count();
+        assert_eq!(title_count, 1, "prior tag replaced, not stacked");
+    }
+
+    #[test]
+    fn wav_retag_preserves_existing_uslt_without_new_lyrics() {
+        let audio = minimal_wav();
+        let mut meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+        meta.lyrics = "first embedded lyrics".to_owned();
+        let with_lyrics = tag_wav(&audio, &meta, None, None).unwrap();
+
+        let mut retag_meta = meta.clone();
+        retag_meta.lyrics = String::new();
+        let retagged = tag_wav(&with_lyrics, &retag_meta, None, None).unwrap();
+        let tag = id3::Tag::read_from_wav(Cursor::new(&retagged)).unwrap();
+        assert_eq!(
+            tag.lyrics().next().map(|f| f.text.as_str()),
+            Some("first embedded lyrics"),
+            "USLT preserved on retag with no new lyrics"
+        );
+    }
+
+    #[test]
+    fn wav_audio_samples_preserved_after_tagging() {
+        let audio = minimal_wav();
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+        let tagged = tag_wav(&audio, &meta, None, None).unwrap();
+
+        // The WAV_AUDIO_DATA bytes must survive byte-for-byte inside the tagged file.
+        let found = tagged
+            .windows(WAV_AUDIO_DATA.len())
+            .any(|w| w == WAV_AUDIO_DATA);
+        assert!(found, "audio sample bytes not found in tagged WAV");
     }
 }

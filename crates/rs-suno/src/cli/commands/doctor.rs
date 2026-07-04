@@ -42,7 +42,8 @@ pub async fn run_doctor(global: &GlobalArgs) -> Result<ExitCode> {
         env!("SUNO_TARGET")
     )
     .ok();
-    match version::ffmpeg_version() {
+    let ffmpeg = version::ffmpeg_version();
+    match &ffmpeg {
         Some((found, path)) => writeln!(out, "ffmpeg: {found} (detected at {path})").ok(),
         None => writeln!(out, "ffmpeg: not found on PATH").ok(),
     };
@@ -58,6 +59,15 @@ pub async fn run_doctor(global: &GlobalArgs) -> Result<ExitCode> {
                 render_account_env(&mut out, &env, &target.label);
                 render_account_config(&mut out, target.root.as_deref());
                 render_resolved_settings(&mut out, &target.settings);
+                if target.settings.requires_ffmpeg() && ffmpeg.is_none() {
+                    writeln!(
+                        out,
+                        "  ffmpeg: required for {} output but not found on PATH",
+                        target.settings.format
+                    )
+                    .ok();
+                    worst = max_exit_code(worst, ExitCode::Config);
+                }
                 match target.settings.token.as_deref() {
                     Some(token) => {
                         let live = inspect_live(token, &http).await;
@@ -421,5 +431,46 @@ mod tests {
         let diag = inspect_config(Some(path), true).unwrap();
         assert_eq!(diag.status, "not found");
         assert_eq!(diag.exit_code, Some(ExitCode::Config));
+    }
+
+    #[test]
+    fn max_exit_code_selects_higher() {
+        assert_eq!(
+            max_exit_code(ExitCode::Ok, ExitCode::Config),
+            ExitCode::Config
+        );
+        assert_eq!(
+            max_exit_code(ExitCode::Auth, ExitCode::Config),
+            ExitCode::Auth
+        );
+        assert_eq!(max_exit_code(ExitCode::Ok, ExitCode::Ok), ExitCode::Ok);
+    }
+
+    #[test]
+    fn ffmpeg_required_flac_no_ffmpeg_raises_config() {
+        let mut s = settings();
+        s.format = AudioFormat::Flac;
+        s.animated_covers = false;
+        // Simulate ffmpeg absent: if requires_ffmpeg() and no binary, exit = Config.
+        let ffmpeg: Option<(String, String)> = None;
+        let mut worst = ExitCode::Ok;
+        if s.requires_ffmpeg() && ffmpeg.is_none() {
+            worst = max_exit_code(worst, ExitCode::Config);
+        }
+        assert_eq!(worst, ExitCode::Config);
+    }
+
+    #[test]
+    fn ffmpeg_not_required_mp3_no_ffmpeg_stays_ok() {
+        let mut s = settings();
+        s.format = AudioFormat::Mp3;
+        s.animated_covers = false;
+        s.raw_animated_cover = false;
+        let ffmpeg: Option<(String, String)> = None;
+        let mut worst = ExitCode::Ok;
+        if s.requires_ffmpeg() && ffmpeg.is_none() {
+            worst = max_exit_code(worst, ExitCode::Config);
+        }
+        assert_eq!(worst, ExitCode::Ok);
     }
 }

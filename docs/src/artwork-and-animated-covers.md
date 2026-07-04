@@ -6,8 +6,8 @@ and media servers pick it up.
 
 ## Metadata tags
 
-`rs-suno` writes rich metadata into each file. MP3 uses ID3v2.4 frames and FLAC
-uses Vorbis comments.
+`rs-suno` writes rich metadata into each file. MP3 and WAV use ID3v2.4 frames
+and FLAC uses Vorbis comments.
 
 **Core tags**
 
@@ -53,10 +53,10 @@ karaoke players and shows as literal text in the rest, so it is not used; the
 per-word timing is carried in the MP3 `SYLT` frame instead.)
 
 The `.lrc` is the primary synced-lyrics artefact and is written for every
-format (MP3, FLAC and WAV). For **MP3 only**, an ID3 `SYLT` (synchronised
-lyrics) frame is embedded in the file as well with word-level timing, so players
-that read `SYLT` show karaoke-style per-word lyrics. FLAC and WAV carry no ID3,
-so they get no `SYLT`; the line-level `.lrc` covers them.
+format (MP3, FLAC and WAV). For **MP3 and WAV**, an ID3 `SYLT` (synchronised
+lyrics) frame is also embedded in the file with word-level timing, so players
+that read `SYLT` show karaoke-style per-word lyrics. FLAC uses Vorbis comments
+and carries no `SYLT`; the line-level `.lrc` covers it.
 
 The alignment is fetched from Suno once per clip (the result is immutable), so
 enabling the feature probes every clip once on the first pass (cached thereafter);
@@ -125,13 +125,14 @@ you need an ffmpeg build with animated-WebP (`libwebp_anim`) support. See
 [Installation and ffmpeg](installation-and-ffmpeg.md#ffmpeg). Without it, use
 the default static covers. The raw `cover.mp4` needs no ffmpeg.
 
-## A note on WAV
+## WAV metadata
 
-The WAV format carries only limited metadata. When you download in WAV, embedded
-lyrics and album art are omitted, and `rs-suno` warns you. Choose FLAC (the
-default) or MP3 if you want the full set of tags and embedded art. The synced
-`.lrc` sidecar is a separate file, so it is still written for WAV downloads when
-`lrc_sidecar` is enabled; only the in-file `SYLT`/`USLT` tags are MP3/FLAC-only.
+WAV downloads carry full ID3v2.4 tags in a RIFF `id3 ` chunk — the same tag
+set as MP3: title, artist, album, date, lyrics (`USLT`), cover art (`APIC`),
+and all `SUNO_*` extended-text frames. Word-level synced lyrics (`SYLT`) are
+also embedded when alignment is available. Choose FLAC (the default) for a
+lossless archive with Vorbis comments, MP3 for the smallest files, or WAV when
+you need uncompressed PCM with full metadata.
 
 ## What lands on disk
 

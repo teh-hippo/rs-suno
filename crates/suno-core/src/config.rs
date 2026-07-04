@@ -804,6 +804,18 @@ pub struct EffectiveSettings {
     pub album_overrides: BTreeMap<String, String>,
 }
 
+impl EffectiveSettings {
+    /// Returns `true` when these settings require ffmpeg to be on `PATH`.
+    ///
+    /// FLAC output transcodes WAV→FLAC; animated WebP covers transcode
+    /// MP4→WebP. The raw MP4 retention path copies the video verbatim and
+    /// needs no ffmpeg. An MP3 or WAV run with no animated-WebP covers can
+    /// proceed without ffmpeg.
+    pub fn requires_ffmpeg(&self) -> bool {
+        self.format == AudioFormat::Flac || (self.animated_covers && !self.raw_animated_cover)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1874,5 +1886,41 @@ mod tests {
                 .areas
                 .is_none()
         );
+    }
+
+    fn base_settings(format: AudioFormat) -> EffectiveSettings {
+        let toml = "[accounts.a]\n";
+        let cfg = Config::from_toml(toml).unwrap();
+        let mut eff = cfg.resolve("a", None, &no_env(), &no_flags()).unwrap();
+        eff.format = format;
+        eff
+    }
+
+    #[test]
+    fn requires_ffmpeg_flac_always_needs_it() {
+        let mut eff = base_settings(AudioFormat::Flac);
+        eff.animated_covers = false;
+        assert!(eff.requires_ffmpeg());
+        eff.animated_covers = true;
+        assert!(eff.requires_ffmpeg());
+    }
+
+    #[test]
+    fn requires_ffmpeg_mp3_needs_it_only_for_animated_webp() {
+        let mut eff = base_settings(AudioFormat::Mp3);
+        assert!(!eff.requires_ffmpeg(), "mp3 + no covers = no ffmpeg");
+        eff.animated_covers = true;
+        assert!(eff.requires_ffmpeg(), "mp3 + animated webp = needs ffmpeg");
+        eff.animated_covers = false;
+        eff.raw_animated_cover = true;
+        assert!(!eff.requires_ffmpeg(), "mp3 + raw mp4 only = no ffmpeg");
+    }
+
+    #[test]
+    fn requires_ffmpeg_wav_mirrors_mp3_logic() {
+        let mut eff = base_settings(AudioFormat::Wav);
+        assert!(!eff.requires_ffmpeg(), "wav + no covers = no ffmpeg");
+        eff.animated_covers = true;
+        assert!(eff.requires_ffmpeg(), "wav + animated webp = needs ffmpeg");
     }
 }
