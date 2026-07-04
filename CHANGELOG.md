@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.4](https://github.com/teh-hippo/rs-suno/compare/v0.22.3...v0.22.4) (2026-07-04)
+
+
+### Bug Fixes
+
+* wire the trashed flag from the clip into the desired state ([bf1db9d](https://github.com/teh-hippo/rs-suno/commit/bf1db9dab8d5f0816ea01e55bbcc16514ebc6d46)), closes [#150](https://github.com/teh-hippo/rs-suno/issues/150)
+
 ## [0.22.3](https://github.com/teh-hippo/rs-suno/compare/v0.22.2...v0.22.3) (2026-07-04)
 
 
