@@ -1404,6 +1404,7 @@ fn record_synced_lyrics_checks(manifest: &mut Manifest, pending: &[suno_core::Pe
                 version: suno_core::SYNCED_LRC_VERSION,
                 checked_unix: now,
                 empty: check.empty,
+                timed: check.timed,
             });
         }
     }

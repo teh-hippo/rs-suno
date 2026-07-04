@@ -9,10 +9,11 @@
 //! Suno's forced alignment for a clip is immutable in practice (the audio and
 //! its lyrics are fixed once generated), so a clip is fetched at most once per
 //! render [`SYNCED_LRC_VERSION`] — recorded by [`SyncedLyricsCheck`] on the
-//! manifest — except that a clip that resolved to no lyrics (an instrumental) is
-//! re-checked after [`SYNCED_LRC_RECHECK_SECS`] to pick up alignment Suno may
-//! compute after generation, and a clip whose audio is renamed is re-fetched so
-//! its `.lrc` moves with it. A version bump re-resolves everything.
+//! manifest — except that a clip that resolved to no lyrics (an instrumental) or
+//! to an untimed plain-text fallback is re-checked after [`SYNCED_LRC_RECHECK_SECS`]
+//! to pick up alignment Suno may compute after generation, and a clip whose audio
+//! is renamed is re-fetched so its `.lrc` moves with it. A version bump
+//! re-resolves everything.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -22,9 +23,9 @@ use crate::lyrics::AlignedLyrics;
 use crate::manifest::{Manifest, ManifestEntry};
 use crate::reconcile::{ArtifactKind, Desired};
 
-/// How long a clip that resolved to no lyrics is trusted before its alignment is
-/// re-checked (14 days). Bounds the re-fetch of instrumentals to catch alignment
-/// Suno may compute shortly after a clip is generated.
+/// How long a clip that resolved to no lyrics (instrumental) or to an untimed
+/// plain-text fallback is trusted before its alignment is re-checked (14 days).
+/// Bounds the re-fetch to catch alignment Suno may compute after generation.
 pub const SYNCED_LRC_RECHECK_SECS: u64 = 14 * 24 * 60 * 60;
 
 /// One clip's synced-lyrics outcome this run, for the caller to record as a
@@ -36,6 +37,9 @@ pub struct PendingCheck {
     pub clip_id: String,
     /// Whether the clip resolved to no lyrics (an instrumental).
     pub empty: bool,
+    /// Whether the written `.lrc` body carries timed alignment (as opposed to
+    /// an untimed plain-text fallback). Only meaningful when `empty` is false.
+    pub timed: bool,
     /// The content hash of the rendered `.lrc` body, when one was produced. The
     /// caller records the marker only once the manifest slot reflects this hash,
     /// so an interrupted or failed write is re-resolved next run.
@@ -63,11 +67,12 @@ fn needs_fetch(entry: Option<&ManifestEntry>, desired_lrc_path: &str, now_unix: 
             if check.version != SYNCED_LRC_VERSION {
                 return true; // the render changed -> re-resolve and re-render
             }
-            if check.empty {
-                // An instrumental: re-check only once the window elapses.
+            if check.empty || !check.timed {
+                // Instrumental (no `.lrc`) or untimed fallback: re-check once
+                // the window elapses, to pick up alignment Suno adds later.
                 now_unix.saturating_sub(check.checked_unix) > SYNCED_LRC_RECHECK_SECS
             } else {
-                // Written: re-fetch only to move the `.lrc` when the audio is
+                // Timed: re-fetch only to move the `.lrc` when the audio is
                 // renamed (its `.lrc` path drifts), or if the slot is somehow
                 // missing (an interrupted prior write).
                 entry
@@ -122,7 +127,9 @@ pub fn synced_lyrics_targets(
 /// else the untimed lyrics as a fallback; an instrumental (no body) drops the
 /// artifact and records an empty check. A produced body sets the artifact's
 /// content and its content hash, so reconcile rewrites only when the body
-/// actually changes (including an untimed→timed upgrade after a re-check).
+/// actually changes (including an untimed→timed upgrade after a re-check). The
+/// `timed` flag in the returned check distinguishes timed alignment from an
+/// untimed fallback: only timed clips are exempt from the periodic re-check.
 pub fn apply_synced_lrc(
     desired: &mut [Desired],
     manifest: &Manifest,
@@ -140,10 +147,11 @@ pub fn apply_synced_lrc(
             .map(|slot| slot.hash.clone());
 
         if let Some(aligned) = successes.get(&clip_id) {
-            let body = if aligned.is_empty() {
-                render_clip_lrc(&d.clip, &d.lineage)
-            } else {
+            let timed = !aligned.is_empty();
+            let body = if timed {
                 render_synced_lrc(&d.clip, &d.lineage, aligned)
+            } else {
+                render_clip_lrc(&d.clip, &d.lineage)
             };
             match body {
                 Some(text) => {
@@ -154,6 +162,7 @@ pub fn apply_synced_lrc(
                     pending.push(PendingCheck {
                         clip_id,
                         empty: false,
+                        timed,
                         body_hash: Some(hash),
                     });
                 }
@@ -162,6 +171,7 @@ pub fn apply_synced_lrc(
                     pending.push(PendingCheck {
                         clip_id,
                         empty: true,
+                        timed: false,
                         body_hash: None,
                     });
                 }
@@ -296,7 +306,7 @@ mod tests {
     fn targets_new_clip_but_not_a_recently_resolved_one() {
         let d = vec![desired("new", ""), desired("done", "")];
         let mut manifest = Manifest::new();
-        // `done` was resolved (written) at the current version; `new` is unseen.
+        // `done` was timed-resolved at the current version; `new` is unseen.
         manifest.insert(
             "done",
             entry(
@@ -308,6 +318,7 @@ mod tests {
                     version: SYNCED_LRC_VERSION,
                     checked_unix: 1_000,
                     empty: false,
+                    timed: true,
                 }),
             ),
         );
@@ -328,6 +339,7 @@ mod tests {
                     version: SYNCED_LRC_VERSION,
                     checked_unix: 1_000,
                     empty: true,
+                    timed: false,
                 }),
             ),
         );
@@ -337,6 +349,62 @@ mod tests {
         // Past the window: re-checked, to pick up late alignment.
         let later = 1_001 + SYNCED_LRC_RECHECK_SECS;
         assert!(synced_lyrics_targets(&d, &manifest, later, true).contains("instr"));
+    }
+
+    #[test]
+    fn untimed_fallback_is_rechecked_after_the_window() {
+        // A clip that previously resolved to an untimed fallback (empty alignment
+        // but non-empty lyrics) must be re-checked after the window so a later
+        // Suno alignment upgrades it to a timed `.lrc`.
+        let d = vec![desired("a", "some lyrics")];
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry(
+                Some(ArtifactState {
+                    path: "a.lrc".to_string(),
+                    hash: "untimed-hash".to_string(),
+                }),
+                Some(SyncedLyricsCheck {
+                    version: SYNCED_LRC_VERSION,
+                    checked_unix: 1_000,
+                    empty: false,
+                    timed: false,
+                }),
+            ),
+        );
+        // Within the window: no re-fetch (avoids churn on every run).
+        let soon = 1_000 + SYNCED_LRC_RECHECK_SECS;
+        assert!(synced_lyrics_targets(&d, &manifest, soon, true).is_empty());
+        // Past the window: re-checked, to upgrade to timed if alignment arrived.
+        let later = 1_001 + SYNCED_LRC_RECHECK_SECS;
+        assert!(synced_lyrics_targets(&d, &manifest, later, true).contains("a"));
+    }
+
+    #[test]
+    fn timed_clip_is_not_rechecked_without_rename() {
+        // A timed clip must not be re-fetched just because the window elapsed;
+        // only a rename (path drift) or missing slot should trigger a re-fetch.
+        let d = vec![desired("a", "")];
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry(
+                Some(ArtifactState {
+                    path: "a.lrc".to_string(),
+                    hash: "h".to_string(),
+                }),
+                Some(SyncedLyricsCheck {
+                    version: SYNCED_LRC_VERSION,
+                    checked_unix: 0, // maximally stale
+                    empty: false,
+                    timed: true,
+                }),
+            ),
+        );
+        // Even long after the window: still not re-fetched.
+        let very_late = 2 * SYNCED_LRC_RECHECK_SECS;
+        assert!(synced_lyrics_targets(&d, &manifest, very_late, true).is_empty());
     }
 
     #[test]
@@ -354,6 +422,7 @@ mod tests {
                     version: SYNCED_LRC_VERSION + 1, // resolved at a different version
                     checked_unix: 1_000,
                     empty: false,
+                    timed: true,
                 }),
             ),
         );
@@ -377,6 +446,7 @@ mod tests {
                     version: SYNCED_LRC_VERSION,
                     checked_unix: 1_000,
                     empty: false,
+                    timed: true,
                 }),
             ),
         );
@@ -399,9 +469,27 @@ mod tests {
             vec![PendingCheck {
                 clip_id: "a".to_string(),
                 empty: false,
+                timed: true,
                 body_hash: Some(content_hash(body)),
             }]
         );
+    }
+
+    #[test]
+    fn apply_untimed_fallback_marks_not_timed() {
+        // When Suno returns empty alignment but the clip has lyrics, the untimed
+        // plain-text fallback is written but `timed` is false so the check is
+        // subject to the periodic re-check window.
+        let mut d = vec![desired("a", "some lyrics")];
+        let mut successes = HashMap::new();
+        successes.insert("a".to_string(), AlignedLyrics::default());
+        let pending = apply_synced_lrc(&mut d, &Manifest::new(), &successes);
+
+        let art = &d[0].artifacts[0];
+        assert!(art.content.is_some(), "untimed body written");
+        let check = &pending[0];
+        assert!(!check.empty, "clip has lyrics, not an instrumental");
+        assert!(!check.timed, "alignment was empty -> untimed fallback");
     }
 
     #[test]
@@ -417,6 +505,7 @@ mod tests {
             vec![PendingCheck {
                 clip_id: "instr".to_string(),
                 empty: true,
+                timed: false,
                 body_hash: None,
             }]
         );
@@ -442,6 +531,7 @@ mod tests {
                     version: SYNCED_LRC_VERSION,
                     checked_unix: 1_000,
                     empty: false,
+                    timed: true,
                 }),
             ),
         );
@@ -468,10 +558,10 @@ mod tests {
 
     #[test]
     fn apply_upgrades_untimed_to_timed_when_alignment_appears() {
-        // The clip previously wrote an untimed body (stored slot hash); a later
-        // fetch returns alignment, so the timed body's content hash differs and
-        // reconcile will rewrite (the artifact carries the new content).
-        let mut d = vec![desired("a", "")];
+        // The clip previously resolved to an untimed fallback (empty alignment,
+        // body written, timed: false). A re-check now returns alignment, so the
+        // timed body's content hash differs and reconcile will rewrite.
+        let mut d = vec![desired("a", "some lyrics")];
         let untimed_hash = "untimed".to_string();
         let mut manifest = Manifest::new();
         manifest.insert(
@@ -484,13 +574,14 @@ mod tests {
                 Some(SyncedLyricsCheck {
                     version: SYNCED_LRC_VERSION,
                     checked_unix: 1_000,
-                    empty: true,
+                    empty: false,
+                    timed: false,
                 }),
             ),
         );
         let mut successes = HashMap::new();
         successes.insert("a".to_string(), one_line_alignment());
-        apply_synced_lrc(&mut d, &manifest, &successes);
+        let pending = apply_synced_lrc(&mut d, &manifest, &successes);
         let art = &d[0].artifacts[0];
         assert!(
             art.content
@@ -499,6 +590,7 @@ mod tests {
                 .contains("[00:00.50]hi there")
         );
         assert_ne!(art.hash, untimed_hash, "a changed body triggers a rewrite");
+        assert!(pending[0].timed, "upgraded to timed");
     }
 
     #[test]
@@ -516,6 +608,7 @@ mod tests {
                     version: SYNCED_LRC_VERSION,
                     checked_unix: 1_000,
                     empty: false,
+                    timed: true,
                 }),
             ),
         );
