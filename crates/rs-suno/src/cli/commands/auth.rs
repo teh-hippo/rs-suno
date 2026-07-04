@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use suno_core::{ClerkAuth, Config, EffectiveSettings, FlagOverrides};
 
 use crate::cli::args::{AuthArgs, AuthCommand, AuthRefreshArgs, GlobalArgs};
-use crate::cli::desired::ExitCode;
+use crate::cli::desired::{ExitCode, worse};
 use crate::cli::run;
 use crate::http::ReqwestHttp;
 
@@ -122,11 +122,6 @@ fn resolve_named(
         .map_err(|err| err.to_string())
 }
 
-/// The more severe of two exit codes.
-fn worse(a: ExitCode, b: ExitCode) -> ExitCode {
-    if b.code() >= a.code() { b } else { a }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,12 +202,5 @@ mod tests {
         let err = resolve_targets(None, &global, &refresh, &env(), &FlagOverrides::default())
             .unwrap_err();
         assert!(err.contains("--all requires"));
-    }
-
-    #[test]
-    fn worse_picks_higher_code() {
-        assert_eq!(worse(ExitCode::Ok, ExitCode::Auth), ExitCode::Auth);
-        assert_eq!(worse(ExitCode::Auth, ExitCode::Ok), ExitCode::Auth);
-        assert_eq!(worse(ExitCode::Config, ExitCode::Config), ExitCode::Config);
     }
 }

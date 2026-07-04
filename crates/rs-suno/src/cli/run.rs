@@ -33,6 +33,7 @@ use crate::cli::commands::version;
 use crate::cli::desired::{
     Confirm, ExitCode, PlaylistPolicy, ResolvedSelection, build_modes_by_id, confirm_decision,
     confirmed, is_narrowed, mass_delete_abort, resolve_playlist, resolve_selection, run_exit_code,
+    worse,
 };
 use crate::cli::logs;
 use crate::cli::output;
@@ -2326,11 +2327,6 @@ fn synthetic_config() -> Config {
         .accounts
         .insert("default".to_owned(), suno_core::AccountConfig::default());
     config
-}
-
-/// Pick the more severe of two exit codes (`Ok` is least severe).
-fn worse(a: ExitCode, b: ExitCode) -> ExitCode {
-    if b.code() >= a.code() { b } else { a }
 }
 
 /// The first eight characters of an id, for user-facing messages. The full id
