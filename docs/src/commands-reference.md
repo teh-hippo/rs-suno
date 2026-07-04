@@ -72,7 +72,7 @@ configured `root` is used.
 | `--min-newest <N>` | `1` | Newest clips always kept when a recency filter applies. |
 | `--retries <N>` | `3` | Download retry attempts per clip. |
 | `--animated-covers` | off | Also write animated WebP covers from video previews. |
-| `--video-cover-retention <neither\|webp\|mp4\|both>` | | Unified video-cover retention mode (overrides `--animated-covers`/`--video-mp4`). |
+| `--video-cover-retention <neither\|webp\|mp4\|both>` | | Album video-cover retention: `webp` keeps the transcoded `cover.webp`, `mp4` keeps the raw `cover.mp4` (no transcode), `both` keeps both. Overrides `--animated-covers`; the standalone music video stays on `--video-mp4`. |
 | `--animated-cover-quality <N>` | `70` | Animated WebP quality (`0..100`). |
 | `--animated-cover-max-fps <N>` | `24` | Animated WebP frame-rate cap. |
 | `--animated-cover-max-width <PIXELS>` | native | Animated WebP width cap (omit to keep source width). |

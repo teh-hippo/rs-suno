@@ -258,9 +258,13 @@ where
         }
     }
     for art in albums.values() {
-        for state in [art.folder_jpg.as_ref(), art.folder_webp.as_ref()]
-            .into_iter()
-            .flatten()
+        for state in [
+            art.folder_jpg.as_ref(),
+            art.folder_webp.as_ref(),
+            art.folder_mp4.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             *tracked_paths.entry(state.path.clone()).or_default() += 1;
         }
@@ -288,6 +292,27 @@ where
         })
         .collect();
     let cover_cache: Mutex<HashMap<String, Vec<u8>>> = Mutex::new(HashMap::new());
+    // The `both` video-cover retention keeps `cover.webp` (transcoded) and
+    // `cover.mp4` (raw) for an album from the SAME `video_cover_url`. Cache that
+    // source on its first fetch so the second folder artifact drains it rather
+    // than fetching the same MP4 twice (#90 reuses the #89 fetch-once path).
+    let mut folder_cover_uses: HashMap<&str, u32> = HashMap::new();
+    for action in &plan.actions {
+        if let Action::WriteArtifact {
+            kind: ArtifactKind::FolderWebp | ArtifactKind::FolderMp4,
+            source_url,
+            ..
+        } = action
+            && !source_url.is_empty()
+        {
+            *folder_cover_uses.entry(source_url.as_str()).or_default() += 1;
+        }
+    }
+    let shared_cover_urls: HashSet<&str> = folder_cover_uses
+        .into_iter()
+        .filter(|(_, uses)| *uses > 1)
+        .map(|(url, _)| url)
+        .collect();
     let ctx = Ctx {
         http,
         fs,
@@ -300,6 +325,7 @@ where
         write_targets: &write_targets,
         cover_cache: &cover_cache,
         cover_wanted: &cover_wanted,
+        shared_cover_urls: &shared_cover_urls,
     };
 
     let mut outcome = ExecOutcome::default();
@@ -490,7 +516,10 @@ fn disk_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail {
 /// recorded on the album store) rather than a per-clip sidecar (recorded on the
 /// manifest).
 fn is_album_kind(kind: ArtifactKind) -> bool {
-    matches!(kind, ArtifactKind::FolderJpg | ArtifactKind::FolderWebp)
+    matches!(
+        kind,
+        ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::FolderMp4
+    )
 }
 
 /// True for the library-scoped playlist artifact, routed to the playlist store.
@@ -592,6 +621,13 @@ struct Ctx<'a, H, F, G, C> {
     /// a cover only when its URL is here, so a clip whose cover is embedded but
     /// never written as a sidecar leaves no bytes stranded in `cover_cache`.
     cover_wanted: &'a HashSet<&'a str>,
+    /// Album video-cover source URLs fetched by more than one folder artifact
+    /// this run. The `both` retention derives `cover.webp` (transcoded) and
+    /// `cover.mp4` (raw) from the SAME `video_cover_url`; the first fetch caches
+    /// the raw source here so the sibling drains it instead of re-fetching (#90
+    /// reuses the #89 fetch-once path). `FolderWebp` sorts before `FolderMp4`, so
+    /// the raw source is always cached before the raw sidecar reads it.
+    shared_cover_urls: &'a HashSet<&'a str>,
 }
 
 impl<H, F, G, C> Ctx<'_, H, F, G, C>
@@ -879,8 +915,9 @@ where
     /// means the audio failed or never existed this run; we skip (no fetch, no
     /// write) rather than strand an untracked sidecar with no owning audio.
     ///
-    /// Folder art ([`FolderJpg`](ArtifactKind::FolderJpg) /
-    /// [`FolderWebp`](ArtifactKind::FolderWebp)) is album-scoped: its `owner_id`
+    /// Folder art ([`FolderJpg`](ArtifactKind::FolderJpg),
+    /// [`FolderWebp`](ArtifactKind::FolderWebp), and
+    /// [`FolderMp4`](ArtifactKind::FolderMp4)) is album-scoped: its `owner_id`
     /// is the album's stable root id, not a manifest clip, so it skips the
     /// manifest presence guard and records its state on the album store instead.
     ///
@@ -949,7 +986,7 @@ where
                 .get(owner_id)
                 .and_then(|e| e.video_mp4.as_ref())
                 .map(|s| s.path.clone()),
-            ArtifactKind::FolderJpg | ArtifactKind::FolderWebp => albums
+            ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::FolderMp4 => albums
                 .get(owner_id)
                 .and_then(|a| a.artifact(kind))
                 .map(|s| s.path.clone()),
@@ -1033,9 +1070,10 @@ where
     /// An animated cover — a per-clip [`CoverWebp`](ArtifactKind::CoverWebp) or an
     /// album [`FolderWebp`](ArtifactKind::FolderWebp) — fetches the clip's
     /// `video_cover` MP4 preview and transcodes it to an animated WebP through the
-    /// ffmpeg port; every other kind is the fetched source verbatim (e.g. the
-    /// static [`CoverJpg`](ArtifactKind::CoverJpg) or album
-    /// [`FolderJpg`](ArtifactKind::FolderJpg) image). A fetch or transcode failure
+    /// ffmpeg port; every other kind is the fetched source verbatim (the static
+    /// [`CoverJpg`](ArtifactKind::CoverJpg) / album [`FolderJpg`](ArtifactKind::FolderJpg)
+    /// image, or the raw album [`FolderMp4`](ArtifactKind::FolderMp4) whose
+    /// `video_cover_url` is kept untranscoded). A fetch or transcode failure
     /// is attributed to the owning clip and is a per-clip [`Fail`], except a
     /// disk-full transcode, which aborts the run like the audio FLAC path.
     async fn artifact_bytes(
@@ -1054,10 +1092,23 @@ where
             .remove(source_url);
         let source = match cached {
             Some(bytes) => bytes,
-            None => self
-                .fetch_bytes(source_url)
-                .await
-                .map_err(|err| err.attribute(owner_id))?,
+            None => {
+                let fetched = self
+                    .fetch_bytes(source_url)
+                    .await
+                    .map_err(|err| err.attribute(owner_id))?;
+                // Cache the raw source when a sibling folder artifact will fetch
+                // the same URL (the `both` retention: cover.webp + cover.mp4), so
+                // it is fetched exactly once. Bounded to shared URLs and drained
+                // on the sibling's use.
+                if self.shared_cover_urls.contains(source_url) {
+                    self.cover_cache
+                        .lock()
+                        .expect("cover cache mutex poisoned")
+                        .insert(source_url.to_owned(), fetched.clone());
+                }
+                fetched
+            }
         };
         match kind {
             ArtifactKind::CoverWebp | ArtifactKind::FolderWebp => self
@@ -1079,6 +1130,7 @@ where
             ),
             ArtifactKind::CoverJpg
             | ArtifactKind::FolderJpg
+            | ArtifactKind::FolderMp4
             | ArtifactKind::Playlist
             | ArtifactKind::VideoMp4 => Ok(source),
         }
@@ -4684,6 +4736,109 @@ mod tests {
     }
 
     #[test]
+    fn folder_mp4_write_keeps_the_source_verbatim() {
+        let mut manifest = Manifest::new();
+        let mut albums: BTreeMap<String, AlbumArt> = BTreeMap::new();
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::FolderMp4,
+                path: "creator/album/cover.mp4".to_owned(),
+                source_url: "https://cdn.suno.ai/root/video.mp4".to_owned(),
+                hash: "mh".to_owned(),
+                owner_id: "root".to_owned(),
+                content: None,
+            }],
+        };
+        let http = ScriptedHttp::new().route("root/video.mp4", Reply::ok(b"mp4-bytes".to_vec()));
+        let fs = MemFs::new();
+
+        let outcome = run_with_albums(
+            &plan,
+            &mut manifest,
+            &mut albums,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::webp(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(outcome.failed(), 0);
+        // The raw MP4 is written byte-for-byte, never transcoded.
+        assert_eq!(
+            fs.read_file("creator/album/cover.mp4").unwrap(),
+            b"mp4-bytes"
+        );
+        assert_eq!(
+            albums.get("root").unwrap().folder_mp4,
+            Some(ArtifactState {
+                path: "creator/album/cover.mp4".to_owned(),
+                hash: "mh".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn both_folder_covers_fetch_the_video_cover_once() {
+        let mut manifest = Manifest::new();
+        let mut albums: BTreeMap<String, AlbumArt> = BTreeMap::new();
+        // `both` retention keeps cover.webp (transcoded) and cover.mp4 (raw) from
+        // the one video_cover_url. FolderWebp sorts first and caches the fetched
+        // source; FolderMp4 drains it, so the source is fetched exactly once.
+        let plan = Plan {
+            actions: vec![
+                Action::WriteArtifact {
+                    kind: ArtifactKind::FolderWebp,
+                    path: "creator/album/cover.webp".to_owned(),
+                    source_url: "https://cdn.suno.ai/root/video.mp4".to_owned(),
+                    hash: "wh".to_owned(),
+                    owner_id: "root".to_owned(),
+                    content: None,
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::FolderMp4,
+                    path: "creator/album/cover.mp4".to_owned(),
+                    source_url: "https://cdn.suno.ai/root/video.mp4".to_owned(),
+                    hash: "mh".to_owned(),
+                    owner_id: "root".to_owned(),
+                    content: None,
+                },
+            ],
+        };
+        let http = ScriptedHttp::new().route("root/video.mp4", Reply::ok(b"mp4-bytes".to_vec()));
+        let fs = MemFs::new();
+
+        let outcome = run_with_albums(
+            &plan,
+            &mut manifest,
+            &mut albums,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::webp(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.artifacts_written, 2);
+        assert_eq!(outcome.failed(), 0);
+        // Fetched exactly once despite two artifacts consuming it (#90 / #89).
+        assert_eq!(http.count("root/video.mp4"), 1);
+        // The webp is transcoded; the mp4 is the raw source verbatim.
+        assert!(
+            fs.read_file("creator/album/cover.webp")
+                .unwrap()
+                .starts_with(b"RIFF")
+        );
+        assert_eq!(
+            fs.read_file("creator/album/cover.mp4").unwrap(),
+            b"mp4-bytes"
+        );
+    }
+
+    #[test]
     fn folder_art_delete_clears_album_state() {
         let fs = MemFs::new().with_file("creator/album/folder.jpg", b"jpg".to_vec());
         let mut manifest = Manifest::new();
@@ -4696,6 +4851,7 @@ mod tests {
                     hash: "jh".to_owned(),
                 }),
                 folder_webp: None,
+                folder_mp4: None,
             },
         );
         let plan = Plan {
@@ -4896,6 +5052,7 @@ mod tests {
                     hash: "jh".to_owned(),
                 }),
                 folder_webp: None,
+                folder_mp4: None,
             },
         );
         let fs = MemFs::new().with_file("Creator/AlbumA/folder.jpg", b"old-folder".to_vec());
