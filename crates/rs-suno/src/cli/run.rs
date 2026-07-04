@@ -911,7 +911,22 @@ async fn run_one(
     // and has no authoritative library: truncating the union on an armed or
     // protected run would drop a Mirror/protector clip from `desired` and turn it
     // into a deletion candidate, so a stray `--limit` never disarms a mirror (D2).
-    let truncate = !can_delete && !library_authoritative;
+    let truncate = narrows_downloads(can_delete, library_authoritative);
+    // When a full authoritative library is listed (the injected protector, or a
+    // configured unfiltered `library="mirror"`), `--limit`/`--since` are inert:
+    // the whole feed is listed regardless, so say so once rather than silently
+    // ignoring them (#148). The most surprising case is the configured mirror,
+    // where the flags are inert yet deletions still apply.
+    if is_narrowed(args.limit, args.since.as_deref()) && !truncate && verbosity >= -1 {
+        let deletes = if can_delete {
+            "; the library is still mirrored and deletions apply"
+        } else {
+            ""
+        };
+        eprintln!(
+            "note: --limit/--since do not narrow this run (an authoritative full library is listed){deletes}"
+        );
+    }
     let params = SelectParams {
         limit: if truncate { args.limit } else { None },
         since: if truncate { since } else { None },
@@ -1452,6 +1467,26 @@ fn area_enumerated(area: &AreaListing, force_copy: bool) -> bool {
     area.authoritative_ignoring_empty && !(area.clips.is_empty() && mode == SourceMode::Mirror)
 }
 
+/// Whether a playlist listing is authoritative for deletion, before the
+/// empty-mirror guard: it drained its whole page set, lost no member to the
+/// downloadable filter, and was not deliberately narrowed by `--limit`/`--since`.
+/// A narrowed playlist mirror disarms exactly as a narrowed library or liked
+/// feed does, so `--limit`/`--since` never delete against the full playlist and
+/// deletion always needs a full run, uniformly across every source (#148).
+fn playlist_authoritative(complete: bool, any_filtered: bool, narrowed: bool) -> bool {
+    complete && !any_filtered && !narrowed
+}
+
+/// Whether `--limit`/`--since` may narrow the download selection. Only a run
+/// that neither deletes nor lists an authoritative full library may truncate the
+/// union: narrowing while a mirror is armed would drop a mirror/protector clip
+/// into a deletion (D2), and narrowing when a full library is listed would
+/// regress the library index and folder art built from the complete set. So
+/// truncation structurally implies no deletion.
+fn narrows_downloads(can_delete: bool, library_authoritative: bool) -> bool {
+    !can_delete && !library_authoritative
+}
+
 /// Whether a Library area is present and fully enumerated (the implicit
 /// protector counts; `library="off"` leaves no Library area, so this is false).
 fn library_authoritative(areas: &[AreaListing], force_copy: bool) -> bool {
@@ -1643,6 +1678,7 @@ async fn enumerate_areas(
                             &playlist.id,
                             &playlist.name,
                             *mode,
+                            narrowed,
                             verbosity,
                         )
                         .await,
@@ -1659,6 +1695,7 @@ async fn enumerate_areas(
                             &playlist.id,
                             &playlist.name,
                             mode,
+                            narrowed,
                             verbosity,
                         )
                         .await,
@@ -1690,6 +1727,7 @@ async fn list_playlist_area(
     id: &str,
     name: &str,
     mode: SourceMode,
+    narrowed: bool,
     verbosity: i8,
 ) -> AreaListing {
     match client.get_playlist_clips(http, id).await {
@@ -1704,7 +1742,11 @@ async fn list_playlist_area(
                 },
                 mode,
                 clips,
-                authoritative_ignoring_empty: complete && !any_filtered,
+                authoritative_ignoring_empty: playlist_authoritative(
+                    complete,
+                    any_filtered,
+                    narrowed,
+                ),
             }
         }
         Err(err) => {
@@ -2744,6 +2786,162 @@ mod tests {
             true,
         )];
         assert!(!library_authoritative(&off, false));
+    }
+
+    /// (can_delete, library_authoritative, truncate) for a set of areas, exactly
+    /// as `run_one` computes them, for the #148 scenario traces.
+    fn verdict(areas: &[AreaListing]) -> (bool, bool, bool) {
+        let can_delete = deletion_allowed(&source_statuses(areas, false));
+        let lib_auth = library_authoritative(areas, false);
+        (
+            can_delete,
+            lib_auth,
+            narrows_downloads(can_delete, lib_auth),
+        )
+    }
+
+    fn pl_area(mode: SourceMode, ids: &[&str], authoritative: bool) -> AreaListing {
+        area(
+            AreaKind::Playlist {
+                id: "p".into(),
+                name: "P".into(),
+            },
+            mode,
+            ids,
+            authoritative,
+        )
+    }
+
+    // #148: a narrowed (`--limit`/`--since`) playlist mirror is not authoritative,
+    // exactly as a narrowed library or liked feed, so it cannot delete against the
+    // full playlist; `playlist_authoritative` folds the narrowing flag in.
+    #[test]
+    fn playlist_authoritative_folds_narrowed() {
+        assert!(
+            playlist_authoritative(true, false, false),
+            "full, unfiltered, not narrowed"
+        );
+        assert!(
+            !playlist_authoritative(true, false, true),
+            "narrowed -> not authoritative"
+        );
+        assert!(
+            !playlist_authoritative(false, false, false),
+            "the page set did not drain"
+        );
+        assert!(
+            !playlist_authoritative(true, true, false),
+            "a member was lost to the downloadable filter"
+        );
+    }
+
+    // The #148 behaviour change at the area level: a narrowed playlist mirror
+    // neither enumerates nor arms deletion; the same listing un-narrowed does both.
+    #[test]
+    fn narrowed_playlist_mirror_disarms_deletion() {
+        let narrowed = pl_area(
+            SourceMode::Mirror,
+            &["a"],
+            playlist_authoritative(true, false, true),
+        );
+        assert!(!area_enumerated(&narrowed, false));
+        assert!(!deletion_allowed(&source_statuses(&[narrowed], false)));
+
+        let full = pl_area(
+            SourceMode::Mirror,
+            &["a"],
+            playlist_authoritative(true, false, false),
+        );
+        assert!(area_enumerated(&full, false));
+        assert!(deletion_allowed(&source_statuses(&[full], false)));
+    }
+
+    // #148 scenario (c): a narrowed playlist mirror WITH the injected full-library
+    // protector does not delete (the playlist disarms) and does not narrow
+    // downloads (the protector lists the whole library, which drives index/art).
+    #[test]
+    fn narrowed_playlist_with_protector_neither_deletes_nor_narrows() {
+        let areas = vec![
+            area(AreaKind::Library, SourceMode::Copy, &["lib"], true),
+            pl_area(
+                SourceMode::Mirror,
+                &["pl"],
+                playlist_authoritative(true, false, true),
+            ),
+        ];
+        let (can_delete, lib_auth, truncate) = verdict(&areas);
+        assert!(!can_delete, "narrowed playlist mirror is disarmed");
+        assert!(lib_auth, "the protector is an authoritative library");
+        assert!(
+            !truncate,
+            "the full library is listed, so downloads are not narrowed"
+        );
+    }
+
+    // #148 scenario (d): a narrowed playlist mirror under `library="off"` (no
+    // protector) does not delete and DOES narrow downloads, matching a narrowed
+    // library-only or liked run.
+    #[test]
+    fn narrowed_playlist_off_disarms_and_narrows() {
+        let areas = vec![pl_area(
+            SourceMode::Mirror,
+            &["pl"],
+            playlist_authoritative(true, false, true),
+        )];
+        let (can_delete, lib_auth, truncate) = verdict(&areas);
+        assert!(!can_delete, "narrowed playlist mirror is disarmed");
+        assert!(!lib_auth, "library=off leaves no library area");
+        assert!(
+            truncate,
+            "no armed deletion and no full library, so downloads narrow"
+        );
+    }
+
+    // #148 regression guard for scenario (e): a configured unfiltered
+    // `library="mirror"` lists the whole feed regardless of `--limit`/`--since`,
+    // so it stays armed and authoritative. The fix must NOT disarm it — that is
+    // the #149/D2 guarantee that closes the token-swap hole.
+    #[test]
+    fn configured_full_library_mirror_still_deletes_when_narrowed() {
+        let areas = vec![area(AreaKind::Library, SourceMode::Mirror, &["lib"], true)];
+        let (can_delete, lib_auth, truncate) = verdict(&areas);
+        assert!(
+            can_delete,
+            "the configured full-library mirror still deletes"
+        );
+        assert!(lib_auth);
+        assert!(
+            !truncate,
+            "the full library is listed, so downloads are not narrowed"
+        );
+    }
+
+    // The invariant `narrows_downloads` encodes: download narrowing may never
+    // co-occur with an armed deletion, or a truncated union would drop clips into
+    // deletion candidates.
+    #[test]
+    fn narrowing_never_coexists_with_deletion() {
+        for can_delete in [false, true] {
+            for lib_auth in [false, true] {
+                assert!(
+                    !(narrows_downloads(can_delete, lib_auth) && can_delete),
+                    "truncate must imply !can_delete"
+                );
+            }
+        }
+    }
+
+    // A narrowed `library="off"` mirror playlist cannot delete (#148), so first-use
+    // adoption skips the pin rather than confirming identity — the #149 rule that
+    // only a delete-capable run must confirm the account composes cleanly.
+    #[test]
+    fn adoption_skips_pin_on_a_narrowed_library_off_playlist() {
+        let areas = vec![pl_area(
+            SourceMode::Mirror,
+            &["pl"],
+            playlist_authoritative(true, false, true),
+        )];
+        assert!(!adoption_enumerated(&areas, false));
     }
 
     // H1: the union keeps the first area's payload per id (Library wins over a
