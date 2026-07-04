@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.4](https://github.com/teh-hippo/rs-suno/compare/v0.20.3...v0.20.4) (2026-07-04)
+
+
+### Performance Improvements
+
+* fetch each clip's cover once, not twice ([#89](https://github.com/teh-hippo/rs-suno/issues/89)) ([f975e8d](https://github.com/teh-hippo/rs-suno/commit/f975e8d32fd9956a791a2a6839654baf5f4fe3e0))
+
 ## [0.20.3](https://github.com/teh-hippo/rs-suno/compare/v0.20.2...v0.20.3) (2026-07-04)
 
 
