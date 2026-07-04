@@ -97,6 +97,15 @@ impl Reply {
         }
     }
 
+    /// A reply with `status` and `body`.
+    pub(crate) fn with_body(status: u16, body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            status,
+            headers: Vec::new(),
+            body: body.into(),
+        }
+    }
+
     /// Add a response header.
     pub(crate) fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_owned(), value.to_owned()));

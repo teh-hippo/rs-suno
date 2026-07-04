@@ -14,6 +14,13 @@ pub enum Error {
     /// The Suno API returned an unexpected status or body.
     #[error("api error: {0}")]
     Api(String),
+    /// The Suno API returned `400 Bad Request`.
+    ///
+    /// Distinct from [`Api`](Self::Api) so callers can classify a genuine `400`
+    /// (e.g. "no stems") by status code rather than by body-text matching, which
+    /// would misclassify a `5xx` whose body happens to contain the same text.
+    #[error("bad request: {0}")]
+    BadRequest(String),
     /// The Suno API returned `404 Not Found` for the requested resource.
     ///
     /// Distinct from [`Api`](Self::Api) so a caller can treat a genuine absence
