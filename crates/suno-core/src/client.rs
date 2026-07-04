@@ -236,12 +236,12 @@ impl<C: Clock> SunoClient<C> {
             .filter(|id| !id.is_empty() && seen.insert(id))
             .collect();
         let limit = concurrency.max(1);
-        let fetched = stream::iter(ordered.iter().copied().enumerate())
-            .map(|(idx, id)| async move {
+        let fetched = stream::iter(ordered.iter().copied())
+            .map(|id| async move {
                 let path = format!("/api/clip/{id}");
                 match self.api_get_retrying(http, &path).await {
-                    Ok(body) => Ok((idx, parse_clip(&body))),
-                    Err(Error::NotFound(_)) => Ok((idx, None)),
+                    Ok(body) => Ok(parse_clip(&body)),
+                    Err(Error::NotFound(_)) => Ok(None),
                     Err(err) => Err(err),
                 }
             })
@@ -250,7 +250,7 @@ impl<C: Clock> SunoClient<C> {
             .await;
         let mut clips = Vec::new();
         for item in fetched {
-            let (_idx, clip) = item?;
+            let clip = item?;
             if let Some(clip) = clip {
                 clips.push(clip);
             }
