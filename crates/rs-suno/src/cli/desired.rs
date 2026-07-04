@@ -42,6 +42,12 @@ impl ExitCode {
     }
 }
 
+/// The more severe of two exit codes (`Ok` is least severe); used to fold a
+/// multi-account run's per-account results into one process exit code.
+pub fn worse(a: ExitCode, b: ExitCode) -> ExitCode {
+    if b.code() >= a.code() { b } else { a }
+}
+
 /// Whether a `--limit` or `--since` filter narrows a listing.
 pub fn is_narrowed(limit: Option<usize>, since: Option<&str>) -> bool {
     limit.is_some() || since.is_some()
