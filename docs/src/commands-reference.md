@@ -12,8 +12,8 @@ suno [OPTIONS] <COMMAND>
 | [`ls`](#ls) | List clips in a readable table. |
 | [`lsjson`](#lsjson) | List clips as newline-delimited JSON. |
 | [`fetch`](#fetch) | Download one clip by ID or URL. |
-| [`config`](#config) | Create and inspect the config file. |
-| [`auth`](#auth) | Refresh and test authentication. |
+| [`config`](#config) | Manage the configuration file. |
+| [`auth`](#auth) | Manage authentication. |
 | [`doctor`](#doctor) | Diagnose environment, config, auth, and credits. |
 | [`version`](#version) | Print version and environment information. |
 | [`completions`](#completions) | Emit a shell completion script. |
@@ -63,23 +63,30 @@ configured `root` is used.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--format <mp3\|flac\|wav>` | `flac` | Audio format for downloads. |
+| `--format <mp3\|flac\|wav>` | `flac` | Audio format for downloads. WAV carries limited metadata, with no embedded lyrics or art. |
 | `--limit <N>` | | Mirror only the N most recent clips. |
 | `--since <SPEC>` | | Mirror clips newer than `7d`, `2w`, or `last-run`. |
 | `--liked` | off | Scope the run to your liked songs only (additive unless `--mode mirror`). |
 | `--playlist <ID_OR_NAME>` | | Scope the run to a playlist, by id or name (repeatable; additive unless `--mode mirror`). |
-| `--mode <mirror\|copy>` | | Override the mode for this run: `mirror` may delete, `copy` only adds. |
+| `--mode <mirror\|copy>` | scoped default: `copy` | Select the mode for scoped areas: `mirror` arms deletion, `copy` stays additive. Only meaningful with `--liked`, `--playlist`, or an `[areas]` config. |
 | `--min-newest <N>` | `1` | Newest clips always kept when a recency filter applies. |
 | `--retries <N>` | `3` | Download retry attempts per clip. |
+| `--concurrency <N>` | `4` | Simultaneous downloads. |
 | `--animated-covers` | off | Also write animated WebP covers from video previews. |
-| `--video-cover-retention <neither\|webp\|mp4\|both>` | | Album video-cover retention: `webp` keeps the transcoded `cover.webp`, `mp4` keeps the raw `cover.mp4` (no transcode), `both` keeps both. Overrides `--animated-covers`; the standalone music video stays on `--video-mp4`. |
+| `--video-cover-retention <neither\|webp\|mp4\|both>` | `neither` | Album video-cover retention: `webp` keeps the transcoded `cover.webp`, `mp4` keeps the raw `cover.mp4` (no transcode), `both` keeps both. Overrides `--animated-covers`; the standalone music video stays on `--video-mp4`. |
 | `--animated-cover-quality <N>` | `70` | Animated WebP quality (`0..100`). |
 | `--animated-cover-max-fps <N>` | `24` | Animated WebP frame-rate cap. |
 | `--animated-cover-max-width <PIXELS>` | native | Animated WebP width cap (omit to keep source width). |
 | `--animated-cover-compression-level <N>` | `0` | Animated WebP compression effort (`0..6`). |
+| `--allow-account-change` | off | Re-pin this library to the authenticated account. The run is additive and deletes nothing. |
+| `--details-sidecar` | off | Also write a plain-text `.details.txt` sidecar next to each song. |
+| `--lyrics-sidecar` | off | Also write a plain-text `.lyrics.txt` sidecar next to each song. |
+| `--lrc-sidecar` | off | Also write a synced `.lrc` sidecar next to each song. MP3 also gets a timed `SYLT` frame when Suno has alignment. |
 | `--video-mp4` | off | Also download the standalone `.mp4` music video beside each song, when available. |
 | `--download-stems` | off | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder. Download-only: it lists and downloads existing stems and never triggers separation or spends credits. |
-| `--stem-format <FORMAT>` | `wav` | Container for downloaded stems: `wav` (lossless, via the free WAV render) or `mp3`. Stems are stored RAW and are never transcoded to FLAC. |
+| `--stem-format <wav\|mp3>` | `wav` | Container for downloaded stems. Stems are stored RAW and are never transcoded to FLAC. |
+| `--naming-template <TEMPLATE>` | `{creator}/{album}/{creator}-{title} [{id8}]` | Relative path template. Placeholders: `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, `{root_id8}`. |
+| `--character-set <unicode\|ascii>` | `unicode` | Character set for filename sanitisation. |
 
 When `sync` would delete files and `--yes` was not passed, it lists them and
 asks for confirmation on an interactive terminal. Without a terminal it refuses
@@ -277,20 +284,33 @@ Manage the config file. See [Configuration](configuration.md) for the file
 format.
 
 ```text
-suno config init                     # interactively create a config
-suno config add-account [LABEL]      # add an account to an existing config
-suno config show                     # print the config with tokens redacted
+suno config [OPTIONS] <COMMAND>
 ```
+
+| Subcommand | Usage | Purpose |
+|---|---|---|
+| `init` | `suno config init` | Interactively create a new config file. |
+| `add-account` | `suno config add-account [LABEL]` | Add a new account entry to an existing config file. |
+| `show` | `suno config show` | Print the current config with tokens redacted. |
+
+There is no `config path` or `config edit` command in v0.22.0. Use
+`suno version` to print the resolved config path, then edit the TOML file with
+your editor.
 
 ## auth
 
 ```text
+suno auth [OPTIONS] <COMMAND>
 suno auth refresh [ACCOUNT]
 ```
 
 Re-mint an account's JWT to confirm its stored token still works. With no
 account it uses your single configured account, or `--all` to check every one.
 See [Authentication](authentication.md).
+
+`refresh` is the only auth subcommand in v0.22.0. There is no `auth login`,
+`auth status`, or `auth logout` command; provide or update the Clerk `__client`
+token through [Configuration](configuration.md).
 
 ## doctor
 

@@ -85,19 +85,22 @@ On success it prints the account and its display name. If the account label is
 omitted, it uses your single configured account, or `--all` to check every one.
 `doctor` also reports token-expiry state and the remaining credits balance.
 
-When a token stops working (you logged out, or Suno rotated the session), update
-it:
+When a token stops working (you logged out, or Suno rotated the session), give
+the account a fresh `__client` token. There is no update command, so edit the
+account's `token` in your config file directly (run `suno version` to print the
+resolved config path) and set it to the new `__client=<your-token>` value. If
+the account uses `token_command` instead, a rotated secret is picked up on the
+next run, because the command runs every time.
 
-```bash
-suno config add-account <account> --token <new-token>
-```
+`suno config add-account <label>` is for adding a new account and refuses a
+label that already exists, so it is not the way to update an existing token.
 
 ## Keeping the token safe
 
 `rs-suno` never prints your token or a minted JWT:
 
 - `suno config show` redacts every token, printing `[redacted]`.
-- The `--token` flag hides its environment value in help output.
+- The `--token` value is never printed in `--help` output, logs, or errors.
 - The `__client` cookie is only ever sent to Clerk; the Suno API only ever
   receives the short-lived JWT.
 

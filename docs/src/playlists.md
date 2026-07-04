@@ -50,6 +50,7 @@ Playlists are regular mirror artefacts: they are rewritten when their name,
 order, or any member's path, title, or duration changes, and kept in step by
 every full `sync` or `copy`.
 
-A scoped run (`--liked` or `--playlist`) lists only part of your library, so it
-does not maintain `.m3u8` files: existing playlist files are left untouched, and
-no new ones are written. Run a full `sync` or `copy` to refresh your playlists.
+A scoped run (`--liked` or `--playlist`) maintains only the selected areas'
+`.m3u8` files. A liked-only run refreshes `Liked Songs.m3u8`; a playlist-scoped
+run refreshes the playlists it enumerated. Other existing playlist files are
+left untouched. Run a full `sync` or `copy` to refresh every playlist.

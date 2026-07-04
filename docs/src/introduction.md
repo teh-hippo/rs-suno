@@ -16,7 +16,7 @@ is `rs-suno`, so you install it with `cargo install rs-suno` and then run `suno`
   artwork, renames or re-encodes files that changed, and, with `sync`, removes
   local files whose clips have left your library.
 - Embeds rich metadata: core tags (title, artist, album, date) plus Suno details
-  (style, model, creator, and remix lineage), a front cover, and lyrics —
+  (style, model, creator, and remix lineage), a front cover, and lyrics,
   including optional synced (timed) lyrics as an `.lrc` sidecar and an
   MP3 `SYLT` frame.
 - Groups remixes and edits into lineage albums and writes M3U8 playlists,
@@ -44,9 +44,27 @@ governed by strict safety rules described in
 - `ffmpeg` on your `PATH`, built with FLAC and animated-WebP support (see
   [Installation and ffmpeg](installation-and-ffmpeg.md)).
 
+## Quick start
+
+```bash
+cargo install rs-suno
+suno config init
+suno check ~/Music/Suno
+suno sync ~/Music/Suno --yes
+```
+
+`check` is the safest first run: it shows what a mirror would change and writes
+nothing. When the plan looks right, use `sync` for a faithful mirror or `copy`
+for an archive that only grows.
+
+> **Safety:** `sync` deletes only after a complete, authoritative listing. It
+> never deletes after an empty, failed, partial, `--limit`, or `--since` listing.
+
 ## Where to go next
 
 - New here? Start with [Installation and ffmpeg](installation-and-ffmpeg.md),
   then [Authentication](authentication.md).
-- Ready to run? See the [Commands reference](commands-reference.md).
+- Setting up more than one account? See [Configuration](configuration.md).
+- Ready to run? See [Commands reference](commands-reference.md) and
+  [Sync, copy and deletion safety](sync-copy-and-deletion-safety.md).
 - Automating it? See [Scheduling and exit codes](scheduling-and-exit-codes.md).

@@ -4,6 +4,10 @@ Most people keep their token and destination in a config file so a run is just
 `suno sync` or `suno copy`. Flags and environment variables can still override
 the file for one-off runs and automation.
 
+> **Precedence:** for normal settings, the first value found wins:
+> command-line flag, environment variable, source table, account table,
+> defaults table, then the built-in default.
+
 ## Config file location
 
 By default the config lives at:
@@ -47,6 +51,7 @@ The config is TOML with an optional `[defaults]` table and one
 ```toml
 [defaults]
 format = "flac"
+concurrency = 4
 retries = 3
 min_newest = 1
 animated_covers = false
@@ -61,15 +66,34 @@ lrc_sidecar = false
 video_mp4 = false
 download_stems = false
 stem_format = "wav"
+naming_template = "{creator}/{album}/{creator}-{title} [{id8}]"
+character_set = "unicode"
 
 [accounts.me]
-token = "<your __client token>"
+token = "__client=<your-token>"
 root = "/home/alice/music/suno"
+account_id = "user_abc123"
+lyrics_sidecar = true
+lrc_sidecar = true
+
+[accounts.me.sources.liked]
+format = "mp3"
 
 [accounts.work]
 token_command = "bws secret get <secret-id>"
 root = "/home/alice/music/suno-work"
 format = "mp3"
+
+[accounts.work.areas]
+library = "mirror"
+liked = "copy"
+playlists = "copy"
+
+[accounts.work.areas.playlist]
+"pl_abc123" = "mirror"
+
+[accounts.work.albums]
+"1a2b3c4d-0000-0000-0000-000000000000" = "Greatest Hits"
 ```
 
 On Unix, `rs-suno` writes this config file with private permissions (`0600`), and
@@ -85,6 +109,7 @@ needed. These modes are not applied on non-Unix platforms.
 | `root` | path | | Default destination directory. Used when a command omits `DEST`, and required by `--all`. |
 | `account_id` | string | | Optional Suno user id this account must authenticate as. When set, a run refuses (exit 7) before contacting Suno if the token belongs to a different id, a belt-and-braces check alongside the on-disk owner pin. See [deletion safety](sync-copy-and-deletion-safety.md). |
 | `format` | `mp3` \| `flac` \| `wav` | `flac` | Audio format for downloads. |
+| `concurrency` | integer | `4` | Simultaneous downloads. |
 | `retries` | integer | `3` | Download retry attempts per clip before it is logged as failed. |
 | `min_newest` | integer | `1` | Minimum newest clips kept when a recency filter would otherwise select nothing. |
 | `animated_covers` | bool | `false` | Also write animated WebP covers from clip video previews. |
@@ -95,16 +120,23 @@ needed. These modes are not applied on non-Unix platforms.
 | `animated_cover_compression_level` | integer | `0` | Animated WebP compression effort (`0..6`, higher is smaller and slower). |
 | `details_sidecar` | bool | `false` | Also write a plain-text `<song>.details.txt` beside each audio file, dumping the same metadata that is embedded in the tags plus the song id, duration, and canonical `suno.com` URL. |
 | `lyrics_sidecar` | bool | `false` | Also write a plain-text `<song>.lyrics.txt` beside each audio file, holding the song's lyrics verbatim. A song with no lyrics gets no file. |
-| `lrc_sidecar` | bool | `false` | Also write a `<song>.lrc` beside each audio file. When Suno has word/line alignment for the song, the `.lrc` is synced line-level (a `[mm:ss.xx]` timestamp per line — the universally supported form) and, for MP3, an ID3 `SYLT` frame with per-word timing is embedded too; otherwise it falls back to the untimed lyrics. A song Suno cannot align (an instrumental) gets no file. Enabling this fetches each song's alignment once. |
+| `lrc_sidecar` | bool | `false` | Also write a `<song>.lrc` beside each audio file. When Suno has word/line alignment for the song, the `.lrc` is synced line-level (a `[mm:ss.xx]` timestamp per line, the universally supported form) and, for MP3, an ID3 `SYLT` frame with per-word timing is embedded too; otherwise it falls back to the untimed lyrics. A song Suno cannot align (an instrumental) gets no file. Enabling this fetches each song's alignment once. |
 | `video_mp4` | bool | `false` | Also download the standalone `<song>.mp4` music video beside each audio file, when Suno provides one. A song with no video gets no file. Turning this off leaves existing videos in place; a video is only removed alongside its own audio. |
 | `download_stems` | bool | `false` | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder beside it. Download-only: it lists and downloads existing stems and **never** triggers separation or spends credits. A song with no stems gets no folder. Each stem is stored RAW (see `stem_format`), never transcoded to FLAC. Turning this off leaves existing stems in place; individual stems are only removed when Suno's authoritative listing no longer contains them, or alongside their own song. |
 | `stem_format` | string | `wav` | Container for downloaded stems: `wav` (lossless, fetched through the same free WAV render the FLAC pipeline uses) or `mp3` (the public CDN file). Stems are stored RAW in whichever container and are never re-encoded to FLAC, even when the song's own `format` is FLAC. |
+| `naming_template` | string | `{creator}/{album}/{creator}-{title} [{id8}]` | Relative path template. Supported placeholders are `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, and `{root_id8}`. Empty path segments are dropped. |
+| `character_set` | `unicode` \| `ascii` | `unicode` | Character set for filename sanitisation. Unicode preserves valid path characters; ASCII folds names to portable ASCII. |
+| `sources` | table | | Optional per-source overrides under `[accounts.<label>.sources.<name>]`. A source table may set any account key in this table except `token`, `root`, `account_id`, `sources`, `areas`, and `albums`. |
+| `areas` | table | | Optional per-area mirror/copy selection. See [Per-area sync/copy modes](#per-area-synccopy-modes). |
+| `albums` | table | | Optional album-name overrides keyed by lineage root id. See [Album name overrides](#album-name-overrides). |
 
-Any account key except `token`, `root`, and `account_id` may also be set under
-`[defaults]` to apply to every account.
+Any per-run account key may also be set under `[defaults]` to apply to every
+account. Account-only tables and identity fields (`token`, `root`, `account_id`,
+`sources`, `areas`, and `albums`) cannot be set in `[defaults]`.
 
-`token_command` also works in `[accounts.<label>.sources.<name>]`, so one source
-can override an account or default command when needed.
+`token_command` and the other per-run settings also work in
+`[accounts.<label>.sources.<name>]`, so one source can override an account or
+default value when needed.
 
 Security note: `token_command` runs a user-configured shell command. Keep it
 under your control and never rely on untrusted input in the command string.
@@ -123,7 +155,7 @@ liked = "copy"       # "mirror" or "copy"
 playlists = "copy"   # default mode for every playlist
 
 [accounts.me.areas.playlist]
-# Per-playlist overrides, keyed by playlist id (see `suno ls-playlists`).
+# Per-playlist overrides, keyed by playlist id from Suno.
 pl_abc123 = "mirror"
 ```
 
@@ -190,12 +222,14 @@ If exactly one account is configured, it is used automatically and you can omit
 
 ## Precedence
 
-For every setting, the first value found wins, in this order:
+For every normal setting, the first value found wins, in this order:
 
 1. Command-line flag (for example `--format wav`).
 2. Environment variable (per-account `SUNO_<LABEL>_*` before global `SUNO_*`).
-3. Config file (`[accounts.<label>]` before `[defaults]`).
-4. The built-in default.
+3. Source table (`[accounts.<label>.sources.<name>]`).
+4. Account table (`[accounts.<label>]`).
+5. Defaults table (`[defaults]`).
+6. The built-in default.
 
 Token resolution has one extra step between environment variables and the stored
 account token:
@@ -217,6 +251,7 @@ account token:
 | `SUNO_DRY_RUN` | `--dry-run` | |
 | `SUNO_YES` | `--yes` | |
 | `SUNO_FORMAT` | `--format` | `mp3`, `flac`, or `wav`. |
+| `SUNO_CONCURRENCY` | `--concurrency` | Integer, default `4`. |
 | `SUNO_RETRIES` | `--retries` | |
 | `SUNO_MIN_NEWEST` | `--min-newest` | |
 | `SUNO_ANIMATED_COVERS` | `--animated-covers` | `true` or `false`. |
@@ -231,6 +266,8 @@ account token:
 | `SUNO_VIDEO_MP4` | `--video-mp4` | `true` or `false`. |
 | `SUNO_DOWNLOAD_STEMS` | `--download-stems` | `true` or `false`. |
 | `SUNO_STEM_FORMAT` | `--stem-format` | `wav` or `mp3`. |
+| `SUNO_NAMING_TEMPLATE` | `--naming-template` | Supported placeholders: `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, `{root_id8}`. |
+| `SUNO_CHARACTER_SET` | `--character-set` | `unicode` or `ascii`. |
 
 Per-account variants use the account label upper-cased with hyphens turned into
 underscores, so account `my-lib` reads `SUNO_MY_LIB_TOKEN`,
