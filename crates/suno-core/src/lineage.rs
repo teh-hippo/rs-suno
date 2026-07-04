@@ -15,6 +15,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::client::SunoClient;
 use crate::clock::Clock;
 use crate::error::Result;
@@ -65,9 +67,13 @@ impl EdgeType {
 }
 
 /// Whether an [`Edge`] is the clip's primary parent or a supporting one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum EdgeRole {
     /// The single lineage parent used for root resolution and album grouping.
+    #[default]
     Primary,
     /// An additional source (an extra stitch segment, an infill's future half).
     Secondary,
@@ -107,10 +113,9 @@ impl Default for ResolveOpts {
 }
 
 /// The outcome of resolving a clip's root ancestor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResolveStatus {
-    /// The root was reached: a clip present in the index with no parent.
-    Resolved,
     /// Resolution stopped at an ancestor outside the index (gap-fill budget
     /// exhausted, or the API reported it has no parent of its own).
     External,
@@ -118,6 +123,11 @@ pub enum ResolveStatus {
     Unresolved,
     /// A cycle was detected while walking (pathological data).
     Cycle,
+    /// The root was reached: a clip present in the index with no parent.
+    /// Also the fallback for any unknown future status slug.
+    #[default]
+    #[serde(other)]
+    Resolved,
 }
 
 /// The resolved root ancestor of a clip.

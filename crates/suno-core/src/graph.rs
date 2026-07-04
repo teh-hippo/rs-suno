@@ -336,6 +336,24 @@ pub struct PlaylistState {
     pub hash: String,
 }
 
+/// Lifecycle marker for a [`Node`]: `"observed"` for a clip seen from the feed or gap-fill.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeStatus {
+    #[default]
+    #[serde(other)]
+    Observed,
+}
+
+/// Lifecycle marker for a [`StoredEdge`]: `"active"` for an edge observed this run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeStatus {
+    #[default]
+    #[serde(other)]
+    Active,
+}
+
 /// One clip in the graph. Mirrors the fields lineage needs to survive a purge:
 /// enough to name and date the clip long after Suno deletes it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,8 +365,7 @@ pub struct Node {
     pub task: String,
     pub is_remix: bool,
     pub is_trashed: bool,
-    /// Lifecycle marker; `"observed"` for a clip seen from the feed or gap-fill.
-    pub status: String,
+    pub status: NodeStatus,
     pub first_seen_at: String,
     pub last_seen_at: String,
 }
@@ -362,7 +379,7 @@ impl Default for Node {
             task: String::new(),
             is_remix: false,
             is_trashed: false,
-            status: "observed".to_owned(),
+            status: NodeStatus::Observed,
             first_seen_at: String::new(),
             last_seen_at: String::new(),
         }
@@ -379,14 +396,12 @@ pub struct StoredEdge {
     pub parent_id: String,
     /// Stable lowercase slug, e.g. `"cover"`, `"remaster"`, `"section_replace"`.
     pub edge_type: String,
-    /// `"primary"` for the rooting parent, `"secondary"` for extra sources.
-    pub role: String,
+    pub role: EdgeRole,
     /// The clip field the parent id was read from, e.g. `"cover_clip_id"`.
     pub source_field: String,
     /// Position within its role (0 for the primary, then secondaries in order).
     pub ordinal: u32,
-    /// Lifecycle marker; `"active"` for an edge observed this run.
-    pub status: String,
+    pub status: EdgeStatus,
     pub first_seen_at: String,
     pub last_seen_at: String,
 }
@@ -396,17 +411,17 @@ struct EdgeKey {
     child_id: String,
     parent_id: String,
     edge_type: String,
-    role: String,
+    role: EdgeRole,
     ordinal: u32,
 }
 
 impl EdgeKey {
-    fn new(child_id: &str, parent_id: &str, edge_type: &str, role: &str, ordinal: u32) -> Self {
+    fn new(child_id: &str, parent_id: &str, edge_type: &str, role: EdgeRole, ordinal: u32) -> Self {
         Self {
             child_id: child_id.to_owned(),
             parent_id: parent_id.to_owned(),
             edge_type: edge_type.to_owned(),
-            role: role.to_owned(),
+            role,
             ordinal,
         }
     }
@@ -416,7 +431,7 @@ impl EdgeKey {
             &edge.child_id,
             &edge.parent_id,
             &edge.edge_type,
-            &edge.role,
+            edge.role,
             edge.ordinal,
         )
     }
@@ -428,10 +443,10 @@ impl Default for StoredEdge {
             child_id: String::new(),
             parent_id: String::new(),
             edge_type: String::new(),
-            role: String::new(),
+            role: EdgeRole::Primary,
             source_field: String::new(),
             ordinal: 0,
-            status: "active".to_owned(),
+            status: EdgeStatus::Active,
             first_seen_at: String::new(),
             last_seen_at: String::new(),
         }
@@ -443,8 +458,7 @@ impl Default for StoredEdge {
 #[serde(default)]
 pub struct CacheEntry {
     pub root_id: String,
-    /// `"resolved"`, or a slug of the terminal status (`"external"`, …).
-    pub status: String,
+    pub status: ResolveStatus,
     pub algorithm_version: u32,
     pub computed_at: String,
 }
@@ -650,7 +664,7 @@ impl LineageStore {
             None => (String::new(), None),
         };
         let status = cached
-            .map(|entry| status_from_slug(&entry.status))
+            .map(|entry| entry.status)
             .unwrap_or(ResolveStatus::Resolved);
         LineageContext {
             root_id,
@@ -832,7 +846,11 @@ impl LineageStore {
     pub fn archived_parents(&self) -> HashMap<String, String> {
         self.edges
             .iter()
-            .filter(|edge| edge.role == "primary" && edge.ordinal == 0 && edge.status == "active")
+            .filter(|edge| {
+                edge.role == EdgeRole::Primary
+                    && edge.ordinal == 0
+                    && edge.status == EdgeStatus::Active
+            })
             .map(|edge| (edge.child_id.clone(), edge.parent_id.clone()))
             .collect()
     }
@@ -857,22 +875,27 @@ impl LineageStore {
     /// `(child_id, parent_id, edge_type, role, ordinal)`.
     fn upsert_edge(&mut self, child_id: &str, edge: &Edge, now: &str) {
         let edge_type = edge_type_slug(edge.edge_type);
-        let role = edge_role_slug(edge.role);
-        let key = EdgeKey::new(child_id, &edge.parent_id, edge_type, role, edge.ordinal);
+        let key = EdgeKey::new(
+            child_id,
+            &edge.parent_id,
+            edge_type,
+            edge.role,
+            edge.ordinal,
+        );
         if let Some(&index) = self.edge_index.get(&key) {
             let existing = &mut self.edges[index];
             existing.source_field = edge.source_field.to_owned();
-            existing.status = "active".to_owned();
+            existing.status = EdgeStatus::Active;
             existing.last_seen_at = now.to_owned();
         } else {
             self.edges.push(StoredEdge {
                 child_id: child_id.to_owned(),
                 parent_id: edge.parent_id.clone(),
                 edge_type: edge_type.to_owned(),
-                role: role.to_owned(),
+                role: edge.role,
                 source_field: edge.source_field.to_owned(),
                 ordinal: edge.ordinal,
-                status: "active".to_owned(),
+                status: EdgeStatus::Active,
                 first_seen_at: now.to_owned(),
                 last_seen_at: now.to_owned(),
             });
@@ -900,7 +923,7 @@ impl LineageStore {
             && self
                 .resolution_cache
                 .get(child_id)
-                .is_some_and(|entry| entry.status == "resolved")
+                .is_some_and(|entry| entry.status == ResolveStatus::Resolved)
         {
             return;
         }
@@ -908,7 +931,7 @@ impl LineageStore {
             child_id.to_owned(),
             CacheEntry {
                 root_id: info.root_id.clone(),
-                status: resolve_status_slug(info.status).to_owned(),
+                status: info.status,
                 algorithm_version: 1,
                 computed_at: now.to_owned(),
             },
@@ -928,35 +951,6 @@ fn edge_type_slug(edge_type: EdgeType) -> &'static str {
         EdgeType::Stitch => "stitch",
         EdgeType::Derived => "derived",
         EdgeType::Uploaded => "uploaded",
-    }
-}
-
-/// The stable on-disk slug for an [`EdgeRole`].
-fn edge_role_slug(role: EdgeRole) -> &'static str {
-    match role {
-        EdgeRole::Primary => "primary",
-        EdgeRole::Secondary => "secondary",
-    }
-}
-
-/// The stable on-disk slug for a [`ResolveStatus`].
-fn resolve_status_slug(status: ResolveStatus) -> &'static str {
-    match status {
-        ResolveStatus::Resolved => "resolved",
-        ResolveStatus::External => "external",
-        ResolveStatus::Unresolved => "unresolved",
-        ResolveStatus::Cycle => "cycle",
-    }
-}
-
-/// Parse a cached status slug back into a [`ResolveStatus`], defaulting to
-/// [`Resolved`](ResolveStatus::Resolved) for the self-root/unknown case.
-fn status_from_slug(slug: &str) -> ResolveStatus {
-    match slug {
-        "external" => ResolveStatus::External,
-        "unresolved" => ResolveStatus::Unresolved,
-        "cycle" => ResolveStatus::Cycle,
-        _ => ResolveStatus::Resolved,
     }
 }
 
@@ -1046,7 +1040,7 @@ mod tests {
         assert_eq!(cover.clip_type, "gen");
         assert_eq!(cover.task, "cover");
         assert_eq!(cover.created_at, "t2");
-        assert_eq!(cover.status, "observed");
+        assert_eq!(cover.status, NodeStatus::Observed);
         assert!(!cover.is_trashed);
         assert_eq!(cover.first_seen_at, "now");
         assert_eq!(cover.last_seen_at, "now");
@@ -1055,10 +1049,10 @@ mod tests {
         assert_eq!(store.edges.len(), 2);
         let cb = edge(&store, "c", "b");
         assert_eq!(cb.edge_type, "cover");
-        assert_eq!(cb.role, "primary");
+        assert_eq!(cb.role, EdgeRole::Primary);
         assert_eq!(cb.ordinal, 0);
         assert_eq!(cb.source_field, "cover_clip_id");
-        assert_eq!(cb.status, "active");
+        assert_eq!(cb.status, EdgeStatus::Active);
         let ba = edge(&store, "b", "a");
         assert_eq!(ba.edge_type, "remaster");
         assert!(!store.edges.iter().any(|e| e.child_id == "a"));
@@ -1067,7 +1061,7 @@ mod tests {
         for id in ["a", "b", "c"] {
             let cached = store.get_root(id).unwrap();
             assert_eq!(cached.root_id, "a");
-            assert_eq!(cached.status, "resolved");
+            assert_eq!(cached.status, ResolveStatus::Resolved);
             assert_eq!(cached.algorithm_version, 1);
         }
     }
@@ -1114,7 +1108,7 @@ mod tests {
 
         // The gap-filled ancestor's own edge is persisted (pre-fix it was not).
         let mid_edge = edge(&store, "mid", "root");
-        assert_eq!(mid_edge.role, "primary");
+        assert_eq!(mid_edge.role, EdgeRole::Primary);
         assert_eq!(mid_edge.ordinal, 0);
         // Both hops are now reachable from the archive for a later resolve.
         let archived = store.archived_parents();
@@ -1154,7 +1148,7 @@ mod tests {
 
         let bridged = edge(&store, "gone", "found");
         assert_eq!(bridged.source_field, "parent_endpoint");
-        assert_eq!(bridged.role, "primary");
+        assert_eq!(bridged.role, EdgeRole::Primary);
         assert_eq!(bridged.ordinal, 0);
         assert_eq!(
             store.archived_parents().get("gone").map(String::as_str),
@@ -1276,7 +1270,7 @@ mod tests {
     fn cache_is_monotonic_and_never_downgrades_a_resolved_root() {
         let mut store = LineageStore::new();
         store.update(&chain_clips(), &chain_resolution(), "first");
-        assert_eq!(store.get_root("c").unwrap().status, "resolved");
+        assert_eq!(store.get_root("c").unwrap().status, ResolveStatus::Resolved);
 
         // A later run where `c` fails to resolve (a transient gap-fill miss)
         // and a brand-new clip `d` that only reaches an external boundary.
@@ -1316,12 +1310,12 @@ mod tests {
         // The resolved root of `c` is kept, not downgraded.
         let cached = store.get_root("c").unwrap();
         assert_eq!(cached.root_id, "a");
-        assert_eq!(cached.status, "resolved");
+        assert_eq!(cached.status, ResolveStatus::Resolved);
         assert_eq!(cached.computed_at, "first");
         // A never-resolved clip records its last-known non-resolved status.
         let d = store.get_root("d").unwrap();
         assert_eq!(d.root_id, "boundary");
-        assert_eq!(d.status, "external");
+        assert_eq!(d.status, ResolveStatus::External);
     }
 
     #[test]
@@ -1384,8 +1378,8 @@ mod tests {
         assert_eq!(store.schema_version, 1);
         let node = store.node("x").unwrap();
         assert_eq!(node.title, "Kept");
-        assert_eq!(node.status, "observed");
-        assert_eq!(store.edges[0].status, "active");
+        assert_eq!(node.status, NodeStatus::Observed);
+        assert_eq!(store.edges[0].status, EdgeStatus::Active);
         assert!(store.resolution_cache.is_empty());
         // The album-art collection is additive: a store written before folder
         // art existed loads with no albums and no folder art.
@@ -1902,7 +1896,7 @@ mod tests {
             root_id.to_owned(),
             CacheEntry {
                 root_id: root_id.to_owned(),
-                status: "external".to_owned(),
+                status: ResolveStatus::External,
                 algorithm_version: 1,
                 computed_at: "now".to_owned(),
             },
@@ -2459,5 +2453,133 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&pinned).unwrap()).unwrap();
         assert_eq!(back, pinned);
         assert_eq!(back.owner().unwrap().user_id, "user_a");
+    }
+
+    #[test]
+    fn on_disk_slugs_are_byte_identical_to_the_legacy_string_literals() {
+        // The typed enums must serialize to the SAME slug strings as the old
+        // hand-written literals. Any change here would corrupt existing stores.
+        let mut store = LineageStore::new();
+        store.update(&chain_clips(), &chain_resolution(), "now");
+
+        let value = serde_json::to_value(&store).unwrap();
+        let edges = value.get("edges").unwrap().as_array().unwrap();
+
+        // There are two edges: c->b (cover/primary) and b->a (remaster/primary).
+        let primary_edge = edges
+            .iter()
+            .find(|e| e.get("child_id").unwrap() == "c")
+            .unwrap();
+        assert_eq!(primary_edge.get("role").unwrap(), "primary");
+        assert_eq!(primary_edge.get("status").unwrap(), "active");
+        assert_eq!(primary_edge.get("edge_type").unwrap(), "cover");
+
+        // Node status slug.
+        let node = value.get("nodes").unwrap().get("c").unwrap();
+        assert_eq!(node.get("status").unwrap(), "observed");
+
+        // Cache entry status slug.
+        let cache = value.get("resolution_cache").unwrap();
+        assert_eq!(cache.get("a").unwrap().get("status").unwrap(), "resolved");
+
+        // A non-resolved status also serialises to the correct slug.
+        let mut store2 = LineageStore::new();
+        let child = Clip {
+            id: "x".into(),
+            ..Default::default()
+        };
+        let mut roots = HashMap::new();
+        roots.insert(
+            "x".to_owned(),
+            RootInfo {
+                root_id: "ext".into(),
+                root_title: String::new(),
+                status: ResolveStatus::External,
+            },
+        );
+        store2.update(
+            std::slice::from_ref(&child),
+            &Resolution {
+                roots,
+                gap_filled: Vec::new(),
+                bridges: Vec::new(),
+            },
+            "now",
+        );
+        let v2 = serde_json::to_value(&store2).unwrap();
+        assert_eq!(
+            v2.get("resolution_cache")
+                .unwrap()
+                .get("x")
+                .unwrap()
+                .get("status")
+                .unwrap(),
+            "external"
+        );
+    }
+
+    #[test]
+    fn serde_roundtrip_is_byte_identical() {
+        // The typed enums must not change the wire format: a store serialised
+        // and then re-serialised must produce the same bytes.
+        let mut store = LineageStore::new();
+        store.update(&chain_clips(), &chain_resolution(), "now");
+
+        let first = serde_json::to_string(&store).unwrap();
+        let back: LineageStore = serde_json::from_str(&first).unwrap();
+        let second = serde_json::to_string(&back).unwrap();
+        assert_eq!(first, second, "round-trip must be byte-identical");
+    }
+
+    #[test]
+    fn existing_string_form_json_deserialises_correctly() {
+        // Existing on-disk stores use the plain slug strings; the typed enums
+        // must still parse them correctly after this refactor.
+        let json = r#"{
+            "nodes": {"a": {"title": "Root", "status": "observed"}},
+            "edges": [{"child_id": "b", "parent_id": "a", "role": "primary", "status": "active", "edge_type": "cover"}],
+            "resolution_cache": {"b": {"root_id": "a", "status": "resolved"}}
+        }"#;
+        let store: LineageStore = serde_json::from_str(json).unwrap();
+        assert_eq!(store.node("a").unwrap().status, NodeStatus::Observed);
+        assert_eq!(store.edges[0].role, EdgeRole::Primary);
+        assert_eq!(store.edges[0].status, EdgeStatus::Active);
+        assert_eq!(store.get_root("b").unwrap().status, ResolveStatus::Resolved);
+        // archived_parents uses typed comparison: the loaded edge must be returned.
+        let archived = store.archived_parents();
+        assert_eq!(archived.get("b").map(String::as_str), Some("a"));
+    }
+
+    #[test]
+    fn lineage_resolution_and_album_grouping_are_unchanged() {
+        // End-to-end guard: the typed fields must not change lineage resolution
+        // behaviour or album grouping compared to the previous string-based code.
+        let mut store = LineageStore::new();
+        store.update(&chain_clips(), &chain_resolution(), "now");
+
+        // Root resolution: every clip roots at "a".
+        for id in ["a", "b", "c"] {
+            let cached = store.get_root(id).unwrap();
+            assert_eq!(cached.root_id, "a");
+            assert_eq!(cached.status, ResolveStatus::Resolved);
+        }
+
+        // Album grouping: all three clip under the root's title.
+        for id in ["a", "b", "c"] {
+            assert_eq!(store.album_for_id(id), "Root");
+        }
+
+        // archived_parents feeds lineage hops through purged ancestors.
+        let archived = store.archived_parents();
+        assert_eq!(archived.get("c").map(String::as_str), Some("b"));
+        assert_eq!(archived.get("b").map(String::as_str), Some("a"));
+        assert!(!archived.contains_key("a"));
+
+        // context_for returns the correct status and root.
+        let cover = &chain_clips()[0];
+        let ctx = store.context_for(cover);
+        assert_eq!(ctx.root_id, "a");
+        assert_eq!(ctx.status, ResolveStatus::Resolved);
+        assert_eq!(ctx.album(&cover.title), "Root");
     }
 }
