@@ -791,8 +791,12 @@ async fn run_one(
     }
     let colliding_albums = store.colliding_root_titles();
     // Preliminary authority for the first-use adoption check, computed before
-    // any adoption can flip the run additive.
-    let enumerated = library_authoritative(&areas, force_copy_initial);
+    // any adoption can flip the run additive. A run that could delete (any
+    // fully-enumerated Mirror source, e.g. a playlist under `library="off"`)
+    // must confirm identity here too: otherwise it SkipPins and then deletes
+    // against an account this library was never pinned to, the exact hole the
+    // owner pin closes (#149).
+    let enumerated = adoption_enumerated(&areas, force_copy_initial);
 
     // PHASE 2: first-use adoption, now the listing is known. Only a library
     // that PHASE 1 left unpinned (FirstUse) reaches here; identity is confirmed
@@ -875,13 +879,7 @@ async fn run_one(
     // no Mirror source remains and deletion is impossible; the protector already
     // never armed anything.
     let force_copy = verb == Verb::Copy || force_additive;
-    let sources: Vec<SourceStatus> = areas
-        .iter()
-        .map(|area| SourceStatus {
-            mode: area_mode(area, force_copy),
-            fully_enumerated: area_enumerated(area, force_copy),
-        })
-        .collect();
+    let sources = source_statuses(&areas, force_copy);
     let can_delete = deletion_allowed(&sources);
     // Art, `.m3u8`, and the library index are gated on an authoritative Library:
     // a Library area present in the selection (the implicit protector counts;
@@ -1459,6 +1457,30 @@ fn library_authoritative(areas: &[AreaListing], force_copy: bool) -> bool {
     areas
         .iter()
         .any(|a| matches!(a.kind, AreaKind::Library) && area_enumerated(a, force_copy))
+}
+
+/// The per-source enumeration status of every area, for the deletion verdict.
+fn source_statuses(areas: &[AreaListing], force_copy: bool) -> Vec<SourceStatus> {
+    areas
+        .iter()
+        .map(|area| SourceStatus {
+            mode: area_mode(area, force_copy),
+            fully_enumerated: area_enumerated(area, force_copy),
+        })
+        .collect()
+}
+
+/// Whether first-use adoption can confirm identity from this run's listing.
+///
+/// An authoritative Library is the usual anchor, but a fully-enumerated Mirror
+/// source of any kind (e.g. a playlist under `library="off"`) also arms
+/// deletion. Deleting against an account this library was never pinned to is
+/// the hole the owner pin closes (#149), so such a run is treated as enumerated:
+/// `adopt_decision` then confirms identity by clip overlap and aborts on a
+/// foreign account instead of skipping the pin.
+fn adoption_enumerated(areas: &[AreaListing], force_copy: bool) -> bool {
+    library_authoritative(areas, force_copy)
+        || deletion_allowed(&source_statuses(areas, force_copy))
 }
 
 /// Build the clip union across areas in canonical order, first area winning per
@@ -2643,6 +2665,54 @@ mod tests {
         // A non-empty mirror that fully listed is authoritative.
         let full = area(AreaKind::Liked, SourceMode::Mirror, &["x"], true);
         assert!(area_enumerated(&full, false));
+    }
+
+    // A run under `library="off"` that mirrors a fully-enumerated playlist can
+    // delete, so first-use adoption must confirm identity (enumerated == true)
+    // rather than SkipPin into a delete against an unconfirmed account (#149).
+    #[test]
+    fn adoption_enumerated_covers_a_mirror_playlist_under_library_off() {
+        let playlist = |mode, ids: &[&str], auth| {
+            area(
+                AreaKind::Playlist {
+                    id: "p".into(),
+                    name: "P".into(),
+                },
+                mode,
+                ids,
+                auth,
+            )
+        };
+        // library="off" + a fully-enumerated Mirror playlist arms deletion.
+        assert!(adoption_enumerated(
+            &[playlist(SourceMode::Mirror, &["pl"], true)],
+            false
+        ));
+        // A copy-only run cannot delete, so identity need not be confirmed.
+        assert!(!adoption_enumerated(
+            &[playlist(SourceMode::Copy, &["pl"], true)],
+            false
+        ));
+        // An empty mirror (a dropped or ambiguous listing) is not authoritative.
+        assert!(!adoption_enumerated(
+            &[playlist(SourceMode::Mirror, &[], true)],
+            false
+        ));
+        // A partial (non-authoritative) mirror listing does not arm adoption.
+        assert!(!adoption_enumerated(
+            &[playlist(SourceMode::Mirror, &["pl"], false)],
+            false
+        ));
+        // A force-copy (additive) run never deletes, so never forces the pin.
+        assert!(!adoption_enumerated(
+            &[playlist(SourceMode::Mirror, &["pl"], true)],
+            true
+        ));
+        // The classic authoritative-library anchor still counts.
+        assert!(adoption_enumerated(
+            &[area(AreaKind::Library, SourceMode::Mirror, &["lib"], true)],
+            false,
+        ));
     }
 
     // library_authoritative counts the implicit protector but is false for
