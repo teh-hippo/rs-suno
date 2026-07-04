@@ -4947,45 +4947,6 @@ mod tests {
     }
 
     #[test]
-    fn write_stem_mp3_never_issues_a_generation_post() {
-        // The MP3 stem path is GET-only: writing a stem fetches its CDN url and
-        // never POSTs, let alone to any generation or WAV-render endpoint.
-        let mut manifest = Manifest::new();
-        manifest.insert("a", entry("a.flac", AudioFormat::Flac));
-        let plan = Plan {
-            actions: vec![Action::WriteStem {
-                clip_id: "a".to_owned(),
-                key: "voc".to_owned(),
-                stem_id: "voc".to_owned(),
-                path: "a.stems/voc.mp3".to_owned(),
-                source_url: "https://cdn1.suno.ai/voc.mp3".to_owned(),
-                format: StemFormat::Mp3,
-                hash: "vh".to_owned(),
-            }],
-        };
-        let http = ScriptedHttp::new().route("voc.mp3", Reply::ok(b"stem".to_vec()));
-
-        run(
-            &plan,
-            &mut manifest,
-            &[],
-            &http,
-            &MemFs::new(),
-            &StubFfmpeg::flac(),
-            &RecordingClock::new(),
-            &ExecOptions::default(),
-        );
-
-        assert_eq!(
-            http.count("stem_task"),
-            0,
-            "no generation endpoint is ever hit"
-        );
-        assert_eq!(http.count("convert_wav"), 0);
-        assert_eq!(http.count("/api/gen/"), 0);
-    }
-
-    #[test]
     fn full_stems_mirror_mp3_is_get_only_with_zero_gen_traffic() {
         // End-to-end #100 path with MP3 stems: list a clip's existing stems (free
         // GET over the live page-count + 0-indexed page shape), reconcile them into
