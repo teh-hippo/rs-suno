@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.1](https://github.com/teh-hippo/rs-suno/compare/v0.25.0...v0.25.1) (2026-07-04)
+
+
+### Bug Fixes
+
+* carry HTTP 400 structurally in Error::BadRequest, classify no-stems by status ([3c9b425](https://github.com/teh-hippo/rs-suno/commit/3c9b4256d6a35815e25fcbce6da2705132db96cd))
+
 ## [0.25.0](https://github.com/teh-hippo/rs-suno/compare/v0.24.1...v0.25.0) (2026-07-04)
 
 
