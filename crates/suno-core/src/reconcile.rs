@@ -765,6 +765,24 @@ pub(crate) fn set_manifest_stem(
     }
 }
 
+fn needs_write_drift(
+    stored: Option<(&str, &str)>,
+    want_hash: &str,
+    want_path: &str,
+    local: &HashMap<String, LocalFile>,
+) -> bool {
+    match stored {
+        None => true,
+        Some((stored_hash, stored_path)) => {
+            stored_hash != want_hash
+                || stored_path != want_path
+                || local
+                    .get(stored_path)
+                    .is_some_and(|f| !f.exists || f.size == 0)
+        }
+    }
+}
+
 /// Reconcile the artifacts of a clip whose audio is kept this run.
 ///
 /// Writes each desired per-clip artifact that the manifest lacks, whose stored
@@ -804,16 +822,12 @@ fn plan_clip_artifacts(
         // bytes, new path, old file present) is emitted as a MoveArtifact below,
         // which renames rather than re-fetching (#141).
         let state = entry.and_then(|e| manifest_artifact_by_kind(e, artifact.kind));
-        let needs_write = match state {
-            None => true,
-            Some(state) => {
-                state.hash != artifact.hash
-                    || state.path != artifact.path
-                    || local
-                        .get(&state.path)
-                        .is_some_and(|f| !f.exists || f.size == 0)
-            }
-        };
+        let needs_write = needs_write_drift(
+            state.map(|state| (state.hash.as_str(), state.path.as_str())),
+            artifact.hash.as_str(),
+            artifact.path.as_str(),
+            local,
+        );
         if needs_write {
             // Downgrade a pure relocation to a rename: only the path drifted (a
             // retitle), the bytes are unchanged, the kind is fetched (an inline
@@ -1438,16 +1452,14 @@ pub fn plan_album_artifacts(
         .into_iter()
         .flatten()
         {
-            let needs_write = match stored.and_then(|a| a.artifact(artifact.kind)) {
-                None => true,
-                Some(state) => {
-                    state.hash != artifact.hash
-                        || state.path != artifact.path
-                        || local
-                            .get(&state.path)
-                            .is_some_and(|f| !f.exists || f.size == 0)
-                }
-            };
+            let needs_write = needs_write_drift(
+                stored
+                    .and_then(|a| a.artifact(artifact.kind))
+                    .map(|state| (state.hash.as_str(), state.path.as_str())),
+                artifact.hash.as_str(),
+                artifact.path.as_str(),
+                local,
+            );
             if needs_write {
                 actions.push(Action::WriteArtifact {
                     kind: artifact.kind,
@@ -1576,16 +1588,12 @@ pub fn plan_playlist_artifacts(
 
     for d in desired {
         let stored_here = stored.get(&d.id);
-        let needs_write = match stored_here {
-            None => true,
-            Some(state) => {
-                state.hash != d.hash
-                    || state.path != d.path
-                    || local
-                        .get(&state.path)
-                        .is_some_and(|f| !f.exists || f.size == 0)
-            }
-        };
+        let needs_write = needs_write_drift(
+            stored_here.map(|state| (state.hash.as_str(), state.path.as_str())),
+            d.hash.as_str(),
+            d.path.as_str(),
+            local,
+        );
         if needs_write {
             actions.push(Action::WriteArtifact {
                 kind: ArtifactKind::Playlist,
@@ -3698,6 +3706,39 @@ mod tests {
         } else {
             panic!("expected a WriteArtifact");
         }
+    }
+
+    #[test]
+    fn needs_write_drift_applies_hash_path_and_probe_rules() {
+        let local: HashMap<String, LocalFile> = [
+            ("ok".to_string(), present(10)),
+            ("missing".to_string(), LocalFile::default()),
+            ("empty".to_string(), present(0)),
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(needs_write_drift(None, "h1", "ok", &local));
+        assert!(!needs_write_drift(Some(("h1", "ok")), "h1", "ok", &local));
+        assert!(needs_write_drift(Some(("h0", "ok")), "h1", "ok", &local));
+        assert!(needs_write_drift(
+            Some(("h1", "missing")),
+            "h1",
+            "missing",
+            &local
+        ));
+        assert!(needs_write_drift(
+            Some(("h1", "empty")),
+            "h1",
+            "empty",
+            &local
+        ));
+        assert!(!needs_write_drift(
+            Some(("h1", "unprobed")),
+            "h1",
+            "unprobed",
+            &local
+        ));
     }
 
     #[test]
