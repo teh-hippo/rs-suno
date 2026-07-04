@@ -520,6 +520,15 @@ impl<C: Clock> SunoClient<C> {
                         retry_after: retry_after(&response),
                     });
                 }
+                400 => {
+                    let preview: String = String::from_utf8_lossy(&response.body)
+                        .chars()
+                        .take(200)
+                        .collect();
+                    return Err(Error::BadRequest(format!(
+                        "Suno API returned 400: {preview}"
+                    )));
+                }
                 404 => {
                     return Err(Error::NotFound(format!("Suno API returned 404: {path}")));
                 }
@@ -581,7 +590,7 @@ fn is_single_id_segment(segment: &str) -> bool {
 /// clip with zero stems). Distinguished from a transient `5xx` (also
 /// [`Error::Api`]) so a server error is never mistaken for "no stems".
 fn is_invalid_page_error(err: &Error) -> bool {
-    matches!(err, Error::Api(msg) if msg.contains("returned 400") || msg.contains("Invalid page"))
+    matches!(err, Error::BadRequest(_))
 }
 
 /// Parse the stems page count from `GET /api/clip/{id}/stems/pages`
@@ -1792,6 +1801,40 @@ mod tests {
             assert!(stems.is_empty(), "status {status}");
             assert!(!complete, "status {status} is indeterminate, not empty");
         }
+    }
+
+    #[test]
+    fn stem_page_count_400_is_no_stems() {
+        // A genuine `400` on the page-count endpoint means "no stems": it must
+        // produce ([], false) — indeterminate, not an authoritative empty set.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("stems/pages", Reply::status(400));
+        let mut client = scripted_client(&http, RecordingClock::new());
+
+        let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
+        assert!(stems.is_empty());
+        assert!(
+            !complete,
+            "400 is indeterminate, not an authoritative empty set"
+        );
+    }
+
+    #[test]
+    fn stem_page_count_5xx_with_invalid_page_body_is_not_no_stems() {
+        // A `5xx` whose body happens to contain "Invalid page" must NOT be
+        // classified as "no stems": body-text matching would misclassify it.
+        // Only a genuine `400` status triggers the no-stems path.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("stems/pages", Reply::with_body(500, "Invalid page"));
+        let mut client = scripted_client(&http, RecordingClock::new());
+
+        let result = pollster::block_on(client.list_stems(&http, "clip1"));
+        assert!(
+            result.is_err(),
+            "a 5xx is a transient error, never 'no stems'"
+        );
     }
 
     #[test]

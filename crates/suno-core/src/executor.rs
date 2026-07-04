@@ -1893,6 +1893,7 @@ fn classify_core(id: &str, err: Error) -> Fail {
         Error::Auth(_) => auth_fail(id, reason),
         Error::RateLimited { .. } | Error::Connection(_) => transient_fail(id, reason),
         Error::Api(_)
+        | Error::BadRequest(_)
         | Error::NotFound(_)
         | Error::Tag(_)
         | Error::Config(_)
