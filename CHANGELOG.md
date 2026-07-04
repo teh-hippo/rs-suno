@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.25.0](https://github.com/teh-hippo/rs-suno/compare/v0.24.1...v0.25.0) (2026-07-04)
+
+
+### Features
+
+* inject wall-clock time via Clock port, remove SystemTime from suno-core ([19dfbef](https://github.com/teh-hippo/rs-suno/commit/19dfbef79ba4d04f615c86d74951947bef83906f))
+
+
+### Bug Fixes
+
+* [#193](https://github.com/teh-hippo/rs-suno/issues/193) set_pin helper, [#183](https://github.com/teh-hippo/rs-suno/issues/183) async stat_manifest, [#181](https://github.com/teh-hippo/rs-suno/issues/181) concurrent accounts ([89c8953](https://github.com/teh-hippo/rs-suno/commit/89c895312cc876c838a53208bd429eeb5c128c2f))
+* address code review — propagate spawn_blocking panic, fix permit capture ([d8535ef](https://github.com/teh-hippo/rs-suno/commit/d8535ef653e3210a7267b4095146fdc898ae11fe))
+
 ## [0.24.1](https://github.com/teh-hippo/rs-suno/compare/v0.24.0...v0.24.1) (2026-07-04)
 
 
