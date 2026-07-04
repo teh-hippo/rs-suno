@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.23.0](https://github.com/teh-hippo/rs-suno/compare/v0.22.9...v0.23.0) (2026-07-04)
+
+
+### Features
+
+* relocate fetched sidecars and stems with a rename, not a re-fetch ([3540375](https://github.com/teh-hippo/rs-suno/commit/354037506feb9d9955026b69afc7336cfdc79191)), closes [#141](https://github.com/teh-hippo/rs-suno/issues/141)
+
+
+### Bug Fixes
+
+* count moves in the dry-run rename bucket and guard stem co-reference ([76689fc](https://github.com/teh-hippo/rs-suno/commit/76689fc979294ebddba8911690d12fb290c88f47))
+
 ## [0.22.9](https://github.com/teh-hippo/rs-suno/compare/v0.22.8...v0.22.9) (2026-07-04)
 
 
