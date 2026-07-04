@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.6](https://github.com/teh-hippo/rs-suno/compare/v0.22.5...v0.22.6) (2026-07-04)
+
+
+### Bug Fixes
+
+* disarm deletion on narrowed playlist mirror runs ([5e5fb3e](https://github.com/teh-hippo/rs-suno/commit/5e5fb3e50bfbbc792a5deef6ddd6f9fed4d9ac07))
+
 ## [0.22.5](https://github.com/teh-hippo/rs-suno/compare/v0.22.4...v0.22.5) (2026-07-04)
 
 
