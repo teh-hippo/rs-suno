@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization as _;
 
 use crate::Clip;
 use crate::error::{Error, Result};
@@ -103,29 +104,41 @@ pub fn render_clip_names(
         .map(|(request, album)| render_with_album(*request, config, album))
         .collect::<Vec<_>>();
 
-    // Filename fallback: any distinct clips that still render to one path (a
-    // custom template lacking `{id8}`) are separated by their full clip id.
-    let mut collisions = BTreeMap::<String, Vec<usize>>::new();
-    for (index, name) in rendered.iter().enumerate() {
-        collisions
-            .entry(name.relative_path.to_string_lossy().into_owned())
-            .or_default()
-            .push(index);
-    }
-
-    for indexes in collisions.into_values().filter(|indexes| indexes.len() > 1) {
-        for index in indexes {
-            let suffix = &requests[index].clip.id;
-            rendered[index] = with_suffix(
-                rendered[index].clone(),
-                suffix,
-                config.character_set,
-                config.max_component_len,
-            );
+    // Two passes to keep distinct clips from landing on one path.  The first
+    // pass keys on the exact rendered string; the second on the filesystem-
+    // canonical form (NFC + lowercase) so that paths differing only by case or
+    // Unicode normalisation (NFD vs NFC) are caught too — they would collide on
+    // case-insensitive or NFC-normalising filesystems (Windows, macOS default).
+    for apply_canonical in [false, true] {
+        let mut collisions = BTreeMap::<String, Vec<usize>>::new();
+        for (index, name) in rendered.iter().enumerate() {
+            let key = if apply_canonical {
+                canonical_path_key(&name.relative_path.to_string_lossy())
+            } else {
+                name.relative_path.to_string_lossy().into_owned()
+            };
+            collisions.entry(key).or_default().push(index);
+        }
+        for indexes in collisions.into_values().filter(|v| v.len() > 1) {
+            for index in indexes {
+                let suffix = &requests[index].clip.id;
+                rendered[index] = with_suffix(
+                    rendered[index].clone(),
+                    suffix,
+                    config.character_set,
+                    config.max_component_len,
+                );
+            }
         }
     }
 
     rendered
+}
+
+/// Filesystem-canonical key: NFC-normalise then lowercase, so paths that differ
+/// only by case or by NFC/NFD encoding hash to the same bucket.
+fn canonical_path_key(path: &str) -> String {
+    path.nfc().flat_map(char::to_lowercase).collect()
 }
 
 /// The album path component for every request, with a clip whose root title
@@ -1055,5 +1068,75 @@ mod tests {
         // A junk extension falls back to mp3 (defensive; callers pass wav/mp3).
         let fallback = stem_file_path("s", "Bass", "x", "??", CharacterSet::Unicode);
         assert_eq!(fallback, "s.stems/s - Bass [x].mp3");
+    }
+
+    #[test]
+    fn case_only_path_difference_is_a_canonical_collision() {
+        // A custom template without {id8}: clips whose titles differ only in
+        // case produce different exact paths but the same canonical path and
+        // must be disambiguated to avoid clobbering on case-insensitive FSes.
+        let config = NamingConfig {
+            template: "{creator}/{title}".to_string(),
+            ..NamingConfig::default()
+        };
+        let first = test_clip("aaaa1111-x", "sunrise");
+        let second = test_clip("bbbb2222-y", "SUNRISE");
+
+        let names = render_all_own(&[first, second], &config, &BTreeSet::new());
+
+        assert_ne!(
+            names[0].relative_path.to_string_lossy(),
+            names[1].relative_path.to_string_lossy(),
+            "canonical collision was not disambiguated"
+        );
+    }
+
+    #[test]
+    fn nfc_nfd_path_difference_is_a_canonical_collision() {
+        // The same character encoded as NFC vs NFD produces different byte
+        // strings but the same file on NFC-normalising filesystems (macOS APFS).
+        let config = NamingConfig {
+            template: "{creator}/{title}".to_string(),
+            ..NamingConfig::default()
+        };
+        // "é" as NFC (U+00E9) vs NFD (e + U+0301).
+        let nfc_title = "\u{00e9}toile";
+        let nfd_title = "e\u{0301}toile";
+        let first = test_clip("aaaa1111-x", nfc_title);
+        let second = test_clip("bbbb2222-y", nfd_title);
+
+        let names = render_all_own(&[first, second], &config, &BTreeSet::new());
+
+        assert_ne!(
+            names[0].relative_path.to_string_lossy(),
+            names[1].relative_path.to_string_lossy(),
+            "NFC/NFD canonical collision was not disambiguated"
+        );
+    }
+
+    #[test]
+    fn genuinely_distinct_paths_are_never_wrongly_disambiguated() {
+        // Clips with distinct titles (not even canonically equivalent) must not
+        // receive unnecessary suffixes — the canonical check must not produce
+        // false positives.
+        let config = NamingConfig {
+            template: "{creator}/{title}".to_string(),
+            ..NamingConfig::default()
+        };
+        let first = test_clip("aaaa1111-x", "Alpha");
+        let second = test_clip("bbbb2222-y", "Beta");
+
+        let names = render_all_own(&[first, second], &config, &BTreeSet::new());
+
+        assert_eq!(
+            names[0].relative_path.to_string_lossy(),
+            "München/Alpha",
+            "distinct path was wrongly suffixed"
+        );
+        assert_eq!(
+            names[1].relative_path.to_string_lossy(),
+            "München/Beta",
+            "distinct path was wrongly suffixed"
+        );
     }
 }
