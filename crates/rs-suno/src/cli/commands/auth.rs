@@ -56,7 +56,7 @@ async fn refresh_accounts(global: &GlobalArgs, refresh: &AuthRefreshArgs) -> Res
                 continue;
             }
         };
-        let mut auth = ClerkAuth::new(&token);
+        let auth = ClerkAuth::new(&token);
         match auth.authenticate(&http).await {
             Ok(_) => {
                 crate::cli::expiry::warn_token_expiry(&label, &auth, global.verbosity());

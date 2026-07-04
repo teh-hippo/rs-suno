@@ -66,12 +66,12 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     );
 
     let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
-    let mut auth = ClerkAuth::new(&token);
+    let auth = ClerkAuth::new(&token);
     if let Err(err) = auth.authenticate(&http).await {
         return Ok(run::report_auth_failure(&label, &err));
     }
     crate::cli::expiry::warn_token_expiry(&label, &auth, global.verbosity());
-    let mut client = SunoClient::new(auth, TokioClock);
+    let client = SunoClient::new(auth, TokioClock);
 
     let clip = client
         .get_clip(&http, &id)
@@ -97,7 +97,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
         }
         AudioFormat::Flac => {
             let clock = TokioClock;
-            let wav_url = ensure_wav_url(&mut client, &http, &clock, &id).await?;
+            let wav_url = ensure_wav_url(&client, &http, &clock, &id).await?;
             let wav = download::get_bytes(&http, &wav_url)
                 .await
                 .context("could not download the WAV")?;
@@ -112,7 +112,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
                 );
             }
             let clock = TokioClock;
-            let wav_url = ensure_wav_url(&mut client, &http, &clock, &id).await?;
+            let wav_url = ensure_wav_url(&client, &http, &clock, &id).await?;
             let wav = download::get_bytes(&http, &wav_url)
                 .await
                 .context("could not download the WAV")?;
@@ -177,7 +177,7 @@ fn looks_like_dir(dest: &Path) -> bool {
 
 /// Resolve the rendered WAV URL, requesting a render and polling if needed.
 async fn ensure_wav_url(
-    client: &mut SunoClient<TokioClock>,
+    client: &SunoClient<TokioClock>,
     http: &ReqwestHttp,
     clock: &impl Clock,
     id: &str,

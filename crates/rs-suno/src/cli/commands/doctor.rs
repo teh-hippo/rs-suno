@@ -198,13 +198,13 @@ struct LiveDiagnostic {
 }
 
 async fn inspect_live(token: &str, http: &ReqwestHttp) -> LiveDiagnostic {
-    let mut auth = ClerkAuth::new(token);
+    let auth = ClerkAuth::new(token);
     let now = i64::try_from(run::now_secs()).unwrap_or(i64::MAX);
     let expiry = auth.token_expiry(now, TOKEN_EXPIRY_WARN_DAYS * SECS_PER_DAY);
     match auth.authenticate(http).await {
         Ok(user_id) => {
             let display_name = auth.display_name().to_owned();
-            let mut client = SunoClient::new(auth, TokioClock);
+            let client = SunoClient::new(auth, TokioClock);
             match client.get_billing_info(http).await {
                 Ok(billing) => LiveDiagnostic {
                     auth_line: format!(
