@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/teh-hippo/rs-suno/compare/v0.20.4...v0.21.0) (2026-07-04)
+
+
+### Features
+
+* make video-cover retention and WebP encoding configurable ([a367023](https://github.com/teh-hippo/rs-suno/commit/a367023f0f5de72dcb1c788b54b398456214b555))
+
 ## [0.20.4](https://github.com/teh-hippo/rs-suno/compare/v0.20.3...v0.20.4) (2026-07-04)
 
 
