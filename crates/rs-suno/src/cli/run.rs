@@ -478,6 +478,11 @@ fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
         min_newest: args.min_newest,
         // A presence-only toggle can only enable; absence defers to config/env.
         animated_covers: args.animated_covers.then_some(true),
+        video_cover_retention: args.video_cover_retention.map(Into::into),
+        animated_cover_quality: args.animated_cover_quality,
+        animated_cover_max_fps: args.animated_cover_max_fps,
+        animated_cover_max_width: args.animated_cover_max_width,
+        animated_cover_compression_level: args.animated_cover_compression_level,
         details_sidecar: args.details_sidecar.then_some(true),
         lyrics_sidecar: args.lyrics_sidecar.then_some(true),
         lrc_sidecar: args.lrc_sidecar.then_some(true),
@@ -1177,6 +1182,7 @@ async fn execute_plan(
         wav_poll_attempts: WAV_POLL_ATTEMPTS,
         wav_poll_interval: WAV_POLL_INTERVAL,
         concurrency: settings.concurrency,
+        cover_webp: settings.animated_cover_webp,
     };
     let started = std::time::Instant::now();
 
@@ -2132,6 +2138,8 @@ mod tests {
             retries: 3,
             min_newest: 1,
             animated_covers: false,
+            video_cover_retention: suno_core::VideoCoverRetention::Neither,
+            animated_cover_webp: suno_core::WebpEncodeSettings::default(),
             details_sidecar: false,
             lyrics_sidecar: false,
             lrc_sidecar: false,

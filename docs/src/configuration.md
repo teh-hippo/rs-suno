@@ -50,6 +50,11 @@ format = "flac"
 retries = 3
 min_newest = 1
 animated_covers = false
+video_cover_retention = "neither" # neither|webp|mp4|both
+animated_cover_quality = 70
+animated_cover_max_fps = 24
+animated_cover_max_width = 720
+animated_cover_compression_level = 0 # 0..6
 details_sidecar = false
 lyrics_sidecar = false
 lrc_sidecar = false
@@ -83,6 +88,11 @@ needed. These modes are not applied on non-Unix platforms.
 | `retries` | integer | `3` | Download retry attempts per clip before it is logged as failed. |
 | `min_newest` | integer | `1` | Minimum newest clips kept when a recency filter would otherwise select nothing. |
 | `animated_covers` | bool | `false` | Also write animated WebP covers from clip video previews. |
+| `video_cover_retention` | `neither` \| `webp` \| `mp4` \| `both` | `neither` | Unified retention mode for video-cover artifacts. `webp` keeps animated covers, `mp4` keeps video files, `both` keeps both, `neither` keeps neither. Overrides `animated_covers`/`video_mp4` when set. |
+| `animated_cover_quality` | integer | `70` | Animated WebP quality (`0..100`, higher is better and larger). |
+| `animated_cover_max_fps` | integer | `24` | Frame-rate cap for animated WebP output. |
+| `animated_cover_max_width` | integer | native | Optional width cap in pixels for animated WebP output (no upscaling). |
+| `animated_cover_compression_level` | integer | `0` | Animated WebP compression effort (`0..6`, higher is smaller and slower). |
 | `details_sidecar` | bool | `false` | Also write a plain-text `<song>.details.txt` beside each audio file, dumping the same metadata that is embedded in the tags plus the song id, duration, and canonical `suno.com` URL. |
 | `lyrics_sidecar` | bool | `false` | Also write a plain-text `<song>.lyrics.txt` beside each audio file, holding the song's lyrics verbatim. A song with no lyrics gets no file. |
 | `lrc_sidecar` | bool | `false` | Also write a `<song>.lrc` beside each audio file. When Suno has word/line alignment for the song, the `.lrc` is synced line-level (a `[mm:ss.xx]` timestamp per line — the universally supported form) and, for MP3, an ID3 `SYLT` frame with per-word timing is embedded too; otherwise it falls back to the untimed lyrics. A song Suno cannot align (an instrumental) gets no file. Enabling this fetches each song's alignment once. |
@@ -210,6 +220,11 @@ account token:
 | `SUNO_RETRIES` | `--retries` | |
 | `SUNO_MIN_NEWEST` | `--min-newest` | |
 | `SUNO_ANIMATED_COVERS` | `--animated-covers` | `true` or `false`. |
+| `SUNO_VIDEO_COVER_RETENTION` | `--video-cover-retention` | `neither`, `webp`, `mp4`, `both`. |
+| `SUNO_ANIMATED_COVER_QUALITY` | `--animated-cover-quality` | `0..100`. |
+| `SUNO_ANIMATED_COVER_MAX_FPS` | `--animated-cover-max-fps` | Positive integer. |
+| `SUNO_ANIMATED_COVER_MAX_WIDTH` | `--animated-cover-max-width` | Integer width cap in pixels. |
+| `SUNO_ANIMATED_COVER_COMPRESSION_LEVEL` | `--animated-cover-compression-level` | `0..6`. |
 | `SUNO_DETAILS_SIDECAR` | `--details-sidecar` | `true` or `false`. |
 | `SUNO_LYRICS_SIDECAR` | `--lyrics-sidecar` | `true` or `false`. |
 | `SUNO_LRC_SIDECAR` | `--lrc-sidecar` | `true` or `false`. |

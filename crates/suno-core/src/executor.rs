@@ -75,6 +75,8 @@ pub struct ExecOptions {
     /// How many clips' audio to fetch, transcode, and tag concurrently. Clamped
     /// to at least one, so a zero collapses to sequential rather than stalling.
     pub concurrency: u32,
+    /// Settings used for animated WebP cover transcodes.
+    pub cover_webp: WebpEncodeSettings,
 }
 
 impl Default for ExecOptions {
@@ -84,6 +86,7 @@ impl Default for ExecOptions {
             wav_poll_attempts: 24,
             wav_poll_interval: Duration::from_secs(5),
             concurrency: 4,
+            cover_webp: WebpEncodeSettings::default(),
         }
     }
 }
@@ -1059,7 +1062,7 @@ where
         match kind {
             ArtifactKind::CoverWebp | ArtifactKind::FolderWebp => self
                 .ffmpeg
-                .mp4_to_webp(&source, WebpEncodeSettings::default())
+                .mp4_to_webp(&source, self.opts.cover_webp)
                 .await
                 .map_err(|err| {
                     if err.is_out_of_space() {
@@ -1663,13 +1666,13 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run(
+    fn run<G: Ffmpeg>(
         plan: &Plan,
         manifest: &mut Manifest,
         desired: &[Desired],
         http: &ScriptedHttp,
         fs: &MemFs,
-        ffmpeg: &StubFfmpeg,
+        ffmpeg: &G,
         clock: &RecordingClock,
         opts: &ExecOptions,
     ) -> ExecOutcome {
@@ -1688,14 +1691,14 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_with_albums(
+    fn run_with_albums<G: Ffmpeg>(
         plan: &Plan,
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
         desired: &[Desired],
         http: &ScriptedHttp,
         fs: &MemFs,
-        ffmpeg: &StubFfmpeg,
+        ffmpeg: &G,
         clock: &RecordingClock,
         opts: &ExecOptions,
     ) -> ExecOutcome {
@@ -1715,7 +1718,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_full(
+    fn run_full<G: Ffmpeg>(
         plan: &Plan,
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
@@ -1723,7 +1726,7 @@ mod tests {
         desired: &[Desired],
         http: &ScriptedHttp,
         fs: &MemFs,
-        ffmpeg: &StubFfmpeg,
+        ffmpeg: &G,
         clock: &RecordingClock,
         opts: &ExecOptions,
     ) -> ExecOutcome {
@@ -1753,6 +1756,7 @@ mod tests {
             wav_poll_attempts: 2,
             wav_poll_interval: Duration::from_secs(5),
             concurrency: 4,
+            cover_webp: WebpEncodeSettings::default(),
         }
     }
 
@@ -4507,6 +4511,83 @@ mod tests {
         assert_eq!(outcome.artifacts_written, 1);
         assert_eq!(fs.read_file("b/cover.jpg").unwrap(), b"jpg-b");
         assert!(manifest.get("b").unwrap().cover_jpg.is_some());
+    }
+
+    #[test]
+    fn write_artifact_uses_configured_webp_settings() {
+        use std::sync::{Arc, Mutex};
+
+        struct RecordingWebpFfmpeg {
+            seen: Arc<Mutex<Vec<WebpEncodeSettings>>>,
+        }
+
+        impl Ffmpeg for RecordingWebpFfmpeg {
+            async fn wav_to_flac(
+                &self,
+                _wav: &[u8],
+            ) -> Result<Vec<u8>, crate::ffmpeg::FfmpegError> {
+                Ok(Vec::new())
+            }
+
+            async fn mp4_to_webp(
+                &self,
+                _mp4: &[u8],
+                settings: WebpEncodeSettings,
+            ) -> Result<Vec<u8>, crate::ffmpeg::FfmpegError> {
+                let seen = Arc::clone(&self.seen);
+                seen.lock().unwrap().push(settings);
+                Ok(b"RIFF\x00\x00\x00\x00WEBP".to_vec())
+            }
+        }
+
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
+        let plan = Plan {
+            actions: vec![Action::WriteArtifact {
+                kind: ArtifactKind::CoverWebp,
+                path: "a/cover.webp".to_owned(),
+                source_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+                hash: "v1".to_owned(),
+                owner_id: "a".to_owned(),
+                content: None,
+            }],
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let ffmpeg = RecordingWebpFfmpeg {
+            seen: Arc::clone(&seen),
+        };
+        let opts = ExecOptions {
+            cover_webp: WebpEncodeSettings {
+                quality: 88,
+                max_fps: 12,
+                max_width: Some(720),
+                lossless: false,
+                compression_level: 4,
+            },
+            ..ExecOptions::default()
+        };
+
+        let _ = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new().route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec())),
+            &MemFs::new(),
+            &ffmpeg,
+            &RecordingClock::new(),
+            &opts,
+        );
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[WebpEncodeSettings {
+                quality: 88,
+                max_fps: 12,
+                max_width: Some(720),
+                lossless: false,
+                compression_level: 4,
+            }]
+        );
     }
 
     // ── Phase 8: folder art routes to the album store ───────────────

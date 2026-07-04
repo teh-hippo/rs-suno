@@ -151,6 +151,11 @@ fn render_show(config: &Config) -> String {
         || d.min_newest.is_some()
         || d.token_command.is_some()
         || d.animated_covers.is_some()
+        || d.video_cover_retention.is_some()
+        || d.animated_cover_quality.is_some()
+        || d.animated_cover_max_fps.is_some()
+        || d.animated_cover_max_width.is_some()
+        || d.animated_cover_compression_level.is_some()
         || d.naming_template.is_some()
         || d.character_set.is_some()
     {
@@ -168,6 +173,31 @@ fn render_show(config: &Config) -> String {
             &mut out,
             "animated_covers",
             d.animated_covers.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "video_cover_retention",
+            d.video_cover_retention.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "animated_cover_quality",
+            d.animated_cover_quality.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "animated_cover_max_fps",
+            d.animated_cover_max_fps.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "animated_cover_max_width",
+            d.animated_cover_max_width.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "animated_cover_compression_level",
+            d.animated_cover_compression_level.map(|v| v.to_string()),
         );
         push_opt(&mut out, "naming_template", d.naming_template.clone());
         push_opt(
@@ -206,6 +236,31 @@ fn render_show(config: &Config) -> String {
             "animated_covers",
             acc.animated_covers.map(|v| v.to_string()),
         );
+        push_opt(
+            &mut out,
+            "video_cover_retention",
+            acc.video_cover_retention.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "animated_cover_quality",
+            acc.animated_cover_quality.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "animated_cover_max_fps",
+            acc.animated_cover_max_fps.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "animated_cover_max_width",
+            acc.animated_cover_max_width.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "animated_cover_compression_level",
+            acc.animated_cover_compression_level.map(|v| v.to_string()),
+        );
         push_opt(&mut out, "naming_template", acc.naming_template.clone());
         push_opt(
             &mut out,
@@ -224,6 +279,31 @@ fn render_show(config: &Config) -> String {
                 &mut out,
                 "    character_set",
                 src.character_set.map(|v| v.to_string()),
+            );
+            push_opt(
+                &mut out,
+                "    video_cover_retention",
+                src.video_cover_retention.map(|v| v.to_string()),
+            );
+            push_opt(
+                &mut out,
+                "    animated_cover_quality",
+                src.animated_cover_quality.map(|v| v.to_string()),
+            );
+            push_opt(
+                &mut out,
+                "    animated_cover_max_fps",
+                src.animated_cover_max_fps.map(|v| v.to_string()),
+            );
+            push_opt(
+                &mut out,
+                "    animated_cover_max_width",
+                src.animated_cover_max_width.map(|v| v.to_string()),
+            );
+            push_opt(
+                &mut out,
+                "    animated_cover_compression_level",
+                src.animated_cover_compression_level.map(|v| v.to_string()),
             );
         }
         if let Some(areas) = &acc.areas {

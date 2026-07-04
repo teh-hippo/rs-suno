@@ -367,6 +367,8 @@ mod tests {
             retries: 3,
             min_newest: 1,
             animated_covers: true,
+            video_cover_retention: suno_core::VideoCoverRetention::Both,
+            animated_cover_webp: suno_core::WebpEncodeSettings::default(),
             details_sidecar: false,
             lyrics_sidecar: true,
             lrc_sidecar: false,
