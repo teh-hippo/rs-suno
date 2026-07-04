@@ -35,6 +35,7 @@ use crate::cli::desired::{
 use crate::cli::logs;
 use crate::cli::output;
 use crate::clock::TokioClock;
+use crate::download::cleanup_stale_parts;
 #[cfg(unix)]
 use crate::download::set_permissions_or_remove;
 use crate::ffmpeg::FfmpegAdapter;
@@ -1206,6 +1207,7 @@ async fn execute_plan(
     verbosity: i8,
     library_authoritative: bool,
 ) -> Result<ExitCode> {
+    cleanup_stale_parts(dest);
     let fs = FsAdapter::new(dest);
     let ffmpeg = FfmpegAdapter::new(dest);
     let clock = TokioClock;
