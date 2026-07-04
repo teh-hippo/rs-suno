@@ -351,10 +351,21 @@ where
     // clips (not yet in the manifest) the serial apply path handles them after
     // the audio commit, so the owner-absent guard fires correctly.
     let pre_clip_ids: HashSet<String> = manifest.entries.keys().cloned().collect();
+    // Clip IDs with a concurrent audio (Download/Reformat) action this run.
+    // Used to keep CoverJpg serial when its audio producer will cache the same
+    // cover URL (#89); preparing both concurrently races the remove vs insert.
+    let audio_clip_ids: HashSet<&str> = plan
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Download { clip, .. } | Action::Reformat { clip, .. } => Some(clip.id.as_str()),
+            _ => None,
+        })
+        .collect();
     let mut prepares = stream::iter(
         plan.actions
             .iter()
-            .filter(|action| is_prepareable(action, &pre_clip_ids))
+            .filter(|action| is_prepareable(action, &pre_clip_ids, &audio_clip_ids))
             .map(|action| async move { ctx_ref.prepare(client_lock_ref, action).await }),
     )
     .buffered(concurrency);
@@ -364,7 +375,7 @@ where
         // and commit them here; every other action applies its own effect. Both the
         // serial commit and the serial apply run in the same serial loop, so all
         // destination and manifest effects keep the plan's order exactly.
-        let result = if is_prepareable(action, &pre_clip_ids) {
+        let result = if is_prepareable(action, &pre_clip_ids, &audio_clip_ids) {
             match prepares.next().await {
                 Some(Ok(Prepared::Audio(rendered))) => ctx.commit_audio(manifest, rendered),
                 Some(Ok(Prepared::Artifact(prepared))) => ctx.commit_artifact(
@@ -441,9 +452,21 @@ where
 /// cannot be prepared concurrently because its audio has not committed yet (the
 /// manifest entry doesn't exist at prepare time), so it falls through to the
 /// serial apply path which checks the manifest after the audio commits.
-/// Album-kind artifacts (FolderJpg, FolderWebp, FolderMp4) have no per-clip
-/// manifest guard and are always prepareable.
-fn is_prepareable(action: &Action, pre_clip_ids: &HashSet<String>) -> bool {
+///
+/// Two additional cases stay serial to preserve fetch-once dedup:
+///
+/// - [`FolderWebp`](ArtifactKind::FolderWebp) / [`FolderMp4`](ArtifactKind::FolderMp4):
+///   the `both` retention shares one `video_cover_url`; serial ordering lets
+///   the first fetch insert into `cover_cache` and the second drain it (#90).
+/// - [`CoverJpg`](ArtifactKind::CoverJpg) whose owner clip also has an audio
+///   action this run: the audio producer caches the cover bytes in `cover_cache`
+///   (#89); a concurrent CoverJpg drains the cache before the insert, causing a
+///   double fetch and a leaked entry.
+fn is_prepareable(
+    action: &Action,
+    pre_clip_ids: &HashSet<String>,
+    audio_clip_ids: &HashSet<&str>,
+) -> bool {
     match action {
         Action::Download { .. } | Action::Reformat { .. } => true,
         Action::WriteArtifact {
@@ -451,7 +474,15 @@ fn is_prepareable(action: &Action, pre_clip_ids: &HashSet<String>) -> bool {
             owner_id,
             content: None,
             ..
-        } => !is_per_clip_kind(*kind) || pre_clip_ids.contains(owner_id.as_str()),
+        } => {
+            if matches!(kind, ArtifactKind::FolderWebp | ArtifactKind::FolderMp4) {
+                return false;
+            }
+            if *kind == ArtifactKind::CoverJpg && audio_clip_ids.contains(owner_id.as_str()) {
+                return false;
+            }
+            !is_per_clip_kind(*kind) || pre_clip_ids.contains(owner_id.as_str())
+        }
         Action::WriteStem { clip_id, .. } => pre_clip_ids.contains(clip_id.as_str()),
         _ => false,
     }
@@ -6075,6 +6106,10 @@ mod tests {
             fn peak(&self) -> usize {
                 self.peak.load(Ordering::SeqCst)
             }
+
+            fn count(&self, needle: &str) -> usize {
+                self.inner.count(needle)
+            }
         }
 
         impl Http for GatedHttp {
@@ -6905,6 +6940,121 @@ mod tests {
             assert_eq!(out8.failed(), 1);
             // Covers and stems for the 3 successful clips.
             assert_eq!(out8.artifacts_written, 6);
+        }
+
+        #[test]
+        fn both_folder_covers_fetch_video_cover_once_under_concurrency() {
+            // FolderWebp and FolderMp4 share a source_url (the `both` retention).
+            // Even with other downloads running concurrently, they must stay serial
+            // so the first fetch inserts into cover_cache and the second drains it
+            // (#90), fetching the video_cover_url exactly once.
+            let scripted = ScriptedHttp::new()
+                .with_auth()
+                .route("root/video.mp4", Reply::ok(b"mp4-bytes".to_vec()))
+                .route("d0.mp3", Reply::ok(b"audio".to_vec()))
+                .route("d1.mp3", Reply::ok(b"audio".to_vec()));
+            let mut actions = vec![
+                Action::WriteArtifact {
+                    kind: ArtifactKind::FolderWebp,
+                    path: "album/cover.webp".to_owned(),
+                    source_url: "https://cdn.suno.ai/root/video.mp4".to_owned(),
+                    hash: "wh".to_owned(),
+                    owner_id: "root".to_owned(),
+                    content: None,
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::FolderMp4,
+                    path: "album/cover.mp4".to_owned(),
+                    source_url: "https://cdn.suno.ai/root/video.mp4".to_owned(),
+                    hash: "mh".to_owned(),
+                    owner_id: "root".to_owned(),
+                    content: None,
+                },
+            ];
+            let mut desireds = vec![];
+            for id in ["d0", "d1"] {
+                let (_c, d, a) = download(id, AudioFormat::Mp3);
+                actions.push(a);
+                desireds.push(d);
+            }
+            let plan = Plan { actions };
+            let http = GatedHttp::new(scripted);
+            let ffmpeg = StubFfmpeg::webp();
+            let clock = RecordingClock::new();
+            let mut manifest = Manifest::new();
+            let mut albums = BTreeMap::new();
+            let mut playlists = BTreeMap::new();
+            let mut client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+            pollster::block_on(execute(
+                &plan,
+                &mut manifest,
+                &mut albums,
+                &mut playlists,
+                &desireds,
+                &HashMap::new(),
+                Ports {
+                    client: &mut client,
+                    http: &http,
+                    fs: &MemFs::new(),
+                    ffmpeg: &ffmpeg,
+                    clock: &clock,
+                },
+                &opts_with(4),
+            ));
+
+            assert_eq!(
+                http.count("root/video.mp4"),
+                1,
+                "video_cover_url must be fetched exactly once even under concurrency"
+            );
+        }
+
+        #[test]
+        fn existing_clip_audio_and_cover_sidecar_share_cover_fetch() {
+            // Clip "e" is already in the manifest; this run reformats its audio
+            // AND updates its CoverJpg sidecar. The audio producer caches the
+            // cover; the sidecar drains it. Even under concurrency the cover must
+            // be fetched exactly once and cover_cache must not accumulate a
+            // leaked entry.
+            let c = art_clip("e");
+            let cover_url = c.image_large_url.clone();
+            let d = desired(c.clone(), AudioFormat::Mp3);
+            let scripted = ScriptedHttp::new()
+                .with_auth()
+                .route("e.mp3", Reply::ok(b"audio".to_vec()))
+                .route("e/large.jpg", Reply::ok(b"cover-jpg".to_vec()));
+            let plan = Plan {
+                actions: vec![
+                    Action::Reformat {
+                        clip: c,
+                        path: "e.mp3".to_owned(),
+                        from_path: "e-old.mp3".to_owned(),
+                        from: AudioFormat::Mp3,
+                        to: AudioFormat::Mp3,
+                    },
+                    Action::WriteArtifact {
+                        kind: ArtifactKind::CoverJpg,
+                        path: "e/cover.jpg".to_owned(),
+                        source_url: cover_url,
+                        hash: "new-art".to_owned(),
+                        owner_id: "e".to_owned(),
+                        content: None,
+                    },
+                ],
+            };
+            let mut manifest = Manifest::new();
+            manifest.insert("e".to_owned(), entry("e-old.mp3", AudioFormat::Mp3));
+            let fs = MemFs::new().with_file("e-old.mp3", b"old-audio".to_vec());
+            let http = GatedHttp::new(scripted);
+            let outcome = run_gated_fs(&plan, &mut manifest, &[d], &http, &fs, &opts_with(4));
+
+            assert_eq!(outcome.reformatted, 1);
+            assert_eq!(outcome.failed(), 0);
+            assert_eq!(
+                http.count("e/large.jpg"),
+                1,
+                "cover must be fetched exactly once, not once per concurrent action"
+            );
         }
     }
 }
