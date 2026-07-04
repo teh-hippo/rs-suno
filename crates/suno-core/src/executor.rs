@@ -229,21 +229,6 @@ where
     } = ports;
     let by_id: HashMap<&str, &Desired> = desired.iter().map(|d| (d.clip.id.as_str(), d)).collect();
     let by_path: HashMap<&str, &Desired> = desired.iter().map(|d| (d.path.as_str(), d)).collect();
-    // Every path this run writes, so the inline old-sidecar cleanup never removes
-    // a file another action produces this run (the non-planned twin of
-    // `suppress_path_aliasing`).
-    let write_targets: BTreeSet<String> = plan
-        .actions
-        .iter()
-        .filter_map(|a| match a {
-            Action::Download { path, .. }
-            | Action::Reformat { path, .. }
-            | Action::WriteArtifact { path, .. }
-            | Action::WriteStem { path, .. } => Some(path.clone()),
-            Action::Rename { to, .. } => Some(to.clone()),
-            _ => None,
-        })
-        .collect();
     // How many tracked artifact slots reference each path. The inline old-path
     // cleanup removes a path only once nothing else holds it: each slot that
     // moves away decrements its reference, and the removal fires only when the
@@ -322,13 +307,16 @@ where
         by_id: &by_id,
         by_path: &by_path,
         synced,
-        write_targets: &write_targets,
         cover_cache: &cover_cache,
         cover_wanted: &cover_wanted,
         shared_cover_urls: &shared_cover_urls,
     };
 
     let mut outcome = ExecOutcome::default();
+    // Destinations whose write has actually committed this run, gating old-path
+    // cleanup so a vacated sidecar/stem is kept only when a *successful* write
+    // also targets it (#142). Serial commit order makes this a clean prefix.
+    let mut committed: BTreeSet<String> = BTreeSet::new();
 
     // The audio-producing actions ([`Download`](Action::Download) /
     // [`Reformat`](Action::Reformat)) render concurrently, but their work is
@@ -380,11 +368,22 @@ where
                 albums,
                 playlists,
                 &mut tracked_paths,
+                &committed,
             )
             .await
         };
         match result {
-            Ok(effect) => outcome.record(effect),
+            Ok(effect) => {
+                outcome.record(effect);
+                // Record this action's destination now that its write succeeded.
+                // A later action vacating a path removes it only when no
+                // *committed* write also targets it; commit is strictly serial in
+                // plan order, so a planned-but-failed or not-yet-run write never
+                // protects a stale file from cleanup (#142).
+                if let Some(dest) = written_path(action) {
+                    committed.insert(dest.to_owned());
+                }
+            }
             Err(fail) => {
                 let abort = abort_status(fail.class);
                 outcome.failures.push(Failure {
@@ -419,6 +418,21 @@ where
 /// the manifest, album, or playlist stores directly and runs serially.
 fn is_audio_action(action: &Action) -> bool {
     matches!(action, Action::Download { .. } | Action::Reformat { .. })
+}
+
+/// The destination path an action writes on success, or `None` for actions that
+/// write no file (skips, deletes). The serial committer records this once the
+/// action succeeds, so a later action vacating that same path keeps it rather
+/// than removing a freshly written file (#142, #76).
+fn written_path(action: &Action) -> Option<&str> {
+    match action {
+        Action::Download { path, .. }
+        | Action::Reformat { path, .. }
+        | Action::WriteArtifact { path, .. }
+        | Action::WriteStem { path, .. } => Some(path),
+        Action::Rename { to, .. } => Some(to),
+        _ => None,
+    }
 }
 
 /// A rendered-but-uncommitted audio result: the tagged bytes plus what the serial
@@ -602,13 +616,6 @@ struct Ctx<'a, H, F, G, C> {
     /// lyric text; a clip absent here is tagged exactly as before. Populated by
     /// the caller (the fetch is IO), so the engine stays free of direct IO.
     synced: &'a HashMap<String, AlignedLyrics>,
-    /// Every destination path this run writes (audio downloads and reformats,
-    /// artifact writes, and rename targets). The inline old-sidecar cleanup in
-    /// [`write_artifact`](Ctx::write_artifact) skips any path in this set, so a
-    /// path swap between two clips can never delete a file the same run just
-    /// wrote. This mirrors [`suppress_path_aliasing`] for the one removal that
-    /// is not itself a planned action.
-    write_targets: &'a BTreeSet<String>,
     /// Static cover art the audio producer already fetched to embed in the tag,
     /// keyed by CDN URL, so the matching per-song `.jpg` sidecar reuses it rather
     /// than fetching the same image again (#89). Only URLs a `CoverJpg` sidecar
@@ -642,6 +649,7 @@ where
     /// Audio actions ([`Download`](Action::Download) /
     /// [`Reformat`](Action::Reformat)) run in the concurrent phase through
     /// [`prepare_audio`](Self::prepare_audio) and never reach here.
+    #[allow(clippy::too_many_arguments)]
     async fn apply(
         &self,
         client_lock: &ClientLock<'_, C>,
@@ -650,6 +658,7 @@ where
         albums: &mut BTreeMap<String, AlbumArt>,
         playlists: &mut BTreeMap<String, PlaylistState>,
         tracked_paths: &mut HashMap<String, u32>,
+        committed: &BTreeSet<String>,
     ) -> Result<Effect, Fail> {
         match action {
             Action::Download { .. } | Action::Reformat { .. } => {
@@ -685,6 +694,7 @@ where
                     owner_id,
                     content.as_deref(),
                     tracked_paths,
+                    committed,
                 )
                 .await
             }
@@ -712,6 +722,7 @@ where
                     source_url,
                     *format,
                     hash,
+                    committed,
                 )
                 .await
             }
@@ -946,6 +957,7 @@ where
         owner_id: &str,
         content: Option<&str>,
         tracked_paths: &mut HashMap<String, u32>,
+        committed: &BTreeSet<String>,
     ) -> Result<Effect, Fail> {
         // A per-song sidecar needs its owning clip's manifest entry; album and
         // playlist kinds are keyed elsewhere and skip this guard.
@@ -1015,12 +1027,14 @@ where
         // The removal is gated so it can never delete a live file (#76). This
         // slot is releasing `old`, so drop its reference in `tracked_paths`; the
         // file is removed only once nothing else holds it — no other tracked slot
-        // still references it (count now zero) and no action writes it this run
-        // (`write_targets`, the non-planned twin of `suppress_path_aliasing`).
-        // On a path swap (A: x -> y while B: y -> x) `write_targets` keeps each
-        // freshly written file; when two slots share a path after a prior failed
-        // swap, the first to move keeps it and the last to leave reclaims it, so
-        // a co-owned file is never deleted and a vacated one is never orphaned.
+        // still references it (count now zero) and no *committed* write this run
+        // has already placed a file there (`committed`, the commit-tracked twin of
+        // `suppress_path_aliasing`). On a path swap (A: x -> y while B: y -> x)
+        // the earlier write commits its path, so the later mover keeps it; when
+        // two slots share a path after a prior failed swap, the reference count
+        // keeps it. But a merely *planned* colliding write that later fails no
+        // longer protects a stale file, so it is cleaned up rather than orphaned
+        // (#142).
         if let Some(old) = old_path.as_deref()
             && !old.is_empty()
             && old != path
@@ -1032,7 +1046,7 @@ where
                     *count > 0
                 })
                 .unwrap_or(false);
-            if !still_referenced && !self.write_targets.contains(old) {
+            if !still_referenced && !committed.contains(old) {
                 self.fs.remove(old).map_err(|err| {
                     permanent_fail(
                         owner_id,
@@ -1218,6 +1232,7 @@ where
         source_url: &str,
         format: StemFormat,
         hash: &str,
+        committed: &BTreeSet<String>,
     ) -> Result<Effect, Fail> {
         // A stem needs its owning clip's manifest entry (its audio must exist).
         if manifest.get(clip_id).is_none() {
@@ -1233,14 +1248,15 @@ where
         self.write_verify(clip_id, path, &bytes)?;
         // The new stem is in place; only now drop a stale copy left at the old
         // path (the song moved, or the stem format changed). `remove` is
-        // idempotent. A path this run also writes is never removed (the
-        // non-planned twin of `suppress_path_aliasing`). On a genuine remove
-        // failure we return BEFORE updating the slot, so the next run re-plans the
-        // same write and retries the cleanup — no orphan.
+        // idempotent. A path a *committed* write this run has already placed is
+        // never removed (the commit-tracked twin of `suppress_path_aliasing`); a
+        // merely planned write that later fails no longer protects a stale file
+        // (#142). On a genuine remove failure we return BEFORE updating the slot,
+        // so the next run re-plans the same write and retries the cleanup.
         if let Some(old) = old_path.as_deref()
             && !old.is_empty()
             && old != path
-            && !self.write_targets.contains(old)
+            && !committed.contains(old)
         {
             self.fs.remove(old).map_err(|err| {
                 permanent_fail(clip_id, format!("could not remove old stem {old}: {err}"))
@@ -3838,6 +3854,135 @@ mod tests {
         // The following sidecar was written and recorded.
         assert_eq!(fs.read_file("b/cover.jpg").unwrap(), b"jpg-b");
         assert!(manifest.get("b").unwrap().cover_jpg.is_some());
+    }
+
+    #[test]
+    fn stranded_old_sidecar_removed_when_colliding_writer_fails() {
+        // #142: clip A moves its cover shared -> a/cover.jpg (fetch succeeds);
+        // clip B is planned to write the vacated `shared` path but its fetch
+        // fails. The old-path cleanup is gated on COMMITTED writes, not planned
+        // ones, so B's failed write no longer protects the stale file: A's old
+        // `shared` copy is removed rather than left as an untracked orphan.
+        let mut manifest = Manifest::new();
+        let mut a = entry("a.mp3", AudioFormat::Mp3);
+        a.cover_jpg = Some(ArtifactState {
+            path: "shared/cover.jpg".to_owned(),
+            hash: "ha".to_owned(),
+        });
+        manifest.insert("a", a);
+        manifest.insert("b", entry("b.mp3", AudioFormat::Mp3));
+        let fs = MemFs::new().with_file("shared/cover.jpg", b"old-shared".to_vec());
+        let plan = Plan {
+            actions: vec![
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "a/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                    hash: "ha".to_owned(),
+                    owner_id: "a".to_owned(),
+                    content: None,
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "shared/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/b/large.jpg".to_owned(),
+                    hash: "hb".to_owned(),
+                    owner_id: "b".to_owned(),
+                    content: None,
+                },
+            ],
+        };
+        let http = ScriptedHttp::new()
+            .route("a/large.jpg", Reply::ok(b"jpg-a".to_vec()))
+            .route("b/large.jpg", Reply::status(404));
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 1);
+        assert_eq!(outcome.failures[0].clip_id, "b");
+        // A's move committed; the vacated file is gone, not an orphan.
+        assert_eq!(fs.read_file("a/cover.jpg").unwrap(), b"jpg-a");
+        assert!(
+            !fs.exists("shared/cover.jpg"),
+            "the vacated file must be removed once the colliding writer failed"
+        );
+        assert_eq!(
+            manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().path,
+            "a/cover.jpg"
+        );
+    }
+
+    #[test]
+    fn committed_write_at_old_path_is_preserved() {
+        // #142: clip B writes `shared` and commits BEFORE clip A vacates it
+        // (A moves shared -> a/cover.jpg). A's cleanup sees `shared` in the
+        // committed set and keeps B's freshly written file rather than deleting
+        // it. This is the successful-collision case the guard must still protect.
+        let mut manifest = Manifest::new();
+        let mut a = entry("a.mp3", AudioFormat::Mp3);
+        a.cover_jpg = Some(ArtifactState {
+            path: "shared/cover.jpg".to_owned(),
+            hash: "ha".to_owned(),
+        });
+        manifest.insert("a", a);
+        manifest.insert("b", entry("b.mp3", AudioFormat::Mp3));
+        let fs = MemFs::new().with_file("shared/cover.jpg", b"old-shared".to_vec());
+        let plan = Plan {
+            actions: vec![
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "shared/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/b/large.jpg".to_owned(),
+                    hash: "hb".to_owned(),
+                    owner_id: "b".to_owned(),
+                    content: None,
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "a/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                    hash: "ha".to_owned(),
+                    owner_id: "a".to_owned(),
+                    content: None,
+                },
+            ],
+        };
+        let http = ScriptedHttp::new()
+            .route("b/large.jpg", Reply::ok(b"jpg-b".to_vec()))
+            .route("a/large.jpg", Reply::ok(b"jpg-a".to_vec()));
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        // B's committed write survives A's subsequent move; both files are present.
+        assert_eq!(fs.read_file("shared/cover.jpg").unwrap(), b"jpg-b");
+        assert_eq!(fs.read_file("a/cover.jpg").unwrap(), b"jpg-a");
+        assert_eq!(
+            manifest.get("b").unwrap().cover_jpg.as_ref().unwrap().path,
+            "shared/cover.jpg"
+        );
+        assert_eq!(
+            manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().path,
+            "a/cover.jpg"
+        );
     }
 
     #[test]
