@@ -951,7 +951,11 @@ async fn run_one(
     // is partial, so leave folder art entirely untouched (no rewrites, no
     // deletes) by handing the planner an empty desired set.
     let albums_desired = if library_authoritative {
-        album_desired(&desired, settings.animated_covers)
+        album_desired(
+            &desired,
+            settings.animated_covers,
+            settings.raw_animated_cover,
+        )
     } else {
         Vec::new()
     };
@@ -2138,6 +2142,7 @@ mod tests {
             retries: 3,
             min_newest: 1,
             animated_covers: false,
+            raw_animated_cover: false,
             video_cover_retention: suno_core::VideoCoverRetention::Neither,
             animated_cover_webp: suno_core::WebpEncodeSettings::default(),
             details_sidecar: false,

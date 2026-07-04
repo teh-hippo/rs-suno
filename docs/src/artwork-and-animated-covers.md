@@ -104,12 +104,24 @@ writes:
 The static `.jpg` covers are always written as well, so players without WebP
 support still show art.
 
+### Keeping the raw source
+
+The WebP is a re-encode. To keep Suno's original animation untouched, choose
+`--video-cover-retention mp4` (or `video_cover_retention = "mp4"`): it writes the
+album's `video_cover_url` verbatim as `cover.mp4`, with no transcode and no
+ffmpeg. Use `both` to keep the raw `cover.mp4` beside the transcoded
+`cover.webp`; the two come from the same album variant, and the source is
+fetched only once.
+
+This is a different asset from `--video-mp4`, which downloads the standalone
+music video (`video_url`) beside each song.
+
 ### ffmpeg requirement
 
 Animated covers are transcoded from the clip's video preview with `ffmpeg`, so
 you need an ffmpeg build with animated-WebP (`libwebp_anim`) support. See
 [Installation and ffmpeg](installation-and-ffmpeg.md#ffmpeg). Without it, use
-the default static covers.
+the default static covers. The raw `cover.mp4` needs no ffmpeg.
 
 ## A note on WAV
 

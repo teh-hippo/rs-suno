@@ -271,6 +271,10 @@ pub struct AlbumArt {
     /// The album's animated `cover.webp`, from the first-created animated variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_webp: Option<ArtifactState>,
+    /// The album's raw `cover.mp4`: the same variant's `video_cover_url` kept
+    /// verbatim (no transcode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_mp4: Option<ArtifactState>,
 }
 
 impl AlbumArt {
@@ -280,6 +284,7 @@ impl AlbumArt {
         match kind {
             ArtifactKind::FolderJpg => self.folder_jpg.as_ref(),
             ArtifactKind::FolderWebp => self.folder_webp.as_ref(),
+            ArtifactKind::FolderMp4 => self.folder_mp4.as_ref(),
             ArtifactKind::CoverJpg
             | ArtifactKind::CoverWebp
             | ArtifactKind::DetailsTxt
@@ -299,6 +304,7 @@ impl AlbumArt {
         match kind {
             ArtifactKind::FolderJpg => self.folder_jpg = state,
             ArtifactKind::FolderWebp => self.folder_webp = state,
+            ArtifactKind::FolderMp4 => self.folder_mp4 = state,
             ArtifactKind::CoverJpg
             | ArtifactKind::CoverWebp
             | ArtifactKind::DetailsTxt
@@ -309,10 +315,10 @@ impl AlbumArt {
         }
     }
 
-    /// True when the album holds no folder art at all (both slots empty), so the
+    /// True when the album holds no folder art at all (every slot empty), so the
     /// store can prune the now-dead album row.
     pub fn is_empty(&self) -> bool {
-        self.folder_jpg.is_none() && self.folder_webp.is_none()
+        self.folder_jpg.is_none() && self.folder_webp.is_none() && self.folder_mp4.is_none()
     }
 }
 
@@ -1240,6 +1246,10 @@ mod tests {
                     path: "alice/Album/cover.webp".to_owned(),
                     hash: "webp-h".to_owned(),
                 }),
+                folder_mp4: Some(ArtifactState {
+                    path: "alice/Album/cover.mp4".to_owned(),
+                    hash: "mp4-h".to_owned(),
+                }),
             },
         );
 
@@ -1264,6 +1274,7 @@ mod tests {
             art.artifact(ArtifactKind::FolderWebp).unwrap().hash,
             "webp-h"
         );
+        assert_eq!(art.artifact(ArtifactKind::FolderMp4).unwrap().hash, "mp4-h");
         // A per-clip kind has no album slot.
         assert!(art.artifact(ArtifactKind::CoverJpg).is_none());
     }
@@ -1293,6 +1304,43 @@ mod tests {
 
         // Clearing the only slot prunes the whole album row (no dead entries).
         store.set_album_artifact("root-1", ArtifactKind::FolderJpg, None);
+        assert!(store.album_art("root-1").is_none());
+        assert!(store.albums.is_empty());
+    }
+
+    #[test]
+    fn album_row_survives_until_the_last_slot_including_folder_mp4_is_cleared() {
+        // Regression: `is_empty` must count every slot. A `both`-retention album
+        // owns folder_webp + folder_mp4; clearing folder_webp first must NOT
+        // prune the row while folder_mp4 is still stored, or the later cover.mp4
+        // delete would lose its store entry and never retry on failure.
+        let mut store = LineageStore::new();
+        let state = |p: &str| ArtifactState {
+            path: p.to_owned(),
+            hash: "h".to_owned(),
+        };
+        store.set_album_artifact(
+            "root-1",
+            ArtifactKind::FolderWebp,
+            Some(state("a/cover.webp")),
+        );
+        store.set_album_artifact(
+            "root-1",
+            ArtifactKind::FolderMp4,
+            Some(state("a/cover.mp4")),
+        );
+
+        // FolderWebp is cleared first (its kind sorts before FolderMp4); the row
+        // must stay because the raw cover is still tracked.
+        store.set_album_artifact("root-1", ArtifactKind::FolderWebp, None);
+        let art = store
+            .album_art("root-1")
+            .expect("row kept while folder_mp4 remains");
+        assert!(!art.is_empty());
+        assert!(art.folder_mp4.is_some());
+
+        // Clearing the last slot finally prunes the row.
+        store.set_album_artifact("root-1", ArtifactKind::FolderMp4, None);
         assert!(store.album_art("root-1").is_none());
         assert!(store.albums.is_empty());
     }
@@ -1826,7 +1874,7 @@ mod tests {
             desired_of(&clip_b, &ctx_b, &names[1]),
         ];
 
-        let albums = crate::reconcile::album_desired(&desired, false);
+        let albums = crate::reconcile::album_desired(&desired, false, false);
         assert_eq!(albums.len(), 2, "each distinct root is its own album");
         let jpg_paths: Vec<String> = albums
             .iter()
@@ -1937,7 +1985,7 @@ mod tests {
             desired_of(&real_clip, &real_ctx, &names[0]),
             desired_of(&new_clip, &new_ctx, &names[1]),
         ];
-        let albums = crate::reconcile::album_desired(&desired, false);
+        let albums = crate::reconcile::album_desired(&desired, false, false);
         let jpg_paths: Vec<String> = albums
             .iter()
             .filter_map(|a| a.folder_jpg.as_ref().map(|art| art.path.clone()))

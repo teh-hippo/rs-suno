@@ -502,9 +502,15 @@ impl Config {
             None,
             "VIDEO_COVER_RETENTION",
         )?;
-        let (animated_covers, video_mp4) = match video_cover_retention {
+        // `video_cover_retention`, when set, is the unified control for the
+        // album video-cover artifacts: `webp`/`both` keep the transcoded
+        // `cover.webp` (and the per-song `.webp`), `mp4`/`both` keep the raw
+        // `cover.mp4` (`video_cover_url` verbatim). The standalone music video
+        // (`video_url`) is a different asset and stays on its own `video_mp4`
+        // toggle, untouched here.
+        let (animated_covers, raw_animated_cover) = match video_cover_retention {
             Some(retention) => (retention.keeps_webp(), retention.keeps_mp4()),
-            None => (animated_covers, video_mp4),
+            None => (animated_covers, false),
         };
 
         let defaults_webp = WebpEncodeSettings::default();
@@ -602,7 +608,8 @@ impl Config {
             retries,
             min_newest,
             animated_covers,
-            video_cover_retention: match (animated_covers, video_mp4) {
+            raw_animated_cover,
+            video_cover_retention: match (animated_covers, raw_animated_cover) {
                 (false, false) => VideoCoverRetention::Neither,
                 (true, false) => VideoCoverRetention::Webp,
                 (false, true) => VideoCoverRetention::Mp4,
@@ -776,6 +783,9 @@ pub struct EffectiveSettings {
     pub retries: u32,
     pub min_newest: u32,
     pub animated_covers: bool,
+    /// Keep the raw album `cover.mp4` (`video_cover_url` verbatim, no transcode).
+    /// Driven by [`VideoCoverRetention::keeps_mp4`]; independent of `video_mp4`.
+    pub raw_animated_cover: bool,
     pub video_cover_retention: VideoCoverRetention,
     pub animated_cover_webp: WebpEncodeSettings,
     pub details_sidecar: bool,
@@ -890,6 +900,7 @@ mod tests {
                 retries: 3,
                 min_newest: 1,
                 animated_covers: false,
+                raw_animated_cover: false,
                 video_cover_retention: VideoCoverRetention::Neither,
                 animated_cover_webp: WebpEncodeSettings::default(),
                 details_sidecar: false,
@@ -1346,31 +1357,47 @@ mod tests {
     }
 
     #[test]
-    fn video_cover_retention_overrides_legacy_toggles() {
-        let toml = r#"
-            [defaults]
-            animated_covers = true
-            video_mp4 = false
-            video_cover_retention = "mp4"
-        "#;
-        let cfg = Config::from_toml(toml).unwrap();
-        let eff = cfg.resolve("alice", None, &no_env(), &no_flags());
-        assert!(eff.is_err());
-
-        let cfg = Config::from_toml(format!("{toml}\n[accounts.alice]\n").as_str()).unwrap();
-        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
-        assert!(!eff.animated_covers);
-        assert!(eff.video_mp4);
-        assert_eq!(eff.video_cover_retention, VideoCoverRetention::Mp4);
-
-        let flags = FlagOverrides {
-            video_cover_retention: Some(VideoCoverRetention::Both),
-            ..Default::default()
+    fn video_cover_retention_drives_cover_artifacts_not_the_music_video() {
+        let resolve = |retention: &str| {
+            let toml = format!("[accounts.alice]\nvideo_cover_retention = \"{retention}\"\n");
+            Config::from_toml(&toml)
+                .unwrap()
+                .resolve("alice", None, &no_env(), &no_flags())
+                .unwrap()
         };
-        let eff = cfg.resolve("alice", None, &no_env(), &flags).unwrap();
-        assert!(eff.animated_covers);
+
+        let neither = resolve("neither");
+        assert!(!neither.animated_covers && !neither.raw_animated_cover);
+        assert_eq!(neither.video_cover_retention, VideoCoverRetention::Neither);
+
+        let webp = resolve("webp");
+        assert!(webp.animated_covers && !webp.raw_animated_cover);
+        assert_eq!(webp.video_cover_retention, VideoCoverRetention::Webp);
+
+        // `mp4` keeps the raw album cover (`video_cover_url` verbatim); it does
+        // NOT switch on the standalone music-video toggle (`video_url`).
+        let mp4 = resolve("mp4");
+        assert!(!mp4.animated_covers && mp4.raw_animated_cover);
+        assert!(!mp4.video_mp4);
+        assert_eq!(mp4.video_cover_retention, VideoCoverRetention::Mp4);
+
+        let both = resolve("both");
+        assert!(both.animated_covers && both.raw_animated_cover);
+        assert!(!both.video_mp4);
+        assert_eq!(both.video_cover_retention, VideoCoverRetention::Both);
+    }
+
+    #[test]
+    fn video_mp4_is_independent_of_cover_retention() {
+        // The standalone music video (`video_url`) has its own toggle and is
+        // never implied by a `video_cover_retention` mode, nor vice versa.
+        let toml = "[accounts.alice]\nvideo_mp4 = true\nvideo_cover_retention = \"webp\"\n";
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
         assert!(eff.video_mp4);
-        assert_eq!(eff.video_cover_retention, VideoCoverRetention::Both);
+        assert!(eff.animated_covers);
+        assert!(!eff.raw_animated_cover);
+        assert_eq!(eff.video_cover_retention, VideoCoverRetention::Webp);
     }
 
     #[test]
@@ -1477,7 +1504,7 @@ mod tests {
         let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
         assert_eq!(eff.video_cover_retention, VideoCoverRetention::Both);
         assert!(eff.animated_covers);
-        assert!(eff.video_mp4);
+        assert!(eff.raw_animated_cover);
 
         // An unknown env value is a config error rather than a silent default.
         let bad_env: HashMap<String, String> =

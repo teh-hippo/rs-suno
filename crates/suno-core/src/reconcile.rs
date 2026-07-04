@@ -71,6 +71,10 @@ pub enum ArtifactKind {
     FolderJpg,
     /// The album folder's animated cover (album-scoped, later phase).
     FolderWebp,
+    /// The album folder's raw animated cover: the same `video_cover_url` as
+    /// [`FolderWebp`](ArtifactKind::FolderWebp), kept verbatim with no transcode
+    /// (album-scoped, later phase).
+    FolderMp4,
     /// A library-root `.m3u8` playlist (library-scoped, later phase).
     Playlist,
 }
@@ -204,6 +208,9 @@ pub struct AlbumDesired {
     pub folder_jpg: Option<DesiredArtifact>,
     /// The desired animated `cover.webp`, from the first-created animated variant.
     pub folder_webp: Option<DesiredArtifact>,
+    /// The desired raw `cover.mp4`: the same variant's `video_cover_url` kept
+    /// verbatim (no transcode). `None` unless raw cover retention is enabled.
+    pub folder_mp4: Option<DesiredArtifact>,
 }
 
 /// The desired `.m3u8` target for one playlist (a Suno playlist, or the
@@ -618,6 +625,7 @@ fn removed_kind_delete_eligible(kind: ArtifactKind) -> bool {
         ArtifactKind::DetailsTxt
         | ArtifactKind::FolderJpg
         | ArtifactKind::FolderWebp
+        | ArtifactKind::FolderMp4
         | ArtifactKind::Playlist => true,
     }
 }
@@ -634,7 +642,10 @@ fn manifest_artifact_by_kind(entry: &ManifestEntry, kind: ArtifactKind) -> Optio
         ArtifactKind::LyricsTxt => entry.lyrics_txt.as_ref(),
         ArtifactKind::Lrc => entry.lrc.as_ref(),
         ArtifactKind::VideoMp4 => entry.video_mp4.as_ref(),
-        ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => None,
+        ArtifactKind::FolderJpg
+        | ArtifactKind::FolderWebp
+        | ArtifactKind::FolderMp4
+        | ArtifactKind::Playlist => None,
     }
 }
 
@@ -681,7 +692,10 @@ pub(crate) fn set_manifest_artifact(
         ArtifactKind::LyricsTxt => entry.lyrics_txt = state,
         ArtifactKind::Lrc => entry.lrc = state,
         ArtifactKind::VideoMp4 => entry.video_mp4 = state,
-        ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::Playlist => {}
+        ArtifactKind::FolderJpg
+        | ArtifactKind::FolderWebp
+        | ArtifactKind::FolderMp4
+        | ArtifactKind::Playlist => {}
     }
 }
 
@@ -1128,11 +1142,19 @@ fn meta_or_art_changed(d: &Desired, entry: &ManifestEntry) -> bool {
 /// - `cover.webp` (only when `animated_covers` is set) comes from the
 ///   EARLIEST-created variant with a non-empty `video_cover_url`; ties break to
 ///   the smallest id. `None` when no variant has an animated source.
+/// - `cover.mp4` (only when `raw_cover` is set) is that same variant's
+///   `video_cover_url` kept verbatim (no transcode), so `both` yields the raw
+///   source beside its WebP re-encode. `None` when no variant has an animated
+///   source.
 ///
 /// The album folder is the common parent of the album's clips' audio paths (they
 /// share `{creator}/{album}/`); `folder.jpg` lands at `{album_dir}/folder.jpg`
-/// and the animated cover at `{album_dir}/cover.webp`.
-pub fn album_desired(desired: &[Desired], animated_covers: bool) -> Vec<AlbumDesired> {
+/// and the animated covers at `{album_dir}/cover.webp` / `{album_dir}/cover.mp4`.
+pub fn album_desired(
+    desired: &[Desired],
+    animated_covers: bool,
+    raw_cover: bool,
+) -> Vec<AlbumDesired> {
     let mut groups: BTreeMap<&str, Vec<&Desired>> = BTreeMap::new();
     for d in desired {
         groups
@@ -1162,10 +1184,21 @@ pub fn album_desired(desired: &[Desired], animated_covers: bool) -> Vec<AlbumDes
                     hash: art_url_hash(&source.clip.video_cover_url),
                     content: None,
                 });
+            let folder_mp4 = raw_cover
+                .then(|| folder_webp_source(&members))
+                .flatten()
+                .map(|source| DesiredArtifact {
+                    kind: ArtifactKind::FolderMp4,
+                    path: album_child(&album_dir, "cover.mp4"),
+                    source_url: source.clip.video_cover_url.clone(),
+                    hash: art_url_hash(&source.clip.video_cover_url),
+                    content: None,
+                });
             AlbumDesired {
                 root_id: root_id.to_owned(),
                 folder_jpg,
                 folder_webp,
+                folder_mp4,
             }
         })
         .collect()
@@ -1271,9 +1304,13 @@ pub fn plan_album_artifacts(
 
     for d in desired {
         let stored = albums.get(&d.root_id);
-        for artifact in [d.folder_jpg.as_ref(), d.folder_webp.as_ref()]
-            .into_iter()
-            .flatten()
+        for artifact in [
+            d.folder_jpg.as_ref(),
+            d.folder_webp.as_ref(),
+            d.folder_mp4.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             let needs_write = match stored.and_then(|a| a.artifact(artifact.kind)) {
                 None => true,
@@ -1324,6 +1361,9 @@ fn album_artifacts(art: &AlbumArt) -> Vec<(ArtifactKind, &ArtifactState)> {
     if let Some(state) = &art.folder_webp {
         out.push((ArtifactKind::FolderWebp, state));
     }
+    if let Some(state) = &art.folder_mp4 {
+        out.push((ArtifactKind::FolderMp4, state));
+    }
     out
 }
 
@@ -1332,6 +1372,7 @@ fn album_desires_kind(d: &AlbumDesired, kind: ArtifactKind) -> bool {
     match kind {
         ArtifactKind::FolderJpg => d.folder_jpg.is_some(),
         ArtifactKind::FolderWebp => d.folder_webp.is_some(),
+        ArtifactKind::FolderMp4 => d.folder_mp4.is_some(),
         ArtifactKind::CoverJpg
         | ArtifactKind::CoverWebp
         | ArtifactKind::DetailsTxt
@@ -3416,7 +3457,7 @@ mod tests {
             album_member(album_clip("b", 9, "t1", "art-b", ""), "root", "c/al/b.flac"),
             album_member(album_clip("c", 2, "t2", "art-c", ""), "root", "c/al/c.flac"),
         ];
-        let albums = album_desired(&members, false);
+        let albums = album_desired(&members, false, false);
         assert_eq!(albums.len(), 1);
         let jpg = albums[0].folder_jpg.as_ref().unwrap();
         // "b" has the highest play_count, so its art content hash wins.
@@ -3434,7 +3475,7 @@ mod tests {
             album_member(album_clip("y", 4, "t0", "art-y", ""), "root", "c/al/y.flac"),
             album_member(album_clip("x", 4, "t1", "art-x", ""), "root", "c/al/x.flac"),
         ];
-        let jpg = album_desired(&by_time, false)[0]
+        let jpg = album_desired(&by_time, false, false)[0]
             .folder_jpg
             .clone()
             .unwrap();
@@ -3445,7 +3486,10 @@ mod tests {
             album_member(album_clip("m", 4, "t0", "art-m", ""), "root", "c/al/m.flac"),
             album_member(album_clip("g", 4, "t0", "art-g", ""), "root", "c/al/g.flac"),
         ];
-        let jpg = album_desired(&by_id, false)[0].folder_jpg.clone().unwrap();
+        let jpg = album_desired(&by_id, false, false)[0]
+            .folder_jpg
+            .clone()
+            .unwrap();
         assert_eq!(jpg.source_url, "art-g");
     }
 
@@ -3464,7 +3508,7 @@ mod tests {
             ),
             album_member(album_clip("c", 5, "t1", "art-c", ""), "root", "c/al/c.flac"),
         ];
-        let webp = album_desired(&members, true)[0]
+        let webp = album_desired(&members, true, false)[0]
             .folder_webp
             .clone()
             .unwrap();
@@ -3482,10 +3526,67 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let off = album_desired(&members, false);
+        let off = album_desired(&members, false, false);
         assert!(off[0].folder_webp.is_none());
-        let on = album_desired(&members, true);
+        let on = album_desired(&members, true, false);
         assert!(on[0].folder_webp.is_some());
+    }
+
+    #[test]
+    fn raw_cover_yields_folder_mp4_from_the_webp_source_verbatim() {
+        let members = vec![
+            album_member(
+                album_clip("a", 9, "t2", "art-a", "vid-a"),
+                "root",
+                "c/al/a.flac",
+            ),
+            album_member(
+                album_clip("b", 1, "t0", "art-b", "vid-b"),
+                "root",
+                "c/al/b.flac",
+            ),
+        ];
+        // `both`: cover.webp (transcoded) and cover.mp4 (raw) come from the SAME
+        // earliest-created animated variant, so they describe one animation. The
+        // raw cover keeps the `video_cover_url` unchanged and hashes on the URL.
+        let album = album_desired(&members, true, true).remove(0);
+        let webp = album.folder_webp.unwrap();
+        let mp4 = album.folder_mp4.unwrap();
+        assert_eq!(mp4.kind, ArtifactKind::FolderMp4);
+        assert_eq!(mp4.path, "c/al/cover.mp4");
+        assert_eq!(mp4.source_url, "vid-b");
+        assert_eq!(mp4.hash, art_url_hash("vid-b"));
+        assert_eq!(mp4.source_url, webp.source_url, "same variant feeds both");
+    }
+
+    #[test]
+    fn raw_cover_and_webp_are_independent_toggles() {
+        let members = vec![album_member(
+            album_clip("a", 1, "t0", "art-a", "vid-a"),
+            "root",
+            "c/al/a.flac",
+        )];
+        // webp-only keeps the transcode but no raw mp4.
+        let webp_only = album_desired(&members, true, false).remove(0);
+        assert!(webp_only.folder_webp.is_some());
+        assert!(webp_only.folder_mp4.is_none());
+        // mp4-only keeps the raw source but no transcode.
+        let mp4_only = album_desired(&members, false, true).remove(0);
+        assert!(mp4_only.folder_webp.is_none());
+        assert!(mp4_only.folder_mp4.is_some());
+    }
+
+    #[test]
+    fn raw_cover_needs_an_animated_source() {
+        // No variant carries a video_cover_url, so there is nothing to keep.
+        let members = vec![album_member(
+            album_clip("a", 3, "t0", "art-a", ""),
+            "root",
+            "c/al/a.flac",
+        )];
+        let album = album_desired(&members, true, true).remove(0);
+        assert!(album.folder_mp4.is_none());
+        assert!(album.folder_webp.is_none());
     }
 
     #[test]
@@ -3495,7 +3596,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let albums = album_desired(&members, true);
+        let albums = album_desired(&members, true, false);
         assert!(albums[0].folder_jpg.is_none());
         assert!(albums[0].folder_webp.is_none());
     }
@@ -3507,7 +3608,7 @@ mod tests {
             album_member(album_clip("b", 1, "t0", "art-b", ""), "r2", "c/al2/b.flac"),
             album_member(album_clip("c", 9, "t0", "art-c", ""), "r1", "c/al1/c.flac"),
         ];
-        let albums = album_desired(&members, false);
+        let albums = album_desired(&members, false, false);
         assert_eq!(albums.len(), 2);
         assert_eq!(albums[0].root_id, "r1");
         assert_eq!(albums[0].folder_jpg.as_ref().unwrap().source_url, "art-c");
@@ -3530,7 +3631,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, true);
+        let desired = album_desired(&members, true, false);
         let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true);
         assert_eq!(
             actions,
@@ -3562,13 +3663,14 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, false);
+        let desired = album_desired(&members, false, false);
         let mut albums = BTreeMap::new();
         albums.insert(
             "root".to_string(),
             AlbumArt {
                 folder_jpg: Some(stored("c/al/folder.jpg", &art_url_hash("art-a"))),
                 folder_webp: None,
+                folder_mp4: None,
             },
         );
         assert!(plan_album_artifacts(&desired, &albums, true).is_empty());
@@ -3581,13 +3683,14 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, false);
+        let desired = album_desired(&members, false, false);
         let mut albums = BTreeMap::new();
         albums.insert(
             "root".to_string(),
             AlbumArt {
                 folder_jpg: Some(stored("old/folder.jpg", &art_url_hash("art-a"))),
                 folder_webp: None,
+                folder_mp4: None,
             },
         );
         let actions = plan_album_artifacts(&desired, &albums, true);
@@ -3613,7 +3716,7 @@ mod tests {
                 "c/al/b.flac",
             ),
         ];
-        let desired1 = album_desired(&run1, false);
+        let desired1 = album_desired(&run1, false, false);
         let write1 = plan_album_artifacts(&desired1, &BTreeMap::new(), true);
         assert_eq!(write1.len(), 1);
 
@@ -3631,6 +3734,7 @@ mod tests {
                 AlbumArt {
                     folder_jpg: Some(stored(path, hash)),
                     folder_webp: None,
+                    folder_mp4: None,
                 },
             );
         }
@@ -3648,7 +3752,7 @@ mod tests {
                 "c/al/b.flac",
             ),
         ];
-        let desired2 = album_desired(&run2, false);
+        let desired2 = album_desired(&run2, false, false);
         // The winner flipped, but the chosen art content hash did not: no churn.
         assert!(plan_album_artifacts(&desired2, &albums, true).is_empty());
     }
@@ -3661,6 +3765,7 @@ mod tests {
             AlbumArt {
                 folder_jpg: Some(stored("c/al/folder.jpg", &art_url_hash("old-art"))),
                 folder_webp: None,
+                folder_mp4: None,
             },
         );
         // The new most-played variant carries genuinely different art.
@@ -3676,7 +3781,7 @@ mod tests {
                 "c/al/b.flac",
             ),
         ];
-        let desired = album_desired(&members, false);
+        let desired = album_desired(&members, false, false);
         let actions = plan_album_artifacts(&desired, &albums, true);
         assert_eq!(actions.len(), 1);
         assert!(matches!(
@@ -3702,7 +3807,7 @@ mod tests {
                 )
             })
             .collect();
-        let desired = album_desired(&members, true);
+        let desired = album_desired(&members, true, false);
         assert_eq!(desired.len(), 1);
         let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true);
         // Exactly one folder.jpg and one cover.webp for the whole 200-clip album.
@@ -3724,6 +3829,7 @@ mod tests {
             AlbumArt {
                 folder_jpg: Some(stored("c/al/folder.jpg", "h")),
                 folder_webp: Some(stored("c/al/cover.webp", "hw")),
+                folder_mp4: Some(stored("c/al/cover.mp4", "hm")),
             },
         );
         // No album desires this root any more (it emptied out this run).
@@ -3732,7 +3838,7 @@ mod tests {
         // Gated off: an incomplete/unsafe listing removes nothing.
         assert!(plan_album_artifacts(&desired, &albums, false).is_empty());
 
-        // Gated on: both stored kinds are removed, sorted by kind.
+        // Gated on: every stored kind is removed, sorted by kind.
         let actions = plan_album_artifacts(&desired, &albums, true);
         assert_eq!(
             actions,
@@ -3747,6 +3853,11 @@ mod tests {
                     path: "c/al/cover.webp".to_string(),
                     owner_id: "root".to_string(),
                 },
+                Action::DeleteArtifact {
+                    kind: ArtifactKind::FolderMp4,
+                    path: "c/al/cover.mp4".to_string(),
+                    owner_id: "root".to_string(),
+                },
             ]
         );
     }
@@ -3759,6 +3870,7 @@ mod tests {
             AlbumArt {
                 folder_jpg: Some(stored("c/al/folder.jpg", &art_url_hash("art-a"))),
                 folder_webp: Some(stored("c/al/cover.webp", &art_url_hash("vid-a"))),
+                folder_mp4: None,
             },
         );
         // The album is still present with the same folder.jpg, but animated
@@ -3768,7 +3880,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, false);
+        let desired = album_desired(&members, false, false);
 
         assert!(plan_album_artifacts(&desired, &albums, false).is_empty());
 
@@ -3778,6 +3890,41 @@ mod tests {
             vec![Action::DeleteArtifact {
                 kind: ArtifactKind::FolderWebp,
                 path: "c/al/cover.webp".to_string(),
+                owner_id: "root".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn disappeared_raw_cover_deletes_only_that_kind_when_gated() {
+        let mut albums = BTreeMap::new();
+        albums.insert(
+            "root".to_string(),
+            AlbumArt {
+                folder_jpg: Some(stored("c/al/folder.jpg", &art_url_hash("art-a"))),
+                folder_webp: Some(stored("c/al/cover.webp", &art_url_hash("vid-a"))),
+                folder_mp4: Some(stored("c/al/cover.mp4", &art_url_hash("vid-a"))),
+            },
+        );
+        // The album stays and animated covers stay on, but raw cover retention
+        // is now off, so only the raw `cover.mp4` is no longer desired.
+        let members = vec![album_member(
+            album_clip("a", 1, "t0", "art-a", "vid-a"),
+            "root",
+            "c/al/a.flac",
+        )];
+        let desired = album_desired(&members, true, false);
+
+        // Gated off: nothing removed on an unsafe listing.
+        assert!(plan_album_artifacts(&desired, &albums, false).is_empty());
+
+        // Gated on: only the raw cover goes; folder.jpg and cover.webp stay.
+        let actions = plan_album_artifacts(&desired, &albums, true);
+        assert_eq!(
+            actions,
+            vec![Action::DeleteArtifact {
+                kind: ArtifactKind::FolderMp4,
+                path: "c/al/cover.mp4".to_string(),
                 owner_id: "root".to_string(),
             }]
         );
@@ -3797,7 +3944,7 @@ mod tests {
                 "c/al1/b.flac",
             ),
         ];
-        let desired = album_desired(&members, true);
+        let desired = album_desired(&members, true, true);
         let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true);
         let keys: Vec<(&str, ArtifactKind)> = actions
             .iter()
@@ -3811,8 +3958,10 @@ mod tests {
             vec![
                 ("r1", ArtifactKind::FolderJpg),
                 ("r1", ArtifactKind::FolderWebp),
+                ("r1", ArtifactKind::FolderMp4),
                 ("r2", ArtifactKind::FolderJpg),
                 ("r2", ArtifactKind::FolderWebp),
+                ("r2", ArtifactKind::FolderMp4),
             ]
         );
     }

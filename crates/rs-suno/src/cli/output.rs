@@ -234,6 +234,7 @@ fn artifact_label(kind: ArtifactKind) -> &'static str {
         ArtifactKind::VideoMp4 => "video.mp4",
         ArtifactKind::FolderJpg => "folder.jpg",
         ArtifactKind::FolderWebp => "folder.webp",
+        ArtifactKind::FolderMp4 => "cover.mp4",
         ArtifactKind::Playlist => "playlist",
     }
 }

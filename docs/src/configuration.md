@@ -88,7 +88,7 @@ needed. These modes are not applied on non-Unix platforms.
 | `retries` | integer | `3` | Download retry attempts per clip before it is logged as failed. |
 | `min_newest` | integer | `1` | Minimum newest clips kept when a recency filter would otherwise select nothing. |
 | `animated_covers` | bool | `false` | Also write animated WebP covers from clip video previews. |
-| `video_cover_retention` | `neither` \| `webp` \| `mp4` \| `both` | `neither` | Unified retention mode for video-cover artifacts. `webp` keeps animated covers, `mp4` keeps video files, `both` keeps both, `neither` keeps neither. Overrides `animated_covers`/`video_mp4` when set. |
+| `video_cover_retention` | `neither` \| `webp` \| `mp4` \| `both` | `neither` | Retention mode for the album video-cover, derived from each album's animated preview. `webp` keeps the transcoded animated `cover.webp` (and the per-song `.webp`), `mp4` keeps the raw `cover.mp4` (the `video_cover_url` byte-for-byte, no transcode), `both` keeps both, `neither` keeps neither. Overrides `animated_covers` when set. The standalone music video (`video_url`) is a separate asset with its own `video_mp4` toggle. |
 | `animated_cover_quality` | integer | `70` | Animated WebP quality (`0..100`, higher is better and larger). |
 | `animated_cover_max_fps` | integer | `24` | Frame-rate cap for animated WebP output. |
 | `animated_cover_max_width` | integer | native | Optional width cap in pixels for animated WebP output (no upscaling). |
