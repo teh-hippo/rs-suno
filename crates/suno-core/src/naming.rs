@@ -501,24 +501,59 @@ fn sanitise_component(
     character_set: CharacterSet,
     max_component_len: usize,
 ) -> String {
-    let filtered = match character_set {
-        CharacterSet::Unicode => value.chars().map(unicode_char).collect::<String>(),
-        CharacterSet::Ascii => value.chars().flat_map(ascii_chars).collect::<String>(),
+    // Single pass: map each char to its charset-safe form while collapsing runs
+    // of whitespace to one space and dropping leading/trailing whitespace. This
+    // fuses the old filter / split_whitespace / collect / join steps, which
+    // allocated several intermediate strings and a vector, into one buffer.
+    let mut collapsed = String::with_capacity(value.len());
+    let mut pending_space = false;
+    let push = |out: char, buf: &mut String, pending: &mut bool| {
+        if out.is_whitespace() {
+            *pending = !buf.is_empty();
+        } else {
+            if *pending {
+                buf.push(' ');
+            }
+            *pending = false;
+            buf.push(out);
+        }
     };
-    let collapsed = filtered.split_whitespace().collect::<Vec<_>>().join(" ");
+    match character_set {
+        CharacterSet::Unicode => {
+            for ch in value.chars() {
+                push(unicode_char(ch), &mut collapsed, &mut pending_space);
+            }
+        }
+        CharacterSet::Ascii => {
+            for ch in value.chars() {
+                for out in ascii_chars(ch) {
+                    push(out, &mut collapsed, &mut pending_space);
+                }
+            }
+        }
+    }
+
     let trimmed = collapsed.trim_matches([' ', '.']);
     if trimmed.is_empty() {
         return String::new();
     }
 
-    let mut result = truncate_chars(trimmed, max_component_len.max(1));
-    result = result.trim_matches([' ', '.']).to_string();
+    // Keep at most `max` characters, then trim any space or dot the cut exposed.
+    // Slicing at the char boundary avoids the extra String the old
+    // truncate-then-trim-then-to_string sequence built.
+    let max = max_component_len.max(1);
+    let end = trimmed
+        .char_indices()
+        .nth(max)
+        .map_or(trimmed.len(), |(index, _)| index);
+    let result = trimmed[..end].trim_matches([' ', '.']);
     if result.is_empty() {
         return String::new();
     }
     if result == "." || result == ".." {
         return "item".to_string();
     }
+    let mut result = result.to_string();
     if !result.ends_with('_') && is_reserved_name(&result) {
         result.push('_');
     }
@@ -579,31 +614,16 @@ fn non_blank(value: &str) -> Option<&str> {
 
 fn is_reserved_name(value: &str) -> bool {
     let stem = value.split('.').next().unwrap_or(value);
-    matches!(
-        stem.to_ascii_uppercase().as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    )
+    // Every reserved device name is 3 (CON/PRN/AUX/NUL) or 4 (COMx/LPTx) ASCII
+    // bytes, so anything else cannot match without allocating an uppercased copy.
+    if !matches!(stem.len(), 3 | 4) {
+        return false;
+    }
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    RESERVED.iter().any(|name| name.eq_ignore_ascii_case(stem))
 }
 
 #[cfg(test)]
