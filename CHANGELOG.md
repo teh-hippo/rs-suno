@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/teh-hippo/rs-suno/compare/v0.22.0...v0.22.1) (2026-07-04)
+
+
+### Bug Fixes
+
+* persist gap-filled lineage edges and resolve through the archive ([387226f](https://github.com/teh-hippo/rs-suno/commit/387226f50288dd7748d4577eb384cf0e6a4e1dff))
+
 ## [0.22.0](https://github.com/teh-hippo/rs-suno/compare/v0.21.0...v0.22.0) (2026-07-04)
 
 
