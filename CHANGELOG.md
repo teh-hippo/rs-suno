@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.3](https://github.com/teh-hippo/rs-suno/compare/v0.20.2...v0.20.3) (2026-07-04)
+
+
+### Bug Fixes
+
+* preserve the [id8] disambiguator when a file name is truncated ([#120](https://github.com/teh-hippo/rs-suno/issues/120)) ([26f2713](https://github.com/teh-hippo/rs-suno/commit/26f27138f5b0e4fc7e470f175039350008274756))
+
 ## [0.20.2](https://github.com/teh-hippo/rs-suno/compare/v0.20.1...v0.20.2) (2026-07-04)
 
 
