@@ -84,6 +84,19 @@ fresh. Starting fresh re-downloads every file: without the manifest there is no
 recorded digest to verify existing files against, so the safe choice is to
 re-fetch rather than trust unverified local copies.
 
+### A song I moved or renamed by hand came back, and the moved copy is still there
+
+`rs-suno` tracks each file at the exact path it wrote. If you move or rename a
+downloaded file by hand, the next `sync`/`copy` sees nothing at the recorded
+path and downloads the clip again, leaving your moved copy in place as an
+untracked file. It is not re-identified and adopted: the manifest holds no
+content fingerprint of the audio and the clip id is not embedded in the tags, so
+there is no safe way to match a moved file back to its clip, and guessing could
+attach the wrong audio to a clip. `check` and `--dry-run` list these untracked
+audio files under an "untracked audio file(s)" note so you can see them; move
+each back into place (matching the layout `check` would use) or delete it, then
+re-sync. Let the tool own the file layout to avoid this.
+
 ## FAQ
 
 ### What is the difference between sync and copy?
@@ -91,6 +104,13 @@ re-fetch rather than trust unverified local copies.
 `sync` mirrors, including deleting local files whose clips have left your
 library. `copy` only ever adds and updates. Use `copy` if you want an archive
 that never loses files.
+
+### I unliked a song (or it left my library) — what happens on the next sync?
+
+Under `sync` it becomes a deletion candidate: once a clip is absent from every
+mirror source, its local file is removed (subject to the deletion-safety gates,
+so never on an empty, filtered, or failed listing). Under `copy` it is kept.
+Preview it first with `check` or `--dry-run`, which list the pending deletions.
 
 ### How do I preview what a run would do?
 

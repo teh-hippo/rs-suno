@@ -25,6 +25,7 @@ mod lyrics;
 mod manifest;
 mod model;
 mod naming;
+mod orphans;
 pub mod reconcile;
 pub mod select;
 mod synced;
@@ -71,6 +72,7 @@ pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,
     render_clip_names, sanitise_name, stem_file_path, stems_folder,
 };
+pub use orphans::untracked_audio;
 pub use reconcile::{
     Action, AlbumDesired, ArtifactKind, Desired, DesiredArtifact, DesiredStem, LocalFile, Plan,
     PlaylistDesired, SourceMode, SourceStatus, album_desired, deletion_allowed,

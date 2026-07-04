@@ -349,6 +349,32 @@ pub fn delete_prompt(paths: &[String], show: usize) -> String {
     out
 }
 
+/// A read-only note listing audio files on disk that no manifest entry tracks.
+///
+/// These are orphans: files moved or renamed by hand (their recorded path is
+/// re-downloaded and the moved copy left behind), or leftovers from an older
+/// layout. The tool never matches an orphan back to a clip, renames it, or
+/// deletes it, so it can neither mislabel nor lose data; the report only
+/// surfaces them so a dry run makes hand edits visible (#146). Up to `SHOW`
+/// paths are listed, then a count of any remainder.
+pub fn orphan_report(orphans: &[String]) -> String {
+    const SHOW: usize = 20;
+    let mut out = format!(
+        "note: {} untracked audio file(s) on disk, not touched (moved or renamed by hand, or from an older layout):\n",
+        orphans.len()
+    );
+    for path in orphans.iter().take(SHOW) {
+        out.push_str(&format!("  {path}\n"));
+    }
+    if orphans.len() > SHOW {
+        out.push_str(&format!("  ... and {} more\n", orphans.len() - SHOW));
+    }
+    out.push_str(
+        "  Move each into place or delete it; a re-sync re-downloads any a clip still needs.",
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +556,24 @@ mod tests {
         assert!(
             text.contains("total          2"),
             "total equals plan length: {text}"
+        );
+    }
+
+    #[test]
+    fn orphan_report_lists_paths_and_truncates() {
+        let few = vec!["Moved/a.flac".to_owned(), "b.mp3".to_owned()];
+        let text = orphan_report(&few);
+        assert!(text.contains("2 untracked audio file(s)"));
+        assert!(text.contains("  Moved/a.flac"));
+        assert!(text.contains("  b.mp3"));
+        assert!(!text.contains("more"), "no remainder line for a short list");
+
+        let many: Vec<String> = (0..25).map(|i| format!("orphan{i:02}.flac")).collect();
+        let text = orphan_report(&many);
+        assert!(text.contains("25 untracked audio file(s)"));
+        assert!(
+            text.contains("... and 5 more"),
+            "shows 20, then a remainder"
         );
     }
 
