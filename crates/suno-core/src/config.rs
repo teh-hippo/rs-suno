@@ -392,7 +392,7 @@ impl Config {
             .or(self.defaults.format)
             .unwrap_or(AudioFormat::Flac);
 
-        let concurrency = resolve_u32(
+        let concurrency = resolve_parsed(
             flags.concurrency,
             env_val("CONCURRENCY"),
             src.and_then(|s| s.concurrency),
@@ -402,7 +402,7 @@ impl Config {
             "CONCURRENCY",
         )?;
 
-        let retries = resolve_u32(
+        let retries = resolve_parsed(
             flags.retries,
             env_val("RETRIES"),
             src.and_then(|s| s.retries),
@@ -412,7 +412,7 @@ impl Config {
             "RETRIES",
         )?;
 
-        let min_newest = resolve_u32(
+        let min_newest = resolve_parsed(
             flags.min_newest,
             env_val("MIN_NEWEST"),
             src.and_then(|s| s.min_newest),
@@ -422,7 +422,7 @@ impl Config {
             "MIN_NEWEST",
         )?;
 
-        let animated_covers = resolve_bool(
+        let animated_covers = resolve_parsed(
             flags.animated_covers,
             env_val("ANIMATED_COVERS"),
             src.and_then(|s| s.animated_covers),
@@ -432,7 +432,7 @@ impl Config {
             "ANIMATED_COVERS",
         )?;
 
-        let details_sidecar = resolve_bool(
+        let details_sidecar = resolve_parsed(
             flags.details_sidecar,
             env_val("DETAILS_SIDECAR"),
             src.and_then(|s| s.details_sidecar),
@@ -442,7 +442,7 @@ impl Config {
             "DETAILS_SIDECAR",
         )?;
 
-        let lyrics_sidecar = resolve_bool(
+        let lyrics_sidecar = resolve_parsed(
             flags.lyrics_sidecar,
             env_val("LYRICS_SIDECAR"),
             src.and_then(|s| s.lyrics_sidecar),
@@ -452,7 +452,7 @@ impl Config {
             "LYRICS_SIDECAR",
         )?;
 
-        let lrc_sidecar = resolve_bool(
+        let lrc_sidecar = resolve_parsed(
             flags.lrc_sidecar,
             env_val("LRC_SIDECAR"),
             src.and_then(|s| s.lrc_sidecar),
@@ -462,7 +462,7 @@ impl Config {
             "LRC_SIDECAR",
         )?;
 
-        let video_mp4 = resolve_bool(
+        let video_mp4 = resolve_parsed(
             flags.video_mp4,
             env_val("VIDEO_MP4"),
             src.and_then(|s| s.video_mp4),
@@ -472,7 +472,7 @@ impl Config {
             "VIDEO_MP4",
         )?;
 
-        let download_stems = resolve_bool(
+        let download_stems = resolve_parsed(
             flags.download_stems,
             env_val("DOWNLOAD_STEMS"),
             src.and_then(|s| s.download_stems),
@@ -524,7 +524,7 @@ impl Config {
             "ANIMATED_COVER_QUALITY",
             0..=100,
         )?;
-        let animated_cover_max_fps = resolve_u32(
+        let animated_cover_max_fps = resolve_parsed(
             flags.animated_cover_max_fps,
             env_val("ANIMATED_COVER_MAX_FPS"),
             src.and_then(|s| s.animated_cover_max_fps),
@@ -641,35 +641,18 @@ impl Config {
     }
 }
 
-fn resolve_u32(
-    flag: Option<u32>,
+fn resolve_parsed<T>(
+    flag: Option<T>,
     env_str: Option<&str>,
-    src: Option<u32>,
-    acc: Option<u32>,
-    defaults: Option<u32>,
-    compiled: u32,
+    src: Option<T>,
+    acc: Option<T>,
+    defaults: Option<T>,
+    compiled: T,
     name: &str,
-) -> Result<u32> {
-    if let Some(v) = flag {
-        return Ok(v);
-    }
-    if let Some(s) = env_str {
-        return s
-            .parse()
-            .map_err(|_| Error::Config(format!("invalid {name}: '{s}'")));
-    }
-    Ok(src.or(acc).or(defaults).unwrap_or(compiled))
-}
-
-fn resolve_bool(
-    flag: Option<bool>,
-    env_str: Option<&str>,
-    src: Option<bool>,
-    acc: Option<bool>,
-    defaults: Option<bool>,
-    compiled: bool,
-    name: &str,
-) -> Result<bool> {
+) -> Result<T>
+where
+    T: FromStr + Copy,
+{
     if let Some(v) = flag {
         return Ok(v);
     }
