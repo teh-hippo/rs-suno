@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use suno_core::{
     ClerkAuth, Config, EffectiveSettings, FlagOverrides, SunoClient, TOKEN_EXPIRY_WARN_DAYS,
-    TokenExpiry,
+    TokenExpiry, config::label_to_env,
 };
 
 use crate::cli::args::GlobalArgs;
@@ -347,10 +347,6 @@ fn exit_code_for_core_error(err: &suno_core::Error) -> ExitCode {
         }
         _ => ExitCode::General,
     }
-}
-
-fn label_to_env(label: &str) -> String {
-    label.to_ascii_uppercase().replace('-', "_")
 }
 
 fn present(yes: bool) -> &'static str {
