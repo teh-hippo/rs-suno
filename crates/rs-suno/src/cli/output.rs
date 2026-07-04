@@ -198,6 +198,20 @@ fn action_line(action: &Action, failed_ids: &HashSet<&str>) -> String {
                 artifact_label(*kind)
             ),
         ),
+        Action::MoveArtifact {
+            kind,
+            from,
+            to,
+            owner_id,
+            ..
+        } => mark(
+            owner_id,
+            format!(
+                "artifact  {}  {}  {from} -> {to}",
+                short_id(owner_id),
+                artifact_label(*kind)
+            ),
+        ),
         Action::DeleteArtifact {
             kind,
             path,
@@ -215,6 +229,16 @@ fn action_line(action: &Action, failed_ids: &HashSet<&str>) -> String {
         } => mark(
             clip_id,
             format!("stem      {}  {}  -> {path}", short_id(clip_id), key),
+        ),
+        Action::MoveStem {
+            clip_id,
+            from,
+            to,
+            key,
+            ..
+        } => mark(
+            clip_id,
+            format!("stem      {}  {}  {from} -> {to}", short_id(clip_id), key),
         ),
         Action::DeleteStem { clip_id, path, key } => mark(
             clip_id,
@@ -536,6 +560,7 @@ mod tests {
                 Action::DeleteArtifact { .. } => outcome.artifacts_deleted += 1,
                 Action::WriteStem { .. } => outcome.artifacts_written += 1,
                 Action::DeleteStem { .. } => outcome.artifacts_deleted += 1,
+                Action::MoveArtifact { .. } | Action::MoveStem { .. } => outcome.renamed += 1,
             }
         }
         outcome

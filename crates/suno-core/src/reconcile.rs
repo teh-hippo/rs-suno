@@ -309,6 +309,23 @@ pub enum Action {
         owner_id: String,
         content: Option<String>,
     },
+    /// Relocate a fetched sidecar from `from` to `to` without re-fetching, when
+    /// only its path drifts (a retitle) and its content hash is unchanged.
+    ///
+    /// The executor renames the existing file (a local move), so a retitle no
+    /// longer re-downloads a cover or re-transcodes an animated WebP. If the old
+    /// file has vanished by commit time, or the rename fails, the executor falls
+    /// back to the ordinary fetch-and-write at `to` using `source_url`. Never
+    /// emitted for inline-content kinds (playlists, text), where a rewrite from
+    /// the in-hand bytes is already free.
+    MoveArtifact {
+        kind: ArtifactKind,
+        from: String,
+        to: String,
+        source_url: String,
+        hash: String,
+        owner_id: String,
+    },
     /// Delete an external sidecar artifact (a removed kind, or a co-deleted
     /// sidecar of a clip whose audio is being deleted).
     ///
@@ -334,6 +351,23 @@ pub enum Action {
         key: String,
         stem_id: String,
         path: String,
+        source_url: String,
+        format: StemFormat,
+        hash: String,
+    },
+    /// Relocate a stem file from `from` to `to` without re-rendering, when only
+    /// its path drifts (a retitle) and its content hash is unchanged.
+    ///
+    /// The executor renames the existing file, so a retitle no longer re-renders
+    /// a WAV stem through `convert_wav` or re-fetches an MP3 stem. If the old
+    /// file has vanished by commit time, or the rename fails, the executor falls
+    /// back to the ordinary fetch-and-write at `to`.
+    MoveStem {
+        clip_id: String,
+        key: String,
+        stem_id: String,
+        from: String,
+        to: String,
         source_url: String,
         format: StemFormat,
         hash: String,
@@ -419,6 +453,18 @@ impl Plan {
         self.count(|a| matches!(a, Action::WriteStem { .. }))
     }
 
+    /// Number of [`Action::MoveArtifact`] actions (a sidecar relocated without a
+    /// re-fetch).
+    pub fn artifact_moves(&self) -> usize {
+        self.count(|a| matches!(a, Action::MoveArtifact { .. }))
+    }
+
+    /// Number of [`Action::MoveStem`] actions (a stem relocated without a
+    /// re-render).
+    pub fn stem_moves(&self) -> usize {
+        self.count(|a| matches!(a, Action::MoveStem { .. }))
+    }
+
     /// Number of [`Action::DeleteStem`] actions.
     pub fn stem_deletes(&self) -> usize {
         self.count(|a| matches!(a, Action::DeleteStem { .. }))
@@ -472,7 +518,7 @@ pub fn reconcile(
             co_delete_stems(d.clip.id.as_str(), manifest, can_delete, &mut actions);
         } else {
             plan_clip_artifacts(d, manifest, local, can_delete, &mut actions);
-            plan_clip_stems(d, manifest, can_delete, &mut actions);
+            plan_clip_stems(d, manifest, local, can_delete, &mut actions);
         }
     }
 
@@ -754,10 +800,11 @@ fn plan_clip_artifacts(
         }
         // A write is needed when the manifest lacks the sidecar, its bytes drift
         // (hash), the clip moved so the sidecar belongs at a new path, or the
-        // tracked file is absent (or empty) on disk. On a move the executor's
-        // WriteArtifact relocates the sidecar: it writes the new path, then
-        // removes the copy left at the previously tracked path.
-        let needs_write = match entry.and_then(|e| manifest_artifact_by_kind(e, artifact.kind)) {
+        // tracked file is absent (or empty) on disk. A pure relocation (same
+        // bytes, new path, old file present) is emitted as a MoveArtifact below,
+        // which renames rather than re-fetching (#141).
+        let state = entry.and_then(|e| manifest_artifact_by_kind(e, artifact.kind));
+        let needs_write = match state {
             None => true,
             Some(state) => {
                 state.hash != artifact.hash
@@ -768,14 +815,37 @@ fn plan_clip_artifacts(
             }
         };
         if needs_write {
-            out.push(Action::WriteArtifact {
-                kind: artifact.kind,
-                path: artifact.path.clone(),
-                source_url: artifact.source_url.clone(),
-                hash: artifact.hash.clone(),
-                owner_id: owner_id.to_string(),
-                content: artifact.content.clone(),
-            });
+            // Downgrade a pure relocation to a rename: only the path drifted (a
+            // retitle), the bytes are unchanged, the kind is fetched (an inline
+            // rewrite is already free), and the old file is confirmed present, so
+            // move it rather than re-fetch or re-transcode (#141). The executor
+            // falls back to a fetch-and-write if the old file has since vanished.
+            if let Some(state) = state
+                && state.hash == artifact.hash
+                && state.path != artifact.path
+                && artifact.content.is_none()
+                && local
+                    .get(&state.path)
+                    .is_some_and(|f| f.exists && f.size > 0)
+            {
+                out.push(Action::MoveArtifact {
+                    kind: artifact.kind,
+                    from: state.path.clone(),
+                    to: artifact.path.clone(),
+                    source_url: artifact.source_url.clone(),
+                    hash: artifact.hash.clone(),
+                    owner_id: owner_id.to_string(),
+                });
+            } else {
+                out.push(Action::WriteArtifact {
+                    kind: artifact.kind,
+                    path: artifact.path.clone(),
+                    source_url: artifact.source_url.clone(),
+                    hash: artifact.hash.clone(),
+                    owner_id: owner_id.to_string(),
+                    content: artifact.content.clone(),
+                });
+            }
         }
     }
 
@@ -868,14 +938,21 @@ fn delete_stem_action(
 /// "no stems". When `d.stems` is `Some(set)`, the set is authoritative:
 ///
 /// - each desired stem the manifest lacks, whose stored hash drifts, or whose
-///   stored path drifts (the song moved), is written; and
+///   stored path drifts (the song moved), is written or, when only the path
+///   drifts and the old file is present, relocated with a rename (#141); and
 /// - each tracked stem whose key is absent from the authoritative set is
 ///   delete-reconciled through the shared [`delete_stem_action`] gate, unless
 ///   the clip is protected this run (private or copy-held).
 ///
 /// A protected clip keeps every stem regardless of the persisted `preserve`
 /// marker (which may still be false on the run that first protects the clip).
-fn plan_clip_stems(d: &Desired, manifest: &Manifest, can_delete: bool, out: &mut Vec<Action>) {
+fn plan_clip_stems(
+    d: &Desired,
+    manifest: &Manifest,
+    local: &HashMap<String, LocalFile>,
+    can_delete: bool,
+    out: &mut Vec<Action>,
+) {
     let Some(desired_stems) = &d.stems else {
         return;
     };
@@ -883,20 +960,44 @@ fn plan_clip_stems(d: &Desired, manifest: &Manifest, can_delete: bool, out: &mut
     let entry = manifest.get(clip_id);
 
     for stem in desired_stems {
-        let needs_write = match entry.and_then(|e| e.stems.get(&stem.key)) {
+        let state = entry.and_then(|e| e.stems.get(&stem.key));
+        let needs_write = match state {
             None => true,
             Some(state) => state.hash != stem.hash || state.path != stem.path,
         };
         if needs_write {
-            out.push(Action::WriteStem {
-                clip_id: clip_id.to_string(),
-                key: stem.key.clone(),
-                stem_id: stem.stem_id.clone(),
-                path: stem.path.clone(),
-                source_url: stem.source_url.clone(),
-                format: stem.format,
-                hash: stem.hash.clone(),
-            });
+            // Downgrade a pure relocation to a rename: only the path drifted and
+            // the bytes are unchanged, so move the raw stem rather than re-render
+            // a WAV via convert_wav or re-fetch an MP3 (#141). The executor falls
+            // back to a fetch-and-write if the old file has since vanished.
+            if let Some(state) = state
+                && state.hash == stem.hash
+                && state.path != stem.path
+                && local
+                    .get(&state.path)
+                    .is_some_and(|f| f.exists && f.size > 0)
+            {
+                out.push(Action::MoveStem {
+                    clip_id: clip_id.to_string(),
+                    key: stem.key.clone(),
+                    stem_id: stem.stem_id.clone(),
+                    from: state.path.clone(),
+                    to: stem.path.clone(),
+                    source_url: stem.source_url.clone(),
+                    format: stem.format,
+                    hash: stem.hash.clone(),
+                });
+            } else {
+                out.push(Action::WriteStem {
+                    clip_id: clip_id.to_string(),
+                    key: stem.key.clone(),
+                    stem_id: stem.stem_id.clone(),
+                    path: stem.path.clone(),
+                    source_url: stem.source_url.clone(),
+                    format: stem.format,
+                    hash: stem.hash.clone(),
+                });
+            }
         }
     }
 
@@ -1003,11 +1104,12 @@ fn rep_key(d: &Desired) -> (&str, &str, &str, u8) {
     )
 }
 
-/// Downgrade any delete whose path is also written by a `Download`,
-/// `Reformat`, `Rename`, `WriteArtifact`, or `WriteStem` this run, so a deletion
-/// can never clobber a file the same plan just produced. This covers the audio
-/// [`Action::Delete`], every artifact [`Action::DeleteArtifact`] class, and
-/// every [`Action::DeleteStem`].
+/// Downgrade any delete whose path is also written or relocated to by a
+/// `Download`, `Reformat`, `Rename`, `WriteArtifact`, `WriteStem`,
+/// `MoveArtifact`, or `MoveStem` this run, so a deletion can never clobber a
+/// file the same plan just produced. This covers the audio [`Action::Delete`],
+/// every artifact [`Action::DeleteArtifact`] class, and every
+/// [`Action::DeleteStem`].
 fn suppress_path_aliasing(actions: &mut [Action]) {
     let targets: BTreeSet<String> = actions
         .iter()
@@ -1016,7 +1118,9 @@ fn suppress_path_aliasing(actions: &mut [Action]) {
             | Action::Reformat { path, .. }
             | Action::WriteArtifact { path, .. }
             | Action::WriteStem { path, .. } => Some(path.clone()),
-            Action::Rename { to, .. } => Some(to.clone()),
+            Action::Rename { to, .. }
+            | Action::MoveArtifact { to, .. }
+            | Action::MoveStem { to, .. } => Some(to.clone()),
             _ => None,
         })
         .collect();
@@ -2530,10 +2634,11 @@ mod tests {
                 Action::Reformat { clip, .. } => clip.id.as_str(),
                 Action::Rename { to, .. } => to.as_str(),
                 Action::WriteArtifact { owner_id, .. }
-                | Action::DeleteArtifact { owner_id, .. } => owner_id.as_str(),
-                Action::WriteStem { clip_id, .. } | Action::DeleteStem { clip_id, .. } => {
-                    clip_id.as_str()
-                }
+                | Action::DeleteArtifact { owner_id, .. }
+                | Action::MoveArtifact { owner_id, .. } => owner_id.as_str(),
+                Action::WriteStem { clip_id, .. }
+                | Action::DeleteStem { clip_id, .. }
+                | Action::MoveStem { clip_id, .. } => clip_id.as_str(),
             })
             .collect();
         assert_eq!(ids, ["a", "b", "c", "z"]);
@@ -3052,6 +3157,206 @@ mod tests {
         } else {
             panic!("expected a WriteArtifact");
         }
+    }
+
+    #[test]
+    fn fetched_sidecar_path_drift_emits_move() {
+        // #141: a fetched cover whose bytes are unchanged but whose path drifted
+        // (a retitle) is relocated with a rename rather than re-fetched.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.cover_jpg = Some(cover("old/cover.jpg", "arthash"));
+        manifest.insert("a", e);
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "new/cover.jpg",
+                "https://art/large.jpg",
+                "arthash",
+            )],
+        )];
+        let local: HashMap<String, LocalFile> = [
+            ("a".to_string(), present(100)),
+            ("old/cover.jpg".to_string(), present(50)),
+        ]
+        .into_iter()
+        .collect();
+        let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+        assert_eq!(plan.artifact_moves(), 1);
+        assert_eq!(plan.artifact_writes(), 0);
+        assert!(plan.actions.contains(&Action::MoveArtifact {
+            kind: ArtifactKind::CoverJpg,
+            from: "old/cover.jpg".to_string(),
+            to: "new/cover.jpg".to_string(),
+            source_url: "https://art/large.jpg".to_string(),
+            hash: "arthash".to_string(),
+            owner_id: "a".to_string(),
+        }));
+    }
+
+    #[test]
+    fn sidecar_hash_drift_emits_write_not_move() {
+        // Different bytes must re-fetch, even when the path also drifted.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.cover_jpg = Some(cover("old/cover.jpg", "oldhash"));
+        manifest.insert("a", e);
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "new/cover.jpg",
+                "https://art/large.jpg",
+                "newhash",
+            )],
+        )];
+        let local: HashMap<String, LocalFile> = [
+            ("a".to_string(), present(100)),
+            ("old/cover.jpg".to_string(), present(50)),
+        ]
+        .into_iter()
+        .collect();
+        let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+        assert_eq!(plan.artifact_moves(), 0);
+        assert_eq!(plan.artifact_writes(), 1);
+    }
+
+    #[test]
+    fn inline_sidecar_path_drift_stays_a_write() {
+        // Inline-content kinds (text) rewrite from the in-hand bytes, so a move
+        // buys nothing: a path drift stays a WriteArtifact even at an equal hash.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.lyrics_txt = Some(cover("old/a.lyrics.txt", &content_hash("words\n")));
+        manifest.insert("a", e);
+        let d = vec![desired_arts(
+            "a",
+            vec![text_art(
+                ArtifactKind::LyricsTxt,
+                "new/a.lyrics.txt",
+                "words\n",
+            )],
+        )];
+        let local: HashMap<String, LocalFile> = [
+            ("a".to_string(), present(100)),
+            ("old/a.lyrics.txt".to_string(), present(50)),
+        ]
+        .into_iter()
+        .collect();
+        let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+        assert_eq!(plan.artifact_moves(), 0);
+        assert_eq!(plan.artifact_writes(), 1);
+    }
+
+    #[test]
+    fn sidecar_move_downgrades_to_write_when_old_file_absent() {
+        // Same bytes and a path drift, but the old file is gone: fetch fresh at
+        // the new path (a self-heal), never emit a move that cannot rename.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.cover_jpg = Some(cover("old/cover.jpg", "arthash"));
+        manifest.insert("a", e);
+        let d = vec![desired_arts(
+            "a",
+            vec![art(
+                ArtifactKind::CoverJpg,
+                "new/cover.jpg",
+                "https://art/large.jpg",
+                "arthash",
+            )],
+        )];
+        let local: HashMap<String, LocalFile> = [
+            ("a".to_string(), present(100)),
+            (
+                "old/cover.jpg".to_string(),
+                LocalFile {
+                    exists: false,
+                    size: 0,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+        assert_eq!(plan.artifact_moves(), 0);
+        assert_eq!(plan.artifact_writes(), 1);
+    }
+
+    #[test]
+    fn move_target_suppresses_a_colliding_delete() {
+        // A MoveArtifact to a path another manifest entry is having deleted must
+        // downgrade that delete, so relocation never clobbers the relocated file.
+        let mut manifest = Manifest::new();
+        let mut a = entry("a.flac", AudioFormat::Flac, "m", "art");
+        a.cover_jpg = Some(cover("old/cover.jpg", "arthash"));
+        manifest.insert("a", a);
+        // b holds a cover at the path a is moving TO; b's cover is a removed kind
+        // this run (feature toggled), so it would be delete-reconciled.
+        let mut b = entry("b.flac", AudioFormat::Flac, "m", "art");
+        b.details_txt = Some(cover("new/cover.jpg", "bh"));
+        manifest.insert("b", b);
+        let d = vec![
+            desired_arts(
+                "a",
+                vec![art(
+                    ArtifactKind::CoverJpg,
+                    "new/cover.jpg",
+                    "https://art/large.jpg",
+                    "arthash",
+                )],
+            ),
+            desired_arts("b", vec![]),
+        ];
+        let local: HashMap<String, LocalFile> = [
+            ("a".to_string(), present(100)),
+            ("b".to_string(), present(100)),
+            ("old/cover.jpg".to_string(), present(50)),
+            ("new/cover.jpg".to_string(), present(50)),
+        ]
+        .into_iter()
+        .collect();
+        let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+        assert_eq!(plan.artifact_moves(), 1);
+        // The colliding delete of new/cover.jpg is suppressed.
+        assert!(!plan.actions.iter().any(|a| matches!(
+            a,
+            Action::DeleteArtifact { path, .. } if path == "new/cover.jpg"
+        )));
+    }
+
+    #[test]
+    fn stem_path_drift_emits_move() {
+        // #141: a stem whose path drifts at an equal hash is relocated with a
+        // rename rather than re-rendered or re-fetched.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry_with_stems("a", &[("voc", "old.stems/voc.mp3", "h1")]),
+        );
+        let d = vec![stem_desired(
+            "a",
+            Some(vec![dstem("voc", "new.stems/voc.mp3", "h1")]),
+        )];
+        let local: HashMap<String, LocalFile> = [
+            ("a".to_string(), present(100)),
+            ("old.stems/voc.mp3".to_string(), present(50)),
+        ]
+        .into_iter()
+        .collect();
+        let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+        assert_eq!(plan.stem_moves(), 1);
+        assert_eq!(plan.stem_writes(), 0);
+        assert!(plan.actions.contains(&Action::MoveStem {
+            clip_id: "a".to_string(),
+            key: "voc".to_string(),
+            stem_id: "voc".to_string(),
+            from: "old.stems/voc.mp3".to_string(),
+            to: "new.stems/voc.mp3".to_string(),
+            source_url: "https://cdn1.suno.ai/voc.mp3".to_string(),
+            format: StemFormat::Mp3,
+            hash: "h1".to_string(),
+        }));
     }
 
     #[test]

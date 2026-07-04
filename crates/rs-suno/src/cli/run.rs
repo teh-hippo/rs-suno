@@ -2048,6 +2048,13 @@ fn stat_manifest(
         {
             map.entry(path.to_owned()).or_insert_with(|| stat(path));
         }
+
+        // Stem files, keyed by their stored path, so a pure stem relocation can
+        // be gated on the old file being present (#141).
+        for state in entry.stems.values().filter(|s| !s.path.is_empty()) {
+            map.entry(state.path.clone())
+                .or_insert_with(|| stat(&state.path));
+        }
     }
 
     // Folder art paths, keyed by their stored path.

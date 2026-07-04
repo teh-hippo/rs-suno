@@ -430,7 +430,9 @@ fn written_path(action: &Action) -> Option<&str> {
         | Action::Reformat { path, .. }
         | Action::WriteArtifact { path, .. }
         | Action::WriteStem { path, .. } => Some(path),
-        Action::Rename { to, .. } => Some(to),
+        Action::Rename { to, .. }
+        | Action::MoveArtifact { to, .. }
+        | Action::MoveStem { to, .. } => Some(to),
         _ => None,
     }
 }
@@ -703,6 +705,29 @@ where
                 path,
                 owner_id,
             } => self.delete_artifact(manifest, albums, playlists, *kind, path, owner_id),
+            Action::MoveArtifact {
+                kind,
+                from,
+                to,
+                source_url,
+                hash,
+                owner_id,
+            } => {
+                self.move_artifact(
+                    manifest,
+                    albums,
+                    playlists,
+                    *kind,
+                    from,
+                    to,
+                    source_url,
+                    hash,
+                    owner_id,
+                    tracked_paths,
+                    committed,
+                )
+                .await
+            }
             Action::WriteStem {
                 clip_id,
                 key,
@@ -728,6 +753,31 @@ where
             }
             Action::DeleteStem { clip_id, key, path } => {
                 self.delete_stem(manifest, clip_id, key, path)
+            }
+            Action::MoveStem {
+                clip_id,
+                key,
+                stem_id,
+                from,
+                to,
+                source_url,
+                format,
+                hash,
+            } => {
+                self.move_stem(
+                    client_lock,
+                    manifest,
+                    clip_id,
+                    key,
+                    stem_id,
+                    from,
+                    to,
+                    source_url,
+                    *format,
+                    hash,
+                    committed,
+                )
+                .await
             }
         }
     }
@@ -1085,7 +1135,89 @@ where
         Ok(Effect::ArtifactWritten)
     }
 
-    /// Produce a sidecar's bytes from its source, branching on kind.
+    /// Relocate a fetched per-clip sidecar with a local rename, falling back to a
+    /// fetch-and-write when the move is unsafe or the old file has vanished.
+    ///
+    /// Reconcile downgrades a pure path drift (same bytes, new path, old file
+    /// present, fetched kind) to a `MoveArtifact`, so a retitle renames the file
+    /// rather than re-downloading a cover or re-transcoding an animated WebP
+    /// (#141). The in-place rename is taken only when `from` is this slot's alone
+    /// to give up (no other tracked slot references it and no committed write has
+    /// placed a file there); otherwise, or if the rename fails, the ordinary
+    /// [`write_artifact`](Self::write_artifact) fetches fresh bytes and runs the
+    /// gated old-path cleanup, so a swap or co-reference is handled exactly as
+    /// before.
+    #[allow(clippy::too_many_arguments)]
+    async fn move_artifact(
+        &self,
+        manifest: &mut Manifest,
+        albums: &mut BTreeMap<String, AlbumArt>,
+        playlists: &mut BTreeMap<String, PlaylistState>,
+        kind: ArtifactKind,
+        from: &str,
+        to: &str,
+        source_url: &str,
+        hash: &str,
+        owner_id: &str,
+        tracked_paths: &mut HashMap<String, u32>,
+        committed: &BTreeSet<String>,
+    ) -> Result<Effect, Fail> {
+        // A per-clip sidecar needs its owning clip's audio present, exactly as
+        // write_artifact requires.
+        if is_per_clip_kind(kind) && manifest.get(owner_id).is_none() {
+            return Ok(Effect::Skipped);
+        }
+        // Relocate in place only when `from` is ours alone to give up: no other
+        // tracked slot still references it (a prior failed swap can share a path)
+        // and no committed write this run has already placed a file there.
+        // Otherwise the fetch-and-write fallback copies fresh bytes and runs the
+        // gated old-path cleanup.
+        let exclusive =
+            tracked_paths.get(from).is_none_or(|count| *count <= 1) && !committed.contains(from);
+        if from != to && exclusive {
+            match self.fs.rename(from, to) {
+                Ok(()) => {
+                    if let Some(count) = tracked_paths.get_mut(from) {
+                        *count = count.saturating_sub(1);
+                    }
+                    if let Some(entry) = manifest.entries.get_mut(owner_id) {
+                        set_manifest_artifact(
+                            entry,
+                            kind,
+                            Some(ArtifactState {
+                                path: to.to_owned(),
+                                hash: hash.to_owned(),
+                            }),
+                        );
+                    }
+                    return Ok(Effect::Renamed);
+                }
+                Err(err) if err.is_out_of_space() => {
+                    return Err(disk_fail(
+                        owner_id,
+                        "disk full: no space left to move sidecar",
+                    ));
+                }
+                // The old file has vanished, or the rename is unsupported: fall
+                // through to a fetch-and-write at `to`.
+                Err(_) => {}
+            }
+        }
+        self.write_artifact(
+            manifest,
+            albums,
+            playlists,
+            kind,
+            to,
+            source_url,
+            hash,
+            owner_id,
+            None,
+            tracked_paths,
+            committed,
+        )
+        .await
+    }
     ///
     /// An animated cover — a per-clip [`CoverWebp`](ArtifactKind::CoverWebp) or an
     /// album [`FolderWebp`](ArtifactKind::FolderWebp) — fetches the clip's
@@ -1273,6 +1405,71 @@ where
             );
         }
         Ok(Effect::ArtifactWritten)
+    }
+
+    /// Relocate a stem with a local rename, falling back to a fetch-and-write
+    /// when the move is unsafe or the old file has vanished (#141).
+    ///
+    /// Reconcile downgrades a pure stem path drift to a `MoveStem`, so a retitle
+    /// renames the raw stem rather than re-rendering a WAV through `convert_wav`
+    /// or re-fetching an MP3. Stems carry no co-reference machinery (the
+    /// [`write_stem`](Self::write_stem) cleanup only guards on the committed set),
+    /// so the in-place rename is taken unless a committed write already holds
+    /// `from`; otherwise the fetch-and-write fallback re-renders at `to`.
+    #[allow(clippy::too_many_arguments)]
+    async fn move_stem(
+        &self,
+        client_lock: &ClientLock<'_, C>,
+        manifest: &mut Manifest,
+        clip_id: &str,
+        key: &str,
+        stem_id: &str,
+        from: &str,
+        to: &str,
+        source_url: &str,
+        format: StemFormat,
+        hash: &str,
+        committed: &BTreeSet<String>,
+    ) -> Result<Effect, Fail> {
+        if manifest.get(clip_id).is_none() {
+            return Ok(Effect::Skipped);
+        }
+        if from != to && !committed.contains(from) {
+            match self.fs.rename(from, to) {
+                Ok(()) => {
+                    if let Some(entry) = manifest.entries.get_mut(clip_id) {
+                        set_manifest_stem(
+                            entry,
+                            key,
+                            Some(ArtifactState {
+                                path: to.to_owned(),
+                                hash: hash.to_owned(),
+                            }),
+                        );
+                    }
+                    return Ok(Effect::Renamed);
+                }
+                Err(err) if err.is_out_of_space() => {
+                    return Err(disk_fail(clip_id, "disk full: no space left to move stem"));
+                }
+                // The old file has vanished, or the rename is unsupported: fall
+                // through to a fetch-and-write at `to`.
+                Err(_) => {}
+            }
+        }
+        self.write_stem(
+            client_lock,
+            manifest,
+            clip_id,
+            key,
+            stem_id,
+            to,
+            source_url,
+            format,
+            hash,
+            committed,
+        )
+        .await
     }
 
     /// Resolve a stem's RAW bytes in its native container, never transcoding.
@@ -3982,6 +4179,197 @@ mod tests {
         assert_eq!(
             manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().path,
             "a/cover.jpg"
+        );
+    }
+
+    #[test]
+    fn cover_move_renames_without_fetching() {
+        // #141: a MoveArtifact relocates the cover with a local rename. The
+        // ScriptedHttp has no route, so any fetch would fail the run; a clean
+        // outcome proves the bytes were renamed, not re-downloaded.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.mp3", AudioFormat::Mp3);
+        e.cover_jpg = Some(ArtifactState {
+            path: "old/cover.jpg".to_owned(),
+            hash: "h".to_owned(),
+        });
+        manifest.insert("a", e);
+        let fs = MemFs::new().with_file("old/cover.jpg", b"JPGBYTES".to_vec());
+        let plan = Plan {
+            actions: vec![Action::MoveArtifact {
+                kind: ArtifactKind::CoverJpg,
+                from: "old/cover.jpg".to_owned(),
+                to: "new/cover.jpg".to_owned(),
+                source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                hash: "h".to_owned(),
+                owner_id: "a".to_owned(),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(outcome.renamed, 1, "counted as a rename, not a write");
+        // Renamed in place: the new path carries the ORIGINAL bytes, old is gone.
+        assert_eq!(fs.read_file("new/cover.jpg").unwrap(), b"JPGBYTES");
+        assert!(!fs.exists("old/cover.jpg"));
+        assert_eq!(
+            manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().path,
+            "new/cover.jpg"
+        );
+    }
+
+    #[test]
+    fn cover_move_falls_back_to_fetch_when_old_file_missing() {
+        // #141: the old file vanished before commit, so the rename fails and the
+        // executor fetches fresh bytes at the new path rather than failing.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.mp3", AudioFormat::Mp3);
+        e.cover_jpg = Some(ArtifactState {
+            path: "old/cover.jpg".to_owned(),
+            hash: "h".to_owned(),
+        });
+        manifest.insert("a", e);
+        let fs = MemFs::new(); // old/cover.jpg is absent.
+        let http = ScriptedHttp::new().route("a/large.jpg", Reply::ok(b"FETCHED".to_vec()));
+        let plan = Plan {
+            actions: vec![Action::MoveArtifact {
+                kind: ArtifactKind::CoverJpg,
+                from: "old/cover.jpg".to_owned(),
+                to: "new/cover.jpg".to_owned(),
+                source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                hash: "h".to_owned(),
+                owner_id: "a".to_owned(),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(fs.read_file("new/cover.jpg").unwrap(), b"FETCHED");
+        assert_eq!(
+            manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().path,
+            "new/cover.jpg"
+        );
+    }
+
+    #[test]
+    fn cover_move_falls_back_when_source_co_referenced() {
+        // Two clips' covers share old/cover.jpg after a prior failed swap. A move
+        // for `a` must NOT rename the shared file away (that would strand `b`); it
+        // falls back to a fetch, and `b`'s file survives.
+        let mut manifest = Manifest::new();
+        let mut a = entry("a.mp3", AudioFormat::Mp3);
+        a.cover_jpg = Some(ArtifactState {
+            path: "old/cover.jpg".to_owned(),
+            hash: "h".to_owned(),
+        });
+        manifest.insert("a", a);
+        let mut b = entry("b.mp3", AudioFormat::Mp3);
+        b.cover_jpg = Some(ArtifactState {
+            path: "old/cover.jpg".to_owned(),
+            hash: "h".to_owned(),
+        });
+        manifest.insert("b", b);
+        let fs = MemFs::new().with_file("old/cover.jpg", b"SHARED".to_vec());
+        let http = ScriptedHttp::new().route("a/large.jpg", Reply::ok(b"FETCHED-A".to_vec()));
+        // Only `a` moves this run: old/cover.jpg -> a/cover.jpg.
+        let plan = Plan {
+            actions: vec![Action::MoveArtifact {
+                kind: ArtifactKind::CoverJpg,
+                from: "old/cover.jpg".to_owned(),
+                to: "a/cover.jpg".to_owned(),
+                source_url: "https://art.suno.ai/a/large.jpg".to_owned(),
+                hash: "h".to_owned(),
+                owner_id: "a".to_owned(),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        // `a` got a fresh fetched copy; `b`'s shared file is untouched.
+        assert_eq!(fs.read_file("a/cover.jpg").unwrap(), b"FETCHED-A");
+        assert_eq!(
+            fs.read_file("old/cover.jpg").unwrap(),
+            b"SHARED",
+            "the co-referenced file must survive"
+        );
+    }
+
+    #[test]
+    fn stem_move_renames_without_refetch() {
+        // #141: a MoveStem relocates the raw stem with a rename; no route is set,
+        // so a clean outcome proves it did not re-render or re-fetch.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac);
+        e.stems.insert(
+            "voc".to_owned(),
+            ArtifactState {
+                path: "old.stems/voc.mp3".to_owned(),
+                hash: "h1".to_owned(),
+            },
+        );
+        manifest.insert("a", e);
+        let fs = MemFs::new().with_file("old.stems/voc.mp3", b"STEMBYTES".to_vec());
+        let plan = Plan {
+            actions: vec![Action::MoveStem {
+                clip_id: "a".to_owned(),
+                key: "voc".to_owned(),
+                stem_id: "voc".to_owned(),
+                from: "old.stems/voc.mp3".to_owned(),
+                to: "new.stems/voc.mp3".to_owned(),
+                source_url: "https://cdn1.suno.ai/voc.mp3".to_owned(),
+                format: StemFormat::Mp3,
+                hash: "h1".to_owned(),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &ScriptedHttp::new(),
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        assert_eq!(outcome.renamed, 1);
+        assert_eq!(fs.read_file("new.stems/voc.mp3").unwrap(), b"STEMBYTES");
+        assert!(!fs.exists("old.stems/voc.mp3"));
+        assert_eq!(
+            manifest.get("a").unwrap().stems.get("voc").unwrap().path,
+            "new.stems/voc.mp3"
         );
     }
 
