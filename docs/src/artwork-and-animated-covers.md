@@ -87,8 +87,11 @@ Suno clips have a short looping video preview. `rs-suno` can turn that into an
 **animated WebP** cover. This is opt-in, because it costs an extra transcode per
 clip.
 
-Enable it per run with `--animated-covers`, or set `animated_covers = true` in
-your [config](configuration.md).
+Enable it per run with `--animated-covers`, `--video-cover-retention webp`, or
+set `video_cover_retention = "webp"` in your
+[config](configuration.md). You can also tune encoder knobs with
+`animated_cover_quality`, `animated_cover_max_fps`,
+`animated_cover_max_width`, and `animated_cover_compression_level`.
 
 With animated covers on, and for clips that have a video preview, `rs-suno` also
 writes:

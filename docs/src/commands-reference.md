@@ -72,6 +72,11 @@ configured `root` is used.
 | `--min-newest <N>` | `1` | Newest clips always kept when a recency filter applies. |
 | `--retries <N>` | `3` | Download retry attempts per clip. |
 | `--animated-covers` | off | Also write animated WebP covers from video previews. |
+| `--video-cover-retention <neither\|webp\|mp4\|both>` | | Unified video-cover retention mode (overrides `--animated-covers`/`--video-mp4`). |
+| `--animated-cover-quality <N>` | `70` | Animated WebP quality (`0..100`). |
+| `--animated-cover-max-fps <N>` | `24` | Animated WebP frame-rate cap. |
+| `--animated-cover-max-width <PIXELS>` | native | Animated WebP width cap (omit to keep source width). |
+| `--animated-cover-compression-level <N>` | `0` | Animated WebP compression effort (`0..6`). |
 | `--video-mp4` | off | Also download the standalone `.mp4` music video beside each song, when available. |
 | `--download-stems` | off | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder. Download-only: it lists and downloads existing stems and never triggers separation or spends credits. |
 | `--stem-format <FORMAT>` | `wav` | Container for downloaded stems: `wav` (lossless, via the free WAV render) or `mp3`. Stems are stored RAW and are never transcoded to FLAC. |

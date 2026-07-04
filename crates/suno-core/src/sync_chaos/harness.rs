@@ -15,6 +15,7 @@ use crate::auth::ClerkAuth;
 use crate::client::SunoClient;
 use crate::config::AudioFormat;
 use crate::executor::{ExecOptions, ExecOutcome, Ports, execute};
+use crate::ffmpeg::WebpEncodeSettings;
 use crate::fs::Filesystem;
 use crate::hash::{art_hash, meta_hash};
 use crate::lineage::LineageContext;
@@ -256,6 +257,7 @@ pub(super) fn fast_opts() -> ExecOptions {
         wav_poll_attempts: 3,
         wav_poll_interval: Duration::from_secs(5),
         concurrency: 4,
+        cover_webp: WebpEncodeSettings::default(),
     }
 }
 

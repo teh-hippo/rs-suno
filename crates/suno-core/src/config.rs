@@ -11,6 +11,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::ffmpeg::WebpEncodeSettings;
 use crate::naming::CharacterSet;
 use crate::reconcile::SourceMode;
 
@@ -95,6 +96,54 @@ impl fmt::Display for StemFormat {
     }
 }
 
+/// Which video-cover artifacts to retain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoCoverRetention {
+    #[default]
+    Neither,
+    Webp,
+    Mp4,
+    Both,
+}
+
+impl VideoCoverRetention {
+    pub fn keeps_webp(self) -> bool {
+        matches!(self, Self::Webp | Self::Both)
+    }
+
+    pub fn keeps_mp4(self) -> bool {
+        matches!(self, Self::Mp4 | Self::Both)
+    }
+}
+
+impl FromStr for VideoCoverRetention {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "neither" => Ok(Self::Neither),
+            "webp" => Ok(Self::Webp),
+            "mp4" => Ok(Self::Mp4),
+            "both" => Ok(Self::Both),
+            other => Err(Error::Config(format!(
+                "unknown video_cover_retention '{other}'"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for VideoCoverRetention {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Neither => f.write_str("neither"),
+            Self::Webp => f.write_str("webp"),
+            Self::Mp4 => f.write_str("mp4"),
+            Self::Both => f.write_str("both"),
+        }
+    }
+}
+
 /// Global default settings applied when no account or source override applies.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Defaults {
@@ -104,6 +153,11 @@ pub struct Defaults {
     pub min_newest: Option<u32>,
     pub token_command: Option<String>,
     pub animated_covers: Option<bool>,
+    pub video_cover_retention: Option<VideoCoverRetention>,
+    pub animated_cover_quality: Option<u8>,
+    pub animated_cover_max_fps: Option<u32>,
+    pub animated_cover_max_width: Option<u32>,
+    pub animated_cover_compression_level: Option<u8>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
@@ -123,6 +177,11 @@ pub struct SourceConfig {
     pub min_newest: Option<u32>,
     pub token_command: Option<String>,
     pub animated_covers: Option<bool>,
+    pub video_cover_retention: Option<VideoCoverRetention>,
+    pub animated_cover_quality: Option<u8>,
+    pub animated_cover_max_fps: Option<u32>,
+    pub animated_cover_max_width: Option<u32>,
+    pub animated_cover_compression_level: Option<u8>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
@@ -148,6 +207,11 @@ pub struct AccountConfig {
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
     pub animated_covers: Option<bool>,
+    pub video_cover_retention: Option<VideoCoverRetention>,
+    pub animated_cover_quality: Option<u8>,
+    pub animated_cover_max_fps: Option<u32>,
+    pub animated_cover_max_width: Option<u32>,
+    pub animated_cover_compression_level: Option<u8>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
@@ -429,6 +493,70 @@ impl Config {
             .or(self.defaults.stem_format)
             .unwrap_or_default();
 
+        let video_cover_retention = resolve_enum(
+            flags.video_cover_retention,
+            env_val("VIDEO_COVER_RETENTION"),
+            src.and_then(|s| s.video_cover_retention),
+            acc.video_cover_retention,
+            self.defaults.video_cover_retention,
+            None,
+            "VIDEO_COVER_RETENTION",
+        )?;
+        let (animated_covers, video_mp4) = match video_cover_retention {
+            Some(retention) => (retention.keeps_webp(), retention.keeps_mp4()),
+            None => (animated_covers, video_mp4),
+        };
+
+        let defaults_webp = WebpEncodeSettings::default();
+        let animated_cover_quality = resolve_u8_ranged(
+            flags.animated_cover_quality,
+            env_val("ANIMATED_COVER_QUALITY"),
+            src.and_then(|s| s.animated_cover_quality),
+            acc.animated_cover_quality,
+            self.defaults.animated_cover_quality,
+            defaults_webp.quality,
+            "ANIMATED_COVER_QUALITY",
+            0..=100,
+        )?;
+        let animated_cover_max_fps = resolve_u32(
+            flags.animated_cover_max_fps,
+            env_val("ANIMATED_COVER_MAX_FPS"),
+            src.and_then(|s| s.animated_cover_max_fps),
+            acc.animated_cover_max_fps,
+            self.defaults.animated_cover_max_fps,
+            defaults_webp.max_fps,
+            "ANIMATED_COVER_MAX_FPS",
+        )?;
+        let animated_cover_max_width_from_env = env_val("ANIMATED_COVER_MAX_WIDTH")
+            .map(|s| {
+                s.parse().map_err(|_| {
+                    Error::Config(format!(
+                        "invalid ANIMATED_COVER_MAX_WIDTH: '{s}' (expected integer)"
+                    ))
+                })
+            })
+            .transpose()?;
+        let animated_cover_max_width = if let Some(v) = flags.animated_cover_max_width {
+            Some(v)
+        } else if let Some(v) = animated_cover_max_width_from_env {
+            Some(v)
+        } else {
+            src.and_then(|s| s.animated_cover_max_width)
+                .or(acc.animated_cover_max_width)
+                .or(self.defaults.animated_cover_max_width)
+                .or(defaults_webp.max_width)
+        };
+        let animated_cover_compression_level = resolve_u8_ranged(
+            flags.animated_cover_compression_level,
+            env_val("ANIMATED_COVER_COMPRESSION_LEVEL"),
+            src.and_then(|s| s.animated_cover_compression_level),
+            acc.animated_cover_compression_level,
+            self.defaults.animated_cover_compression_level,
+            defaults_webp.compression_level,
+            "ANIMATED_COVER_COMPRESSION_LEVEL",
+            0..=6,
+        )?;
+
         let naming_template_from_env = env_val("NAMING_TEMPLATE").map(str::to_owned);
         let naming_template = flags
             .naming_template
@@ -474,6 +602,19 @@ impl Config {
             retries,
             min_newest,
             animated_covers,
+            video_cover_retention: match (animated_covers, video_mp4) {
+                (false, false) => VideoCoverRetention::Neither,
+                (true, false) => VideoCoverRetention::Webp,
+                (false, true) => VideoCoverRetention::Mp4,
+                (true, true) => VideoCoverRetention::Both,
+            },
+            animated_cover_webp: WebpEncodeSettings {
+                quality: animated_cover_quality,
+                max_fps: animated_cover_max_fps,
+                max_width: animated_cover_max_width,
+                lossless: defaults_webp.lossless,
+                compression_level: animated_cover_compression_level,
+            },
             details_sidecar,
             lyrics_sidecar,
             lrc_sidecar,
@@ -533,6 +674,60 @@ fn resolve_bool(
     Ok(src.or(acc).or(defaults).unwrap_or(compiled))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn resolve_u8_ranged(
+    flag: Option<u8>,
+    env_str: Option<&str>,
+    src: Option<u8>,
+    acc: Option<u8>,
+    defaults: Option<u8>,
+    compiled: u8,
+    name: &str,
+    range: std::ops::RangeInclusive<u8>,
+) -> Result<u8> {
+    let value = if let Some(v) = flag {
+        v
+    } else if let Some(s) = env_str {
+        s.parse()
+            .map_err(|_| Error::Config(format!("invalid {name}: '{s}' (expected integer)")))?
+    } else {
+        src.or(acc).or(defaults).unwrap_or(compiled)
+    };
+    if range.contains(&value) {
+        Ok(value)
+    } else {
+        Err(Error::Config(format!(
+            "invalid {name}: '{value}' (expected {}..={})",
+            range.start(),
+            range.end()
+        )))
+    }
+}
+
+fn resolve_enum<T>(
+    flag: Option<T>,
+    env_str: Option<&str>,
+    src: Option<T>,
+    acc: Option<T>,
+    defaults: Option<T>,
+    compiled: Option<T>,
+    name: &str,
+) -> Result<Option<T>>
+where
+    T: FromStr<Err = Error> + Copy,
+{
+    if let Some(v) = flag {
+        return Ok(Some(v));
+    }
+    if let Some(s) = env_str {
+        return s
+            .parse()
+            .map(Some)
+            .map_err(|err| Error::Config(format!("invalid {name}: '{s}' ({err})")));
+    }
+    Ok(src.or(acc).or(defaults).or(compiled))
+}
+
 /// Convert an account label to its environment variable prefix, mirroring the
 /// per-account keys the resolver reads: `my-lib` becomes `MY_LIB` for lookups
 /// like `SUNO_MY_LIB_TOKEN`.
@@ -550,6 +745,11 @@ pub struct FlagOverrides {
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
     pub animated_covers: Option<bool>,
+    pub video_cover_retention: Option<VideoCoverRetention>,
+    pub animated_cover_quality: Option<u8>,
+    pub animated_cover_max_fps: Option<u32>,
+    pub animated_cover_max_width: Option<u32>,
+    pub animated_cover_compression_level: Option<u8>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
@@ -576,6 +776,8 @@ pub struct EffectiveSettings {
     pub retries: u32,
     pub min_newest: u32,
     pub animated_covers: bool,
+    pub video_cover_retention: VideoCoverRetention,
+    pub animated_cover_webp: WebpEncodeSettings,
     pub details_sidecar: bool,
     pub lyrics_sidecar: bool,
     pub lrc_sidecar: bool,
@@ -649,6 +851,11 @@ mod tests {
             retries = 5
             min_newest = 2
             animated_covers = true
+            video_cover_retention = "both"
+            animated_cover_quality = 85
+            animated_cover_max_fps = 18
+            animated_cover_max_width = 720
+            animated_cover_compression_level = 4
         "#;
         let cfg = Config::from_toml(toml).unwrap();
         assert_eq!(cfg.defaults.format, Some(AudioFormat::Mp3));
@@ -656,6 +863,14 @@ mod tests {
         assert_eq!(cfg.defaults.retries, Some(5));
         assert_eq!(cfg.defaults.min_newest, Some(2));
         assert_eq!(cfg.defaults.animated_covers, Some(true));
+        assert_eq!(
+            cfg.defaults.video_cover_retention,
+            Some(VideoCoverRetention::Both)
+        );
+        assert_eq!(cfg.defaults.animated_cover_quality, Some(85));
+        assert_eq!(cfg.defaults.animated_cover_max_fps, Some(18));
+        assert_eq!(cfg.defaults.animated_cover_max_width, Some(720));
+        assert_eq!(cfg.defaults.animated_cover_compression_level, Some(4));
     }
 
     #[test]
@@ -675,6 +890,8 @@ mod tests {
                 retries: 3,
                 min_newest: 1,
                 animated_covers: false,
+                video_cover_retention: VideoCoverRetention::Neither,
+                animated_cover_webp: WebpEncodeSettings::default(),
                 details_sidecar: false,
                 lyrics_sidecar: false,
                 lrc_sidecar: false,
@@ -1126,6 +1343,199 @@ mod tests {
         assert_eq!("Mp3".parse::<StemFormat>().unwrap(), StemFormat::Mp3);
         // A FLAC stem_format in config is a config error, not a silent fallback.
         assert!(Config::from_toml("[defaults]\nstem_format = \"flac\"\n").is_err());
+    }
+
+    #[test]
+    fn video_cover_retention_overrides_legacy_toggles() {
+        let toml = r#"
+            [defaults]
+            animated_covers = true
+            video_mp4 = false
+            video_cover_retention = "mp4"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags());
+        assert!(eff.is_err());
+
+        let cfg = Config::from_toml(format!("{toml}\n[accounts.alice]\n").as_str()).unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert!(!eff.animated_covers);
+        assert!(eff.video_mp4);
+        assert_eq!(eff.video_cover_retention, VideoCoverRetention::Mp4);
+
+        let flags = FlagOverrides {
+            video_cover_retention: Some(VideoCoverRetention::Both),
+            ..Default::default()
+        };
+        let eff = cfg.resolve("alice", None, &no_env(), &flags).unwrap();
+        assert!(eff.animated_covers);
+        assert!(eff.video_mp4);
+        assert_eq!(eff.video_cover_retention, VideoCoverRetention::Both);
+    }
+
+    #[test]
+    fn animated_cover_webp_knobs_follow_precedence_and_validate_ranges() {
+        let toml = r#"
+            [defaults]
+            animated_cover_quality = 80
+            animated_cover_max_fps = 20
+            animated_cover_max_width = 640
+            animated_cover_compression_level = 3
+
+            [accounts.alice.sources.liked]
+            animated_cover_quality = 75
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let eff = cfg
+            .resolve("alice", Some("liked"), &no_env(), &no_flags())
+            .unwrap();
+        assert_eq!(eff.animated_cover_webp.quality, 75);
+        assert_eq!(eff.animated_cover_webp.max_fps, 20);
+        assert_eq!(eff.animated_cover_webp.max_width, Some(640));
+        assert_eq!(eff.animated_cover_webp.compression_level, 3);
+
+        let env: HashMap<String, String> = [("SUNO_ANIMATED_COVER_QUALITY".into(), "90".into())]
+            .into_iter()
+            .collect();
+        let eff = cfg
+            .resolve("alice", Some("liked"), &env, &no_flags())
+            .unwrap();
+        assert_eq!(eff.animated_cover_webp.quality, 90);
+
+        let flags = FlagOverrides {
+            animated_cover_quality: Some(95),
+            animated_cover_max_width: Some(512),
+            animated_cover_compression_level: Some(6),
+            ..Default::default()
+        };
+        let eff = cfg.resolve("alice", Some("liked"), &env, &flags).unwrap();
+        assert_eq!(eff.animated_cover_webp.quality, 95);
+        assert_eq!(eff.animated_cover_webp.max_width, Some(512));
+        assert_eq!(eff.animated_cover_webp.compression_level, 6);
+
+        let bad_env: HashMap<String, String> =
+            [("SUNO_ANIMATED_COVER_QUALITY".into(), "101".into())]
+                .into_iter()
+                .collect();
+        assert!(cfg.resolve("alice", None, &bad_env, &no_flags()).is_err());
+    }
+
+    #[test]
+    fn video_cover_retention_parses_formats_and_reports_kept_artifacts() {
+        // FromStr is case-insensitive across every variant.
+        assert_eq!(
+            "NEITHER".parse::<VideoCoverRetention>().unwrap(),
+            VideoCoverRetention::Neither
+        );
+        assert_eq!(
+            "WebP".parse::<VideoCoverRetention>().unwrap(),
+            VideoCoverRetention::Webp
+        );
+        assert_eq!(
+            "mp4".parse::<VideoCoverRetention>().unwrap(),
+            VideoCoverRetention::Mp4
+        );
+        assert_eq!(
+            "Both".parse::<VideoCoverRetention>().unwrap(),
+            VideoCoverRetention::Both
+        );
+        // An unknown mode is a config error, not a silent fallback.
+        assert!("mkv".parse::<VideoCoverRetention>().is_err());
+
+        // Display round-trips back to a token FromStr accepts.
+        for mode in [
+            VideoCoverRetention::Neither,
+            VideoCoverRetention::Webp,
+            VideoCoverRetention::Mp4,
+            VideoCoverRetention::Both,
+        ] {
+            assert_eq!(
+                mode.to_string().parse::<VideoCoverRetention>().unwrap(),
+                mode
+            );
+        }
+
+        // keeps_webp / keeps_mp4 truth table.
+        assert!(!VideoCoverRetention::Neither.keeps_webp());
+        assert!(!VideoCoverRetention::Neither.keeps_mp4());
+        assert!(VideoCoverRetention::Webp.keeps_webp());
+        assert!(!VideoCoverRetention::Webp.keeps_mp4());
+        assert!(!VideoCoverRetention::Mp4.keeps_webp());
+        assert!(VideoCoverRetention::Mp4.keeps_mp4());
+        assert!(VideoCoverRetention::Both.keeps_webp());
+        assert!(VideoCoverRetention::Both.keeps_mp4());
+    }
+
+    #[test]
+    fn video_cover_retention_resolves_from_env_and_rejects_unknown() {
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+
+        // A valid env value overrides the legacy toggles, just like a flag.
+        let env: HashMap<String, String> = [("SUNO_VIDEO_COVER_RETENTION".into(), "both".into())]
+            .into_iter()
+            .collect();
+        let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
+        assert_eq!(eff.video_cover_retention, VideoCoverRetention::Both);
+        assert!(eff.animated_covers);
+        assert!(eff.video_mp4);
+
+        // An unknown env value is a config error rather than a silent default.
+        let bad_env: HashMap<String, String> =
+            [("SUNO_VIDEO_COVER_RETENTION".into(), "mkv".into())]
+                .into_iter()
+                .collect();
+        assert!(cfg.resolve("alice", None, &bad_env, &no_flags()).is_err());
+    }
+
+    #[test]
+    fn animated_cover_compression_level_enforces_zero_to_six() {
+        // The top of the valid range is accepted from the config file.
+        let cfg = Config::from_toml(
+            "[defaults]\nanimated_cover_compression_level = 6\n[accounts.alice]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.resolve("alice", None, &no_env(), &no_flags())
+                .unwrap()
+                .animated_cover_webp
+                .compression_level,
+            6
+        );
+
+        // One past the top is rejected.
+        let cfg = Config::from_toml(
+            "[defaults]\nanimated_cover_compression_level = 7\n[accounts.alice]\n",
+        )
+        .unwrap();
+        assert!(cfg.resolve("alice", None, &no_env(), &no_flags()).is_err());
+
+        // The same ceiling is enforced for an env override.
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+        let bad_env: HashMap<String, String> =
+            [("SUNO_ANIMATED_COVER_COMPRESSION_LEVEL".into(), "7".into())]
+                .into_iter()
+                .collect();
+        assert!(cfg.resolve("alice", None, &bad_env, &no_flags()).is_err());
+
+        // A non-integer env value is a config error, not a panic.
+        let junk_env: HashMap<String, String> =
+            [("SUNO_ANIMATED_COVER_MAX_FPS".into(), "abc".into())]
+                .into_iter()
+                .collect();
+        assert!(cfg.resolve("alice", None, &junk_env, &no_flags()).is_err());
+    }
+
+    #[test]
+    fn animated_cover_max_width_defaults_to_native() {
+        // With nothing configured, the width cap is None (source width).
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+        assert_eq!(
+            cfg.resolve("alice", None, &no_env(), &no_flags())
+                .unwrap()
+                .animated_cover_webp
+                .max_width,
+            None
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub use client::{BillingInfo, Playlist, Stem, SunoClient};
 pub use clock::Clock;
 pub use config::{
     AccountConfig, AreaMode, AreasConfig, AudioFormat, Config, Defaults, EffectiveSettings,
-    FlagOverrides, SourceConfig, StemFormat,
+    FlagOverrides, SourceConfig, StemFormat, VideoCoverRetention,
 };
 pub use downloadable::is_downloadable;
 pub use error::{Error, Result};

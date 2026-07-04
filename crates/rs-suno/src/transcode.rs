@@ -182,10 +182,12 @@ fn quality_args(settings: &WebpEncodeSettings) -> Vec<String> {
     }
 }
 
-/// The compression-effort flag: full effort when on, none when off.
+/// The compression-effort flag from the configured 0-6 effort level.
 fn compression_args(settings: &WebpEncodeSettings) -> Vec<String> {
-    let level = if settings.compression { "6" } else { "0" };
-    vec!["-compression_level".to_owned(), level.to_owned()]
+    vec![
+        "-compression_level".to_owned(),
+        settings.compression_level.to_string(),
+    ]
 }
 
 /// The last few lines of ffmpeg's stderr, for a concise error message.
@@ -254,11 +256,10 @@ mod tests {
     fn lossy_quality_uses_q_scale_and_default_compression_effort() {
         let settings = WebpEncodeSettings::default();
         assert_eq!(quality_args(&settings), vec!["-q:v", "70"]);
-        // Effort is off by default (level 0): full effort is too slow at native
-        // resolution. Turning it on selects full effort (level 6).
+        // Effort defaults to level 0; callers can choose any level 0-6.
         assert_eq!(compression_args(&settings), vec!["-compression_level", "0"]);
         let full_effort = WebpEncodeSettings {
-            compression: true,
+            compression_level: 6,
             ..Default::default()
         };
         assert_eq!(
@@ -271,11 +272,11 @@ mod tests {
     fn lossless_and_no_compression_flip_the_flags() {
         let settings = WebpEncodeSettings {
             lossless: true,
-            compression: false,
+            compression_level: 2,
             ..Default::default()
         };
         assert_eq!(quality_args(&settings), vec!["-lossless", "1"]);
-        assert_eq!(compression_args(&settings), vec!["-compression_level", "0"]);
+        assert_eq!(compression_args(&settings), vec!["-compression_level", "2"]);
     }
 
     #[test]

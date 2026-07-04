@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use suno_core::{AudioFormat, CharacterSet, StemFormat};
+use suno_core::{AudioFormat, CharacterSet, StemFormat, VideoCoverRetention};
 
 /// A download-only tool for mirroring your Suno.ai library.
 #[derive(Parser, Debug)]
@@ -170,6 +170,27 @@ impl From<ModeArg> for suno_core::SourceMode {
     }
 }
 
+/// Retention mode for video-cover artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum CoverRetentionArg {
+    Neither,
+    Webp,
+    Mp4,
+    Both,
+}
+
+impl From<CoverRetentionArg> for VideoCoverRetention {
+    fn from(value: CoverRetentionArg) -> Self {
+        match value {
+            CoverRetentionArg::Neither => VideoCoverRetention::Neither,
+            CoverRetentionArg::Webp => VideoCoverRetention::Webp,
+            CoverRetentionArg::Mp4 => VideoCoverRetention::Mp4,
+            CoverRetentionArg::Both => VideoCoverRetention::Both,
+        }
+    }
+}
+
 /// Flags shared by `sync` and `copy`.
 #[derive(Args, Debug, Clone, Default)]
 pub struct SyncArgs {
@@ -197,6 +218,21 @@ pub struct SyncArgs {
     /// Also write an animated cover.webp from each clip's video preview.
     #[arg(long)]
     pub animated_covers: bool,
+    /// Keep video-cover artifacts: webp, mp4, both, or neither.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub video_cover_retention: Option<CoverRetentionArg>,
+    /// Animated-cover quality, 0-100 (higher is larger).
+    #[arg(long, value_name = "N")]
+    pub animated_cover_quality: Option<u8>,
+    /// Animated-cover max FPS.
+    #[arg(long, value_name = "N")]
+    pub animated_cover_max_fps: Option<u32>,
+    /// Animated-cover width cap in pixels.
+    #[arg(long, value_name = "PIXELS")]
+    pub animated_cover_max_width: Option<u32>,
+    /// Animated-cover compression effort, 0-6 (higher is smaller/slower).
+    #[arg(long, value_name = "N")]
+    pub animated_cover_compression_level: Option<u8>,
     /// Re-pin this library to the authenticated account (use only when you
     /// deliberately point it at a different Suno account).
     #[arg(long)]
@@ -410,6 +446,11 @@ mod tests {
                 assert_eq!(args.limit, Some(5));
                 assert_eq!(args.min_newest, Some(0));
                 assert!(!args.animated_covers);
+                assert_eq!(args.video_cover_retention, None);
+                assert_eq!(args.animated_cover_quality, None);
+                assert_eq!(args.animated_cover_max_fps, None);
+                assert_eq!(args.animated_cover_max_width, None);
+                assert_eq!(args.animated_cover_compression_level, None);
             }
             _ => panic!("expected sync"),
         }
@@ -427,6 +468,36 @@ mod tests {
         match cli.command {
             Command::Copy(args) => assert!(!args.animated_covers),
             _ => panic!("expected copy"),
+        }
+    }
+
+    #[test]
+    fn sync_parses_video_cover_knobs() {
+        let cli = Cli::try_parse_from([
+            "suno",
+            "sync",
+            "/music",
+            "--video-cover-retention",
+            "both",
+            "--animated-cover-quality",
+            "88",
+            "--animated-cover-max-fps",
+            "15",
+            "--animated-cover-max-width",
+            "720",
+            "--animated-cover-compression-level",
+            "6",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Sync(args) => {
+                assert_eq!(args.video_cover_retention, Some(CoverRetentionArg::Both));
+                assert_eq!(args.animated_cover_quality, Some(88));
+                assert_eq!(args.animated_cover_max_fps, Some(15));
+                assert_eq!(args.animated_cover_max_width, Some(720));
+                assert_eq!(args.animated_cover_compression_level, Some(6));
+            }
+            _ => panic!("expected sync"),
         }
     }
 

@@ -61,12 +61,9 @@ impl FfmpegError {
 /// Encoder settings for the animated WebP cover derived from a clip's MP4
 /// preview.
 ///
-/// The [`Default`] turns encoder effort off so a full-resolution clip encodes
-/// well under the ffmpeg timeout, since full effort can take minutes. The file
-/// is larger as a result, but stays under the 25 MB ceiling some players such
-/// as Symfonium place on embedded/sidecar art. A single hardcoded default is
-/// used this phase behind one `--animated-covers` toggle; per-knob tuning is
-/// deliberately not surfaced on the CLI.
+/// The [`Default`] turns encoder effort off (compression level 0) so a
+/// full-resolution clip encodes well under the ffmpeg timeout, since full
+/// effort can take minutes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebpEncodeSettings {
     /// Lossy encoder quality, 0-100 (higher is better and larger). Ignored when
@@ -80,10 +77,10 @@ pub struct WebpEncodeSettings {
     pub max_width: Option<u32>,
     /// Encode losslessly (much larger); off by default.
     pub lossless: bool,
-    /// Spend extra encoder effort: a smaller file, but far slower. Off by
-    /// default, because `libwebp_anim` at full effort can take minutes on a
-    /// full-resolution clip and exceed the transcode timeout.
-    pub compression: bool,
+    /// Encoder effort, 0-6 (higher is smaller and slower). `0` by default,
+    /// because full effort can take minutes on a full-resolution clip and
+    /// exceed the transcode timeout.
+    pub compression_level: u8,
 }
 
 impl Default for WebpEncodeSettings {
@@ -93,7 +90,7 @@ impl Default for WebpEncodeSettings {
             max_fps: 24,
             max_width: None,
             lossless: false,
-            compression: false,
+            compression_level: 0,
         }
     }
 }
