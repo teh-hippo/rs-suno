@@ -54,8 +54,8 @@ pub use extras::{
 pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind, WebpEncodeSettings};
 pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
 pub use graph::{
-    AdoptDecision, AlbumArt, CacheEntry, LineageStore, Node, Owner, OwnerCheck, OwnerGate,
-    PlaylistState, StoredEdge, adopt_decision, owner_gate,
+    AdoptDecision, AlbumArt, CacheEntry, LineageStore, Node, Owner, OwnerGate, PlaylistState,
+    StoredEdge, adopt_decision, owner_gate,
 };
 pub use hash::{
     SYNCED_LRC_VERSION, art_hash, art_url_hash, content_hash, meta_hash, synced_lrc_source_hash,
