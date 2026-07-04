@@ -157,7 +157,15 @@ impl Clip {
 
     /// The preferred cover-art URL, or `None` when the clip carries no art.
     pub fn selected_image_url(&self) -> Option<&str> {
-        self.cover_candidates().into_iter().next()
+        if !self.image_large_url.is_empty() {
+            Some(self.image_large_url.as_str())
+        } else if !self.image_url.is_empty() {
+            Some(self.image_url.as_str())
+        } else if !self.video_cover_url.is_empty() {
+            Some(self.video_cover_url.as_str())
+        } else {
+            None
+        }
     }
 }
 

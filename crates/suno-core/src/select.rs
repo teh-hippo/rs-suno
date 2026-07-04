@@ -88,7 +88,7 @@ pub fn select<'a>(clips: &'a [Clip], params: &SelectParams) -> Vec<&'a Clip> {
     // reused by both the min-newest floor and the limit step.
     let recency_order: Vec<usize> = {
         let mut idx: Vec<usize> = (0..deduped.len()).collect();
-        idx.sort_by_key(|&i| Reverse(clip_ts(deduped[i])));
+        idx.sort_by_cached_key(|&i| Reverse(clip_ts(deduped[i])));
         idx
     };
 

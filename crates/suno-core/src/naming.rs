@@ -219,18 +219,20 @@ fn render_with_album(
         CharacterSet::Ascii,
         config.max_component_len,
     );
+    let substitutions = SegmentSubstitutions {
+        creator: &creator,
+        handle: &handle,
+        album,
+        title: &title,
+        root_id8: &root_id8,
+        id8: &id8,
+        id: &id,
+    };
     let mut components = config
         .template
         .split('/')
         .filter_map(|segment| {
-            let rendered = segment
-                .replace("{creator}", &creator)
-                .replace("{handle}", &handle)
-                .replace("{album}", album)
-                .replace("{title}", &title)
-                .replace("{root_id8}", &root_id8)
-                .replace("{id8}", &id8)
-                .replace("{id}", &id);
+            let rendered = substitute_segment(segment, substitutions);
             let sanitised = sanitise_segment(
                 &rendered,
                 config.character_set,
@@ -268,6 +270,58 @@ fn render_with_album(
     RenderedName {
         relative_path,
         base_name,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SegmentSubstitutions<'a> {
+    creator: &'a str,
+    handle: &'a str,
+    album: &'a str,
+    title: &'a str,
+    root_id8: &'a str,
+    id8: &'a str,
+    id: &'a str,
+}
+
+fn substitute_segment(segment: &str, substitutions: SegmentSubstitutions<'_>) -> String {
+    let mut rendered = String::with_capacity(segment.len());
+    let mut remainder = segment;
+    while let Some(start) = remainder.find('{') {
+        rendered.push_str(&remainder[..start]);
+        remainder = &remainder[start..];
+        if let Some((token_len, value)) = placeholder_match(remainder, substitutions) {
+            rendered.push_str(value);
+            remainder = &remainder[token_len..];
+        } else {
+            rendered.push('{');
+            remainder = &remainder[1..];
+        }
+    }
+    rendered.push_str(remainder);
+    rendered
+}
+
+fn placeholder_match<'a>(
+    segment: &str,
+    substitutions: SegmentSubstitutions<'a>,
+) -> Option<(usize, &'a str)> {
+    if segment.starts_with("{creator}") {
+        Some(("{creator}".len(), substitutions.creator))
+    } else if segment.starts_with("{handle}") {
+        Some(("{handle}".len(), substitutions.handle))
+    } else if segment.starts_with("{album}") {
+        Some(("{album}".len(), substitutions.album))
+    } else if segment.starts_with("{title}") {
+        Some(("{title}".len(), substitutions.title))
+    } else if segment.starts_with("{root_id8}") {
+        Some(("{root_id8}".len(), substitutions.root_id8))
+    } else if segment.starts_with("{id8}") {
+        Some(("{id8}".len(), substitutions.id8))
+    } else if segment.starts_with("{id}") {
+        Some(("{id}".len(), substitutions.id))
+    } else {
+        None
     }
 }
 
@@ -641,6 +695,43 @@ mod tests {
             rendered.base_name.contains("[abcdef12]"),
             "base_name was {}",
             rendered.base_name
+        );
+    }
+
+    #[test]
+    fn custom_template_replaces_all_known_placeholders_once() {
+        let clip = Clip {
+            id: "abcdef12-full".to_string(),
+            title: "Song".to_string(),
+            display_name: "Creator".to_string(),
+            handle: "handle".to_string(),
+            ..Clip::default()
+        };
+        let lineage = LineageContext {
+            root_id: "rootxyz9-extra".to_string(),
+            root_title: "Album".to_string(),
+            root_date: String::new(),
+            parent_id: "rootxyz9-extra".to_string(),
+            edge_type: Some(EdgeType::Cover),
+            status: ResolveStatus::Resolved,
+        };
+        let config = NamingConfig {
+            template: "{creator}-{handle}-{album}-{title}-{root_id8}-{id8}-{id}-{unknown}"
+                .to_string(),
+            ..NamingConfig::default()
+        };
+
+        let rendered = render_clip_name(
+            NamingRequest {
+                clip: &clip,
+                lineage: &lineage,
+            },
+            &config,
+        );
+
+        assert_eq!(
+            rendered.relative_path.to_string_lossy(),
+            "Creator-handle-Album-Song-rootxyz9-abcdef12-abcdef12-full-{unknown}"
         );
     }
 
