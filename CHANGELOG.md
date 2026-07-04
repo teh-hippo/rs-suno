@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.5](https://github.com/teh-hippo/rs-suno/compare/v0.22.4...v0.22.5) (2026-07-04)
+
+
+### Bug Fixes
+
+* untimed .lrc fallback never upgrades to timed alignment ([#137](https://github.com/teh-hippo/rs-suno/issues/137), [#138](https://github.com/teh-hippo/rs-suno/issues/138)) ([8073a21](https://github.com/teh-hippo/rs-suno/commit/8073a210266cbb6f5a5a52609c5160e0e192b950))
+
 ## [0.22.4](https://github.com/teh-hippo/rs-suno/compare/v0.22.3...v0.22.4) (2026-07-04)
 
 
