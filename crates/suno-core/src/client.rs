@@ -1561,6 +1561,10 @@ mod tests {
 
     #[test]
     fn concurrent_reads_share_aggregate_pacing_after_first_rate_limit() {
+        // Four concurrent requests at 1 req/s should span ~3s from first to last
+        // reserved slot, with a small tolerance for runtime scheduling jitter.
+        const EXPECTED_SPAN: Duration = Duration::from_secs(3);
+        const TOLERANCE: Duration = Duration::from_millis(50);
         let ids = ["a", "b", "c", "d"];
         let a =
             serde_json::json!({"id":"a","title":"A","status":"complete","metadata":{"type":"gen"}})
@@ -1603,8 +1607,8 @@ mod tests {
         // After the first 429, rate halves from 2 -> 1 req/s. Under shared slot
         // pacing, four concurrent reads are dispatched one second apart in
         // aggregate, so the first-to-last spacing is about three seconds.
-        assert!(span >= Duration::from_millis(2950));
-        assert!(span <= Duration::from_millis(3050));
+        assert!(span >= EXPECTED_SPAN.saturating_sub(TOLERANCE));
+        assert!(span <= EXPECTED_SPAN + TOLERANCE);
     }
 
     #[test]
