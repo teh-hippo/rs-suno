@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.2](https://github.com/teh-hippo/rs-suno/compare/v0.22.1...v0.22.2) (2026-07-04)
+
+
+### Bug Fixes
+
+* confirm account identity before a mirror playlist can delete ([a342ee9](https://github.com/teh-hippo/rs-suno/commit/a342ee917cc0ac4cdcb7aa88a13022986fb8eae8)), closes [#149](https://github.com/teh-hippo/rs-suno/issues/149)
+
 ## [0.22.1](https://github.com/teh-hippo/rs-suno/compare/v0.22.0...v0.22.1) (2026-07-04)
 
 
