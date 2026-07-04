@@ -32,6 +32,8 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use futures_util::lock::Mutex as AsyncMutex;
@@ -263,6 +265,26 @@ where
     for playlist in playlists.values() {
         *tracked_paths.entry(playlist.path.clone()).or_default() += 1;
     }
+    // Static cover art is otherwise fetched twice per clip (#89): once to embed
+    // in the audio tag and once for the per-song `.jpg` sidecar, both from the
+    // same CDN URL. The audio producer caches each cover it embeds here, keyed by
+    // URL, and the sidecar write drains it rather than re-fetching. Only URLs a
+    // `CoverJpg` sidecar will fetch this run are cached, and the sidecar removes
+    // its entry on use, so the map holds at most the covers for the clips in
+    // flight (bounded by `concurrency`), never the whole library.
+    let cover_wanted: HashSet<&str> = plan
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::WriteArtifact {
+                kind: ArtifactKind::CoverJpg,
+                source_url,
+                ..
+            } if !source_url.is_empty() => Some(source_url.as_str()),
+            _ => None,
+        })
+        .collect();
+    let cover_cache: Mutex<HashMap<String, Vec<u8>>> = Mutex::new(HashMap::new());
     let ctx = Ctx {
         http,
         fs,
@@ -273,6 +295,8 @@ where
         by_path: &by_path,
         synced,
         write_targets: &write_targets,
+        cover_cache: &cover_cache,
+        cover_wanted: &cover_wanted,
     };
 
     let mut outcome = ExecOutcome::default();
@@ -553,6 +577,18 @@ struct Ctx<'a, H, F, G, C> {
     /// wrote. This mirrors [`suppress_path_aliasing`] for the one removal that
     /// is not itself a planned action.
     write_targets: &'a BTreeSet<String>,
+    /// Static cover art the audio producer already fetched to embed in the tag,
+    /// keyed by CDN URL, so the matching per-song `.jpg` sidecar reuses it rather
+    /// than fetching the same image again (#89). Only URLs a `CoverJpg` sidecar
+    /// will fetch are inserted (see `cover_wanted`) and each is removed on use, so
+    /// the map stays bounded to the clips in flight. A plain mutex guards it: the
+    /// concurrent producers only ever insert, and the lock is never held across an
+    /// await.
+    cover_cache: &'a Mutex<HashMap<String, Vec<u8>>>,
+    /// The cover URLs a `CoverJpg` sidecar will fetch this run. The producer caches
+    /// a cover only when its URL is here, so a clip whose cover is embedded but
+    /// never written as a sidecar leaves no bytes stranded in `cover_cache`.
+    cover_wanted: &'a HashSet<&'a str>,
 }
 
 impl<H, F, G, C> Ctx<'_, H, F, G, C>
@@ -868,6 +904,16 @@ where
         // A per-song sidecar needs its owning clip's manifest entry; album and
         // playlist kinds are keyed elsewhere and skip this guard.
         if is_per_clip_kind(kind) && manifest.get(owner_id).is_none() {
+            // The owning audio never landed this run, so this sidecar is skipped
+            // and will never drain a cover the producer cached for it. Drop that
+            // entry now: an insert without a matching sidecar write must not
+            // outlive its clip, keeping `cover_cache` bounded to the clips in
+            // flight (#89). A non-cover kind has no entry here, so this is a
+            // harmless no-op for them.
+            self.cover_cache
+                .lock()
+                .expect("cover cache mutex poisoned")
+                .remove(source_url);
             return Ok(Effect::Skipped);
         }
         // Capture the path this artifact was last tracked at, BEFORE the slot is
@@ -995,10 +1041,21 @@ where
         source_url: &str,
         owner_id: &str,
     ) -> Result<Vec<u8>, Fail> {
-        let source = self
-            .fetch_bytes(source_url)
-            .await
-            .map_err(|err| err.attribute(owner_id))?;
+        // Reuse the cover the audio producer already fetched for the embedded tag
+        // when it cached this exact URL (#89); otherwise fetch it now. The guard
+        // is taken and dropped in its own statement so it never spans the await.
+        let cached = self
+            .cover_cache
+            .lock()
+            .expect("cover cache mutex poisoned")
+            .remove(source_url);
+        let source = match cached {
+            Some(bytes) => bytes,
+            None => self
+                .fetch_bytes(source_url)
+                .await
+                .map_err(|err| err.attribute(owner_id))?,
+        };
         match kind {
             ArtifactKind::CoverWebp | ArtifactKind::FolderWebp => self
                 .ffmpeg
@@ -1385,6 +1442,15 @@ where
                 && (200..=299).contains(&response.status)
                 && !response.body.is_empty()
             {
+                // A `CoverJpg` sidecar will fetch this exact URL this run; keep the
+                // bytes so its write reuses them instead of fetching again (#89).
+                // The lock guards only the insert, never the await above.
+                if self.cover_wanted.contains(url) {
+                    self.cover_cache
+                        .lock()
+                        .expect("cover cache mutex poisoned")
+                        .insert(url.to_owned(), response.body.clone());
+                }
                 return Some(response.body);
             }
         }
@@ -2094,6 +2160,182 @@ mod tests {
             .position(|u| u.contains("e/small.jpg"))
             .unwrap();
         assert!(large < small, "large art tried before small");
+    }
+
+    // ── Cover reuse: embed + sidecar share one fetch (#89) ──────────
+
+    #[test]
+    fn download_reuses_the_embedded_cover_for_the_jpg_sidecar() {
+        // The embedded tag and the `.jpg` sidecar want the same cover URL; it is
+        // fetched once and the bytes serve both.
+        let c = art_clip("a");
+        let d = desired(c.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![
+                Action::Download {
+                    clip: c.clone(),
+                    lineage: LineageContext::own_root(&c),
+                    path: d.path.clone(),
+                    format: AudioFormat::Mp3,
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "a/cover.jpg".to_owned(),
+                    source_url: c.selected_image_url().unwrap().to_owned(),
+                    hash: "art".to_owned(),
+                    owner_id: "a".to_owned(),
+                    content: None,
+                },
+            ],
+        };
+        let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
+            .route("a/large.jpg", Reply::ok(b"the-art".to_vec()));
+        let fs = MemFs::new();
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.downloaded, 1);
+        assert_eq!(outcome.artifacts_written, 1);
+        assert_eq!(outcome.failed(), 0);
+        // Fetched once, not twice.
+        assert_eq!(http.count("a/large.jpg"), 1);
+        // The sidecar carries the fetched bytes, and the audio was tagged.
+        assert_eq!(fs.read_file("a/cover.jpg").unwrap(), b"the-art");
+        assert_eq!(&fs.read_file("a.mp3").unwrap()[..3], b"ID3");
+    }
+
+    #[test]
+    fn concurrent_downloads_reuse_each_clips_own_cover() {
+        // Two clips render concurrently; each `.jpg` sidecar gets its own cover
+        // (no cross-contamination) and each cover URL is fetched exactly once.
+        let a = art_clip("a");
+        let b = art_clip("b");
+        let da = desired(a.clone(), AudioFormat::Mp3);
+        let db = desired(b.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![
+                Action::Download {
+                    clip: a.clone(),
+                    lineage: LineageContext::own_root(&a),
+                    path: da.path.clone(),
+                    format: AudioFormat::Mp3,
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "a/cover.jpg".to_owned(),
+                    source_url: a.selected_image_url().unwrap().to_owned(),
+                    hash: "art".to_owned(),
+                    owner_id: "a".to_owned(),
+                    content: None,
+                },
+                Action::Download {
+                    clip: b.clone(),
+                    lineage: LineageContext::own_root(&b),
+                    path: db.path.clone(),
+                    format: AudioFormat::Mp3,
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "b/cover.jpg".to_owned(),
+                    source_url: b.selected_image_url().unwrap().to_owned(),
+                    hash: "art".to_owned(),
+                    owner_id: "b".to_owned(),
+                    content: None,
+                },
+            ],
+        };
+        let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::ok(b"a-mp3".to_vec()))
+            .route("b.mp3", Reply::ok(b"b-mp3".to_vec()))
+            .route("a/large.jpg", Reply::ok(b"art-a".to_vec()))
+            .route("b/large.jpg", Reply::ok(b"art-b".to_vec()));
+        let fs = MemFs::new();
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[da, db],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &small_poll(),
+        );
+
+        assert_eq!(outcome.downloaded, 2);
+        assert_eq!(outcome.artifacts_written, 2);
+        assert_eq!(http.count("a/large.jpg"), 1);
+        assert_eq!(http.count("b/large.jpg"), 1);
+        assert_eq!(fs.read_file("a/cover.jpg").unwrap(), b"art-a");
+        assert_eq!(fs.read_file("b/cover.jpg").unwrap(), b"art-b");
+    }
+
+    #[test]
+    fn cover_sidecar_refetches_when_embed_fell_back_to_another_url() {
+        // The large image 404s so the embed falls back to the small image; the
+        // sidecar still wants the (dead) large URL and must NOT be handed the
+        // small bytes. Reuse is keyed on the exact URL, so nothing is cached and
+        // the sidecar fetches the large URL itself (then fails on the 404).
+        let c = art_clip("e");
+        let d = desired(c.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![
+                Action::Download {
+                    clip: c.clone(),
+                    lineage: LineageContext::own_root(&c),
+                    path: d.path.clone(),
+                    format: AudioFormat::Mp3,
+                },
+                Action::WriteArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    path: "e/cover.jpg".to_owned(),
+                    source_url: "https://art.suno.ai/e/large.jpg".to_owned(),
+                    hash: "art".to_owned(),
+                    owner_id: "e".to_owned(),
+                    content: None,
+                },
+            ],
+        };
+        let http = ScriptedHttp::new()
+            .route("e.mp3", Reply::ok(b"body".to_vec()))
+            .route("e/large.jpg", Reply::status(404))
+            .route("e/small.jpg", Reply::ok(b"small-art".to_vec()));
+        let fs = MemFs::new();
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.downloaded, 1);
+        // The small image was fetched once (the embed fallback) and never reused
+        // for the large-keyed sidecar; the sidecar went to the network itself.
+        assert_eq!(http.count("e/small.jpg"), 1);
+        assert!(
+            http.count("e/large.jpg") >= 2,
+            "sidecar refetched the large URL"
+        );
+        assert_eq!(manifest.get("e").unwrap().cover_jpg, None);
+        assert!(!fs.exists("e/cover.jpg"));
     }
 
     // ── Atomic write and size verification (SYNC-13/14) ─────────────
