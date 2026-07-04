@@ -775,6 +775,7 @@ where
                     source_url,
                     *format,
                     hash,
+                    tracked_paths,
                     committed,
                 )
                 .await
@@ -1412,10 +1413,12 @@ where
     ///
     /// Reconcile downgrades a pure stem path drift to a `MoveStem`, so a retitle
     /// renames the raw stem rather than re-rendering a WAV through `convert_wav`
-    /// or re-fetching an MP3. Stems carry no co-reference machinery (the
-    /// [`write_stem`](Self::write_stem) cleanup only guards on the committed set),
-    /// so the in-place rename is taken unless a committed write already holds
-    /// `from`; otherwise the fetch-and-write fallback re-renders at `to`.
+    /// or re-fetching an MP3. The in-place rename is taken only when `from` is
+    /// this slot's alone to give up (no other tracked slot references it — two
+    /// same-base clips can share a stem path after a partially-failed swap — and
+    /// no committed write this run already holds it); otherwise the
+    /// fetch-and-write fallback re-fetches the correct bytes at `to`, so a
+    /// co-referenced shared stem is never renamed away with mismatched content.
     #[allow(clippy::too_many_arguments)]
     async fn move_stem(
         &self,
@@ -1429,14 +1432,20 @@ where
         source_url: &str,
         format: StemFormat,
         hash: &str,
+        tracked_paths: &mut HashMap<String, u32>,
         committed: &BTreeSet<String>,
     ) -> Result<Effect, Fail> {
         if manifest.get(clip_id).is_none() {
             return Ok(Effect::Skipped);
         }
-        if from != to && !committed.contains(from) {
+        let exclusive =
+            tracked_paths.get(from).is_none_or(|count| *count <= 1) && !committed.contains(from);
+        if from != to && exclusive {
             match self.fs.rename(from, to) {
                 Ok(()) => {
+                    if let Some(count) = tracked_paths.get_mut(from) {
+                        *count = count.saturating_sub(1);
+                    }
                     if let Some(entry) = manifest.entries.get_mut(clip_id) {
                         set_manifest_stem(
                             entry,
@@ -4371,6 +4380,62 @@ mod tests {
             manifest.get("a").unwrap().stems.get("voc").unwrap().path,
             "new.stems/voc.mp3"
         );
+    }
+
+    #[test]
+    fn stem_move_falls_back_to_fetch_when_source_co_referenced() {
+        // Two clips' stems share shared.stems/voc.mp3 after a partially-failed
+        // swap (the file holds `a`'s bytes). When `b` moves it, move_stem must NOT
+        // rename the shared file under `b`'s hash (that records `a`'s bytes as
+        // `b`'s); it falls back to a fetch of `b`'s correct bytes.
+        let mut manifest = Manifest::new();
+        let mut a = entry("a.flac", AudioFormat::Flac);
+        a.stems.insert(
+            "voc".to_owned(),
+            ArtifactState {
+                path: "shared.stems/voc.mp3".to_owned(),
+                hash: "h".to_owned(),
+            },
+        );
+        manifest.insert("a", a);
+        let mut b = entry("b.flac", AudioFormat::Flac);
+        b.stems.insert(
+            "voc".to_owned(),
+            ArtifactState {
+                path: "shared.stems/voc.mp3".to_owned(),
+                hash: "h".to_owned(),
+            },
+        );
+        manifest.insert("b", b);
+        let fs = MemFs::new().with_file("shared.stems/voc.mp3", b"A-STEM".to_vec());
+        let http = ScriptedHttp::new().route("bvoc.mp3", Reply::ok(b"B-STEM".to_vec()));
+        let plan = Plan {
+            actions: vec![Action::MoveStem {
+                clip_id: "b".to_owned(),
+                key: "voc".to_owned(),
+                stem_id: "bvoc".to_owned(),
+                from: "shared.stems/voc.mp3".to_owned(),
+                to: "b.stems/voc.mp3".to_owned(),
+                source_url: "https://cdn1.suno.ai/bvoc.mp3".to_owned(),
+                format: StemFormat::Mp3,
+                hash: "h".to_owned(),
+            }],
+        };
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        // b's new stem carries b's freshly fetched bytes, never a's renamed bytes.
+        assert_eq!(fs.read_file("b.stems/voc.mp3").unwrap(), b"B-STEM");
     }
 
     #[test]

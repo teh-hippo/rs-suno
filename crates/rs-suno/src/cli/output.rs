@@ -316,7 +316,9 @@ pub fn run_summary(verb_label: &str, account: &str, outcome: &ExecOutcome, secs:
 pub fn dry_summary(account: &str, plan: &Plan) -> String {
     let to_download = plan.downloads() + plan.reformats();
     let to_tag = plan.retags();
-    let to_rename = plan.renames();
+    // A completed move commits as a rename (`Effect::Renamed`), so fold both the
+    // sidecar and stem relocations into the rename bucket to match a real run.
+    let to_rename = plan.renames() + plan.artifact_moves() + plan.stem_moves();
     let to_delete = plan.deletes() + plan.artifact_deletes() + plan.stem_deletes();
     let sidecars = plan.artifact_writes() + plan.stem_writes();
     let up_to_date = plan.skips();
@@ -492,6 +494,43 @@ mod tests {
         assert!(text.contains("to delete      1"));
         assert!(text.contains("up to date     1"));
         assert!(text.contains("total          3"));
+    }
+
+    #[test]
+    fn dry_summary_counts_moves_in_the_rename_bucket() {
+        // #141: a MoveArtifact/MoveStem must land in a bucket so `total` equals
+        // the plan length (a completed move commits as a rename).
+        let plan = Plan {
+            actions: vec![
+                Action::MoveArtifact {
+                    kind: ArtifactKind::CoverJpg,
+                    from: "old/cover.jpg".to_owned(),
+                    to: "new/cover.jpg".to_owned(),
+                    source_url: "https://art/large.jpg".to_owned(),
+                    hash: "h".to_owned(),
+                    owner_id: "a".to_owned(),
+                },
+                Action::MoveStem {
+                    clip_id: "a".to_owned(),
+                    key: "voc".to_owned(),
+                    stem_id: "voc".to_owned(),
+                    from: "old.stems/voc.mp3".to_owned(),
+                    to: "new.stems/voc.mp3".to_owned(),
+                    source_url: "https://cdn/voc.mp3".to_owned(),
+                    format: suno_core::StemFormat::Mp3,
+                    hash: "h".to_owned(),
+                },
+            ],
+        };
+        let text = dry_summary("alice", &plan);
+        assert!(
+            text.contains("to rename      2"),
+            "both moves counted: {text}"
+        );
+        assert!(
+            text.contains("total          2"),
+            "total equals plan length: {text}"
+        );
     }
 
     #[test]
