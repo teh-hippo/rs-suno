@@ -372,7 +372,12 @@ pub fn build_playlist_desired(
 
 /// Render a relative path as a forward-slash string, dropping any non-normal
 /// component so the stored path is portable and never escapes the root.
-fn rel_to_string(path: &Path) -> String {
+///
+/// This is the single source of truth for turning a rendered [`PathBuf`] into a
+/// stored/compared path: it is `/`-separated on every OS (on Windows the
+/// per-OS separator is normalised away), so manifest paths, `parent_dir`, and
+/// the deletion-safety checks behave identically across platforms.
+pub(crate) fn rel_to_string(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
             Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
@@ -386,6 +391,7 @@ fn rel_to_string(path: &Path) -> String {
 mod tests {
     use std::collections::BTreeSet;
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     use super::*;
     use crate::config::AudioFormat;
@@ -641,6 +647,84 @@ mod tests {
         );
         assert!(!desired[0].path.contains('\\'));
         assert!(desired[0].path.contains('/'));
+    }
+
+    #[test]
+    fn rel_to_string_normalises_os_separators_to_forward_slash() {
+        // rel_to_string is the single source of truth for every stored path, so
+        // it must render '/' on every OS. A PathBuf assembled per-component (as
+        // render_clip_name does) renders with the platform separator internally,
+        // yet rel_to_string flattens it to '/', so a manifest written on one OS
+        // reconciles byte-identically on another (#236).
+        let mut path = PathBuf::new();
+        for part in ["alice", "Album Name", "alice-Song [clipaaaa]"] {
+            path.push(part);
+        }
+        let rendered = rel_to_string(&path);
+        assert_eq!(rendered, "alice/Album Name/alice-Song [clipaaaa]");
+        assert!(
+            !rendered.contains('\\'),
+            "rendered a platform separator: {rendered}"
+        );
+    }
+
+    #[test]
+    fn cover_album_and_stem_paths_use_forward_slashes() {
+        // The audio path is pinned by build_desired_uses_forward_slashes; extend
+        // that guard to every OTHER persisted path kind — the per-clip cover.jpg,
+        // the album-scoped folder.jpg, and a stem — so none can leak a platform
+        // separator into the manifest on Windows (#236).
+        let a = art_clip("clipaaaa-1234");
+        let clips = [&a];
+        let desired = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            &modes_for(&clips, SourceMode::Mirror),
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles::default(),
+            &NamingConfig::default(),
+        );
+        let d = &desired[0];
+
+        let cover = d
+            .artifacts
+            .iter()
+            .find(|art| art.kind == ArtifactKind::CoverJpg)
+            .expect("an art-bearing clip yields a cover.jpg");
+        assert!(
+            cover.path.contains('/') && !cover.path.contains('\\'),
+            "cover: {}",
+            cover.path
+        );
+
+        let albums = crate::reconcile::album_desired(&desired, false, false);
+        let folder_jpg = albums[0]
+            .folder_jpg
+            .as_ref()
+            .expect("the album has a folder.jpg");
+        assert!(
+            folder_jpg.path.contains('/') && !folder_jpg.path.contains('\\'),
+            "folder.jpg: {}",
+            folder_jpg.path
+        );
+
+        let base = d.path.strip_suffix(".flac").expect("a .flac audio path");
+        let stems = clip_stems(
+            base,
+            &[Stem {
+                id: "stemvocal-9f8e".to_owned(),
+                label: "Vocals".to_owned(),
+                url: "https://cdn.suno.ai/stem.mp3".to_owned(),
+            }],
+            StemFormat::Mp3,
+            CharacterSet::Unicode,
+        );
+        assert!(
+            stems[0].path.contains('/') && !stems[0].path.contains('\\'),
+            "stem: {}",
+            stems[0].path
+        );
     }
 
     #[test]
