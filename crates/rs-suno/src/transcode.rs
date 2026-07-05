@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use suno_core::WebpEncodeSettings;
+use suno_core::{AudioFormat, WebpEncodeSettings};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -24,12 +24,14 @@ const FFMPEG_TIMEOUT: Duration = Duration::from_secs(120);
 /// How often to check whether ffmpeg has finished.
 const FFMPEG_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Transcode `wav` to FLAC bytes, staging temporary files in `scratch_dir`.
-pub fn wav_to_flac(wav: &[u8], scratch_dir: &Path) -> Result<Vec<u8>> {
+/// Transcode `wav` to the given lossless `format`'s bytes, staging temporary
+/// files in `scratch_dir`.
+pub fn wav_to_lossless(wav: &[u8], format: AudioFormat, scratch_dir: &Path) -> Result<Vec<u8>> {
+    let (codec, container) = lossless_codec_args(format)?;
     let stamp = unique_stamp();
     let wav_path = scratch_dir.join(format!(".{stamp}.wav"));
-    let flac_path = scratch_dir.join(format!(".{stamp}.flac"));
-    let _scratch = Scratch(vec![wav_path.clone(), flac_path.clone()]);
+    let out_path = scratch_dir.join(format!(".{stamp}.{}", format.ext()));
+    let _scratch = Scratch(vec![wav_path.clone(), out_path.clone()]);
 
     std::fs::write(&wav_path, wav)
         .with_context(|| format!("could not stage WAV at {}", wav_path.display()))?;
@@ -38,8 +40,8 @@ pub fn wav_to_flac(wav: &[u8], scratch_dir: &Path) -> Result<Vec<u8>> {
         .arg("-y")
         .arg("-i")
         .arg(&wav_path)
-        .args(["-map", "0:a:0", "-c:a", "flac", "-f", "flac"])
-        .arg(&flac_path)
+        .args(["-map", "0:a:0", "-c:a", codec, "-f", container])
+        .arg(&out_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -70,21 +72,38 @@ pub fn wav_to_flac(wav: &[u8], scratch_dir: &Path) -> Result<Vec<u8>> {
     if !status.success() {
         // ffmpeg reports a full disk only as stderr text with no io::Error. The
         // scratch dir is the library destination, so a disk that fills mid-encode
-        // (the WAV staged, but no room for the WAV+FLAC pair) would otherwise
+        // (the WAV staged, but no room for the WAV+output pair) would otherwise
         // degrade to a per-clip skip and repeat for every clip. Probe the scratch
         // dir: if a tiny write also hits ENOSPC, carry a real out-of-space
         // io::Error so the adapter classifies this as a disk-full run abort.
         if let Some(err) = scratch_out_of_space(scratch_dir) {
-            return Err(anyhow::Error::new(err).context("disk full while transcoding to FLAC"));
+            return Err(
+                anyhow::Error::new(err).context(format!("disk full while transcoding to {format}"))
+            );
         }
         bail!(
-            "ffmpeg failed to transcode WAV to FLAC: {}",
+            "ffmpeg failed to transcode WAV to {format}: {}",
             stderr_tail(&stderr)
         );
     }
 
-    std::fs::read(&flac_path)
-        .with_context(|| format!("could not read transcoded FLAC at {}", flac_path.display()))
+    std::fs::read(&out_path).with_context(|| {
+        format!(
+            "could not read transcoded {format} at {}",
+            out_path.display()
+        )
+    })
+}
+
+/// Map a lossless output format to its ffmpeg audio codec and container.
+///
+/// Only formats rs-suno transcodes from the WAV render belong here; MP3 is a
+/// source download and WAV the raw render, so neither is transcoded.
+fn lossless_codec_args(format: AudioFormat) -> Result<(&'static str, &'static str)> {
+    match format {
+        AudioFormat::Flac => Ok(("flac", "flac")),
+        other => bail!("wav_to_lossless cannot encode {other}"),
+    }
 }
 
 /// Transcode an MP4 preview to animated WebP bytes under `settings`.
@@ -291,6 +310,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn flac_codec_args_pin_the_default_output() {
+        // FLAC encodes with codec, container, and extension all "flac"; pinning
+        // them keeps the default output byte-identical as new formats are added.
+        assert_eq!(
+            lossless_codec_args(AudioFormat::Flac).unwrap(),
+            ("flac", "flac")
+        );
+        assert_eq!(AudioFormat::Flac.ext(), "flac");
+    }
+
+    #[test]
+    fn wav_to_lossless_rejects_non_transcoded_formats() {
+        // MP3 is a source download and WAV the raw render; neither is transcoded
+        // here, so they are rejected before any disk or ffmpeg work.
+        let dir = Path::new("target").join("no-such-scratch");
+        assert!(wav_to_lossless(b"", AudioFormat::Mp3, &dir).is_err());
+        assert!(wav_to_lossless(b"", AudioFormat::Wav, &dir).is_err());
+    }
+
     /// Proves the real ffmpeg pipeline: a file-output FLAC carries a complete
     /// `STREAMINFO` so the duration is correct. Ignored because CI has no
     /// ffmpeg; run locally with `cargo test -p rs-suno -- --ignored`.
@@ -318,7 +357,7 @@ mod tests {
         assert!(made.success());
 
         let wav = std::fs::read(&wav_path).unwrap();
-        let flac = wav_to_flac(&wav, &dir).unwrap();
+        let flac = wav_to_lossless(&wav, AudioFormat::Flac, &dir).unwrap();
         assert_eq!(&flac[..4], b"fLaC");
 
         let flac_path = dir.join("out.flac");

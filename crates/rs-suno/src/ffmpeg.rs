@@ -9,7 +9,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 
-use suno_core::{Ffmpeg, FfmpegError, WebpEncodeSettings};
+use suno_core::{AudioFormat, Ffmpeg, FfmpegError, WebpEncodeSettings};
 
 /// An ffmpeg transcoder staging temporary files under one scratch directory.
 pub struct FfmpegAdapter {
@@ -26,7 +26,11 @@ impl FfmpegAdapter {
 }
 
 impl Ffmpeg for FfmpegAdapter {
-    fn wav_to_flac(&self, wav: &[u8]) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
+    fn wav_to_lossless(
+        &self,
+        wav: &[u8],
+        format: AudioFormat,
+    ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
         let scratch = self.scratch.clone();
         let wav = wav.to_vec();
         async move {
@@ -38,20 +42,22 @@ impl Ffmpeg for FfmpegAdapter {
                     FfmpegError::new(reason)
                 });
             }
-            tokio::task::spawn_blocking(move || crate::transcode::wav_to_flac(&wav, &scratch))
-                .await
-                .map_err(|err| FfmpegError::new(format!("transcode task failed: {err}")))?
-                // A full disk surfaces two ways here: the staged WAV write carries
-                // a real io::Error, and a failure while ffmpeg writes the output
-                // .flac is proven by transcode's scratch probe, which attaches a
-                // real out-of-space io::Error. Both are classified as disk-full.
-                .map_err(|err| {
-                    if crate::diskspace::anyhow_is_out_of_space(&err) {
-                        FfmpegError::out_of_space(err.to_string())
-                    } else {
-                        FfmpegError::new(err.to_string())
-                    }
-                })
+            tokio::task::spawn_blocking(move || {
+                crate::transcode::wav_to_lossless(&wav, format, &scratch)
+            })
+            .await
+            .map_err(|err| FfmpegError::new(format!("transcode task failed: {err}")))?
+            // A full disk surfaces two ways here: the staged WAV write carries
+            // a real io::Error, and a failure while ffmpeg writes the output
+            // .flac is proven by transcode's scratch probe, which attaches a
+            // real out-of-space io::Error. Both are classified as disk-full.
+            .map_err(|err| {
+                if crate::diskspace::anyhow_is_out_of_space(&err) {
+                    FfmpegError::out_of_space(err.to_string())
+                } else {
+                    FfmpegError::new(err.to_string())
+                }
+            })
         }
     }
 
