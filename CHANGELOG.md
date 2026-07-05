@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.0](https://github.com/teh-hippo/rs-suno/compare/v0.30.0...v0.31.0) (2026-07-05)
+
+
+### Features
+
+* **alac:** add ALAC (.m4a) lossless output tagged via mp4ameta ([9f8c5ef](https://github.com/teh-hippo/rs-suno/commit/9f8c5efae9f666f55d4810aa0eea0096268ea348))
+
 ## [0.30.0](https://github.com/teh-hippo/rs-suno/compare/v0.29.0...v0.30.0) (2026-07-05)
 
 
