@@ -76,7 +76,7 @@ pub enum Command {
     Fetch(FetchArgs),
     /// Manage the configuration file.
     Config(ConfigArgs),
-    /// Manage authentication.
+    /// Open the authentication guide, or refresh a stored token.
     Auth(AuthArgs),
     /// Report environment, config, auth, and credits diagnostics.
     Doctor,
@@ -366,11 +366,12 @@ pub struct ConfigAddAccountArgs {
     pub token: Option<String>,
 }
 
-/// `auth` and its subcommands.
+/// `auth` and its subcommands. With no subcommand, `suno auth` opens the
+/// online authentication guide in the default browser.
 #[derive(Args, Debug)]
 pub struct AuthArgs {
     #[command(subcommand)]
-    pub command: AuthCommand,
+    pub command: Option<AuthCommand>,
 }
 
 #[derive(Subcommand, Debug)]
