@@ -578,6 +578,7 @@ fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
         animated_cover_max_fps: args.animated_cover_max_fps,
         animated_cover_max_width: args.animated_cover_max_width,
         animated_cover_compression_level: args.animated_cover_compression_level,
+        animated_cover_lossless: args.animated_cover_lossless.then_some(true),
         details_sidecar: args.details_sidecar.then_some(true),
         lyrics_sidecar: args.lyrics_sidecar.then_some(true),
         lrc_sidecar: args.lrc_sidecar.then_some(true),

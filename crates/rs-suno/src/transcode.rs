@@ -21,6 +21,10 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Hard cap on a single ffmpeg transcode before we kill it.
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(120);
+/// Longer cap for the animated-WebP transcode: a full-resolution lossless encode
+/// is single-threaded and legitimately runs into the minutes, so it needs more
+/// headroom than the audio path. The lossy default finishes in seconds.
+const WEBP_FFMPEG_TIMEOUT: Duration = Duration::from_secs(600);
 /// How often to check whether ffmpeg has finished.
 const FFMPEG_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -151,7 +155,7 @@ pub fn mp4_to_webp(mp4: &[u8], settings: WebpEncodeSettings) -> Result<Vec<u8>> 
         buf
     });
 
-    let deadline = Instant::now() + FFMPEG_TIMEOUT;
+    let deadline = Instant::now() + WEBP_FFMPEG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().context("could not wait for ffmpeg")? {
             break status;
@@ -161,7 +165,7 @@ pub fn mp4_to_webp(mp4: &[u8], settings: WebpEncodeSettings) -> Result<Vec<u8>> 
             let _ = child.wait();
             bail!(
                 "ffmpeg timed out after {} seconds",
-                FFMPEG_TIMEOUT.as_secs()
+                WEBP_FFMPEG_TIMEOUT.as_secs()
             );
         }
         std::thread::sleep(FFMPEG_POLL_INTERVAL);
@@ -183,13 +187,22 @@ pub fn mp4_to_webp(mp4: &[u8], settings: WebpEncodeSettings) -> Result<Vec<u8>> 
     Ok(webp)
 }
 
-/// The `-vf` chain: always cap the frame rate. With a width cap, also scale a
-/// wider source down (never upscaling) to an even height; `None` keeps the
-/// source resolution untouched.
+/// The `-vf` chain: cap the frame rate, optionally scale a wider source down,
+/// then convert to RGB honouring the source's colour tags.
+///
+/// With a width cap, scale a wider source down (never upscaling) to an even
+/// height; `None` keeps the source resolution. The trailing `format=rgba` makes
+/// ffmpeg (not libwebp) do the YUV→RGB conversion using the source's declared
+/// range and matrix: this is bit-exact for a lossless encode and measurably more
+/// colour-faithful for a lossy one, closing a range/matrix drift that libwebp's
+/// internal conversion otherwise introduces.
 fn video_filter(settings: &WebpEncodeSettings) -> String {
     match settings.max_width {
-        Some(width) => format!("scale='min({width},iw)':-2,fps={}", settings.max_fps),
-        None => format!("fps={}", settings.max_fps),
+        Some(width) => format!(
+            "scale='min({width},iw)':-2,fps={},format=rgba",
+            settings.max_fps
+        ),
+        None => format!("fps={},format=rgba", settings.max_fps),
     }
 }
 
@@ -262,29 +275,36 @@ mod tests {
 
     #[test]
     fn default_webp_filter_keeps_native_width_and_caps_fps() {
-        // The default keeps the source resolution: only the fps cap applies.
-        assert_eq!(video_filter(&WebpEncodeSettings::default()), "fps=24");
+        // The default keeps the source resolution: only the fps cap applies, then
+        // the RGB conversion for colour-faithful output.
+        assert_eq!(
+            video_filter(&WebpEncodeSettings::default()),
+            "fps=24,format=rgba"
+        );
         // An explicit width cap scales a wider source down to an even height.
         let capped = WebpEncodeSettings {
             max_width: Some(720),
             ..Default::default()
         };
-        assert_eq!(video_filter(&capped), "scale='min(720,iw)':-2,fps=24");
+        assert_eq!(
+            video_filter(&capped),
+            "scale='min(720,iw)':-2,fps=24,format=rgba"
+        );
     }
 
     #[test]
     fn lossy_quality_uses_q_scale_and_default_compression_effort() {
         let settings = WebpEncodeSettings::default();
-        assert_eq!(quality_args(&settings), vec!["-q:v", "70"]);
-        // Effort defaults to level 0; callers can choose any level 0-6.
-        assert_eq!(compression_args(&settings), vec!["-compression_level", "0"]);
+        assert_eq!(quality_args(&settings), vec!["-q:v", "95"]);
+        // Effort defaults to level 4; callers can choose any level 0-4.
+        assert_eq!(compression_args(&settings), vec!["-compression_level", "4"]);
         let full_effort = WebpEncodeSettings {
-            compression_level: 6,
+            compression_level: 4,
             ..Default::default()
         };
         assert_eq!(
             compression_args(&full_effort),
-            vec!["-compression_level", "6"]
+            vec!["-compression_level", "4"]
         );
     }
 

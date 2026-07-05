@@ -175,6 +175,7 @@ pub struct Defaults {
     pub animated_cover_max_fps: Option<u32>,
     pub animated_cover_max_width: Option<u32>,
     pub animated_cover_compression_level: Option<u8>,
+    pub animated_cover_lossless: Option<bool>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
@@ -199,6 +200,7 @@ pub struct SourceConfig {
     pub animated_cover_max_fps: Option<u32>,
     pub animated_cover_max_width: Option<u32>,
     pub animated_cover_compression_level: Option<u8>,
+    pub animated_cover_lossless: Option<bool>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
@@ -229,6 +231,7 @@ pub struct AccountConfig {
     pub animated_cover_max_fps: Option<u32>,
     pub animated_cover_max_width: Option<u32>,
     pub animated_cover_compression_level: Option<u8>,
+    pub animated_cover_lossless: Option<bool>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
@@ -577,7 +580,16 @@ impl Config {
             self.defaults.animated_cover_compression_level,
             defaults_webp.compression_level,
             "ANIMATED_COVER_COMPRESSION_LEVEL",
-            0..=6,
+            0..=4,
+        )?;
+        let animated_cover_lossless = resolve_parsed(
+            flags.animated_cover_lossless,
+            env_val("ANIMATED_COVER_LOSSLESS"),
+            src.and_then(|s| s.animated_cover_lossless),
+            acc.animated_cover_lossless,
+            self.defaults.animated_cover_lossless,
+            defaults_webp.lossless,
+            "ANIMATED_COVER_LOSSLESS",
         )?;
 
         let naming_template_from_env = env_val("NAMING_TEMPLATE").map(str::to_owned);
@@ -636,7 +648,7 @@ impl Config {
                 quality: animated_cover_quality,
                 max_fps: animated_cover_max_fps,
                 max_width: animated_cover_max_width,
-                lossless: defaults_webp.lossless,
+                lossless: animated_cover_lossless,
                 compression_level: animated_cover_compression_level,
             },
             details_sidecar,
@@ -757,6 +769,7 @@ pub struct FlagOverrides {
     pub animated_cover_max_fps: Option<u32>,
     pub animated_cover_max_width: Option<u32>,
     pub animated_cover_compression_level: Option<u8>,
+    pub animated_cover_lossless: Option<bool>,
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
@@ -1445,13 +1458,13 @@ mod tests {
         let flags = FlagOverrides {
             animated_cover_quality: Some(95),
             animated_cover_max_width: Some(512),
-            animated_cover_compression_level: Some(6),
+            animated_cover_compression_level: Some(4),
             ..Default::default()
         };
         let eff = cfg.resolve("alice", Some("liked"), &env, &flags).unwrap();
         assert_eq!(eff.animated_cover_webp.quality, 95);
         assert_eq!(eff.animated_cover_webp.max_width, Some(512));
-        assert_eq!(eff.animated_cover_webp.compression_level, 6);
+        assert_eq!(eff.animated_cover_webp.compression_level, 4);
 
         let bad_env: HashMap<String, String> =
             [("SUNO_ANIMATED_COVER_QUALITY".into(), "101".into())]
@@ -1528,10 +1541,11 @@ mod tests {
     }
 
     #[test]
-    fn animated_cover_compression_level_enforces_zero_to_six() {
-        // The top of the valid range is accepted from the config file.
+    fn animated_cover_compression_level_enforces_zero_to_four() {
+        // The top of the valid range is accepted from the config file. Effort is
+        // capped at 4 because level 6 costs many times the time for no size gain.
         let cfg = Config::from_toml(
-            "[defaults]\nanimated_cover_compression_level = 6\n[accounts.alice]\n",
+            "[defaults]\nanimated_cover_compression_level = 4\n[accounts.alice]\n",
         )
         .unwrap();
         assert_eq!(
@@ -1539,12 +1553,12 @@ mod tests {
                 .unwrap()
                 .animated_cover_webp
                 .compression_level,
-            6
+            4
         );
 
         // One past the top is rejected.
         let cfg = Config::from_toml(
-            "[defaults]\nanimated_cover_compression_level = 7\n[accounts.alice]\n",
+            "[defaults]\nanimated_cover_compression_level = 5\n[accounts.alice]\n",
         )
         .unwrap();
         assert!(cfg.resolve("alice", None, &no_env(), &no_flags()).is_err());
@@ -1552,7 +1566,7 @@ mod tests {
         // The same ceiling is enforced for an env override.
         let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
         let bad_env: HashMap<String, String> =
-            [("SUNO_ANIMATED_COVER_COMPRESSION_LEVEL".into(), "7".into())]
+            [("SUNO_ANIMATED_COVER_COMPRESSION_LEVEL".into(), "5".into())]
                 .into_iter()
                 .collect();
         assert!(cfg.resolve("alice", None, &bad_env, &no_flags()).is_err());
@@ -1563,6 +1577,55 @@ mod tests {
                 .into_iter()
                 .collect();
         assert!(cfg.resolve("alice", None, &junk_env, &no_flags()).is_err());
+    }
+
+    #[test]
+    fn animated_cover_lossless_defaults_off_and_follows_precedence() {
+        // The compiled default is a visually transparent lossy encode: quality
+        // 95, effort 4, lossy (not lossless).
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.animated_cover_webp.quality, 95);
+        assert_eq!(eff.animated_cover_webp.compression_level, 4);
+        assert!(!eff.animated_cover_webp.lossless);
+
+        // Config opts in; an env value and a flag each override in turn.
+        let cfg =
+            Config::from_toml("[defaults]\nanimated_cover_lossless = true\n[accounts.alice]\n")
+                .unwrap();
+        assert!(
+            cfg.resolve("alice", None, &no_env(), &no_flags())
+                .unwrap()
+                .animated_cover_webp
+                .lossless
+        );
+        let env: HashMap<String, String> =
+            [("SUNO_ANIMATED_COVER_LOSSLESS".into(), "false".into())]
+                .into_iter()
+                .collect();
+        assert!(
+            !cfg.resolve("alice", None, &env, &no_flags())
+                .unwrap()
+                .animated_cover_webp
+                .lossless
+        );
+        let flags = FlagOverrides {
+            animated_cover_lossless: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            cfg.resolve("alice", None, &env, &flags)
+                .unwrap()
+                .animated_cover_webp
+                .lossless
+        );
+
+        // A non-boolean value is a config error, not a silent default.
+        let bad_env: HashMap<String, String> =
+            [("SUNO_ANIMATED_COVER_LOSSLESS".into(), "maybe".into())]
+                .into_iter()
+                .collect();
+        assert!(cfg.resolve("alice", None, &bad_env, &no_flags()).is_err());
     }
 
     #[test]

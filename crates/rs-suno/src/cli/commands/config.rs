@@ -156,6 +156,7 @@ fn render_show(config: &Config) -> String {
         || d.animated_cover_max_fps.is_some()
         || d.animated_cover_max_width.is_some()
         || d.animated_cover_compression_level.is_some()
+        || d.animated_cover_lossless.is_some()
         || d.naming_template.is_some()
         || d.character_set.is_some()
     {
@@ -198,6 +199,11 @@ fn render_show(config: &Config) -> String {
             &mut out,
             "animated_cover_compression_level",
             d.animated_cover_compression_level.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "animated_cover_lossless",
+            d.animated_cover_lossless.map(|v| v.to_string()),
         );
         push_opt(&mut out, "naming_template", d.naming_template.clone());
         push_opt(
@@ -261,6 +267,11 @@ fn render_show(config: &Config) -> String {
             "animated_cover_compression_level",
             acc.animated_cover_compression_level.map(|v| v.to_string()),
         );
+        push_opt(
+            &mut out,
+            "animated_cover_lossless",
+            acc.animated_cover_lossless.map(|v| v.to_string()),
+        );
         push_opt(&mut out, "naming_template", acc.naming_template.clone());
         push_opt(
             &mut out,
@@ -304,6 +315,11 @@ fn render_show(config: &Config) -> String {
                 &mut out,
                 "    animated_cover_compression_level",
                 src.animated_cover_compression_level.map(|v| v.to_string()),
+            );
+            push_opt(
+                &mut out,
+                "    animated_cover_lossless",
+                src.animated_cover_lossless.map(|v| v.to_string()),
             );
         }
         if let Some(areas) = &acc.areas {

@@ -56,10 +56,11 @@ retries = 3
 min_newest = 1
 animated_covers = false
 video_cover_retention = "neither" # neither|webp|mp4|both
-animated_cover_quality = 70
+animated_cover_quality = 95
 animated_cover_max_fps = 24
 animated_cover_max_width = 720
-animated_cover_compression_level = 0 # 0..6
+animated_cover_compression_level = 4 # 0..4
+animated_cover_lossless = false # bit-exact but very large
 details_sidecar = false
 lyrics_sidecar = false
 lrc_sidecar = false
@@ -114,10 +115,11 @@ needed. These modes are not applied on non-Unix platforms.
 | `min_newest` | integer | `1` | Minimum newest clips kept when a recency filter would otherwise select nothing. |
 | `animated_covers` | bool | `false` | Also write animated WebP covers from clip video previews. |
 | `video_cover_retention` | `neither` \| `webp` \| `mp4` \| `both` | `neither` | Retention mode for the album video-cover, derived from each album's animated preview. `webp` keeps the transcoded animated `cover.webp` (and the per-song `.webp`), `mp4` keeps the raw `cover.mp4` (the `video_cover_url` byte-for-byte, no transcode), `both` keeps both, `neither` keeps neither. Overrides `animated_covers` when set. The standalone music video (`video_url`) is a separate asset with its own `video_mp4` toggle. |
-| `animated_cover_quality` | integer | `70` | Animated WebP quality (`0..100`, higher is better and larger). |
+| `animated_cover_quality` | integer | `95` | Animated WebP quality (`0..100`, higher is better and larger). The default `95` is visually transparent (measured ~46 dB on real covers) at roughly a fifth of the lossless size. Ignored when `animated_cover_lossless` is set. |
 | `animated_cover_max_fps` | integer | `24` | Frame-rate cap for animated WebP output. |
 | `animated_cover_max_width` | integer | native | Optional width cap in pixels for animated WebP output (no upscaling). |
-| `animated_cover_compression_level` | integer | `0` | Animated WebP compression effort (`0..6`, higher is smaller and slower). |
+| `animated_cover_compression_level` | integer | `4` | Animated WebP compression effort (`0..4`, higher is smaller and slower). Capped at `4`: effort `6` costs many times the encode time for no size gain. |
+| `animated_cover_lossless` | boolean | `false` | Encode the animated cover losslessly (bit-exact to the source). Off by default because lossless animated video is intrinsically huge (a few seconds can be ~145 MB, roughly 30x the source); quality `95` looks the same at a fraction of the size. |
 | `details_sidecar` | bool | `false` | Also write a plain-text `<song>.details.txt` beside each audio file, dumping the same metadata that is embedded in the tags plus the song id, duration, and canonical `suno.com` URL. |
 | `lyrics_sidecar` | bool | `false` | Also write a plain-text `<song>.lyrics.txt` beside each audio file, holding the song's lyrics verbatim. A song with no lyrics gets no file. |
 | `lrc_sidecar` | bool | `false` | Also write a `<song>.lrc` beside each audio file. When Suno has word/line alignment for the song, the `.lrc` is synced line-level (a `[mm:ss.xx]` timestamp per line, the universally supported form) and, for MP3, an ID3 `SYLT` frame with per-word timing is embedded too; otherwise it falls back to the untimed lyrics. A song Suno cannot align (an instrumental) gets no file. Enabling this fetches each song's alignment once. |
@@ -259,7 +261,8 @@ account token:
 | `SUNO_ANIMATED_COVER_QUALITY` | `--animated-cover-quality` | `0..100`. |
 | `SUNO_ANIMATED_COVER_MAX_FPS` | `--animated-cover-max-fps` | Positive integer. |
 | `SUNO_ANIMATED_COVER_MAX_WIDTH` | `--animated-cover-max-width` | Integer width cap in pixels. |
-| `SUNO_ANIMATED_COVER_COMPRESSION_LEVEL` | `--animated-cover-compression-level` | `0..6`. |
+| `SUNO_ANIMATED_COVER_COMPRESSION_LEVEL` | `--animated-cover-compression-level` | `0..4`. |
+| `SUNO_ANIMATED_COVER_LOSSLESS` | `--animated-cover-lossless` | `true` or `false`. |
 | `SUNO_DETAILS_SIDECAR` | `--details-sidecar` | `true` or `false`. |
 | `SUNO_LYRICS_SIDECAR` | `--lyrics-sidecar` | `true` or `false`. |
 | `SUNO_LRC_SIDECAR` | `--lrc-sidecar` | `true` or `false`. |

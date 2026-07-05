@@ -232,9 +232,14 @@ pub struct SyncArgs {
     /// Animated-cover width cap in pixels.
     #[arg(long, value_name = "PIXELS")]
     pub animated_cover_max_width: Option<u32>,
-    /// Animated-cover compression effort, 0-6 (higher is smaller/slower).
+    /// Animated-cover compression effort, 0-4 (higher is smaller/slower).
     #[arg(long, value_name = "N")]
     pub animated_cover_compression_level: Option<u8>,
+    /// Encode the animated cover losslessly. Bit-exact but very large (a few
+    /// seconds of video can be ~145 MB); off by default (quality 95 is visually
+    /// transparent at a fraction of the size).
+    #[arg(long)]
+    pub animated_cover_lossless: bool,
     /// Re-pin this library to the authenticated account (use only when you
     /// deliberately point it at a different Suno account).
     #[arg(long)]
@@ -453,6 +458,7 @@ mod tests {
                 assert_eq!(args.animated_cover_max_fps, None);
                 assert_eq!(args.animated_cover_max_width, None);
                 assert_eq!(args.animated_cover_compression_level, None);
+                assert!(!args.animated_cover_lossless);
             }
             _ => panic!("expected sync"),
         }
@@ -488,7 +494,8 @@ mod tests {
             "--animated-cover-max-width",
             "720",
             "--animated-cover-compression-level",
-            "6",
+            "4",
+            "--animated-cover-lossless",
         ])
         .unwrap();
         match cli.command {
@@ -497,7 +504,8 @@ mod tests {
                 assert_eq!(args.animated_cover_quality, Some(88));
                 assert_eq!(args.animated_cover_max_fps, Some(15));
                 assert_eq!(args.animated_cover_max_width, Some(720));
-                assert_eq!(args.animated_cover_compression_level, Some(6));
+                assert_eq!(args.animated_cover_compression_level, Some(4));
+                assert!(args.animated_cover_lossless);
             }
             _ => panic!("expected sync"),
         }

@@ -89,11 +89,35 @@ Suno clips have a short looping video preview. `rs-suno` can turn that into an
 **animated WebP** cover. This is opt-in, because it costs an extra transcode per
 clip.
 
+WebP is the right format for this: media servers that show animated covers
+(Navidrome, for example) animate WebP, APNG, and GIF on cover zoom but do **not**
+accept video (MP4/WebM). Of those, WebP gives the best quality for the size, so
+it is what `rs-suno` produces. (The raw `cover.mp4` below is for archival, not for
+a server to animate.)
+
 Enable it per run with `--animated-covers`, `--video-cover-retention webp`, or
 set `video_cover_retention = "webp"` in your
 [config](configuration.md). You can also tune encoder knobs with
 `animated_cover_quality`, `animated_cover_max_fps`,
 `animated_cover_max_width`, and `animated_cover_compression_level`.
+
+The default encode is **quality 95 at effort 4**, which is visually transparent
+(measured around 46 dB against the source on real covers) yet a fraction of the
+lossless size, and encodes in seconds. The frame rate and resolution of the
+source are preserved (no upscaling; the width cap only ever scales down), and the
+YUV-to-RGB conversion honours the source's colour tags, so the cover matches the
+original video's colours.
+
+### Lossless covers
+
+For a bit-exact cover, set `--animated-cover-lossless` (or
+`animated_cover_lossless = true`). Be warned that lossless animated video is
+intrinsically enormous: a five-second preview is around **145 MB** (roughly 30
+times the source), because a lossless codec cannot use the motion compression a
+lossy one does. Quality 95 is visually indistinguishable at a fraction of the
+size, so lossless is off by default and worth it only if you truly want the exact
+frames. Effort is capped at 4 for every mode, because effort 6 produces the same
+size for many times the encode time.
 
 With animated covers on, and for clips that have a video preview, `rs-suno` also
 writes:

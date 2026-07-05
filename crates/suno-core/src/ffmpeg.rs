@@ -63,9 +63,12 @@ impl FfmpegError {
 /// Encoder settings for the animated WebP cover derived from a clip's MP4
 /// preview.
 ///
-/// The [`Default`] turns encoder effort off (compression level 0) so a
-/// full-resolution clip encodes well under the ffmpeg timeout, since full
-/// effort can take minutes.
+/// The [`Default`] is visually transparent lossy: quality 95 at effort
+/// (`compression_level`) 4. Measurement on real Suno covers showed 95 reaches
+/// ~46 dB (indistinguishable from lossless for a cover) at roughly a fifth of
+/// the lossless size, and that effort 6 only matches effort 4's size for 7-13x
+/// the encode time, so effort is capped at 4. Lossless is opt-in and much
+/// larger (a 5 s cover is ~145 MB versus ~31 MB at quality 95).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebpEncodeSettings {
     /// Lossy encoder quality, 0-100 (higher is better and larger). Ignored when
@@ -77,22 +80,23 @@ pub struct WebpEncodeSettings {
     /// source down keeping its aspect ratio (never upscaling), while `None`
     /// keeps the source resolution.
     pub max_width: Option<u32>,
-    /// Encode losslessly (much larger); off by default.
+    /// Encode losslessly. Off by default: lossless animated WebP of real video
+    /// is intrinsically huge (roughly 30x the lossy source) with no visible
+    /// gain over quality 95 for a cover.
     pub lossless: bool,
-    /// Encoder effort, 0-6 (higher is smaller and slower). `0` by default,
-    /// because full effort can take minutes on a full-resolution clip and
-    /// exceed the transcode timeout.
+    /// Encoder effort, 0-4 (higher is smaller and slower). Capped at 4 because
+    /// effort 6 yields the same size for many times the encode time.
     pub compression_level: u8,
 }
 
 impl Default for WebpEncodeSettings {
     fn default() -> Self {
         Self {
-            quality: 70,
+            quality: 95,
             max_fps: 24,
             max_width: None,
             lossless: false,
-            compression_level: 0,
+            compression_level: 4,
         }
     }
 }
