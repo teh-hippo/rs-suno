@@ -2018,17 +2018,9 @@ mod tests {
         }
     }
 
-    fn ext(format: AudioFormat) -> &'static str {
-        match format {
-            AudioFormat::Mp3 => "mp3",
-            AudioFormat::Flac => "flac",
-            AudioFormat::Wav => "wav",
-        }
-    }
-
     fn desired(clip: Clip, format: AudioFormat) -> Desired {
         Desired {
-            path: format!("{}.{}", clip.id, ext(format)),
+            path: format!("{}.{}", clip.id, format.ext()),
             lineage: LineageContext::own_root(&clip),
             clip,
             format,

@@ -103,15 +103,6 @@ impl ClipSpec {
     }
 }
 
-/// The file extension for a format.
-pub(super) fn ext(format: AudioFormat) -> &'static str {
-    match format {
-        AudioFormat::Mp3 => "mp3",
-        AudioFormat::Flac => "flac",
-        AudioFormat::Wav => "wav",
-    }
-}
-
 /// Reduce a title to a path-safe slug, so a title change yields a path change.
 fn slug(title: &str) -> String {
     let cleaned: String = title
@@ -136,7 +127,7 @@ pub(super) fn path_of(spec: &ClipSpec) -> String {
         slug(&spec.creator),
         slug(&spec.title),
         spec.id,
-        ext(spec.format)
+        spec.format.ext()
     )
 }
 

@@ -593,7 +593,8 @@ fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
 /// extensionless base the sidecars and the `.stems` folder are built from.
 /// Falls back to the whole path if the extension is somehow absent.
 fn strip_format_ext(path: &str, format: suno_core::AudioFormat) -> &str {
-    path.strip_suffix(&format!(".{format}")).unwrap_or(path)
+    path.strip_suffix(&format!(".{}", format.ext()))
+        .unwrap_or(path)
 }
 
 /// List existing stems for the selected clips, when the feature is on.

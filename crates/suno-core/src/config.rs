@@ -25,6 +25,19 @@ pub enum AudioFormat {
     Wav,
 }
 
+impl AudioFormat {
+    /// The on-disk file extension for a clip in this format. Kept separate from
+    /// the [`Display`](fmt::Display) token so a codec's container extension need
+    /// not match its config name.
+    pub fn ext(self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::Flac => "flac",
+            Self::Wav => "wav",
+        }
+    }
+}
+
 impl FromStr for AudioFormat {
     type Err = Error;
 
@@ -1693,6 +1706,13 @@ mod tests {
             let s = fmt.to_string();
             assert_eq!(s.parse::<AudioFormat>().unwrap(), fmt);
         }
+    }
+
+    #[test]
+    fn audio_format_ext() {
+        assert_eq!(AudioFormat::Mp3.ext(), "mp3");
+        assert_eq!(AudioFormat::Flac.ext(), "flac");
+        assert_eq!(AudioFormat::Wav.ext(), "wav");
     }
 
     #[test]
