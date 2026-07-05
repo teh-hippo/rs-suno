@@ -7,19 +7,19 @@
 `suno version` ends with `ffmpeg: not found on PATH`. Install ffmpeg and make
 sure it is on your `PATH`. See
 [Installation and ffmpeg](installation-and-ffmpeg.md#ffmpeg). `rs-suno` needs
-ffmpeg to produce FLAC (the default format) and animated WebP covers.
+ffmpeg to produce FLAC (the default format) or ALAC, and animated WebP covers.
 
-### FLAC or animated covers fail to encode
+### FLAC, ALAC, or animated covers fail to encode
 
 Your ffmpeg build is missing an encoder. Check it with:
 
 ```bash
-ffmpeg -hide_banner -encoders | grep -E 'flac|libwebp'
+ffmpeg -hide_banner -encoders | grep -E 'flac|alac|libwebp'
 ```
 
-If `flac` is missing, download in MP3 or install a fuller ffmpeg build. If
-`libwebp`/`libwebp_anim` is missing, drop `--animated-covers` or install an
-ffmpeg with animated-WebP support.
+If `flac` or `alac` is missing, download in MP3 or WAV, or install a fuller
+ffmpeg build. If `libwebp`/`libwebp_anim` is missing, drop `--animated-covers`
+or install an ffmpeg with animated-WebP support.
 
 ### Authentication failed (exit 4)
 
@@ -136,9 +136,11 @@ itself is shown by `suno version`.
 
 ### Which format should I choose?
 
-FLAC (the default) is lossless and carries full metadata and embedded art. MP3
-is smaller and widely compatible. WAV is lossless but carries limited metadata,
-so lyrics and embedded art are omitted.
+FLAC (the default) is lossless and carries full metadata and embedded art. ALAC
+is lossless too and is the Apple-friendly choice (`.m4a`, plays natively on Apple
+devices and Apple Music), carrying the same tags and cover. MP3 is smaller and
+widely compatible. WAV is lossless but carries limited metadata, so lyrics and
+embedded art are omitted.
 
 ### Is it safe to run on a schedule?
 
