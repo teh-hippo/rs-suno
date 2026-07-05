@@ -82,9 +82,9 @@ pub use naming::{
 pub use orphans::untracked_audio;
 pub use reconcile::{
     Action, AlbumDesired, ArtifactKind, Desired, DesiredArtifact, DesiredStem, LocalFile, Plan,
-    PlaylistDesired, SourceMode, SourceStatus, album_desired, area_fully_enumerated,
-    deletion_allowed, narrows_downloads, plan_album_artifacts, plan_playlist_artifacts,
-    playlist_authoritative, reconcile,
+    PlaylistDesired, SourceMode, SourceStatus, album_desired, area_authoritative,
+    area_fully_enumerated, deletion_allowed, narrows_downloads, plan_album_artifacts,
+    plan_playlist_artifacts, reconcile,
 };
 pub use synced::{
     PendingCheck, SYNCED_LRC_RECHECK_SECS, apply_synced_lrc, preview_synced_lrc,
