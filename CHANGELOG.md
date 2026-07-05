@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/teh-hippo/rs-suno/compare/v0.29.0...v0.30.0) (2026-07-05)
+
+
+### Features
+
+* ship native Windows x86_64 and aarch64 (MSVC) release binaries ([9700679](https://github.com/teh-hippo/rs-suno/commit/9700679bd75a78201370ce0c29af599eec57c402))
+
 ## [0.29.0](https://github.com/teh-hippo/rs-suno/compare/v0.28.0...v0.29.0) (2026-07-05)
 
 
