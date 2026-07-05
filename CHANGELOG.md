@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.0](https://github.com/teh-hippo/rs-suno/compare/v0.32.0...v0.33.0) (2026-07-05)
+
+
+### Features
+
+* **auth:** open the guide when `suno auth` runs without a subcommand ([36cc27d](https://github.com/teh-hippo/rs-suno/commit/36cc27d35e9a8bb63e564c086567c78d97f2e201))
+
 ## [0.32.0](https://github.com/teh-hippo/rs-suno/compare/v0.31.0...v0.32.0) (2026-07-05)
 
 
