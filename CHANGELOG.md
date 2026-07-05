@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.33.1](https://github.com/teh-hippo/rs-suno/compare/v0.33.0...v0.33.1) (2026-07-05)
+
+
+### Bug Fixes
+
+* **fs:** reject symlinked path escapes on writes and pruning ([3528e3b](https://github.com/teh-hippo/rs-suno/commit/3528e3bd6322b5282f0055ffc1782aac47c6173b)), closes [#247](https://github.com/teh-hippo/rs-suno/issues/247) [#249](https://github.com/teh-hippo/rs-suno/issues/249)
+* **http:** confine egress to Suno hosts and redact error URLs ([fb8510d](https://github.com/teh-hippo/rs-suno/commit/fb8510d27c180d4626a62d4c316862f7d12a30ee)), closes [#246](https://github.com/teh-hippo/rs-suno/issues/246) [#250](https://github.com/teh-hippo/rs-suno/issues/250)
+* **sync:** disarm deletion authority on feed filter-loss ([c84ab4d](https://github.com/teh-hippo/rs-suno/commit/c84ab4da33d4ae41970f14c33450ed8fdff5eaf8)), closes [#248](https://github.com/teh-hippo/rs-suno/issues/248)
+
 ## [0.33.0](https://github.com/teh-hippo/rs-suno/compare/v0.32.0...v0.33.0) (2026-07-05)
 
 
