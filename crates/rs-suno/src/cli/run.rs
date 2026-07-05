@@ -22,10 +22,9 @@ use suno_core::{
     Error as CoreError, ExecOptions, Filesystem, FlagOverrides, LIKED_PLAYLIST_ID, LineageContext,
     LocalFile, Manifest, NamingConfig, Owner, OwnerGate, PlaylistDesired, PlaylistInput,
     PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode, SourceStatus, Stem, SunoClient,
-    adopt_decision, album_desired, area_fully_enumerated, build_desired, build_playlist_desired,
-    clip_stems, deletion_allowed, is_downloadable, narrows_downloads, owner_gate,
-    plan_album_artifacts, plan_playlist_artifacts, playlist_authoritative, reconcile,
-    resolve_roots,
+    adopt_decision, album_desired, area_authoritative, area_fully_enumerated, build_desired,
+    build_playlist_desired, clip_stems, deletion_allowed, is_downloadable, narrows_downloads,
+    owner_gate, plan_album_artifacts, plan_playlist_artifacts, reconcile, resolve_roots,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
@@ -1704,11 +1703,13 @@ async fn enumerate_areas(
             // Protector / configured Library: list the whole feed, ignoring any
             // `--limit`/`--since` so a stray narrowing never disarms it (D2).
             match client.list_clips(http, false, None).await {
-                Ok((clips, complete)) => areas.push(AreaListing {
+                Ok((clips, complete, any_filtered)) => areas.push(AreaListing {
                     kind: AreaKind::Library,
                     mode: lib.mode,
                     clips,
-                    authoritative_ignoring_empty: complete,
+                    // The protector ignores `--limit`/`--since` (narrowed=false)
+                    // but still disarms on filter loss (#248).
+                    authoritative_ignoring_empty: area_authoritative(complete, any_filtered, false),
                 }),
                 Err(err) => {
                     if verbosity >= -1 {
@@ -1728,11 +1729,15 @@ async fn enumerate_areas(
             // Plain Library run: honours `--limit`, and a listing failure aborts
             // exactly as today (the run has no other data source).
             match client.list_clips(http, false, args.limit).await {
-                Ok((clips, complete)) => areas.push(AreaListing {
+                Ok((clips, complete, any_filtered)) => areas.push(AreaListing {
                     kind: AreaKind::Library,
                     mode: lib.mode,
                     clips,
-                    authoritative_ignoring_empty: complete && !narrowed,
+                    authoritative_ignoring_empty: area_authoritative(
+                        complete,
+                        any_filtered,
+                        narrowed,
+                    ),
                 }),
                 Err(err) => return Err(report_listing_failure(label, &err)),
             }
@@ -1741,11 +1746,11 @@ async fn enumerate_areas(
 
     if let Some(mode) = selection.liked {
         match client.list_clips(http, true, None).await {
-            Ok((clips, complete)) => areas.push(AreaListing {
+            Ok((clips, complete, any_filtered)) => areas.push(AreaListing {
                 kind: AreaKind::Liked,
                 mode,
                 clips,
-                authoritative_ignoring_empty: complete && !narrowed,
+                authoritative_ignoring_empty: area_authoritative(complete, any_filtered, narrowed),
             }),
             Err(err) => {
                 if verbosity >= -1 {
@@ -1873,11 +1878,7 @@ async fn list_playlist_area(
                 },
                 mode,
                 clips,
-                authoritative_ignoring_empty: playlist_authoritative(
-                    complete,
-                    any_filtered,
-                    narrowed,
-                ),
+                authoritative_ignoring_empty: area_authoritative(complete, any_filtered, narrowed),
             }
         }
         Err(err) => {
@@ -2045,14 +2046,14 @@ async fn fetch_playlist_desired(
     // drained fully: a truncated feed would render a short playlist and is left
     // untouched instead (B2).
     match client.list_clips(http, true, None).await {
-        Ok((liked, true)) => {
+        Ok((liked, true, _)) => {
             fetched.push((
                 LIKED_PLAYLIST_ID.to_owned(),
                 "Liked Songs".to_owned(),
                 liked,
             ));
         }
-        Ok((_, false)) => {
+        Ok((_, false, _)) => {
             if verbosity >= -1 {
                 eprint_t!("warning: liked feed was truncated; keeping Liked Songs.m3u8 unchanged");
             }
@@ -3085,7 +3086,7 @@ mod tests {
         let narrowed = pl_area(
             SourceMode::Mirror,
             &["a"],
-            playlist_authoritative(true, false, true),
+            area_authoritative(true, false, true),
         );
         assert!(!area_enumerated(&narrowed, false));
         assert!(!deletion_allowed(&source_statuses(&[narrowed], false)));
@@ -3093,7 +3094,7 @@ mod tests {
         let full = pl_area(
             SourceMode::Mirror,
             &["a"],
-            playlist_authoritative(true, false, false),
+            area_authoritative(true, false, false),
         );
         assert!(area_enumerated(&full, false));
         assert!(deletion_allowed(&source_statuses(&[full], false)));
@@ -3109,7 +3110,7 @@ mod tests {
             pl_area(
                 SourceMode::Mirror,
                 &["pl"],
-                playlist_authoritative(true, false, true),
+                area_authoritative(true, false, true),
             ),
         ];
         let (can_delete, lib_auth, truncate) = verdict(&areas);
@@ -3129,7 +3130,7 @@ mod tests {
         let areas = vec![pl_area(
             SourceMode::Mirror,
             &["pl"],
-            playlist_authoritative(true, false, true),
+            area_authoritative(true, false, true),
         )];
         let (can_delete, lib_auth, truncate) = verdict(&areas);
         assert!(!can_delete, "narrowed playlist mirror is disarmed");
@@ -3167,7 +3168,7 @@ mod tests {
         let areas = vec![pl_area(
             SourceMode::Mirror,
             &["pl"],
-            playlist_authoritative(true, false, true),
+            area_authoritative(true, false, true),
         )];
         assert!(!adoption_enumerated(&areas, false));
     }

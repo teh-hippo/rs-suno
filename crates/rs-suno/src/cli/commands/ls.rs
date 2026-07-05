@@ -66,7 +66,7 @@ pub async fn run_ls(global: &GlobalArgs, args: &LsArgs, force_json: bool) -> Res
     crate::cli::expiry::warn_token_expiry(&label, &auth, global.verbosity());
     let client = SunoClient::new(auth, TokioClock);
 
-    let (clips, _complete) = match client.list_clips(&http, args.liked, args.limit).await {
+    let (clips, _complete, _) = match client.list_clips(&http, args.liked, args.limit).await {
         Ok(result) => result,
         Err(err) => return Ok(run::report_listing_failure(&label, &err)),
     };

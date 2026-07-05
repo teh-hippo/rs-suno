@@ -584,16 +584,17 @@ pub fn deletion_allowed(sources: &[SourceStatus]) -> bool {
     saw_mirror
 }
 
-/// Whether a playlist listing is authoritative for deletion, before the
+/// Whether an area listing is authoritative for deletion, before the
 /// empty-mirror guard.
 ///
-/// A playlist area is authoritative only when its page set drained completely
-/// (`complete`), no member was lost to the downloadable filter (`any_filtered`),
-/// and no `--limit`/`--since` narrowing was applied (`narrowed`). A narrowed
-/// playlist mirror disarms exactly as a narrowed library or liked feed does, so
-/// `--limit`/`--since` never delete against the full playlist and deletion
-/// always needs a full run, uniformly across every source (#148).
-pub fn playlist_authoritative(complete: bool, any_filtered: bool, narrowed: bool) -> bool {
+/// Any area -- library, liked feed, or playlist -- is authoritative only when
+/// its listing drained completely (`complete`), no member was lost to the
+/// downloadable filter (`any_filtered`), and no `--limit`/`--since` narrowing
+/// was applied (`narrowed`). A member that transiently fails the filter would
+/// otherwise look absent and see its master deleted, so any filter loss disarms
+/// deletion uniformly across every source (#148, #248); a narrowing likewise
+/// always defers deletion to a full run.
+pub fn area_authoritative(complete: bool, any_filtered: bool, narrowed: bool) -> bool {
     complete && !any_filtered && !narrowed
 }
 
@@ -2384,17 +2385,17 @@ mod tests {
     }
 
     #[test]
-    fn playlist_authoritative_requires_all_conditions() {
+    fn area_authoritative_requires_all_conditions() {
         // All three conditions satisfied: authoritative.
-        assert!(playlist_authoritative(true, false, false));
+        assert!(area_authoritative(true, false, false));
         // Incomplete page drain: not authoritative.
-        assert!(!playlist_authoritative(false, false, false));
+        assert!(!area_authoritative(false, false, false));
         // A member lost to the downloadable filter: not authoritative.
-        assert!(!playlist_authoritative(true, true, false));
+        assert!(!area_authoritative(true, true, false));
         // Narrowed with --limit/--since: not authoritative.
-        assert!(!playlist_authoritative(true, false, true));
+        assert!(!area_authoritative(true, false, true));
         // Multiple conditions: any failure disarms.
-        assert!(!playlist_authoritative(false, true, true));
+        assert!(!area_authoritative(false, true, true));
     }
 
     #[test]

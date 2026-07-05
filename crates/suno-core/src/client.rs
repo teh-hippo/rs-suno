@@ -175,28 +175,35 @@ impl<C: Clock> SunoClient<C> {
     /// usable `next_cursor`, a `limit` stop, exhausting [`MAX_PAGES`], or any
     /// transport error all yield `false` (or propagate) so the caller can refuse
     /// to treat a truncated listing as authoritative for deletion.
+    ///
+    /// A third `any_filtered` flag is `true` when any listed clip was dropped by
+    /// the downloadable filter on any page, so the caller can refuse deletion
+    /// authority for a listing that may have hidden a manifest-tracked clip
+    /// (#248), exactly as the playlist path already does.
     pub async fn list_clips(
         &self,
         http: &impl Http,
         liked: bool,
         limit: Option<usize>,
-    ) -> Result<(Vec<Clip>, bool)> {
+    ) -> Result<(Vec<Clip>, bool, bool)> {
         let mut clips = Vec::new();
         let mut cursor: Option<String> = None;
         let mut complete = false;
+        let mut any_filtered = false;
         for _ in 0..MAX_PAGES {
             let body = feed_v3_body(liked, cursor.as_deref());
             let response = self
                 .api_send_retrying(http, Method::Post, FEED_V3_PATH, body)
                 .await?;
-            let (page_clips, has_more, next_cursor) = parse_feed_v3(&response)?;
-            clips.extend(page_clips);
-            match has_more {
+            let page = parse_feed_v3(&response)?;
+            clips.extend(page.clips);
+            any_filtered |= page.any_filtered;
+            match page.has_more {
                 Some(false) => {
                     complete = true;
                     break;
                 }
-                Some(true) => match next_cursor {
+                Some(true) => match page.next_cursor {
                     Some(next) => cursor = Some(next),
                     None => break,
                 },
@@ -209,7 +216,7 @@ impl<C: Clock> SunoClient<C> {
         if let Some(n) = limit {
             clips.truncate(n);
         }
-        Ok((clips, complete))
+        Ok((clips, complete, any_filtered))
     }
 
     /// Fetch one clip by ID.
@@ -580,7 +587,7 @@ impl<C: Clock> SunoClient<C> {
 
     /// Locate a clip by scanning the library feed.
     async fn find_in_feed(&self, http: &impl Http, id: &str) -> Result<Clip> {
-        let (clips, _complete) = self.list_clips(http, false, None).await?;
+        let (clips, _complete, _) = self.list_clips(http, false, None).await?;
         clips
             .into_iter()
             .find(|clip| clip.id == id)
@@ -1026,35 +1033,63 @@ fn feed_v3_body(liked: bool, cursor: Option<&str>) -> Vec<u8> {
     serde_json::to_vec(&Value::Object(body)).unwrap_or_default()
 }
 
-/// Parse a v3 feed page into the kept clips, the raw `has_more`, and the
-/// `next_cursor`.
+/// One parsed v3 feed page.
 ///
 /// `has_more` is [`None`] when the key is missing or not a bool, so the caller
 /// can refuse to treat an unrecognised page as a fully drained feed. An empty
 /// `next_cursor` string maps to [`None`] so it is never re-sent as a cursor.
-fn parse_feed_v3(body: &[u8]) -> Result<(Vec<Clip>, Option<bool>, Option<String>)> {
+/// `any_filtered` is `true` when the raw `clips[]` array held more entries than
+/// survived the downloadable and non-empty-id filters, so the caller can disarm
+/// deletion authority for a listing that may have hidden a tracked clip (#248).
+struct FeedPage {
+    clips: Vec<Clip>,
+    has_more: Option<bool>,
+    next_cursor: Option<String>,
+    any_filtered: bool,
+}
+
+/// Parse a v3 feed page into a [`FeedPage`].
+fn parse_feed_v3(body: &[u8]) -> Result<FeedPage> {
     let data: Value = serde_json::from_slice(body)
         .map_err(|err| Error::Api(format!("invalid feed JSON: {err}")))?;
     let Some(object) = data.as_object() else {
-        return Ok((Vec::new(), None, None));
+        return Ok(FeedPage {
+            clips: Vec::new(),
+            has_more: None,
+            next_cursor: None,
+            any_filtered: false,
+        });
     };
-    let clips = object
-        .get("clips")
-        .and_then(Value::as_array)
+    let raw = object.get("clips").and_then(Value::as_array);
+    let raw_len = raw.map(|clips| clips.len()).unwrap_or(0);
+    let clips: Vec<Clip> = raw
         .map(|raw| {
             raw.iter()
                 .map(Clip::from_json)
                 .filter(is_downloadable)
+                .filter(|clip| !clip.id.is_empty())
                 .collect()
         })
         .unwrap_or_default();
+    // A member the feed still lists may have flipped off `complete` (or into an
+    // excluded type/task) since it was downloaded, or arrived with a corrupted
+    // (empty) id; dropping it silently here would make a tracked clip look
+    // absent and delete its master. Surface any such loss so the caller can
+    // refuse deletion authority for this listing, matching the playlist path's
+    // empty-id and filter guards (#248, sibling of #148).
+    let any_filtered = clips.len() < raw_len;
     let has_more = object.get("has_more").and_then(Value::as_bool);
     let next_cursor = object
         .get("next_cursor")
         .and_then(Value::as_str)
         .filter(|cursor| !cursor.is_empty())
         .map(str::to_string);
-    Ok((clips, has_more, next_cursor))
+    Ok(FeedPage {
+        clips,
+        has_more,
+        next_cursor,
+        any_filtered,
+    })
 }
 
 /// Parse a `/api/playlist/me` page into playlists, dropping entries with no id.
@@ -1164,13 +1199,49 @@ mod tests {
 
     #[test]
     fn parse_feed_v3_filters_and_reads_pagination() {
-        let (clips, has_more, next_cursor) = parse_feed_v3(feed_body().as_bytes()).unwrap();
-        assert_eq!(has_more, Some(false));
-        assert_eq!(next_cursor, None);
-        assert_eq!(clips.len(), 1);
-        assert_eq!(clips[0].id, "a");
-        assert_eq!(clips[0].tags, "rock");
-        assert!((clips[0].duration - 120.5).abs() < f64::EPSILON);
+        let page = parse_feed_v3(feed_body().as_bytes()).unwrap();
+        assert_eq!(page.has_more, Some(false));
+        assert_eq!(page.next_cursor, None);
+        assert_eq!(page.clips.len(), 1);
+        assert_eq!(page.clips[0].id, "a");
+        assert_eq!(page.clips[0].tags, "rock");
+        assert!((page.clips[0].duration - 120.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_feed_v3_flags_a_dropped_clip_as_filtered() {
+        // feed_body() lists four clips but only one survives is_downloadable, so
+        // a tracked clip that flipped off `complete` would be hidden here; the
+        // flag warns the caller to disarm deletion (#248).
+        let page = parse_feed_v3(feed_body().as_bytes()).unwrap();
+        assert_eq!(page.clips.len(), 1);
+        assert!(page.any_filtered);
+
+        // A page whose every clip is downloadable loses nothing.
+        let clean = serde_json::json!({
+            "has_more": false,
+            "clips": [{"id": "a", "status": "complete", "metadata": {"type": "gen"}}]
+        })
+        .to_string();
+        let page = parse_feed_v3(clean.as_bytes()).unwrap();
+        assert_eq!(page.clips.len(), 1);
+        assert!(!page.any_filtered);
+
+        // A complete clip with a corrupted (empty) id is dropped and counted as
+        // loss, so a tracked clip cannot be hidden behind an id-less entry
+        // (parity with the playlist path).
+        let empty_id = serde_json::json!({
+            "has_more": false,
+            "clips": [
+                {"id": "kept", "status": "complete", "metadata": {"type": "gen"}},
+                {"id": "", "status": "complete", "metadata": {"type": "gen"}}
+            ]
+        })
+        .to_string();
+        let page = parse_feed_v3(empty_id.as_bytes()).unwrap();
+        assert_eq!(page.clips.len(), 1);
+        assert_eq!(page.clips[0].id, "kept");
+        assert!(page.any_filtered);
     }
 
     /// One real anonymised `POST /api/feed/v3` page (issue #219): a single
@@ -1241,7 +1312,12 @@ mod tests {
 
     #[test]
     fn parse_feed_v3_page_maps_real_body_and_pagination() {
-        let (clips, has_more, next_cursor) = parse_feed_v3(FEED_V3_PAGE.as_bytes()).unwrap();
+        let FeedPage {
+            clips,
+            has_more,
+            next_cursor,
+            ..
+        } = parse_feed_v3(FEED_V3_PAGE.as_bytes()).unwrap();
         assert_eq!(has_more, Some(true));
         assert_eq!(next_cursor.as_deref(), Some("cursor-token"));
         // The single gen_stem clip is complete and passes is_downloadable.
@@ -1288,7 +1364,12 @@ mod tests {
             "has_more": false
         })
         .to_string();
-        let (clips, has_more, next_cursor) = parse_feed_v3(stripped.as_bytes()).unwrap();
+        let FeedPage {
+            clips,
+            has_more,
+            next_cursor,
+            ..
+        } = parse_feed_v3(stripped.as_bytes()).unwrap();
         assert_eq!(has_more, Some(false));
         assert_eq!(next_cursor, None);
         assert_eq!(clips.len(), 1);
@@ -1341,7 +1422,8 @@ mod tests {
         let auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(&http)).unwrap();
         let client = SunoClient::new(auth, RecordingClock::new());
-        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, "a");
         assert!(complete);
@@ -1376,7 +1458,7 @@ mod tests {
         let auth = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth.authenticate(&http)).unwrap();
         let client = SunoClient::new(auth, RecordingClock::at(exp - JWT_REFRESH_BUFFER));
-        let (clips, _) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, _, _) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
         // authenticate + api_request refresh = 2 token calls.
         assert_eq!(http.count("/v1/client/sessions/"), 2);
@@ -1386,7 +1468,7 @@ mod tests {
         let auth2 = ClerkAuth::new("eyJtoken");
         pollster::block_on(auth2.authenticate(&http2)).unwrap();
         let client2 = SunoClient::new(auth2, RecordingClock::at(exp - JWT_REFRESH_BUFFER - 1));
-        let (clips2, _) = pollster::block_on(client2.list_clips(&http2, false, None)).unwrap();
+        let (clips2, _, _) = pollster::block_on(client2.list_clips(&http2, false, None)).unwrap();
         assert_eq!(clips2.len(), 1);
         // Only authenticate's token call; no extra refresh.
         assert_eq!(http2.count("/v1/client/sessions/"), 1);
@@ -1412,7 +1494,8 @@ mod tests {
         let http = MockHttp::new(rules);
         let client = authed_client(&http);
 
-        let (_clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (_clips, complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(!complete);
     }
 
@@ -2059,7 +2142,8 @@ mod tests {
         let clock = RecordingClock::new();
         let client = scripted_client(&http, clock.clone());
 
-        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
         assert!(complete);
         // The throttled page was retried once, waiting the default post-429 wait.
@@ -2079,7 +2163,8 @@ mod tests {
         let clock = RecordingClock::new();
         let client = scripted_client(&http, clock.clone());
 
-        let (clips, _complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, _complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert_eq!(clips.len(), 1);
         // The server's Retry-After is honoured directly as the post-429 wait.
         assert_eq!(clock.sleeps(), vec![Duration::from_secs(7)]);
@@ -2099,7 +2184,8 @@ mod tests {
         let clock = RecordingClock::new();
         let client = scripted_client(&http, clock.clone());
 
-        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
         assert_eq!(clips.len(), 2);
         let bodies = http.bodies();
@@ -2125,7 +2211,8 @@ mod tests {
         let clock = RecordingClock::new();
         let client = scripted_client(&http, clock.clone());
 
-        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
         assert_eq!(clips.len(), 2);
         let bodies = http.bodies();
@@ -2156,7 +2243,8 @@ mod tests {
         let clock = RecordingClock::new();
         let client = scripted_client(&http, clock.clone());
 
-        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(!complete);
         assert_eq!(clips.len(), 1);
         assert_eq!(http.count("/api/feed/v3"), 1, "no re-POST of a null cursor");
@@ -2178,7 +2266,8 @@ mod tests {
         let clock = RecordingClock::new();
         let client = scripted_client(&http, clock.clone());
 
-        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(!complete);
         assert_eq!(clips.len(), 1);
         assert_eq!(http.count("/api/feed/v3"), 1);
@@ -2211,9 +2300,59 @@ mod tests {
         let clock = RecordingClock::new();
         let client = scripted_client(&http, clock.clone());
 
-        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
         assert!(clips.is_empty());
+    }
+
+    #[test]
+    fn list_clips_flags_filter_loss_on_a_drained_feed() {
+        // A fully drained feed that still hides a clip behind is_downloadable
+        // must report any_filtered=true, so the Library/Liked area is not
+        // authoritative and an irreplaceable master is never deleted as
+        // "absent" (#248).
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/feed/v3", Reply::json(&feed_body()));
+        let clock = RecordingClock::new();
+        let client = scripted_client(&http, clock.clone());
+
+        let (clips, complete, any_filtered) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert!(complete);
+        assert!(any_filtered);
+        assert_eq!(clips.len(), 1);
+    }
+
+    #[test]
+    fn list_clips_ors_filter_loss_across_pages() {
+        // The first page loses nothing; the second hides a streaming clip. The
+        // flag must accumulate so a late-page filter loss still disarms deletion.
+        let page2 = serde_json::json!({
+            "has_more": false,
+            "clips": [
+                {"id": "e", "status": "complete", "metadata": {"type": "gen"}},
+                {"id": "f", "status": "streaming", "metadata": {}}
+            ]
+        })
+        .to_string();
+        let http = ScriptedHttp::new().with_auth().route_seq(
+            "/api/feed/v3",
+            vec![
+                Reply::json(&one_clip_page("a", Some("cur1"))),
+                Reply::json(&page2),
+            ],
+        );
+        let clock = RecordingClock::new();
+        let client = scripted_client(&http, clock.clone());
+
+        let (clips, complete, any_filtered) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        assert!(complete);
+        assert!(any_filtered);
+        // "a" and "e" survive; the streaming "f" is dropped.
+        assert_eq!(clips.len(), 2);
     }
 
     #[test]
@@ -2244,7 +2383,8 @@ mod tests {
         let clock = RecordingClock::new();
         let client = scripted_client(&http, clock.clone());
 
-        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
         assert_eq!(clips.len(), 2);
         assert_eq!(http.count("/api/feed/v3"), 2);
@@ -2265,7 +2405,8 @@ mod tests {
         let clock = RecordingClock::new();
         let client = scripted_client(&http, clock.clone());
 
-        let (clips, complete) = pollster::block_on(client.list_clips(&http, false, None)).unwrap();
+        let (clips, complete, _) =
+            pollster::block_on(client.list_clips(&http, false, None)).unwrap();
         assert!(complete);
         assert_eq!(clips.len(), 2);
         // The 429 halved the rate, so the default post-429 wait is followed by a
