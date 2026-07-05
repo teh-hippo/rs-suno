@@ -756,12 +756,12 @@ impl<'a> Resolver<'a> {
         want.sort();
         want.dedup();
 
-        // Same-owner clip_root seeds: an OPTIONAL extra root candidate. They are
-        // only ever batch-fetched; a seed the batch omits is dropped, never
-        // bridged, externalised, or forced to a root, so clip_roots can neither
-        // fabricate a parent link nor arm a delete. Foreign-owned roots are
-        // excluded (fail-closed by handle), and each seed is attempted at most
-        // once.
+        // Same-owner clip_root seeds: an OPTIONAL extra root candidate. They ride
+        // the batch and its per-id fallback, but never the parent-endpoint path
+        // below, so a seed the fetch omits is simply dropped, never bridged,
+        // externalised, or forced to a root: clip_roots can neither fabricate a
+        // parent link nor arm a delete. Foreign-owned roots are excluded
+        // (fail-closed by handle), and each seed is attempted at most once.
         let mut seeds: Vec<String> = self
             .clip_root_seeds()
             .into_iter()
