@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.29.0](https://github.com/teh-hippo/rs-suno/compare/v0.28.0...v0.29.0) (2026-07-05)
+
+
+### Features
+
+* **client:** batch lineage gap-fill via get_songs_by_ids ([#224](https://github.com/teh-hippo/rs-suno/issues/224)) ([1f47fdc](https://github.com/teh-hippo/rs-suno/commit/1f47fdce0bc2f0c961ff372920e4b5565ad48db3))
+* **lineage:** adopt clip_roots as attribution + same-owner gap-fill seed ([#220](https://github.com/teh-hippo/rs-suno/issues/220)) ([acff4ba](https://github.com/teh-hippo/rs-suno/commit/acff4ba49c28e8fc619a30aabd86ad9135a48eca))
+* **model:** capture stem lineage, wav 404, and lyrics extras ([#222](https://github.com/teh-hippo/rs-suno/issues/222)) ([c4cbff6](https://github.com/teh-hippo/rs-suno/commit/c4cbff679cdfa2becab6fe6a9e59f503ecd4e371))
+* **model:** prune dead lsjson fields, add media_urls/user_id/batch_index ([#219](https://github.com/teh-hippo/rs-suno/issues/219)) ([37c4660](https://github.com/teh-hippo/rs-suno/commit/37c4660c12ef92b1a641eb4dfe100fa5db222694))
+
 ## [0.28.0](https://github.com/teh-hippo/rs-suno/compare/v0.27.1...v0.28.0) (2026-07-05)
 
 
