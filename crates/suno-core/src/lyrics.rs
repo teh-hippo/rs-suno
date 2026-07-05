@@ -62,6 +62,15 @@ pub struct AlignedLine {
 pub struct AlignedLyrics {
     pub words: Vec<AlignedWord>,
     pub lines: Vec<AlignedLine>,
+    /// `waveform_data`: the amplitude/peak envelope Suno returns for waveform
+    /// display, empty when absent. Additive metadata, not lyric content, so it
+    /// does not affect [`is_empty`](Self::is_empty).
+    pub waveform_data: Vec<f64>,
+    /// `hoot_cer`: Suno's alignment/transcription error metric (higher is
+    /// worse), `None` when absent.
+    pub hoot_cer: Option<f64>,
+    /// `is_streamed`: Suno's streaming flag, `None` when absent.
+    pub is_streamed: Option<bool>,
 }
 
 impl AlignedLyrics {
@@ -81,7 +90,20 @@ impl AlignedLyrics {
             .and_then(Value::as_array)
             .map(|items| items.iter().map(parse_line).collect())
             .unwrap_or_default();
-        AlignedLyrics { words, lines }
+        let waveform_data = raw
+            .get("waveform_data")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_f64).collect())
+            .unwrap_or_default();
+        let hoot_cer = raw.get("hoot_cer").and_then(Value::as_f64);
+        let is_streamed = raw.get("is_streamed").and_then(Value::as_bool);
+        AlignedLyrics {
+            words,
+            lines,
+            waveform_data,
+            hoot_cer,
+            is_streamed,
+        }
     }
 
     /// Parse the `aligned_lyrics/v2` response bytes, or the empty value when the
@@ -307,6 +329,45 @@ mod tests {
         assert!(AlignedLyrics::from_json(&serde_json::json!({})).is_empty());
         assert!(AlignedLyrics::from_json(&Value::Null).is_empty());
         assert!(AlignedLyrics::from_bytes(b"not json").is_empty());
+    }
+
+    #[test]
+    fn captures_waveform_hoot_cer_and_is_streamed_absent_safe() {
+        // The v2 body carries a waveform envelope, an alignment-error metric, and
+        // a streaming flag alongside the words and lines; all are additive
+        // metadata captured verbatim.
+        let json = serde_json::json!({
+            "aligned_words": [],
+            "aligned_lyrics": [],
+            "waveform_data": [0.00044, 0.0, 0.00014, 0.0008, 0.00146],
+            "hoot_cer": 0.22907083716651333_f64,
+            "is_streamed": false
+        });
+        let aligned = AlignedLyrics::from_json(&json);
+        assert_eq!(aligned.waveform_data.len(), 5);
+        assert!((aligned.waveform_data[3] - 0.0008).abs() < 1e-9);
+        assert!(
+            aligned
+                .hoot_cer
+                .is_some_and(|cer| (cer - 0.229_070_837).abs() < 1e-6)
+        );
+        assert_eq!(aligned.is_streamed, Some(false));
+        // They are metadata, not lyric content: an otherwise-empty body is still
+        // "no synced lyrics", so no synced artefact is written.
+        assert!(aligned.is_empty());
+
+        // Absent: the extras degrade to empty/None, never a panic.
+        let bare = AlignedLyrics::from_json(&serde_json::json!({}));
+        assert!(bare.waveform_data.is_empty());
+        assert_eq!(bare.hoot_cer, None);
+        assert_eq!(bare.is_streamed, None);
+        // Wrong-typed values are ignored the same way rather than erroring.
+        let odd = AlignedLyrics::from_json(&serde_json::json!({
+            "waveform_data": "nope", "hoot_cer": "high", "is_streamed": 1
+        }));
+        assert!(odd.waveform_data.is_empty());
+        assert_eq!(odd.hoot_cer, None);
+        assert_eq!(odd.is_streamed, None);
     }
 
     #[test]

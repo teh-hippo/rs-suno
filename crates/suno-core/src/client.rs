@@ -114,9 +114,10 @@ pub struct Stem {
     /// The stem's own server clip id. Used both as the stable per-stem key and
     /// to render the stem's lossless WAV through the free `convert_wav` flow.
     pub id: String,
-    /// The stem label, taken from the trailing parenthetical of the stem clip's
-    /// title (e.g. `Vocals`, `Backing Vocals`, `Drums`). May be blank when the
-    /// title has no parenthetical, so it is never used alone as a key or name.
+    /// The stem label, preferring the structured `metadata.stem_type_group_name`
+    /// (normalised, e.g. `Backing_Vocals` -> `Backing Vocals`) and falling back
+    /// to the trailing parenthetical of the stem clip's title. May be blank when
+    /// neither is present, so it is never used alone as a key or name.
     pub label: String,
     /// The public CDN MP3 URL the stem downloads from (a plain GET; free).
     pub url: String,
@@ -231,9 +232,19 @@ impl<C: Clock> SunoClient<C> {
     }
 
     /// Read the rendered WAV URL for a clip, or `None` while it is not ready.
+    ///
+    /// A `404` maps to `None` (the render is absent, not yet requested, or the
+    /// endpoint has moved), symmetric with [`aligned_lyrics`](Self::aligned_lyrics)
+    /// so an unrendered clip is "no WAV yet" rather than a run-aborting error.
+    /// Like [`request_wav`](Self::request_wav) it skips the shared retry: the
+    /// caller's poll loop owns that budget.
     pub async fn wav_url(&self, http: &impl Http, id: &str) -> Result<Option<String>> {
         let path = format!("/api/gen/{id}/wav_file/");
-        let body = self.api_get(http, &path).await?;
+        let body = match self.api_get(http, &path).await {
+            Ok(body) => body,
+            Err(Error::NotFound(_)) => return Ok(None),
+            Err(err) => return Err(err),
+        };
         let data: Value = serde_json::from_slice(&body)
             .map_err(|err| Error::Api(format!("invalid wav_file JSON: {err}")))?;
         Ok(data
@@ -805,15 +816,28 @@ fn parse_stems_page(body: &[u8]) -> Vec<Stem> {
         .collect()
 }
 
-/// Map one raw stem clip element to a [`Stem`]: its clip id, the trailing
-/// parenthetical of its title as the label, and its public CDN MP3 URL.
+/// Map one raw stem clip element to a [`Stem`]: its clip id, its stem label,
+/// and its public CDN MP3 URL.
 fn parse_stem(raw: &Value) -> Stem {
     let clip = Clip::from_json(raw);
     Stem {
         id: clip.id.clone(),
-        label: stem_label_from_title(&clip.title),
+        label: stem_label(&clip),
         url: clip.mp3_url(),
     }
+}
+
+/// The stem's label, preferring the structured `metadata.stem_type_group_name`
+/// (normalised from its underscore form, `Backing_Vocals` -> `Backing Vocals`)
+/// over the fragile trailing title parenthetical, and empty when neither is
+/// present so the caller falls back to the stem id for naming.
+fn stem_label(clip: &Clip) -> String {
+    let group = clip.stem_type_group_name.replace('_', " ");
+    let group = group.trim();
+    if !group.is_empty() {
+        return group.to_string();
+    }
+    stem_label_from_title(&clip.title)
 }
 
 /// The stem label carried in a stem clip's title: the text inside its trailing
@@ -2352,6 +2376,24 @@ mod tests {
     }
 
     #[test]
+    fn wav_url_404_maps_to_none() {
+        // A 404 means the render is absent or was never requested, not a run
+        // failure: map it to None, symmetric with aligned_lyrics, so the fetch
+        // flow polls again rather than aborting the whole render.
+        let mut rules = auth_rules();
+        rules.push(Rule::new(
+            "/wav_file/",
+            404,
+            r#"{"detail": "Not found."}"#.to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let client = authed_client(&http);
+
+        let url = pollster::block_on(client.wav_url(&http, "z")).unwrap();
+        assert_eq!(url, None);
+    }
+
+    #[test]
     fn get_clips_by_ids_keeps_infill_and_upload_ancestors() {
         // The gap-fill path must not apply the listing's downloadability filter:
         // an infill ancestor and an upload root both survive, returned by the
@@ -3334,6 +3376,79 @@ mod tests {
         assert_eq!(recovered[0].url, "https://cdn1.suno.ai/y.mp3");
         // Malformed JSON never panics; it yields no stems.
         assert!(parse_stems_page(b"not json").is_empty());
+    }
+
+    #[test]
+    fn list_stems_labels_the_inferred_populated_page_from_the_stem_group() {
+        // The populated `/stems` shape was never captured for this account, so
+        // it is inferred: each stem is a full clip whose structured
+        // `metadata.stem_type_group_name` (underscore form) is the label, even
+        // when the title carries no parenthetical. This pins the normaliser and
+        // the group-over-title preference against the inferred fixture.
+        let page = serde_json::json!({
+            "stems": [{
+                "id": "stem-bv",
+                "title": "Track 30",
+                "status": "complete",
+                "audio_url": "https://cdn1.suno.ai/stem-bv.mp3",
+                "metadata": {
+                    "stem_from_id": "source-074",
+                    "stem_task": "twelve",
+                    "stem_type_id": 91.0,
+                    "stem_type_group_name": "Backing_Vocals"
+                }
+            }]
+        })
+        .to_string();
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("stems/pages", Reply::json(&stem_pages(1)))
+            .route("stems?page=0", Reply::json(&page));
+        let client = scripted_client(&http, RecordingClock::new());
+
+        let (stems, complete) = pollster::block_on(client.list_stems(&http, "clip1")).unwrap();
+        assert_eq!(stems.len(), 1);
+        assert_eq!(stems[0].id, "stem-bv");
+        assert_eq!(
+            stems[0].label, "Backing Vocals",
+            "the underscore group name is normalised, not the empty title parenthetical"
+        );
+        assert_eq!(stems[0].url, "https://cdn1.suno.ai/stem-bv.mp3");
+        assert!(
+            complete,
+            "a drained listing that returned a stem is authoritative"
+        );
+    }
+
+    #[test]
+    fn stem_label_prefers_the_normalised_group_over_the_title() {
+        // The structured group name wins and its underscore form is normalised.
+        let grouped = Clip {
+            title: "Track 30".to_owned(),
+            stem_type_group_name: "Backing_Vocals".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(stem_label(&grouped), "Backing Vocals");
+        // It still wins over a present title parenthetical (strictly more
+        // reliable and language-stable than title scraping).
+        let both = Clip {
+            title: "My Song (Guitar)".to_owned(),
+            stem_type_group_name: "Vocals".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(stem_label(&both), "Vocals");
+        // No group name: fall back to the title parenthetical.
+        let titled = Clip {
+            title: "My Song (Drums)".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(stem_label(&titled), "Drums");
+        // Neither present: empty, so the caller falls back to the stem id.
+        let bare = Clip {
+            title: "Track 31".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(stem_label(&bare), "");
     }
 
     #[test]
