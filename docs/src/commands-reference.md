@@ -180,9 +180,12 @@ suno ls --liked | column -t -s $'\t'
 ## lsjson
 
 List selected clips as newline-delimited JSON (one object per line). Equivalent
-to `ls --format json`, and it accepts the same flags. The schema is stable for
-scripting: fields are only added, never removed or renamed. Every field is
-present on every object; nullable fields are `null` when Suno supplied no value.
+to `ls --format json`, and it accepts the same flags. The schema is additive for
+scripting: fields are not renamed, and new ones are only appended. The
+always-null legacy lineage fields `album_title`, `root_ancestor_id`, and
+`lineage_status` were removed once confirmed dead (Suno stopped sending them);
+no live response ever populated them. Every remaining field is present on every
+object; nullable fields are `null` when Suno supplied no value.
 
 | Field | Type | Description |
 |---|---|---|
@@ -202,9 +205,6 @@ present on every object; nullable fields are `null` when Suno supplied no value.
 | `major_model_version` | string | For example `v4`. |
 | `display_name` | string | Account display name. |
 | `handle` | string | Account handle. |
-| `album_title` | string \| null | Lineage album title. |
-| `root_ancestor_id` | string \| null | Root clip of the lineage. |
-| `lineage_status` | string \| null | For example `root`. |
 | `edited_clip_id` | string \| null | Source clip if this is a remix. |
 | `audio_url` | string | Audio CDN URL. |
 | `image_url` | string | Cover image URL. |

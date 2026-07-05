@@ -51,20 +51,14 @@ fn arb_clip() -> impl Strategy<Value = Clip> {
         any::<String>(),
         any::<String>(),
         any::<String>(),
-        any::<String>(),
-        any::<String>(),
     )
-        .prop_map(
-            |(id, title, display_name, handle, album_title, root_ancestor_id)| Clip {
-                id,
-                title,
-                display_name,
-                handle,
-                album_title,
-                root_ancestor_id,
-                ..Default::default()
-            },
-        )
+        .prop_map(|(id, title, display_name, handle)| Clip {
+            id,
+            title,
+            display_name,
+            handle,
+            ..Default::default()
+        })
 }
 
 /// A naming template: the default, a fully arbitrary string, or a join of

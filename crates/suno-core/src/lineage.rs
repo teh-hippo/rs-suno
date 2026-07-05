@@ -173,7 +173,7 @@ pub struct Resolution {
 /// of the engine that turn a clip into files: it carries exactly the resolved
 /// values that get embedded in a path or a tag (the root the clip folders
 /// under, the immediate parent and how it derives from it), so those consumers
-/// never re-read the now-defunct `root_ancestor_id`/`album_title` feed fields.
+/// never re-read the removed `root_ancestor_id`/`album_title` feed fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageContext {
     /// The resolved root ancestor id (the clip's own id when it is a root).
