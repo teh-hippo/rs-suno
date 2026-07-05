@@ -108,7 +108,7 @@ needed. These modes are not applied on non-Unix platforms.
 | `token_command` | string | | A shell command to run for the account token. `rs-suno` trims stdout and uses it as the token. It is resolved after `--token` and `SUNO_*_TOKEN`, but before the stored `token`. |
 | `root` | path | | Default destination directory. Used when a command omits `DEST`, and required by `--all`. |
 | `account_id` | string | | Optional Suno user id this account must authenticate as. When set, a run refuses (exit 7) before contacting Suno if the token belongs to a different id, a belt-and-braces check alongside the on-disk owner pin. See [deletion safety](sync-copy-and-deletion-safety.md). |
-| `format` | `mp3` \| `flac` \| `wav` | `flac` | Audio format for downloads. |
+| `format` | `mp3` \| `flac` \| `alac` \| `wav` | `flac` | Audio format for downloads. `flac` and `alac` (Apple Lossless, `.m4a`) are lossless transcodes of the WAV render; `alac` is tagged with iTunes atoms, keeping the Suno fields as freeform `com.apple.iTunes` atoms. Changing an existing library's format re-encodes the affected files on the next run, and an older `rs-suno` cannot read a library once a newer format is written. |
 | `concurrency` | integer | `4` | Simultaneous downloads. |
 | `retries` | integer | `3` | Download retry attempts per clip before it is logged as failed. |
 | `min_newest` | integer | `1` | Minimum newest clips kept when a recency filter would otherwise select nothing. |
@@ -250,7 +250,7 @@ account token:
 | `SUNO_CONFIG` | `--config` | |
 | `SUNO_DRY_RUN` | `--dry-run` | |
 | `SUNO_YES` | `--yes` | |
-| `SUNO_FORMAT` | `--format` | `mp3`, `flac`, or `wav`. |
+| `SUNO_FORMAT` | `--format` | `mp3`, `flac`, `alac`, or `wav`. |
 | `SUNO_CONCURRENCY` | `--concurrency` | Integer, default `4`. |
 | `SUNO_RETRIES` | `--retries` | |
 | `SUNO_MIN_NEWEST` | `--min-newest` | |

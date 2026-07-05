@@ -55,13 +55,14 @@ If the last line reads `ffmpeg: not found on PATH`, install ffmpeg as below.
 
 `rs-suno` shells out to `ffmpeg` for two jobs:
 
-- transcoding the server-rendered lossless audio to **FLAC**, and
+- transcoding the server-rendered lossless audio to **FLAC** or **ALAC**, and
 - transcoding a clip's video preview to an **animated WebP** cover when you pass
   `--animated-covers`.
 
-You therefore need an `ffmpeg` build with FLAC and animated-WebP (`libwebp_anim`)
-support. Most distribution packages include both. `suno` runs the first `ffmpeg`
-it finds on your `PATH`.
+You therefore need an `ffmpeg` build with FLAC, ALAC (the `alac` encoder and the
+`ipod`/MP4 muxer), and animated-WebP (`libwebp_anim`) support. Most distribution
+packages include all of them. `suno` runs the first `ffmpeg` it finds on your
+`PATH`.
 
 ### Install ffmpeg
 
@@ -78,14 +79,14 @@ it finds on your `PATH`.
 Confirm ffmpeg is on your `PATH` and can encode the formats:
 
 ```bash
-ffmpeg -hide_banner -encoders | grep -E 'flac|libwebp'
+ffmpeg -hide_banner -encoders | grep -E 'flac|alac|libwebp'
 ```
 
-You should see both the `flac` audio encoder and the `libwebp`/`libwebp_anim`
-video encoders. FLAC is required for the default audio format; the WebP encoder
-is only needed if you use `--animated-covers`. MP3 and WAV downloads do not need
-ffmpeg for the audio itself, but FLAC does, so keeping a full ffmpeg build is the
-simplest path.
+You should see the `flac` and `alac` audio encoders and the
+`libwebp`/`libwebp_anim` video encoders. FLAC (the default) or ALAC output needs
+ffmpeg; the WebP encoder is only needed if you use `--animated-covers`. MP3 and
+WAV downloads do not need ffmpeg for the audio itself, but FLAC and ALAC do, so
+keeping a full ffmpeg build is the simplest path.
 
 ## Next steps
 

@@ -63,7 +63,7 @@ configured `root` is used.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--format <mp3\|flac\|wav>` | `flac` | Audio format for downloads. WAV carries full ID3v2.4 tags (lyrics, art, and all SUNO fields) embedded in a RIFF `id3 ` chunk. |
+| `--format <mp3\|flac\|alac\|wav>` | `flac` | Audio format for downloads. `alac` is Apple Lossless (`.m4a`), tagged with iTunes atoms. WAV carries full ID3v2.4 tags (lyrics, art, and all SUNO fields) embedded in a RIFF `id3 ` chunk. |
 | `--limit <N>` | | Mirror only the N most recent clips. |
 | `--since <SPEC>` | | Mirror clips newer than `7d`, `2w`, or `last-run`. |
 | `--liked` | off | Scope the run to your liked songs only (additive unless `--mode mirror`). |
@@ -239,7 +239,7 @@ only added, never removed or renamed. Genuinely unknown live-only fields are
 |---|---|---|
 | `id` | string | Suno clip UUID (the manifest key). |
 | `path` | string | Forward-slash library-relative path to the audio file. |
-| `format` | string | `flac`, `mp3`, or `wav`. |
+| `format` | string | `flac`, `mp3`, `alac`, or `wav`. |
 | `size` | number | File size in bytes. |
 | `title` | string | Live title, else the archived title, else `Untitled`. |
 | `artist` | string \| null | Live display name (`Suno` when blank); null when not seen this run. |
@@ -270,7 +270,7 @@ current directory; when it is a directory the file is named `<id>.<ext>`.
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--format <mp3\|flac\|wav>` | | `flac` | Audio format. |
+| `--format <mp3\|flac\|alac\|wav>` | | `flac` | Audio format. |
 | `--output <PATH>` | `-o` | | Explicit output file path, overriding `DEST` and auto-naming. |
 
 ```bash
