@@ -16,8 +16,12 @@ and animated-WebP support. Most distribution packages include both.
 cargo install rs-suno
 ```
 
-Pre-built binaries for common platforms are also attached to each
-[GitHub release](https://github.com/teh-hippo/rs-suno/releases).
+Pre-built binaries are also attached to each
+[GitHub release](https://github.com/teh-hippo/rs-suno/releases) for Linux
+(x86_64 and aarch64, statically linked with musl) and Windows (x86_64 and
+aarch64, native MSVC). The binaries are unsigned, so Windows may show a
+SmartScreen "unknown publisher" prompt; you can verify a download against its
+published `.sha256` checksum and build-provenance attestation.
 
 ## Quick start
 
