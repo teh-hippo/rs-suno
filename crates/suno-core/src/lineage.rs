@@ -402,6 +402,72 @@ pub fn lineage_edges(clip: &Clip) -> Vec<Edge> {
     edges
 }
 
+/// An attribution edge derived from a clip's nested `clip_roots` list.
+///
+/// This is informational lineage the API states directly (the clip was remixed
+/// from these roots), NOT a structural parent. It is deliberately kept apart
+/// from the [`EdgeType`]-classified structural [`Edge`]s: it is NEVER read by
+/// [`immediate_parent`], [`primary_parent`], [`lineage_edges`], or the root
+/// [`walk`](Resolver::walk). It feeds only the durable graph store (as a
+/// secondary edge carrying the open attribution slug) and, for a same-owner
+/// root, a bounded gap-fill seed. It can never fabricate a structural parent,
+/// an external boundary, or a download candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributionEdge {
+    /// The root clip id, normalised (`m_` stripped, sentinel dropped).
+    pub parent_id: String,
+    /// The raw attribution slug from `clip_attribution_type` (open, e.g.
+    /// `"remix"`); normalisation to a stored form happens at the graph layer,
+    /// never against the closed [`EdgeType`].
+    pub edge_slug: String,
+    /// Always [`EdgeRole::Secondary`]: attribution never supplants a clip's
+    /// structural primary parent.
+    pub role: EdgeRole,
+    /// Position within the clip's `clip_roots.clips[]` list (0..N).
+    pub ordinal: u32,
+    /// The field these came from (always `"clip_roots"`).
+    pub source_field: &'static str,
+    /// Whether the root shares the clip's owner handle (fail-closed): only a
+    /// same-owner root is ever gap-fill seeded.
+    pub same_owner: bool,
+}
+
+/// Every attribution edge from a clip's `clip_roots` (empty when absent).
+///
+/// One edge per root with a usable id, in list order. Emitted for EVERY root
+/// regardless of owner: a foreign-owned root still records its attribution. The
+/// `same_owner` flag gates only the later gap-fill seed, never the edge itself.
+pub fn attribution_edges(clip: &Clip) -> Vec<AttributionEdge> {
+    let mut edges = Vec::new();
+    for root in &clip.clip_roots {
+        let Some(parent_id) = normalise_id(&root.id) else {
+            continue;
+        };
+        let ordinal = edges.len() as u32;
+        edges.push(AttributionEdge {
+            parent_id,
+            edge_slug: clip.clip_attribution_type.clone(),
+            role: EdgeRole::Secondary,
+            ordinal,
+            source_field: "clip_roots",
+            same_owner: same_owner(clip, root),
+        });
+    }
+    edges
+}
+
+/// Whether a `clip_root` shares the clip's owner, by handle equality.
+///
+/// Fail-closed: an empty or missing handle on either side is a foreign owner,
+/// so a rename or an absent identity never folds a foreign remix source into
+/// the owner's album via the gap-fill seed. Never relax to substring or prefix
+/// matching.
+fn same_owner(clip: &Clip, root: &crate::model::ClipRoot) -> bool {
+    let clip_handle = clip.handle.trim();
+    let root_handle = root.handle.trim();
+    !clip_handle.is_empty() && !root_handle.is_empty() && clip_handle == root_handle
+}
+
 /// Resolve the root ancestor of every clip in `clips`.
 ///
 /// Walks each clip up its [`immediate_parent`] chain to a root. Chains that
@@ -524,6 +590,10 @@ struct Resolver<'a> {
     gap_filled: HashSet<String>,
     bridges: HashMap<String, String>,
     external: HashSet<String>,
+    /// Clip-root ids already attempted as a gap-fill seed, so a root that the
+    /// batch never returns is tried once and then left alone (never re-seeded,
+    /// never bridged, never external).
+    seeded: HashSet<String>,
     memo: HashMap<String, RootInfo>,
     targets: Vec<String>,
     budget: u32,
@@ -548,6 +618,7 @@ impl<'a> Resolver<'a> {
             gap_filled: HashSet::new(),
             bridges: HashMap::new(),
             external: HashSet::new(),
+            seeded: HashSet::new(),
             memo: HashMap::new(),
             targets,
             budget: opts.max_gap_fills,
@@ -665,30 +736,66 @@ impl<'a> Resolver<'a> {
     }
 
     /// Fetch missing `frontier` ancestors, batching by id and falling back to
-    /// the parent endpoint. Returns whether the index (or bridges/externals)
-    /// grew, so the caller can detect a stalled resolution.
+    /// the parent endpoint. Same-owner `clip_roots` are additionally seeded as
+    /// best-effort root candidates. Returns whether the index (or
+    /// bridges/externals) grew, so the caller can detect a stalled resolution.
     async fn gap_fill(
         &mut self,
         client: &SunoClient<impl Clock>,
         http: &impl Http,
         frontier: &[String],
     ) -> Result<bool> {
+        // Structural frontier: ancestors a walk is blocked on. They get the full
+        // treatment (batch fetch, then a parent-endpoint fallback that may bridge
+        // one hop or mark the id external).
         let mut want: Vec<String> = frontier
             .iter()
             .filter(|id| !self.known(id))
             .cloned()
             .collect();
-        if want.is_empty() {
+        want.sort();
+        want.dedup();
+
+        // Same-owner clip_root seeds: an OPTIONAL extra root candidate. They are
+        // only ever batch-fetched; a seed the batch omits is dropped, never
+        // bridged, externalised, or forced to a root, so clip_roots can neither
+        // fabricate a parent link nor arm a delete. Foreign-owned roots are
+        // excluded (fail-closed by handle), and each seed is attempted at most
+        // once.
+        let mut seeds: Vec<String> = self
+            .clip_root_seeds()
+            .into_iter()
+            .filter(|id| !self.known(id) && !self.seeded.contains(id) && !want.contains(id))
+            .collect();
+        seeds.sort();
+        seeds.dedup();
+
+        if want.is_empty() && seeds.is_empty() {
             return Ok(false);
         }
-        want.sort();
-        let take = (self.budget as usize).min(want.len());
-        let batch: Vec<String> = want.into_iter().take(take).collect();
-        self.budget -= batch.len() as u32;
 
-        let refs: Vec<&str> = batch.iter().map(String::as_str).collect();
+        // Frontier ids take budget priority so a blocked walk is never starved
+        // by a best-effort seed.
+        let frontier_take = (self.budget as usize).min(want.len());
+        let frontier_batch: Vec<String> = want.into_iter().take(frontier_take).collect();
+        self.budget -= frontier_batch.len() as u32;
+
+        let seed_take = (self.budget as usize).min(seeds.len());
+        let seed_batch: Vec<String> = seeds.into_iter().take(seed_take).collect();
+        self.budget -= seed_batch.len() as u32;
+        for id in &seed_batch {
+            self.seeded.insert(id.clone());
+        }
+
+        // One batch call covers frontier + seeds; the parent-endpoint fallback
+        // below is confined to the structural frontier.
+        let all: Vec<&str> = frontier_batch
+            .iter()
+            .chain(seed_batch.iter())
+            .map(String::as_str)
+            .collect();
         let fetched = client
-            .get_clips_by_ids(http, &refs, self.concurrency as usize)
+            .get_clips_by_ids(http, &all, self.concurrency as usize)
             .await?;
 
         let mut returned: HashSet<String> = HashSet::new();
@@ -700,7 +807,7 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        for id in &batch {
+        for id in &frontier_batch {
             if returned.contains(id) {
                 continue;
             }
@@ -719,6 +826,21 @@ impl<'a> Resolver<'a> {
         }
 
         Ok(progressed)
+    }
+
+    /// Same-owner `clip_root` ids across the current index, as extra root
+    /// candidates for gap-fill. Foreign-owned roots are excluded (fail-closed by
+    /// handle) so a foreign remix source is never folded into the owner's album.
+    fn clip_root_seeds(&self) -> Vec<String> {
+        let mut seeds = Vec::new();
+        for clip in self.index.values() {
+            for edge in attribution_edges(clip) {
+                if edge.same_owner {
+                    seeds.push(edge.parent_id);
+                }
+            }
+        }
+        seeds
     }
 
     /// Add a gap-filled ancestor to the index, tracking it as an ancestor-only
@@ -1807,6 +1929,241 @@ mod tests {
         let info = &roots["child"];
         assert_eq!(info.status, ResolveStatus::External);
         assert_eq!(info.root_id, "outside");
+    }
+
+    fn clip_root(id: &str, handle: &str) -> crate::model::ClipRoot {
+        crate::model::ClipRoot {
+            id: id.to_owned(),
+            handle: handle.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn attribution_edges_map_clip_roots_in_order() {
+        let clip = Clip {
+            id: "child".into(),
+            handle: "me".into(),
+            clip_attribution_type: "remix".into(),
+            clip_roots: vec![
+                clip_root("own-root", "me"),
+                clip_root("foreign-root", "stranger"),
+            ],
+            ..Default::default()
+        };
+        let edges = attribution_edges(&clip);
+        assert_eq!(edges.len(), 2);
+        assert_eq!(
+            edges[0],
+            AttributionEdge {
+                parent_id: "own-root".into(),
+                edge_slug: "remix".into(),
+                role: EdgeRole::Secondary,
+                ordinal: 0,
+                source_field: "clip_roots",
+                same_owner: true,
+            }
+        );
+        assert_eq!(edges[1].parent_id, "foreign-root");
+        assert_eq!(edges[1].ordinal, 1);
+        assert!(
+            !edges[1].same_owner,
+            "a differently-handled root is foreign, and still emits an edge"
+        );
+    }
+
+    #[test]
+    fn attribution_edges_are_empty_without_clip_roots() {
+        let clip = Clip {
+            id: "child".into(),
+            handle: "me".into(),
+            ..Default::default()
+        };
+        assert!(attribution_edges(&clip).is_empty());
+    }
+
+    #[test]
+    fn attribution_edges_same_owner_is_fail_closed() {
+        // Matching non-empty handles are same-owner; an empty handle on either
+        // side, or a mismatch, is foreign (never fold a foreign remix in).
+        let matched = Clip {
+            handle: "me".into(),
+            clip_roots: vec![clip_root("r", "me")],
+            ..Default::default()
+        };
+        assert!(attribution_edges(&matched)[0].same_owner);
+
+        let clip_blank = Clip {
+            handle: "".into(),
+            clip_roots: vec![clip_root("r", "me")],
+            ..Default::default()
+        };
+        assert!(
+            !attribution_edges(&clip_blank)[0].same_owner,
+            "an empty clip handle is fail-closed to foreign"
+        );
+
+        let root_blank = Clip {
+            handle: "me".into(),
+            clip_roots: vec![clip_root("r", "   ")],
+            ..Default::default()
+        };
+        assert!(
+            !attribution_edges(&root_blank)[0].same_owner,
+            "a whitespace-only root handle is fail-closed to foreign"
+        );
+    }
+
+    #[test]
+    fn attribution_edges_skip_a_root_with_no_id_and_keep_contiguous_ordinals() {
+        let clip = Clip {
+            handle: "me".into(),
+            clip_attribution_type: "remix".into(),
+            clip_roots: vec![
+                clip_root("", "me"),
+                clip_root(ZERO_UUID, "me"),
+                clip_root("real-root", "me"),
+            ],
+            ..Default::default()
+        };
+        let edges = attribution_edges(&clip);
+        assert_eq!(edges.len(), 1, "empty and sentinel root ids are dropped");
+        assert_eq!(edges[0].parent_id, "real-root");
+        assert_eq!(edges[0].ordinal, 0, "ordinals stay contiguous after a skip");
+    }
+
+    #[test]
+    fn resolve_roots_seeds_a_same_owner_clip_root_but_not_a_foreign_one() {
+        // A clip whose structural parent is missing triggers gap-fill. Its
+        // same-owner clip_root is seeded into the same batch (an extra root
+        // candidate), while its foreign-owned clip_root is NEVER fetched. The
+        // structural walk alone still decides the root.
+        let child = Clip {
+            id: "child".into(),
+            title: "Remix".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "struct-parent".into(),
+            edited_clip_id: "struct-parent".into(),
+            handle: "me".into(),
+            clip_attribution_type: "remix".into(),
+            clip_roots: vec![
+                clip_root("own-root", "me"),
+                clip_root("foreign-root", "stranger"),
+            ],
+            ..Default::default()
+        };
+        let struct_parent = serde_json::json!({
+            "id": "struct-parent", "title": "Structural Root", "status": "complete",
+            "metadata": {"type": "gen"}
+        })
+        .to_string();
+        let own_root = serde_json::json!({
+            "id": "own-root", "title": "Attribution Root", "status": "complete",
+            "metadata": {"type": "gen"}
+        })
+        .to_string();
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/clip/struct-parent", Reply::json(&struct_parent))
+            .route("/api/clip/own-root", Reply::json(&own_root));
+        let client = authed_client(&http);
+
+        let resolution = pollster::block_on(resolve_roots(
+            &[child],
+            &HashMap::new(),
+            &client,
+            &http,
+            ResolveOpts::default(),
+        ))
+        .unwrap();
+
+        // The structural walk (not clip_roots) decides the root.
+        let info = &resolution.roots["child"];
+        assert_eq!(info.status, ResolveStatus::Resolved);
+        assert_eq!(info.root_id, "struct-parent");
+
+        assert_eq!(
+            http.count("own-root"),
+            1,
+            "the same-owner clip_root is seeded and fetched exactly once"
+        );
+        assert_eq!(
+            http.count("foreign-root"),
+            0,
+            "a foreign-owned clip_root is NEVER seeded or fetched"
+        );
+    }
+
+    #[test]
+    fn resolve_roots_clip_root_seed_is_best_effort_never_bridges_or_retries() {
+        // A same-owner clip_root that the batch never returns (trashed/404) is
+        // simply dropped: it is never bridged, never external, never re-seeded,
+        // and the structural resolution is unaffected.
+        let child = Clip {
+            id: "child".into(),
+            title: "Remix".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "mid".into(),
+            edited_clip_id: "mid".into(),
+            handle: "me".into(),
+            clip_attribution_type: "remix".into(),
+            clip_roots: vec![clip_root("gone-root", "me")],
+            ..Default::default()
+        };
+        // "mid" resolves to "root" over two gap-fill rounds, so the seed would be
+        // re-scanned on the second round if the attempted-set did not suppress it.
+        let mid = serde_json::json!({
+            "id": "mid", "title": "Mid", "status": "complete",
+            "metadata": {"type": "gen", "task": "cover", "cover_clip_id": "root"}
+        })
+        .to_string();
+        let root = serde_json::json!({
+            "id": "root", "title": "Root", "status": "complete",
+            "metadata": {"type": "gen"}
+        })
+        .to_string();
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("/api/clip/mid", Reply::json(&mid))
+            .route("/api/clip/root", Reply::json(&root))
+            .route("/api/clip/gone-root", Reply::status(404));
+        let client = authed_client(&http);
+
+        let resolution = pollster::block_on(resolve_roots(
+            &[child],
+            &HashMap::new(),
+            &client,
+            &http,
+            ResolveOpts::default(),
+        ))
+        .unwrap();
+
+        let info = &resolution.roots["child"];
+        assert_eq!(info.status, ResolveStatus::Resolved);
+        assert_eq!(
+            info.root_id, "root",
+            "the structural chain resolves normally"
+        );
+        assert!(
+            resolution.bridges.is_empty(),
+            "a dropped seed must never become a bridge"
+        );
+        assert!(
+            !resolution.gap_filled.iter().any(|c| c.id == "gone-root"),
+            "a seed the batch omits is never added"
+        );
+        assert_eq!(
+            http.count("/api/clip/gone-root"),
+            1,
+            "the seed is attempted once, never retried across rounds"
+        );
+        assert_eq!(
+            http.count("/api/clips/parent"),
+            0,
+            "a seed never falls through to the parent endpoint"
+        );
     }
 
     fn resolution_with(roots: Vec<(&str, RootInfo)>) -> Resolution {

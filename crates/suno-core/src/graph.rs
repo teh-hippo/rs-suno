@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::lineage::{
-    Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveStatus, RootInfo,
-    immediate_parent, lineage_edges,
+    AttributionEdge, Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveStatus, RootInfo,
+    attribution_edges, immediate_parent, lineage_edges,
 };
 use crate::manifest::ArtifactState;
 use crate::model::Clip;
@@ -819,6 +819,15 @@ impl LineageStore {
             };
             self.upsert_edge(child_id, &edge, now);
         }
+        // Attribution edges from `clip_roots` are additive and informational,
+        // never structural: they carry the open attribution slug directly and
+        // are role Secondary, so `archived_parents` (Primary, ordinal 0) never
+        // reads them and root resolution stays untouched.
+        for clip in clips.iter().chain(resolution.gap_filled.iter()) {
+            for edge in attribution_edges(clip) {
+                self.upsert_attribution_edge(&clip.id, &edge, now);
+            }
+        }
         self.edges.sort_by(|a, b| {
             a.child_id
                 .cmp(&b.child_id)
@@ -903,6 +912,43 @@ impl LineageStore {
         }
     }
 
+    /// Insert or refresh an attribution edge from `clip_roots`, keyed like any
+    /// edge by `(child_id, parent_id, edge_type, role, ordinal)`.
+    ///
+    /// The open attribution slug (normalised) is written DIRECTLY to
+    /// `edge_type`, bypassing the closed-[`EdgeType`] slug path, so an unknown
+    /// `clip_attribution_type` is preserved verbatim rather than forced into the
+    /// structural enum.
+    fn upsert_attribution_edge(&mut self, child_id: &str, edge: &AttributionEdge, now: &str) {
+        let edge_type = normalise_slug(&edge.edge_slug);
+        let key = EdgeKey::new(
+            child_id,
+            &edge.parent_id,
+            &edge_type,
+            edge.role,
+            edge.ordinal,
+        );
+        if let Some(&index) = self.edge_index.get(&key) {
+            let existing = &mut self.edges[index];
+            existing.source_field = edge.source_field.to_owned();
+            existing.status = EdgeStatus::Active;
+            existing.last_seen_at = now.to_owned();
+        } else {
+            self.edges.push(StoredEdge {
+                child_id: child_id.to_owned(),
+                parent_id: edge.parent_id.clone(),
+                edge_type,
+                role: edge.role,
+                source_field: edge.source_field.to_owned(),
+                ordinal: edge.ordinal,
+                status: EdgeStatus::Active,
+                first_seen_at: now.to_owned(),
+                last_seen_at: now.to_owned(),
+            });
+            self.edge_index.insert(key, self.edges.len() - 1);
+        }
+    }
+
     fn rebuild_edge_index(&mut self) {
         self.edge_index.clear();
         for (index, edge) in self.edges.iter().enumerate() {
@@ -951,6 +997,22 @@ fn edge_type_slug(edge_type: EdgeType) -> &'static str {
         EdgeType::Stitch => "stitch",
         EdgeType::Derived => "derived",
         EdgeType::Uploaded => "uploaded",
+    }
+}
+
+/// Normalise an open attribution slug to a stable lowercase, underscore-joined
+/// form, e.g. `"Remix Cover"` -> `"remix_cover"`. An empty (or whitespace-only)
+/// slug maps to `"attribution"` so an edge always carries a non-empty type.
+fn normalise_slug(slug: &str) -> String {
+    let normalised = slug
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_")
+        .to_lowercase();
+    if normalised.is_empty() {
+        "attribution".to_owned()
+    } else {
+        normalised
     }
 }
 
@@ -1167,6 +1229,117 @@ mod tests {
             !archived.contains_key("a"),
             "a root has no primary parent edge"
         );
+    }
+
+    #[test]
+    fn update_persists_attribution_edges_without_polluting_resolution() {
+        // A clip whose clip_roots point at a different node than its structural
+        // parent: the attribution edge is stored (role Secondary, open slug),
+        // but it must NOT be read by archived_parents (which seeds resolution)
+        // nor appear in the resolution cache's root set.
+        let child = Clip {
+            id: "child".into(),
+            title: "Remix".into(),
+            clip_type: "gen".into(),
+            task: "cover".into(),
+            cover_clip_id: "struct-parent".into(),
+            edited_clip_id: "struct-parent".into(),
+            handle: "me".into(),
+            clip_attribution_type: "remix".into(),
+            clip_roots: vec![crate::model::ClipRoot {
+                id: "attr-root".into(),
+                handle: "me".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut roots = HashMap::new();
+        roots.insert(
+            "child".to_owned(),
+            RootInfo {
+                root_id: "struct-parent".into(),
+                root_title: "Structural Root".into(),
+                status: ResolveStatus::Resolved,
+            },
+        );
+        let resolution = Resolution {
+            roots,
+            gap_filled: Vec::new(),
+            bridges: Vec::new(),
+        };
+        let mut store = LineageStore::new();
+        store.update(std::slice::from_ref(&child), &resolution, "now");
+
+        // The attribution edge is stored as a Secondary with the open slug.
+        let attr = edge(&store, "child", "attr-root");
+        assert_eq!(attr.edge_type, "remix");
+        assert_eq!(attr.role, EdgeRole::Secondary);
+        assert_eq!(attr.ordinal, 0);
+        assert_eq!(attr.source_field, "clip_roots");
+
+        // The structural edge is separate and unaffected.
+        let structural = edge(&store, "child", "struct-parent");
+        assert_eq!(structural.role, EdgeRole::Primary);
+
+        // Deletion/resolution safety: the attribution edge never seeds a walk.
+        let archived = store.archived_parents();
+        assert_eq!(
+            archived.get("child").map(String::as_str),
+            Some("struct-parent"),
+            "archived_parents reads only the structural primary, never clip_roots"
+        );
+        assert_eq!(
+            store.get_root("child").unwrap().root_id,
+            "struct-parent",
+            "the resolution cache roots at the structural parent, not the attribution root"
+        );
+    }
+
+    #[test]
+    fn update_defaults_a_blank_attribution_type_to_attribution() {
+        // clip_roots present with a blank clip_attribution_type still records an
+        // edge, slugged "attribution" so it always carries a type.
+        let child = Clip {
+            id: "child".into(),
+            title: "Remix".into(),
+            handle: "me".into(),
+            clip_attribution_type: "".into(),
+            clip_roots: vec![crate::model::ClipRoot {
+                id: "attr-root".into(),
+                handle: "me".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut roots = HashMap::new();
+        roots.insert(
+            "child".to_owned(),
+            RootInfo {
+                root_id: "child".into(),
+                root_title: "Remix".into(),
+                status: ResolveStatus::Resolved,
+            },
+        );
+        let resolution = Resolution {
+            roots,
+            gap_filled: Vec::new(),
+            bridges: Vec::new(),
+        };
+        let mut store = LineageStore::new();
+        store.update(std::slice::from_ref(&child), &resolution, "now");
+        assert_eq!(edge(&store, "child", "attr-root").edge_type, "attribution");
+    }
+
+    #[test]
+    fn normalise_slug_lowercases_joins_and_defaults() {
+        assert_eq!(normalise_slug("remix"), "remix");
+        assert_eq!(normalise_slug("Remix Cover"), "remix_cover");
+        assert_eq!(
+            normalise_slug("  Remix   Reuse Style "),
+            "remix_reuse_style"
+        );
+        assert_eq!(normalise_slug(""), "attribution");
+        assert_eq!(normalise_slug("   "), "attribution");
     }
 
     #[test]

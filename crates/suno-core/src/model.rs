@@ -33,6 +33,9 @@ pub struct Clip {
     /// Index within a generation batch (paired gens), for sibling
     /// disambiguation in naming and dedup. `None` when `batch_index` is absent.
     pub batch_index: Option<i64>,
+    /// The clip owner's avatar image URL (`avatar_image_url`, or the
+    /// `user_`-prefixed form on a parent-shaped clip). Empty when absent.
+    pub avatar_image_url: String,
     pub is_liked: bool,
     pub is_trashed: bool,
     pub has_vocal: bool,
@@ -57,6 +60,31 @@ pub struct Clip {
     pub override_future_clip_id: String,
     pub history: Vec<HistoryEntry>,
     pub concat_history: Vec<HistoryEntry>,
+    /// The remix/attribution origins Suno lists under the nested `clip_roots`
+    /// object (`clip_roots.clips[]`). Empty when the key is absent. These feed
+    /// attribution edges and a same-owner gap-fill seed only; they are never
+    /// read by structural root resolution.
+    pub clip_roots: Vec<ClipRoot>,
+    /// The attribution kind for `clip_roots` (`clip_roots.clip_attribution_type`,
+    /// e.g. `"remix"`). Open string, empty when absent.
+    pub clip_attribution_type: String,
+}
+
+/// One remix/attribution origin from a clip's nested `clip_roots.clips[]` list.
+///
+/// Informational lineage the API exposes directly on the clip: the clip was
+/// derived from this root. Identity keys are `user_`-prefixed here. Every field
+/// defaults to empty/false when absent, so a reshaped or partial entry degrades
+/// rather than fails.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClipRoot {
+    pub id: String,
+    pub title: String,
+    pub image_url: String,
+    pub is_public: bool,
+    pub display_name: String,
+    pub handle: String,
+    pub avatar_image_url: String,
 }
 
 /// One audio asset from a clip's top-level `media_urls` list.
@@ -128,10 +156,11 @@ impl Clip {
                 .unwrap_or("unknown")
                 .to_string(),
             created_at: string(raw, "created_at"),
-            display_name: string(raw, "display_name"),
-            handle: string(raw, "handle"),
+            display_name: string_or(raw, "display_name", "user_display_name"),
+            handle: string_or(raw, "handle", "user_handle"),
             user_id: string(raw, "user_id"),
             batch_index: raw.get("batch_index").and_then(Value::as_i64),
+            avatar_image_url: string_or(raw, "avatar_image_url", "user_avatar_image_url"),
             is_liked: bool_field(raw, "is_liked"),
             is_trashed: bool_field(raw, "is_trashed"),
             has_vocal: bool_field(&metadata, "has_vocal"),
@@ -153,6 +182,11 @@ impl Clip {
             override_future_clip_id: string(&metadata, "override_future_clip_id"),
             history: history_entries(&metadata, "history"),
             concat_history: history_entries(&metadata, "concat_history"),
+            clip_roots: parse_clip_roots(raw),
+            clip_attribution_type: raw
+                .get("clip_roots")
+                .map(|roots| string(roots, "clip_attribution_type"))
+                .unwrap_or_default(),
         }
     }
 
@@ -214,6 +248,20 @@ fn string(value: &Value, key: &str) -> String {
         .to_string()
 }
 
+/// Read `primary`, falling back to `fallback` when it is missing or empty.
+///
+/// Suno exposes the owner's identity under bare keys on a feed clip
+/// (`display_name`, `handle`) but under `user_`-prefixed keys on a
+/// parent-shaped clip; this reads whichever shape is present.
+fn string_or(value: &Value, primary: &str, fallback: &str) -> String {
+    let first = string(value, primary);
+    if first.is_empty() {
+        string(value, fallback)
+    } else {
+        first
+    }
+}
+
 /// Read a bool field, defaulting to `false` when missing or not a bool.
 fn bool_field(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
@@ -222,6 +270,31 @@ fn bool_field(value: &Value, key: &str) -> bool {
 /// Read a CDN URL field, rewriting the unreliable `cdn2` host to `cdn1`.
 fn cdn(value: &Value, key: &str) -> String {
     string(value, key).replace("cdn2.suno.ai", "cdn1.suno.ai")
+}
+
+/// Read the nested `clip_roots.clips[]` array into [`ClipRoot`]s.
+///
+/// The roots are nested under a `clip_roots` object (`{clips[],
+/// clip_attribution_type}`), NOT a top-level array, and each entry carries
+/// `user_`-prefixed identity keys. A missing key or non-array yields an empty
+/// `Vec`, so a clip without attribution roots degrades rather than fails.
+fn parse_clip_roots(raw: &Value) -> Vec<ClipRoot> {
+    let Some(Value::Array(items)) = raw.get("clip_roots").and_then(|roots| roots.get("clips"))
+    else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|item| ClipRoot {
+            id: string(item, "id"),
+            title: string(item, "title"),
+            image_url: cdn(item, "image_url"),
+            is_public: bool_field(item, "is_public"),
+            display_name: string(item, "user_display_name"),
+            handle: string(item, "user_handle"),
+            avatar_image_url: string(item, "user_avatar_image_url"),
+        })
+        .collect()
 }
 
 /// Read the top-level `media_urls` array into [`MediaUrl`]s.
@@ -387,6 +460,136 @@ mod tests {
         // A non-array media_urls degrades to empty, never a panic.
         let odd = Clip::from_json(&serde_json::json!({"id": "x", "media_urls": "nope"}));
         assert!(odd.media_urls.is_empty());
+    }
+
+    #[test]
+    fn from_json_parses_nested_clip_roots_and_owner_identity() {
+        // The real /api/clip/{id} remix body: clip_roots is a NESTED object
+        // ({clips[], clip_attribution_type}), the root carries user_-prefixed
+        // identity keys, and the owner identity is top-level.
+        let raw = serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000017",
+            "title": "Track 1",
+            "user_id": "00000000-0000-4000-8000-000000000019",
+            "display_name": "Example Artist 4",
+            "handle": "example-artist-1",
+            "avatar_image_url": "https://cdn1.suno.ai/avatar.jpg",
+            "batch_index": 1,
+            "clip_roots": {
+                "clips": [
+                    {
+                        "id": "00000000-0000-4000-8000-000000000020",
+                        "title": "Track 2",
+                        "image_url": "https://cdn2.suno.ai/image_00000000-0000-4000-8000-000000000020.jpeg",
+                        "is_public": false,
+                        "user_display_name": "Example Artist 4",
+                        "user_handle": "example-artist-1",
+                        "user_avatar_image_url": "https://cdn1.suno.ai/avatar.jpg"
+                    }
+                ],
+                "clip_attribution_type": "remix"
+            }
+        });
+        let clip = Clip::from_json(&raw);
+
+        assert_eq!(clip.display_name, "Example Artist 4");
+        assert_eq!(clip.handle, "example-artist-1");
+        assert_eq!(clip.avatar_image_url, "https://cdn1.suno.ai/avatar.jpg");
+        assert_eq!(clip.clip_attribution_type, "remix");
+        assert_eq!(clip.clip_roots.len(), 1);
+        let root = &clip.clip_roots[0];
+        assert_eq!(root.id, "00000000-0000-4000-8000-000000000020");
+        assert_eq!(root.title, "Track 2");
+        assert!(!root.is_public);
+        // The root's user_-prefixed identity keys map onto the flat fields.
+        assert_eq!(root.display_name, "Example Artist 4");
+        assert_eq!(root.handle, "example-artist-1");
+        assert_eq!(root.avatar_image_url, "https://cdn1.suno.ai/avatar.jpg");
+        // The cdn2 artwork host is rewritten to cdn1, as for the clip's own art.
+        assert_eq!(
+            root.image_url,
+            "https://cdn1.suno.ai/image_00000000-0000-4000-8000-000000000020.jpeg"
+        );
+    }
+
+    #[test]
+    fn from_json_reads_user_prefixed_identity_on_a_parent_shape() {
+        // The reduced parent shape carries only user_-prefixed identity keys.
+        let raw = serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000020",
+            "title": "Track 2",
+            "is_public": false,
+            "user_display_name": "Example Artist 4",
+            "user_handle": "example-artist-1",
+            "user_avatar_image_url": "https://cdn1.suno.ai/avatar.jpg"
+        });
+        let clip = Clip::from_json(&raw);
+        assert_eq!(clip.display_name, "Example Artist 4");
+        assert_eq!(clip.handle, "example-artist-1");
+        assert_eq!(clip.avatar_image_url, "https://cdn1.suno.ai/avatar.jpg");
+    }
+
+    #[test]
+    fn from_json_prefers_bare_identity_over_user_prefixed() {
+        // When both shapes are present, the bare (feed) keys win.
+        let raw = serde_json::json!({
+            "id": "x",
+            "display_name": "Bare Name",
+            "user_display_name": "Prefixed Name",
+            "handle": "bare-handle",
+            "user_handle": "prefixed-handle"
+        });
+        let clip = Clip::from_json(&raw);
+        assert_eq!(clip.display_name, "Bare Name");
+        assert_eq!(clip.handle, "bare-handle");
+    }
+
+    #[test]
+    fn from_json_defaults_clip_roots_when_absent_or_malformed() {
+        // Absent clip_roots -> empty, attribution type empty.
+        let none = Clip::from_json(&serde_json::json!({"id": "x"}));
+        assert!(none.clip_roots.is_empty());
+        assert_eq!(none.clip_attribution_type, "");
+
+        // clip_roots present but `clips` missing or non-array -> empty, no panic.
+        let no_clips = Clip::from_json(&serde_json::json!({
+            "id": "x",
+            "clip_roots": {"clip_attribution_type": "remix"}
+        }));
+        assert!(no_clips.clip_roots.is_empty());
+        assert_eq!(no_clips.clip_attribution_type, "remix");
+
+        let odd = Clip::from_json(&serde_json::json!({
+            "id": "x",
+            "clip_roots": {"clips": "nope"}
+        }));
+        assert!(odd.clip_roots.is_empty());
+
+        // A top-level (non-object) clip_roots is ignored, never a panic.
+        let array_shape = Clip::from_json(&serde_json::json!({
+            "id": "x",
+            "clip_roots": [{"id": "r"}]
+        }));
+        assert!(array_shape.clip_roots.is_empty());
+        assert_eq!(array_shape.clip_attribution_type, "");
+    }
+
+    #[test]
+    fn from_json_reads_multiple_clip_roots_in_order() {
+        let raw = serde_json::json!({
+            "id": "x",
+            "clip_roots": {
+                "clips": [
+                    {"id": "root-a", "title": "A"},
+                    {"id": "root-b", "title": "B"}
+                ],
+                "clip_attribution_type": "remix"
+            }
+        });
+        let clip = Clip::from_json(&raw);
+        assert_eq!(clip.clip_roots.len(), 2);
+        assert_eq!(clip.clip_roots[0].id, "root-a");
+        assert_eq!(clip.clip_roots[1].id, "root-b");
     }
 
     #[test]

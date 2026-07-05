@@ -1958,6 +1958,43 @@ mod tests {
     }
 
     #[test]
+    fn mis_rooted_clip_moves_never_deletes_even_when_deletion_is_armed() {
+        // Deletion safety: if a clip's resolved root changes between runs (its
+        // album folder moves from {root A} to {root B}), reconcile must relocate
+        // the file with a Rename, never Delete the old copy and re-download.
+        // This holds with deletion fully armed (mirror_ok => can_delete), so a
+        // future clip_roots-driven root shift can never arm an audio delete.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "child",
+            entry("Creator/Root A/child.flac", AudioFormat::Flac, "m", "art"),
+        );
+        let d = vec![desired(
+            "child",
+            "Creator/Root B/child.flac",
+            AudioFormat::Flac,
+            "m",
+            "art",
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("child"), &mirror_ok());
+
+        assert_eq!(
+            plan.actions,
+            vec![Action::Rename {
+                from: "Creator/Root A/child.flac".to_string(),
+                to: "Creator/Root B/child.flac".to_string(),
+            }],
+            "a mis-rooted clip is moved, not deleted or re-downloaded"
+        );
+        assert_eq!(
+            plan.deletes(),
+            0,
+            "deletion safety: a re-root deletes nothing"
+        );
+        assert_eq!(plan.downloads(), 0, "a re-root never re-fetches audio");
+    }
+
+    #[test]
     fn format_change_reformats() {
         let mut manifest = Manifest::new();
         manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));

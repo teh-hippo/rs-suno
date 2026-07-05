@@ -213,8 +213,7 @@ impl<C: Clock> SunoClient<C> {
     /// Fetch one clip by ID.
     ///
     /// Tries the dedicated `/api/clip/{id}` endpoint first, then falls back to
-    /// scanning the library feed, since that endpoint's exact shape is not yet
-    /// confirmed against the live API.
+    /// scanning the library feed if that endpoint yields no matching clip.
     pub async fn get_clip(&self, http: &impl Http, id: &str) -> Result<Clip> {
         if let Some(clip) = self.try_get_clip(http, id).await? {
             return Ok(clip);
@@ -316,14 +315,18 @@ impl<C: Clock> SunoClient<C> {
 
     /// Fetch a clip's immediate parent via the dedicated parent endpoint.
     ///
-    /// Returns the parent clip, or `None` when the clip is a root (no parent) or
-    /// the endpoint yields no clip. Lineage resolution uses this as a fallback
-    /// when a missing ancestor cannot be retrieved by id. Only a `404` (the clip
-    /// has no parent) maps to `None`; any other failure, including a transient
-    /// `5xx`, propagates as an error rather than being mistaken for a root.
+    /// Returns the parent clip, or `None` when the clip is a root. A root's
+    /// parent is reported as HTTP `200` with a bodiless clip that carries no
+    /// `id` (e.g. `{"is_public": false}`), not a `404`: [`parse_clip`] requires
+    /// a non-empty id, so that root shape maps to `Ok(None)` here. The `404`
+    /// arm is kept as a belt-and-braces fallback for the alternative "no parent"
+    /// encoding. Any other failure, including a transient `5xx`, propagates as
+    /// an error rather than being mistaken for a root.
     pub async fn get_clip_parent(&self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
         let path = format!("{CLIP_PARENT_PATH}?clip_id={id}");
         match self.api_get_retrying(http, &path).await {
+            // A root replies 200 with no id; parse_clip gates on a non-empty id
+            // and yields None, so a root never looks like a fetched parent.
             Ok(body) => Ok(parse_clip(&body)),
             Err(Error::NotFound(_)) => Ok(None),
             Err(err) => Err(err),
@@ -1123,6 +1126,14 @@ mod tests {
             clip.mp3_url(),
             "https://cdn1.suno.ai/00000000-0000-4000-8000-000000000076.mp3"
         );
+        // A feed clip carries the same nested clip_roots shape as /api/clip/{id}.
+        assert_eq!(clip.clip_attribution_type, "remix");
+        assert_eq!(clip.clip_roots.len(), 1);
+        assert_eq!(
+            clip.clip_roots[0].id,
+            "00000000-0000-4000-8000-000000000028"
+        );
+        assert_eq!(clip.clip_roots[0].handle, "example-artist-1");
     }
 
     #[test]
@@ -2409,6 +2420,54 @@ mod tests {
 
         let clip = pollster::block_on(client.get_clip_parent(&http, "root")).unwrap();
         assert!(clip.is_none());
+    }
+
+    #[test]
+    fn get_clip_parent_is_none_for_a_200_no_id_root() {
+        // The live "no parent" contract: HTTP 200 with a bodiless clip that has
+        // no id (`{"is_public": false}`), not a 404. parse_clip gates on a
+        // non-empty id, so it maps to Ok(None) rather than a bogus edge. Both
+        // the bare and `{"clip": ...}`-wrapped encodings must behave the same.
+        for body in [
+            r#"{"is_public": false}"#,
+            r#"{"clip": {"is_public": false}}"#,
+        ] {
+            let mut rules = auth_rules();
+            rules.push(Rule::new("/api/clips/parent", 200, body.to_string()));
+            let http = MockHttp::new(rules);
+            let client = authed_client(&http);
+
+            let clip = pollster::block_on(client.get_clip_parent(&http, "root")).unwrap();
+            assert!(clip.is_none(), "200-no-id body {body:?} must map to None");
+        }
+    }
+
+    #[test]
+    fn get_clip_parent_reads_the_reduced_user_prefixed_shape() {
+        // The parent endpoint returns a reduced shape with user_-prefixed
+        // identity keys; after the dual-identity mapper fix the parent Clip
+        // carries a non-empty display_name/handle (regression pin for #220).
+        let parent = serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000020",
+            "title": "Track 2",
+            "is_public": false,
+            "user_display_name": "Example Artist 4",
+            "user_handle": "example-artist-1",
+            "user_avatar_image_url": "https://cdn1.suno.ai/avatar.jpg"
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/clips/parent?clip_id=child", 200, parent));
+        let http = MockHttp::new(rules);
+        let client = authed_client(&http);
+
+        let clip = pollster::block_on(client.get_clip_parent(&http, "child"))
+            .unwrap()
+            .expect("a parent clip with an id");
+        assert_eq!(clip.id, "00000000-0000-4000-8000-000000000020");
+        assert_eq!(clip.display_name, "Example Artist 4");
+        assert_eq!(clip.handle, "example-artist-1");
+        assert_eq!(clip.avatar_image_url, "https://cdn1.suno.ai/avatar.jpg");
     }
 
     #[test]
