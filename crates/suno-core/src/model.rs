@@ -43,6 +43,21 @@ pub struct Clip {
     /// `metadata.has_stem`. The stems mirror uses it as a precondition: a clip
     /// whose `has_stem` is false or absent is never queried for stems.
     pub has_stem: bool,
+    /// `metadata.stem_from_id`: the clip this one was separated from, when it is
+    /// a stem child. Empty when absent. Structured stem lineage, carried on an
+    /// ordinary feed clip independently of the `/stems` listing.
+    pub stem_from_id: String,
+    /// `metadata.stem_task`: the separation-run id grouping one set of stems.
+    /// Empty when absent.
+    pub stem_task: String,
+    /// `metadata.stem_type_id`: the numeric separation-type id. Tolerates both
+    /// the integer and the float (`91.0`) forms Suno has used; `None` when
+    /// absent or non-numeric.
+    pub stem_type_id: Option<i64>,
+    /// `metadata.stem_type_group_name`: the canonical stem group in underscore
+    /// form (e.g. `Backing_Vocals`). Empty when absent. Preferred, normalised,
+    /// over a title parenthetical as the stem label.
+    pub stem_type_group_name: String,
     pub clip_type: String,
     pub prompt: String,
     pub gpt_description_prompt: String,
@@ -165,6 +180,10 @@ impl Clip {
             is_trashed: bool_field(raw, "is_trashed"),
             has_vocal: bool_field(&metadata, "has_vocal"),
             has_stem: bool_field(&metadata, "has_stem"),
+            stem_from_id: string(&metadata, "stem_from_id"),
+            stem_task: string(&metadata, "stem_task"),
+            stem_type_id: int_tolerant(&metadata, "stem_type_id"),
+            stem_type_group_name: string(&metadata, "stem_type_group_name"),
             clip_type: string(&metadata, "type"),
             prompt: string(&metadata, "prompt"),
             gpt_description_prompt: string(&metadata, "gpt_description_prompt"),
@@ -265,6 +284,19 @@ fn string_or(value: &Value, primary: &str, fallback: &str) -> String {
 /// Read a bool field, defaulting to `false` when missing or not a bool.
 fn bool_field(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Read an integer field, tolerating the float form Suno's history uses (e.g.
+/// `stem_type_id` as `91.0`). Returns `None` when the field is missing,
+/// non-numeric, or a non-integral float.
+fn int_tolerant(value: &Value, key: &str) -> Option<i64> {
+    let field = value.get(key)?;
+    field.as_i64().or_else(|| {
+        field
+            .as_f64()
+            .filter(|number| number.fract() == 0.0)
+            .map(|number| number as i64)
+    })
 }
 
 /// Read a CDN URL field, rewriting the unreliable `cdn2` host to `cdn1`.
@@ -743,6 +775,50 @@ mod tests {
             !Clip::from_json(&serde_json::json!({"id": "x", "metadata": {"has_stem": false}}))
                 .has_stem
         );
+    }
+
+    #[test]
+    fn stem_lineage_quartet_parses_from_metadata_float_tolerant() {
+        // A stem child on an ordinary feed clip: the quartet is under metadata,
+        // and the history form of stem_type_id is a float (91.0).
+        let raw = serde_json::json!({
+            "id": "stem-child",
+            "metadata": {
+                "has_stem": false,
+                "stem_from_id": "source-074",
+                "stem_task": "twelve",
+                "stem_type_id": 91.0,
+                "stem_type_group_name": "Backing_Vocals"
+            }
+        });
+        let clip = Clip::from_json(&raw);
+        assert_eq!(clip.stem_from_id, "source-074");
+        assert_eq!(clip.stem_task, "twelve");
+        assert_eq!(clip.stem_type_id, Some(91));
+        assert_eq!(clip.stem_type_group_name, "Backing_Vocals");
+        // The quartet and has_stem are read from the same metadata block: a stem
+        // child carries the quartet yet is not itself a stem source.
+        assert!(!clip.has_stem);
+
+        // The plain integer form maps identically.
+        let as_int = serde_json::json!({"id": "x", "metadata": {"stem_type_id": 91}});
+        assert_eq!(Clip::from_json(&as_int).stem_type_id, Some(91));
+
+        // Absent, null, non-integral, or non-numeric stem_type_id is None, and
+        // the string members default to empty, so a non-stem clip degrades
+        // cleanly rather than fabricating a separation id.
+        let bare = Clip::from_json(&serde_json::json!({"id": "x"}));
+        assert_eq!(bare.stem_type_id, None);
+        assert_eq!(bare.stem_from_id, "");
+        assert_eq!(bare.stem_task, "");
+        assert_eq!(bare.stem_type_group_name, "");
+        for odd in [
+            serde_json::json!({"id": "x", "metadata": {"stem_type_id": null}}),
+            serde_json::json!({"id": "x", "metadata": {"stem_type_id": 91.5}}),
+            serde_json::json!({"id": "x", "metadata": {"stem_type_id": "91"}}),
+        ] {
+            assert_eq!(Clip::from_json(&odd).stem_type_id, None);
+        }
     }
 
     #[test]
