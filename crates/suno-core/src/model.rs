@@ -140,10 +140,7 @@ impl Clip {
         let metadata = raw.get("metadata").cloned().unwrap_or(Value::Null);
         let id = string(raw, "id");
 
-        let mut audio_url = string(raw, "audio_url");
-        if audio_url.contains("audiopipe") && !id.is_empty() {
-            audio_url = format!("{CDN_BASE_URL}/{id}.mp3");
-        }
+        let audio_url = cdn_audio_url(&string(raw, "audio_url"), &id);
 
         let title = match raw.get("title") {
             Some(Value::String(title)) => title.clone(),
@@ -222,7 +219,7 @@ impl Clip {
             .iter()
             .find(|media| media.content_type == "mp3" && !media.url.is_empty())
         {
-            return mp3.url.clone();
+            return cdn_audio_url(&mp3.url, &self.id);
         }
         if self.audio_url.is_empty() {
             format!("{CDN_BASE_URL}/{}.mp3", self.id)
@@ -302,6 +299,19 @@ fn int_tolerant(value: &Value, key: &str) -> Option<i64> {
 /// Read a CDN URL field, rewriting the unreliable `cdn2` host to `cdn1`.
 fn cdn(value: &Value, key: &str) -> String {
     string(value, key).replace("cdn2.suno.ai", "cdn1.suno.ai")
+}
+
+/// Rewrite an expiring `audiopipe` audio URL to the permanent CDN URL for `id`.
+/// Any other URL, including an empty one, is returned unchanged, and an empty
+/// `id` leaves the URL untouched because the CDN URL cannot be synthesised
+/// without it. Shared by `audio_url` mapping and `mp3_url` so no single URL
+/// source can leak an expiring link.
+fn cdn_audio_url(url: &str, id: &str) -> String {
+    if url.contains("audiopipe") && !id.is_empty() {
+        format!("{CDN_BASE_URL}/{id}.mp3")
+    } else {
+        url.to_string()
+    }
 }
 
 /// Read the nested `clip_roots.clips[]` array into [`ClipRoot`]s.
@@ -447,6 +457,34 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(only_m4a.mp3_url(), "https://cdn1.suno.ai/z.mp3");
+    }
+
+    #[test]
+    fn mp3_url_rewrites_an_expiring_audiopipe_media_url() {
+        // An audiopipe mp3 in media_urls expires, so mp3_url rewrites it to the
+        // permanent CDN URL, matching how audio_url is rewritten at parse time.
+        let expiring = Clip {
+            id: "z".to_owned(),
+            media_urls: vec![MediaUrl {
+                url: "https://audiopipe.suno.ai/item?id=z".to_owned(),
+                content_type: "mp3".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(expiring.mp3_url(), "https://cdn1.suno.ai/z.mp3");
+
+        // A permanent (non-audiopipe) mp3 asset is returned verbatim.
+        let permanent = Clip {
+            id: "z".to_owned(),
+            media_urls: vec![MediaUrl {
+                url: "https://cdn1.suno.ai/z.mp3".to_owned(),
+                content_type: "mp3".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(permanent.mp3_url(), "https://cdn1.suno.ai/z.mp3");
     }
 
     #[test]
