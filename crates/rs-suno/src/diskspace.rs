@@ -60,11 +60,27 @@ mod tests {
     use anyhow::Context;
 
     #[test]
-    fn enospc_and_quota_are_out_of_space() {
-        assert!(is_out_of_space(&std::io::Error::from_raw_os_error(28)));
+    fn storage_full_and_quota_are_out_of_space() {
+        assert!(is_out_of_space(&std::io::Error::from(
+            ErrorKind::StorageFull
+        )));
         assert!(is_out_of_space(&std::io::Error::from(
             ErrorKind::QuotaExceeded
         )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_enospc_is_out_of_space() {
+        // ENOSPC (28) is what a full disk reports on Unix.
+        assert!(is_out_of_space(&std::io::Error::from_raw_os_error(28)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn raw_disk_full_is_out_of_space() {
+        // ERROR_DISK_FULL (112) is what a full disk reports on Windows.
+        assert!(is_out_of_space(&std::io::Error::from_raw_os_error(112)));
     }
 
     #[test]
@@ -76,7 +92,7 @@ mod tests {
 
     #[test]
     fn anyhow_walks_the_chain_for_an_out_of_space_source() {
-        let err = Err::<(), _>(std::io::Error::from_raw_os_error(28))
+        let err = Err::<(), _>(std::io::Error::from(ErrorKind::StorageFull))
             .context("could not write scratch")
             .unwrap_err();
         assert!(anyhow_is_out_of_space(&err));
