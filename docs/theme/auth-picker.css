@@ -1,0 +1,39 @@
+/* Browser picker for the token-capture steps (docs/src/authentication.md).
+   Progressive enhancement: with JavaScript off, no `.js` class is added and
+   every browser's steps stay visible. */
+
+.browser-picker {
+  margin: 1rem 0 1.5rem;
+}
+
+.browser-picker__label {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.browser-picker__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.browser-picker__buttons button {
+  cursor: pointer;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid var(--sidebar-active, #1f6feb);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.browser-picker__buttons button[aria-selected="true"] {
+  background: var(--sidebar-active, #1f6feb);
+  color: #fff;
+}
+
+.browser-picker.js .browser-steps {
+  border-left: 3px solid var(--sidebar-active, #1f6feb);
+  padding-left: 1rem;
+}
