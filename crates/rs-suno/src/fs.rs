@@ -51,6 +51,46 @@ impl FsAdapter {
         }
     }
 
+    /// Reject a resolved path that escapes the account root through a symlinked
+    /// ancestor.
+    ///
+    /// [`resolve`](Self::resolve) bars `..`, absolute, and prefix components
+    /// lexically, but `std::fs` follows directory symlinks, so on a shared
+    /// library a planted link (`ln -s /elsewhere "<root>/Artist"`) could still
+    /// redirect a write, rename, or remove outside the root. The deepest
+    /// existing ancestor of the target is canonicalised (resolving every
+    /// symlink) and must stay within the canonical root before any mutating
+    /// operation runs.
+    ///
+    /// The root is anchored on its own deepest existing ancestor rather than
+    /// required to exist, so a first write into a not-yet-created library still
+    /// works (`ensure_parent` creates the tree afterwards); a subtree that does
+    /// not exist yet cannot hold a planted symlink, so this stays safe.
+    ///
+    /// This is a check-then-use guard: it blocks a symlink planted *before* the
+    /// run (the practical shared-host attack), not one raced in between this
+    /// check and the write itself. Fully closing that narrow window needs
+    /// handle-relative, no-follow syscalls (`openat`/`O_NOFOLLOW`) that are not
+    /// portable across the Linux and Windows targets, so it is out of scope.
+    fn verify_contained(&self, full: &Path) -> Result<(), FsError> {
+        let real_root = canonical_existing_ancestor(&self.root)
+            .ok_or_else(|| FsError::new("could not resolve the library root".to_string()))?;
+        let real_full = canonical_existing_ancestor(full).ok_or_else(|| {
+            FsError::new(format!(
+                "could not resolve an existing ancestor of {}",
+                full.display()
+            ))
+        })?;
+        if real_full.starts_with(&real_root) {
+            Ok(())
+        } else {
+            Err(FsError::new(format!(
+                "refusing path that escapes the library root through a symlink: {}",
+                full.display()
+            )))
+        }
+    }
+
     /// Create the parent directory of `full` so a write or rename can land.
     fn ensure_parent(full: &Path) -> Result<(), FsError> {
         if let Some(parent) = full.parent() {
@@ -69,6 +109,7 @@ impl FsAdapter {
 impl Filesystem for FsAdapter {
     fn write_atomic(&self, path: &str, bytes: &[u8]) -> Result<(), FsError> {
         let full = self.resolve(path)?;
+        self.verify_contained(&full)?;
         Self::ensure_parent(&full)?;
         write_atomic(&full, bytes).map_err(|err| classify_fs(&err))
     }
@@ -76,12 +117,16 @@ impl Filesystem for FsAdapter {
     fn rename(&self, from: &str, to: &str) -> Result<(), FsError> {
         let from_full = self.resolve(from)?;
         let to_full = self.resolve(to)?;
+        self.verify_contained(&from_full)?;
+        self.verify_contained(&to_full)?;
         Self::ensure_parent(&to_full)?;
         replace(&from_full, &to_full).map_err(|err| classify_fs(&err))
     }
 
     fn remove(&self, path: &str) -> Result<(), FsError> {
-        match std::fs::remove_file(self.resolve(path)?) {
+        let full = self.resolve(path)?;
+        self.verify_contained(&full)?;
+        match std::fs::remove_file(full) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(FsError::new(err.to_string())),
@@ -97,6 +142,10 @@ impl Filesystem for FsAdapter {
         } else {
             self.resolve(root)?
         };
+        // Never begin the walk on a symlinked directory: a named base that is a
+        // planted link would let `read_dir` escape the root even though the
+        // per-entry file-type guard skips symlinked children (#249).
+        self.verify_contained(&base)?;
         prune_dir(&base, true);
         Ok(())
     }
@@ -115,6 +164,21 @@ impl Filesystem for FsAdapter {
     }
 }
 
+/// The canonical form of the deepest existing ancestor of `path` (including
+/// `path` itself when it exists), resolving every symlink along the way.
+///
+/// Returns [`None`] only when no ancestor exists at all. Used to check
+/// containment before a component that does not exist yet is created.
+fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut ancestor = path;
+    loop {
+        if let Ok(real) = ancestor.canonicalize() {
+            return Some(real);
+        }
+        ancestor = ancestor.parent()?;
+    }
+}
+
 /// Remove empty directories under `dir`, depth-first (post-order).
 ///
 /// Children are pruned before their parent, so an emptied parent is caught in
@@ -123,14 +187,17 @@ impl Filesystem for FsAdapter {
 /// `remove_dir` succeeds only on a truly-empty directory, so any directory
 /// still holding a file (hidden ones included) or a surviving subdirectory is
 /// left intact; every failure is ignored, keeping the prune purely advisory.
+///
+/// Symlinked entries are never descended into or removed: `DirEntry::file_type`
+/// does not follow the link, so a planted directory symlink (whose target may
+/// lie outside the root) is skipped and only real directories are pruned.
 fn prune_dir(dir: &Path, is_root: bool) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            prune_dir(&path, false);
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            prune_dir(&entry.path(), false);
         }
     }
     if !is_root {
@@ -240,5 +307,129 @@ mod tests {
         assert!(!root.join("album/leaf").exists());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn creates_a_missing_root_on_first_write() {
+        // `fetch <id> <new-dir>` points the adapter at a directory that does not
+        // exist yet; the containment guard must not require the root to already
+        // exist, or the first write would fail (regression guard).
+        let parent = temp_root();
+        let root = parent.join("not-created-yet");
+        assert!(!root.exists());
+        let adapter = FsAdapter::new(root.clone());
+
+        adapter.write_atomic("song.mp3", b"x").unwrap();
+        assert_eq!(adapter.read("song.mp3").unwrap(), b"x");
+        assert!(root.join("song.mp3").exists());
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_write_through_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root();
+        let outside = temp_root();
+        std::fs::create_dir_all(&outside).unwrap();
+        let adapter = FsAdapter::new(root.clone());
+        // A local co-user plants "root/Artist" -> outside, aiming the write out.
+        symlink(
+            std::fs::canonicalize(&outside).unwrap(),
+            root.join("Artist"),
+        )
+        .unwrap();
+
+        assert!(adapter.write_atomic("Artist/song.flac", b"x").is_err());
+        // Nothing landed in the symlink target.
+        assert!(!outside.join("song.flac").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_remove_through_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root();
+        let outside = temp_root();
+        std::fs::create_dir_all(&outside).unwrap();
+        // A victim file the mirror must never delete through the planted link.
+        std::fs::write(outside.join("victim"), b"keep").unwrap();
+        let adapter = FsAdapter::new(root.clone());
+        symlink(
+            std::fs::canonicalize(&outside).unwrap(),
+            root.join("Artist"),
+        )
+        .unwrap();
+
+        assert!(adapter.remove("Artist/victim").is_err());
+        assert!(outside.join("victim").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_rename_target_through_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root();
+        let outside = temp_root();
+        std::fs::create_dir_all(&outside).unwrap();
+        let adapter = FsAdapter::new(root.clone());
+        adapter.write_atomic("from.flac", b"x").unwrap();
+        symlink(
+            std::fs::canonicalize(&outside).unwrap(),
+            root.join("Artist"),
+        )
+        .unwrap();
+
+        assert!(adapter.rename("from.flac", "Artist/to.flac").is_err());
+        assert!(!outside.join("to.flac").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_does_not_follow_a_symlink_out_of_the_root() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root();
+        let outside = temp_root();
+        // An empty directory outside the root that the prune must never reach.
+        std::fs::create_dir_all(outside.join("victim_empty")).unwrap();
+        let adapter = FsAdapter::new(root.clone());
+        symlink(std::fs::canonicalize(&outside).unwrap(), root.join("link")).unwrap();
+
+        adapter.prune_empty_dirs("").unwrap();
+
+        // The symlink target's empty directory survives; the link is not walked.
+        assert!(outside.join("victim_empty").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_rejects_a_symlinked_named_root() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root();
+        let outside = temp_root();
+        std::fs::create_dir_all(outside.join("victim_empty")).unwrap();
+        let adapter = FsAdapter::new(root.clone());
+        // A named base that is itself a planted symlink must be refused, not
+        // walked: read_dir(base) would otherwise escape the root.
+        symlink(std::fs::canonicalize(&outside).unwrap(), root.join("album")).unwrap();
+
+        assert!(adapter.prune_empty_dirs("album").is_err());
+        assert!(outside.join("victim_empty").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }
