@@ -2063,8 +2063,12 @@ mod tests {
             "metadata": {"type": "gen"}
         })
         .to_string();
+        // The batch returns both the structural parent and the seeded same-owner
+        // root in one request; the per-id routes remain only as the fallback.
+        let batch = format!(r#"{{"clips":[{struct_parent},{own_root}]}}"#);
         let http = ScriptedHttp::new()
             .with_auth()
+            .route("get_songs_by_ids", Reply::json(&batch))
             .route("/api/clip/struct-parent", Reply::json(&struct_parent))
             .route("/api/clip/own-root", Reply::json(&own_root));
         let client = authed_client(&http);
