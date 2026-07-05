@@ -280,13 +280,16 @@ impl<C: Clock> SunoClient<C> {
     /// Trashed and share-list playlists are excluded by query, so the result is
     /// the account's authoritative own set. Paging stops on the first empty page
     /// and is hard-capped at [`MAX_PAGES`] so a server that ignores the page
-    /// parameter cannot loop forever. Only entries with a non-empty id are kept.
+    /// parameter cannot loop forever. Only entries with a non-empty id are kept,
+    /// and accumulated entries are de-duplicated by id so a server that ignores
+    /// the page parameter and repeats a body cannot inflate the set.
     ///
     /// A hard failure propagates as an error; the caller treats that as "the
     /// playlist listing did not fully enumerate" and refuses every playlist
     /// deletion this run, so a dropped fetch can never remove a `.m3u8`.
     pub async fn get_playlists(&self, http: &impl Http) -> Result<Vec<Playlist>> {
         let mut playlists = Vec::new();
+        let mut seen = BTreeSet::new();
         for page in 1..=MAX_PAGES {
             let path =
                 format!("{PLAYLIST_ME_PATH}?page={page}&show_trashed=false&show_sharelist=false");
@@ -295,7 +298,11 @@ impl<C: Clock> SunoClient<C> {
             if page_playlists.is_empty() {
                 break;
             }
-            playlists.extend(page_playlists);
+            for playlist in page_playlists {
+                if seen.insert(playlist.id.clone()) {
+                    playlists.push(playlist);
+                }
+            }
         }
         Ok(playlists)
     }
@@ -311,10 +318,11 @@ impl<C: Clock> SunoClient<C> {
     /// The returned `bool` is a completeness signal for deletion authority: the
     /// endpoint reports `num_total_results` (the playlist's full member count)
     /// alongside `playlist_clips[]`, so `true` means every member came back on
-    /// this single page (`returned == num_total_results`). A short page (a
-    /// paginated or partially-listed playlist) returns `false`, so a Mirror
-    /// playlist area under `library = "off"` is never treated as authoritative
-    /// unless its whole member set was seen (D5).
+    /// this single page intact (`num_total_results` present, equal to the raw
+    /// count, and no member dropped for a missing/empty id). A short page, or one
+    /// missing a member's id, returns `false`, so a Mirror playlist area under
+    /// `library = "off"` is never treated as authoritative unless its whole
+    /// member set was seen (D5).
     pub async fn get_playlist_clips(
         &self,
         http: &impl Http,
@@ -814,11 +822,12 @@ fn parse_playlist_item(raw: &Value) -> Option<Playlist> {
 /// path applies [`is_downloadable`](crate::is_downloadable) itself when it fetches
 /// members as download candidates.
 ///
-/// The completeness flag is `true` when the number of raw `playlist_clips[]`
-/// entries equals the response's `num_total_results`, i.e. the whole member set
-/// arrived on this single page. It gates a Mirror playlist area's deletion
-/// authority (D5): a short or paginated page cannot be authoritative for
-/// deletion, so it returns `false`.
+/// The completeness flag is `true` only when the response's `num_total_results`
+/// is present, equals the raw `playlist_clips[]` count, and no member was
+/// dropped by the empty-id filter, i.e. the whole member set arrived intact on
+/// this single page. It gates a Mirror playlist area's deletion authority (D5):
+/// a short or paginated page, or one carrying a member with a missing/empty
+/// clip id, cannot be authoritative for deletion, so it returns `false`.
 fn parse_playlist_clips(body: &[u8]) -> Result<(Vec<Clip>, bool)> {
     let data: Value = serde_json::from_slice(body)
         .map_err(|err| Error::Api(format!("invalid playlist JSON: {err}")))?;
@@ -832,15 +841,16 @@ fn parse_playlist_clips(body: &[u8]) -> Result<(Vec<Clip>, bool)> {
                 .collect()
         })
         .unwrap_or_default();
-    // Completeness compares the raw entry count (before the empty-id filter)
-    // against the reported total: a full single page has them equal. A missing
-    // or malformed total is never treated as complete, so a page whose size
-    // cannot be verified fails safe toward "not authoritative" and a Mirror area
-    // can never delete from it.
+    // Completeness requires the reported total to be present and to match the
+    // raw entry count (before the empty-id filter) AND no member to have been
+    // dropped by that filter (`clips.len() == raw_len`). A missing or malformed
+    // total, a short page, or a single dropped member (empty/missing clip id)
+    // all fail safe toward "not authoritative", so a Mirror area can never
+    // delete from a page whose whole member set was not seen intact.
     let complete = data
         .get("num_total_results")
         .and_then(Value::as_u64)
-        .is_some_and(|total| raw_len as u64 == total);
+        .is_some_and(|total| raw_len as u64 == total && clips.len() == raw_len);
     Ok((clips, complete))
 }
 
@@ -1814,6 +1824,217 @@ mod tests {
             pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
         assert!(clips.is_empty());
         assert!(!complete, "a missing total is never fully enumerated");
+    }
+
+    #[test]
+    fn get_playlist_clips_dropped_member_disarms_authority() {
+        // A member whose clip carries no usable id is dropped by the empty-id
+        // filter, so clips.len() < raw_len even when raw_len == num_total_results.
+        // Both a missing `id` key and an empty-string `id` must disarm deletion
+        // authority rather than silently arming a Mirror area on a short set.
+        let missing_id = serde_json::json!({
+            "num_total_results": 2,
+            "playlist_clips": [
+                {"clip": {
+                    "id": "a", "title": "A", "status": "complete",
+                    "metadata": {"duration": 60.0, "type": "gen"}
+                }},
+                {"clip": {
+                    "title": "No Id", "status": "complete",
+                    "metadata": {"duration": 30.0, "type": "gen"}
+                }}
+            ]
+        })
+        .to_string();
+        let empty_id = serde_json::json!({
+            "num_total_results": 2,
+            "playlist_clips": [
+                {"clip": {
+                    "id": "a", "title": "A", "status": "complete",
+                    "metadata": {"duration": 60.0, "type": "gen"}
+                }},
+                {"clip": {
+                    "id": "", "title": "Empty Id", "status": "complete",
+                    "metadata": {"duration": 30.0, "type": "gen"}
+                }}
+            ]
+        })
+        .to_string();
+        for body in [missing_id, empty_id] {
+            let mut rules = auth_rules();
+            rules.push(Rule::new("/api/playlist/pl1/", 200, body));
+            let http = MockHttp::new(rules);
+            let client = authed_client(&http);
+
+            let (clips, complete) =
+                pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
+            assert_eq!(clips.len(), 1, "the member with no id is dropped");
+            assert!(
+                !complete,
+                "a dropped member disarms authority even when raw_len == total"
+            );
+        }
+    }
+
+    #[test]
+    fn get_playlist_clips_over_count_is_not_complete() {
+        // total=2 but three raw members (one with an empty id): clips.len()==2
+        // matches the total, yet raw_len==3 does not. The two-conjunct gate must
+        // reject this; a mis-simplification to `clips.len() == total` would wrongly
+        // arm authority here.
+        let body = serde_json::json!({
+            "num_total_results": 2,
+            "playlist_clips": [
+                {"clip": {
+                    "id": "a", "title": "A", "status": "complete",
+                    "metadata": {"duration": 60.0, "type": "gen"}
+                }},
+                {"clip": {
+                    "id": "b", "title": "B", "status": "complete",
+                    "metadata": {"duration": 30.0, "type": "gen"}
+                }},
+                {"clip": {
+                    "id": "", "title": "Empty Id", "status": "complete",
+                    "metadata": {"duration": 45.0, "type": "gen"}
+                }}
+            ]
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/playlist/pl1/", 200, body));
+        let http = MockHttp::new(rules);
+        let client = authed_client(&http);
+
+        let (clips, complete) =
+            pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
+        assert_eq!(clips.len(), 2, "the empty-id member is dropped");
+        assert!(
+            !complete,
+            "raw_len (3) diverging from the total (2) is not authoritative"
+        );
+    }
+
+    #[test]
+    fn get_playlist_clips_ignores_song_count() {
+        // The detail reports song_count=0 while num_total_results=1 for the same
+        // playlist; completeness must trust num_total_results, so a single-member
+        // page reads as complete instead of being compared against song_count.
+        let body = serde_json::json!({
+            "num_total_results": 1,
+            "song_count": 0,
+            "playlist_clips": [
+                {"clip": {
+                    "id": "only", "title": "Only", "status": "complete",
+                    "metadata": {"duration": 60.0, "type": "gen"}
+                }}
+            ]
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/playlist/pl1/", 200, body));
+        let http = MockHttp::new(rules);
+        let client = authed_client(&http);
+
+        let (clips, complete) =
+            pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert!(
+            complete,
+            "completeness uses num_total_results, not song_count"
+        );
+    }
+
+    #[test]
+    fn get_playlists_num_clips_ignores_song_count() {
+        // song_count is unreliable across endpoints (15 in the listing, 0 in the
+        // detail), so num_clips must come from num_total_results, never song_count.
+        let page1 = serde_json::json!({
+            "playlists": [
+                {"id": "pl1", "name": "Road Trip", "num_total_results": 15, "song_count": 0}
+            ]
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/playlist/me?page=1", 200, page1));
+        rules.push(Rule::new(
+            "/api/playlist/me?page=2",
+            200,
+            r#"{"playlists": []}"#.to_string(),
+        ));
+        let http = MockHttp::new(rules);
+        let client = authed_client(&http);
+
+        let playlists = pollster::block_on(client.get_playlists(&http)).unwrap();
+        assert_eq!(
+            playlists[0].num_clips, 15,
+            "num_clips reads num_total_results, not song_count"
+        );
+    }
+
+    #[test]
+    fn get_playlists_dedupes_a_page_ignoring_server() {
+        // A server that ignores `page` returns the same non-empty body for every
+        // page, so the empty-page terminator never fires and MAX_PAGES bounds the
+        // loop. Dedupe-by-id keeps the result to the true unique set instead of
+        // MAX_PAGES copies.
+        let same_body = serde_json::json!({
+            "playlists": [
+                {"id": "pl1", "name": "Road Trip", "num_total_results": 12},
+                {"id": "pl2", "name": "Chill", "num_total_results": 7}
+            ]
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/playlist/me", 200, same_body));
+        let http = MockHttp::new(rules);
+        let client = authed_client(&http);
+
+        let playlists = pollster::block_on(client.get_playlists(&http)).unwrap();
+        assert_eq!(
+            playlists.len(),
+            2,
+            "duplicates from a page-ignoring server are collapsed"
+        );
+        assert_eq!(playlists[0].id, "pl1");
+        assert_eq!(playlists[1].id, "pl2");
+    }
+
+    #[test]
+    fn get_playlist_clips_preserves_array_order_over_created_at() {
+        // relative_index ascends with array order while the wrapper created_at
+        // values are non-monotonic. Members must stay in array order: the parser
+        // never sorts by created_at (or any timestamp).
+        let body = serde_json::json!({
+            "num_total_results": 3,
+            "playlist_clips": [
+                {"clip": {
+                    "id": "a", "title": "A", "status": "complete",
+                    "metadata": {"duration": 60.0, "type": "gen"}
+                }, "relative_index": 1.0, "created_at": "2026-06-08T00:00:00.000Z"},
+                {"clip": {
+                    "id": "b", "title": "B", "status": "complete",
+                    "metadata": {"duration": 30.0, "type": "gen"}
+                }, "relative_index": 2.0, "created_at": "2026-01-11T00:00:00.000Z"},
+                {"clip": {
+                    "id": "c", "title": "C", "status": "complete",
+                    "metadata": {"duration": 45.0, "type": "gen"}
+                }, "relative_index": 3.0, "created_at": "2026-05-15T00:00:00.000Z"}
+            ]
+        })
+        .to_string();
+        let mut rules = auth_rules();
+        rules.push(Rule::new("/api/playlist/pl1/", 200, body));
+        let http = MockHttp::new(rules);
+        let client = authed_client(&http);
+
+        let (clips, complete) =
+            pollster::block_on(client.get_playlist_clips(&http, "pl1")).unwrap();
+        assert_eq!(
+            clips.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c"],
+            "array order is preserved despite non-monotonic created_at"
+        );
+        assert!(complete, "three intact members equal the declared total");
     }
 
     /// A stems page body: each stem is a full clip object whose title carries
