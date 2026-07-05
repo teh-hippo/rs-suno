@@ -32,6 +32,15 @@ pub(crate) const API_MAX_RETRIES: u32 = 3;
 pub(crate) const FEED_V3_PATH: &str = "/api/feed/v3";
 /// The dedicated parent-lookup endpoint: one hop up a clip's lineage.
 pub(crate) const CLIP_PARENT_PATH: &str = "/api/clips/parent";
+/// The batch by-id clip fetch: `GET /api/clips/get_songs_by_ids?ids=…&ids=…`
+/// returning `{"clips":[…]}`. Used to gap-fill lineage ancestors in one request
+/// instead of one `GET /api/clip/{id}` per id, cutting round-trips and `429`s.
+pub(crate) const GET_SONGS_BY_IDS_PATH: &str = "/api/clips/get_songs_by_ids";
+/// Ids per `get_songs_by_ids` request. Conservative: it keeps the repeated
+/// `ids=` query well under typical URL-length limits without knowing the
+/// server's real maximum, and any ids beyond a chunk simply ride the next
+/// request.
+pub(crate) const GET_SONGS_CHUNK: usize = 20;
 /// The caller's own playlists, paged. Trashed and share-list playlists are
 /// excluded by query so the listing is the account's authoritative own set.
 pub(crate) const PLAYLIST_ME_PATH: &str = "/api/playlist/me";

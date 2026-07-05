@@ -1,6 +1,6 @@
 //! The Suno API client: lists the library behind the [`Http`](crate::Http) port.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -12,7 +12,8 @@ use crate::backoff::{backoff_delay, retry_after};
 use crate::clock::Clock;
 use crate::consts::{
     API_MAX_RETRIES, BILLING_INFO_PATH, CLIP_PARENT_PATH, FEED_INITIAL_RATE, FEED_PAGE_SIZE,
-    FEED_V3_PATH, MAX_PAGES, PLAYLIST_ME_PATH, PLAYLIST_PATH, SUNO_API_BASE_URL,
+    FEED_V3_PATH, GET_SONGS_BY_IDS_PATH, GET_SONGS_CHUNK, MAX_PAGES, PLAYLIST_ME_PATH,
+    PLAYLIST_PATH, SUNO_API_BASE_URL,
 };
 use crate::error::{Error, Result};
 use crate::http::{Http, HttpRequest, Method};
@@ -265,33 +266,123 @@ impl<C: Clock> SunoClient<C> {
         }
     }
 
-    /// Fetch specific clips by id, one `GET /api/clip/{id}` per id.
+    /// Fetch specific clips by id, batch-first with a per-id fallback.
     ///
     /// Used by lineage resolution to gap-fill ancestors that are absent from a
-    /// normal listing, including trashed ones. The v3 feed has no batch by-id
-    /// filter, so each id is fetched individually; `/api/clip/{id}` returns any
-    /// clip, trashed or artefact, with the full field set. Unlike
-    /// [`list_clips`](Self::list_clips), no downloadability filter is applied: an
-    /// ancestor may itself be an infill or context-window artefact that the
-    /// lineage walk must still traverse. Clips returned here are ancestors for
-    /// resolution only and must never be treated as download candidates. Ids are
-    /// deduplicated in order, and an id that cannot be retrieved (a `404`) is
-    /// skipped so the caller can fall back to the parent endpoint. Requests are
-    /// issued with bounded concurrency, preserving the de-duplicated input order.
+    /// normal listing, including trashed ones. Ids are fetched in a single
+    /// batch via [`get_songs_by_ids`](Self::get_songs_by_ids)
+    /// (`GET /api/clips/get_songs_by_ids`), which cuts the round-trips and `429`s
+    /// of one request per id. Any ids the batch does not return (individually
+    /// trashed or absent, exactly as a `/api/clip/{id}` `404` today, or in a
+    /// chunk the batch endpoint could not serve) then fall back to one
+    /// `GET /api/clip/{id}` each, with bounded `concurrency`, attempted exactly
+    /// once, and a `404` there is skipped so the caller can fall back to the
+    /// parent endpoint. A `429` while batching propagates rather than fanning
+    /// out into per-id requests.
+    ///
+    /// Unlike [`list_clips`](Self::list_clips), no downloadability filter is
+    /// applied: an ancestor may itself be an infill or context-window artefact
+    /// that the lineage walk must still traverse. Clips returned here are
+    /// ancestors for resolution only and must never be treated as download
+    /// candidates. Ids are deduplicated in order and the result preserves that
+    /// de-duplicated input order, matched by id (never by response position).
+    /// The signature is unchanged so [`gap_fill`](crate::lineage) is unaffected.
     pub async fn get_clips_by_ids(
         &self,
         http: &impl Http,
         ids: &[&str],
         concurrency: usize,
     ) -> Result<Vec<Clip>> {
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        let ordered: Vec<&str> = ids
+        let ordered = dedup_nonempty(ids);
+        let mut found: HashMap<&str, Clip> = self
+            .get_songs_by_ids(http, &ordered)
+            .await?
+            .into_iter()
+            .filter_map(|clip| {
+                ordered
+                    .iter()
+                    .find(|id| **id == clip.id)
+                    .map(|id| (*id, clip))
+            })
+            .collect();
+        let omitted: Vec<&str> = ordered
             .iter()
             .copied()
-            .filter(|id| !id.is_empty() && seen.insert(id))
+            .filter(|id| !found.contains_key(id))
             .collect();
+        if !omitted.is_empty() {
+            for clip in self
+                .fetch_clips_individually(http, &omitted, concurrency)
+                .await?
+            {
+                if let Some(id) = ordered.iter().copied().find(|id| *id == clip.id) {
+                    found.insert(id, clip);
+                }
+            }
+        }
+        Ok(ordered.iter().filter_map(|id| found.remove(id)).collect())
+    }
+
+    /// Batch-fetch clips by id via `GET /api/clips/get_songs_by_ids?ids=…&ids=…`.
+    ///
+    /// This is the pure batch primitive: the deduplicated ids are split into
+    /// chunks of [`GET_SONGS_CHUNK`], each requested with repeated `ids=` params,
+    /// and the `{"clips":[…]}` body is parsed defensively and matched back to the
+    /// requested ids by id, so the result preserves the de-duplicated input order
+    /// regardless of the server's ordering and drops any clip that was not asked
+    /// for. Ids the batch does not return (trashed, absent, or in a chunk the
+    /// endpoint could not serve) are simply left out; filling them is the
+    /// caller's job (see [`get_clips_by_ids`](Self::get_clips_by_ids)).
+    ///
+    /// The batch endpoint is undocumented and may be unavailable. A chunk that
+    /// the endpoint cannot serve (a `404`, a `400`, a `5xx`, a transport failure,
+    /// or a body that is not `{"clips":[…]}`) yields nothing for that chunk
+    /// rather than erroring, so an outage or reshape degrades rather than breaks
+    /// (the decoupling rule) and the caller's per-id fallback recovers those ids
+    /// exactly once. A `429`, by contrast, rides the retry inside
+    /// [`api_get_retrying`](Self::api_get_retrying) and, once exhausted,
+    /// propagates rather than letting a burst of per-id requests deepen the
+    /// throttling; an auth failure likewise propagates rather than being masked.
+    pub async fn get_songs_by_ids(&self, http: &impl Http, ids: &[&str]) -> Result<Vec<Clip>> {
+        let ordered = dedup_nonempty(ids);
+        let mut found: HashMap<&str, Clip> = HashMap::new();
+        for chunk in ordered.chunks(GET_SONGS_CHUNK) {
+            let query = chunk
+                .iter()
+                .map(|id| format!("ids={id}"))
+                .collect::<Vec<_>>()
+                .join("&");
+            let path = format!("{GET_SONGS_BY_IDS_PATH}?{query}");
+            let clips = match self.api_get_retrying(http, &path).await {
+                Ok(body) => parse_songs_batch(&body).unwrap_or_default(),
+                Err(err @ (Error::RateLimited { .. } | Error::Auth(_))) => return Err(err),
+                Err(_) => Vec::new(),
+            };
+            for clip in clips {
+                if let Some(id) = chunk.iter().copied().find(|id| *id == clip.id) {
+                    found.insert(id, clip);
+                }
+            }
+        }
+        Ok(ordered.iter().filter_map(|id| found.remove(id)).collect())
+    }
+
+    /// Fetch clips one `GET /api/clip/{id}` per id, with bounded concurrency.
+    ///
+    /// The per-id fallback used by [`get_clips_by_ids`](Self::get_clips_by_ids)
+    /// for any ids the batch did not return, whether individually omitted or in a
+    /// whole chunk the batch endpoint could not serve. `/api/clip/{id}` returns
+    /// any clip, trashed or artefact, with the full field set and no
+    /// downloadability filter. An id that `404`s is skipped; the input order is
+    /// preserved.
+    async fn fetch_clips_individually(
+        &self,
+        http: &impl Http,
+        ids: &[&str],
+        concurrency: usize,
+    ) -> Result<Vec<Clip>> {
         let limit = concurrency.max(1);
-        let fetched = stream::iter(ordered.iter().copied())
+        let fetched = stream::iter(ids.iter().copied())
             .map(|id| async move {
                 let path = format!("/api/clip/{id}");
                 match self.api_get_retrying(http, &path).await {
@@ -305,8 +396,7 @@ impl<C: Clock> SunoClient<C> {
             .await;
         let mut clips = Vec::new();
         for item in fetched {
-            let clip = item?;
-            if let Some(clip) = clip {
+            if let Some(clip) = item? {
                 clips.push(clip);
             }
         }
@@ -758,6 +848,32 @@ fn parse_clip(body: &[u8]) -> Option<Clip> {
         .and_then(Value::as_str)
         .is_some_and(|id| !id.is_empty());
     has_id.then(|| Clip::from_json(raw))
+}
+
+/// Deduplicate ids in first-seen order, dropping empties. Shared by the by-id
+/// fetch paths so the batch, the fallback, and the returned order all agree.
+fn dedup_nonempty<'a>(ids: &[&'a str]) -> Vec<&'a str> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    ids.iter()
+        .copied()
+        .filter(|id| !id.is_empty() && seen.insert(id))
+        .collect()
+}
+
+/// Parse a `get_songs_by_ids` `{"clips":[…]}` body into clips with a non-empty
+/// id. Returns `None` when the body is not valid JSON or lacks a `clips` array,
+/// signalling the caller to fall back to per-id fetches. No downloadability
+/// filter is applied: these are lineage ancestors, which may be artefacts.
+fn parse_songs_batch(body: &[u8]) -> Option<Vec<Clip>> {
+    let data: Value = serde_json::from_slice(body).ok()?;
+    let clips = data.get("clips")?.as_array()?;
+    Some(
+        clips
+            .iter()
+            .map(Clip::from_json)
+            .filter(|clip| !clip.id.is_empty())
+            .collect(),
+    )
 }
 
 /// Parse `/api/billing/info/` into the billing snapshot we report in `doctor`.
@@ -2236,10 +2352,10 @@ mod tests {
     }
 
     #[test]
-    fn get_clips_by_ids_fetches_each_id_and_keeps_artefacts() {
-        // The per-id gap-fill path must not apply the listing's downloadability
-        // filter: an infill ancestor and an upload root both survive, fetched one
-        // `/api/clip/{id}` at a time.
+    fn get_clips_by_ids_keeps_infill_and_upload_ancestors() {
+        // The gap-fill path must not apply the listing's downloadability filter:
+        // an infill ancestor and an upload root both survive, returned by the
+        // batch `get_songs_by_ids` call.
         let p1 = serde_json::json!({
             "id": "p1", "title": "Infill Ancestor", "status": "complete",
             "metadata": {"type": "gen", "task": "infill"}
@@ -2250,7 +2366,9 @@ mod tests {
             "metadata": {"type": "upload"}
         })
         .to_string();
+        let batch = format!(r#"{{"clips":[{p1},{p2}]}}"#);
         let mut rules = auth_rules();
+        rules.push(Rule::new("get_songs_by_ids", 200, batch));
         rules.push(Rule::new("/api/clip/p1", 200, p1));
         rules.push(Rule::new("/api/clip/p2", 200, p2));
         let http = MockHttp::new(rules);
@@ -2269,13 +2387,15 @@ mod tests {
     #[test]
     fn get_clips_by_ids_returns_a_trashed_clip() {
         // A trashed ancestor must still be retrievable by id (the v2 `?ids=`
-        // capability that per-id `/api/clip/{id}` replaces).
+        // capability that `get_songs_by_ids` now restores in one request).
         let trashed = serde_json::json!({
             "id": "t1", "title": "Trashed Ancestor", "status": "complete",
             "is_trashed": true, "metadata": {"type": "gen"}
         })
         .to_string();
+        let batch = format!(r#"{{"clips":[{trashed}]}}"#);
         let mut rules = auth_rules();
+        rules.push(Rule::new("get_songs_by_ids", 200, batch));
         rules.push(Rule::new("/api/clip/t1", 200, trashed));
         let http = MockHttp::new(rules);
         let client = authed_client(&http);
@@ -2292,10 +2412,13 @@ mod tests {
             "id": "only", "title": "Bare", "status": "complete", "metadata": {"type": "gen"}
         })
         .to_string();
+        // The batch returns "only" and omits "gone"; "gone" then falls back to a
+        // per-id fetch that 404s and is skipped.
+        let batch = format!(r#"{{"clips":[{only}]}}"#);
         let http = ScriptedHttp::new()
             .with_auth()
-            .route("/api/clip/gone", Reply::status(404))
-            .route("/api/clip/only", Reply::json(&only));
+            .route("get_songs_by_ids", Reply::json(&batch))
+            .route("/api/clip/gone", Reply::status(404));
         let client = scripted_client(&http, RecordingClock::new());
 
         let clips =
@@ -2303,13 +2426,22 @@ mod tests {
                 .unwrap();
         assert_eq!(clips.len(), 1, "the 404 id is skipped");
         assert_eq!(clips[0].id, "only");
-        // "only" is fetched once despite appearing twice; "gone" is attempted once.
-        assert_eq!(http.count("/api/clip/only"), 1);
+        // "only" is deduped and returned by the batch, so it is never per-id
+        // fetched; "gone" is attempted once via the per-id fallback.
+        assert_eq!(
+            http.count("get_songs_by_ids"),
+            1,
+            "one batch call for both ids"
+        );
+        assert_eq!(http.count("/api/clip/only"), 0);
         assert_eq!(http.count("/api/clip/gone"), 1);
     }
 
     #[test]
     fn get_clips_by_ids_matches_serial_results_and_keeps_order_when_concurrent() {
+        // With no batch route the batch is unavailable, so both calls fall back
+        // to per-id and must return the deduped input order regardless of the
+        // concurrency used.
         let a = serde_json::json!({
             "id": "a", "title": "A", "status": "complete", "metadata": {"type": "gen"}
         })
@@ -2339,11 +2471,178 @@ mod tests {
         assert_eq!(concurrent_ids, serial_ids);
     }
 
+    /// A minimal complete-clip body for the batch tests below.
+    fn clip_body(id: &str) -> String {
+        format!(r#"{{"id":"{id}","title":"T","status":"complete","metadata":{{"type":"gen"}}}}"#)
+    }
+
+    #[test]
+    fn get_songs_by_ids_maps_the_batch_body_matched_by_id_in_input_order() {
+        // The batch returns the clips out of order; the result must follow the
+        // de-duplicated input order, matched by id, never the response position.
+        let batch = format!(
+            r#"{{"clips":[{},{},{}]}}"#,
+            clip_body("c"),
+            clip_body("a"),
+            clip_body("b")
+        );
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("get_songs_by_ids", Reply::json(&batch));
+        let client = scripted_client(&http, RecordingClock::new());
+
+        let clips =
+            pollster::block_on(client.get_songs_by_ids(&http, &["a", "b", "c", "a"])).unwrap();
+        let ids: Vec<&str> = clips.iter().map(|clip| clip.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"], "input order, not response order");
+        assert_eq!(http.count("get_songs_by_ids"), 1, "one chunk, one request");
+    }
+
+    #[test]
+    fn get_songs_by_ids_drops_clips_that_were_not_requested() {
+        // A defensive body carrying an extra id must not leak into the result.
+        let batch = format!(r#"{{"clips":[{},{}]}}"#, clip_body("a"), clip_body("x"));
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("get_songs_by_ids", Reply::json(&batch));
+        let client = scripted_client(&http, RecordingClock::new());
+
+        let clips = pollster::block_on(client.get_songs_by_ids(&http, &["a"])).unwrap();
+        let ids: Vec<&str> = clips.iter().map(|clip| clip.id.as_str()).collect();
+        assert_eq!(ids, vec!["a"], "an unrequested id is dropped");
+    }
+
+    #[test]
+    fn get_songs_by_ids_chunks_ids_beyond_the_chunk_size() {
+        // 21 ids span two chunks (20 + 1), one batch request each, with the
+        // input order preserved across the chunk boundary.
+        let ids: Vec<String> = (0..21).map(|i| format!("id-{i:02}")).collect();
+        let body = |slice: &[String]| {
+            let clips: Vec<String> = slice.iter().map(|id| clip_body(id)).collect();
+            format!(r#"{{"clips":[{}]}}"#, clips.join(","))
+        };
+        let http = ScriptedHttp::new().with_auth().route_seq(
+            "get_songs_by_ids",
+            vec![
+                Reply::json(&body(&ids[..20])),
+                Reply::json(&body(&ids[20..])),
+            ],
+        );
+        let client = scripted_client(&http, RecordingClock::new());
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+
+        let clips = pollster::block_on(client.get_songs_by_ids(&http, &refs)).unwrap();
+        let got: Vec<&str> = clips.iter().map(|clip| clip.id.as_str()).collect();
+        assert_eq!(got, refs, "all 21 ids returned in input order");
+        assert_eq!(
+            http.count("get_songs_by_ids"),
+            2,
+            "two chunks -> two requests"
+        );
+        let batch_calls: Vec<String> = http
+            .calls()
+            .into_iter()
+            .filter(|url| url.contains("get_songs_by_ids"))
+            .collect();
+        assert_eq!(
+            batch_calls[0].matches("ids=").count(),
+            20,
+            "first chunk of 20"
+        );
+        assert_eq!(
+            batch_calls[1].matches("ids=").count(),
+            1,
+            "second chunk of 1"
+        );
+    }
+
+    #[test]
+    fn get_clips_by_ids_batch_first_does_not_fetch_per_id_when_batch_is_complete() {
+        // When the batch returns every requested id, no per-id request is made.
+        let batch = format!(r#"{{"clips":[{},{}]}}"#, clip_body("a"), clip_body("b"));
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("get_songs_by_ids", Reply::json(&batch))
+            .route("/api/clip/a", Reply::json(&clip_body("a")))
+            .route("/api/clip/b", Reply::json(&clip_body("b")));
+        let client = scripted_client(&http, RecordingClock::new());
+
+        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["a", "b"], 4)).unwrap();
+        let ids: Vec<&str> = clips.iter().map(|clip| clip.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+        assert_eq!(http.count("get_songs_by_ids"), 1);
+        assert_eq!(
+            http.count("/api/clip/"),
+            0,
+            "a complete batch needs no per-id fallback"
+        );
+    }
+
+    #[test]
+    fn get_clips_by_ids_fills_ids_the_batch_omits_via_per_id() {
+        // The batch returns only "a"; "b" is filled by a per-id fetch.
+        let batch = format!(r#"{{"clips":[{}]}}"#, clip_body("a"));
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("get_songs_by_ids", Reply::json(&batch))
+            .route("/api/clip/b", Reply::json(&clip_body("b")));
+        let client = scripted_client(&http, RecordingClock::new());
+
+        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["a", "b"], 4)).unwrap();
+        let ids: Vec<&str> = clips.iter().map(|clip| clip.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"], "omitted id is filled, order preserved");
+        assert_eq!(http.count("/api/clip/a"), 0, "a came from the batch");
+        assert_eq!(http.count("/api/clip/b"), 1, "b was filled per-id");
+    }
+
+    #[test]
+    fn get_clips_by_ids_falls_back_to_per_id_on_a_malformed_batch_body() {
+        // A 200 body that is not `{"clips":[…]}` yields nothing for the chunk, so
+        // every requested id is recovered by the per-id fallback.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("get_songs_by_ids", Reply::json("not-json{"))
+            .route("/api/clip/a", Reply::json(&clip_body("a")))
+            .route("/api/clip/b", Reply::json(&clip_body("b")));
+        let client = scripted_client(&http, RecordingClock::new());
+
+        let clips = pollster::block_on(client.get_clips_by_ids(&http, &["a", "b"], 4)).unwrap();
+        let ids: Vec<&str> = clips.iter().map(|clip| clip.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+        assert_eq!(http.count("/api/clip/a"), 1);
+        assert_eq!(http.count("/api/clip/b"), 1);
+    }
+
+    #[test]
+    fn get_clips_by_ids_propagates_a_batch_rate_limit_without_per_id_fan_out() {
+        // A 429 that survives the retry budget propagates: it must never fan out
+        // into a burst of per-id requests that would only deepen the throttling.
+        let http = ScriptedHttp::new()
+            .with_auth()
+            .route("get_songs_by_ids", Reply::status(429))
+            .route("/api/clip/a", Reply::json(&clip_body("a")))
+            .route("/api/clip/b", Reply::json(&clip_body("b")));
+        let client = scripted_client(&http, RecordingClock::new());
+
+        let result = pollster::block_on(client.get_clips_by_ids(&http, &["a", "b"], 4));
+        assert!(
+            matches!(result, Err(Error::RateLimited { .. })),
+            "an exhausted 429 propagates"
+        );
+        assert_eq!(
+            http.count("/api/clip/"),
+            0,
+            "no per-id fan-out on rate-limit exhaustion"
+        );
+    }
+
     #[test]
     fn concurrent_reads_share_aggregate_pacing_after_first_rate_limit() {
-        // Four concurrent requests at 1 req/s should span ~3s from first to last
-        // reserved slot, with a small tolerance for runtime scheduling jitter.
-        const EXPECTED_SPAN: Duration = Duration::from_secs(3);
+        // Batch-first: one `get_songs_by_ids` request (here returning nothing)
+        // then four concurrent per-id fallbacks. All five share the 1 req/s
+        // aggregate pacing, so from the first to the last reserved slot they span
+        // ~4s, with a small tolerance for runtime scheduling jitter.
+        const EXPECTED_SPAN: Duration = Duration::from_secs(4);
         const TOLERANCE: Duration = Duration::from_millis(50);
         let ids = ["a", "b", "c", "d"];
         let a =
@@ -2367,6 +2666,7 @@ mod tests {
                     Reply::json(&one_clip_page("seed", None)),
                 ],
             )
+            .route("get_songs_by_ids", Reply::json(r#"{"clips":[]}"#))
             .route("/api/clip/a", Reply::json(&a))
             .route("/api/clip/b", Reply::json(&b))
             .route("/api/clip/c", Reply::json(&c))
@@ -2380,13 +2680,18 @@ mod tests {
         assert_eq!(clips.len(), ids.len());
         let sleeps = clock.sleeps();
         let paced = &sleeps[before..];
-        assert_eq!(paced.len(), ids.len());
+        assert_eq!(
+            paced.len(),
+            ids.len() + 1,
+            "one batch call plus four per-id"
+        );
         let min = paced.iter().copied().min().unwrap();
         let max = paced.iter().copied().max().unwrap();
         let span = max.saturating_sub(min);
         // After the first 429, rate halves from 2 -> 1 req/s. Under shared slot
-        // pacing, four concurrent reads are dispatched one second apart in
-        // aggregate, so the first-to-last spacing is about three seconds.
+        // pacing, the batch call and the four per-id fallbacks are dispatched one
+        // second apart in aggregate, so the first-to-last spacing is about four
+        // seconds.
         assert!(span >= EXPECTED_SPAN.saturating_sub(TOLERANCE));
         assert!(span <= EXPECTED_SPAN + TOLERANCE);
     }
