@@ -36,8 +36,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::config::{AudioFormat, StemFormat};
+use crate::ffmpeg::WebpEncodeSettings;
 use crate::graph::{AlbumArt, PlaylistState};
-use crate::hash::{art_hash, art_url_hash};
+use crate::hash::{art_hash, art_url_hash, webp_art_hash};
 use crate::lineage::LineageContext;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
@@ -1354,7 +1355,9 @@ fn meta_or_art_changed(d: &Desired, entry: &ManifestEntry) -> bool {
 ///   variant sharing the same art is a no-op downstream (H1).
 /// - `cover.webp` (only when `animated_covers` is set) comes from the
 ///   EARLIEST-created variant with a non-empty `video_cover_url`; ties break to
-///   the smallest id. `None` when no variant has an animated source.
+///   the smallest id. Its hash folds in the `webp` encode settings, so changing
+///   quality/lossless/effort re-transcodes it. `None` when no variant has an
+///   animated source.
 /// - `cover.mp4` (only when `raw_cover` is set) is that same variant's
 ///   `video_cover_url` kept verbatim (no transcode), so `both` yields the raw
 ///   source beside its WebP re-encode. `None` when no variant has an animated
@@ -1367,6 +1370,7 @@ pub fn album_desired(
     desired: &[Desired],
     animated_covers: bool,
     raw_cover: bool,
+    webp: WebpEncodeSettings,
 ) -> Vec<AlbumDesired> {
     let mut groups: BTreeMap<&str, Vec<&Desired>> = BTreeMap::new();
     for d in desired {
@@ -1394,7 +1398,7 @@ pub fn album_desired(
                     kind: ArtifactKind::FolderWebp,
                     path: album_child(&album_dir, "cover.webp"),
                     source_url: source.clip.video_cover_url.clone(),
-                    hash: art_url_hash(&source.clip.video_cover_url),
+                    hash: webp_art_hash(&source.clip.video_cover_url, &webp),
                     content: None,
                 });
             let folder_mp4 = raw_cover
@@ -4137,7 +4141,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, false, false);
+        let desired = album_desired(&members, false, false, WebpEncodeSettings::default());
         let mut albums = BTreeMap::new();
         albums.insert(
             "root".to_string(),
@@ -4168,7 +4172,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, false, false);
+        let desired = album_desired(&members, false, false, WebpEncodeSettings::default());
         let mut albums = BTreeMap::new();
         albums.insert(
             "root".to_string(),
@@ -4266,7 +4270,7 @@ mod tests {
             album_member(album_clip("b", 9, "t1", "art-b", ""), "root", "c/al/b.flac"),
             album_member(album_clip("c", 2, "t2", "art-c", ""), "root", "c/al/c.flac"),
         ];
-        let albums = album_desired(&members, false, false);
+        let albums = album_desired(&members, false, false, WebpEncodeSettings::default());
         assert_eq!(albums.len(), 1);
         let jpg = albums[0].folder_jpg.as_ref().unwrap();
         // "b" has the highest play_count, so its art content hash wins.
@@ -4284,7 +4288,7 @@ mod tests {
             album_member(album_clip("y", 4, "t0", "art-y", ""), "root", "c/al/y.flac"),
             album_member(album_clip("x", 4, "t1", "art-x", ""), "root", "c/al/x.flac"),
         ];
-        let jpg = album_desired(&by_time, false, false)[0]
+        let jpg = album_desired(&by_time, false, false, WebpEncodeSettings::default())[0]
             .folder_jpg
             .clone()
             .unwrap();
@@ -4295,7 +4299,7 @@ mod tests {
             album_member(album_clip("m", 4, "t0", "art-m", ""), "root", "c/al/m.flac"),
             album_member(album_clip("g", 4, "t0", "art-g", ""), "root", "c/al/g.flac"),
         ];
-        let jpg = album_desired(&by_id, false, false)[0]
+        let jpg = album_desired(&by_id, false, false, WebpEncodeSettings::default())[0]
             .folder_jpg
             .clone()
             .unwrap();
@@ -4317,15 +4321,30 @@ mod tests {
             ),
             album_member(album_clip("c", 5, "t1", "art-c", ""), "root", "c/al/c.flac"),
         ];
-        let webp = album_desired(&members, true, false)[0]
+        let webp = album_desired(&members, true, false, WebpEncodeSettings::default())[0]
             .folder_webp
             .clone()
             .unwrap();
         // "b" is earliest-created with an animated source, regardless of plays.
         assert_eq!(webp.source_url, "vid-b");
-        assert_eq!(webp.hash, art_url_hash("vid-b"));
+        assert_eq!(
+            webp.hash,
+            webp_art_hash("vid-b", &WebpEncodeSettings::default())
+        );
         assert_eq!(webp.path, "c/al/cover.webp");
         assert_eq!(webp.kind, ArtifactKind::FolderWebp);
+
+        // The cover.webp hash folds in the encode settings, so raising quality
+        // (or any encode knob) re-transcodes an existing album cover.
+        let hi = WebpEncodeSettings {
+            quality: 40,
+            ..WebpEncodeSettings::default()
+        };
+        let rehashed = album_desired(&members, true, false, hi)[0]
+            .folder_webp
+            .clone()
+            .unwrap();
+        assert_ne!(rehashed.hash, webp.hash);
     }
 
     #[test]
@@ -4335,9 +4354,9 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let off = album_desired(&members, false, false);
+        let off = album_desired(&members, false, false, WebpEncodeSettings::default());
         assert!(off[0].folder_webp.is_none());
-        let on = album_desired(&members, true, false);
+        let on = album_desired(&members, true, false, WebpEncodeSettings::default());
         assert!(on[0].folder_webp.is_some());
     }
 
@@ -4358,7 +4377,7 @@ mod tests {
         // `both`: cover.webp (transcoded) and cover.mp4 (raw) come from the SAME
         // earliest-created animated variant, so they describe one animation. The
         // raw cover keeps the `video_cover_url` unchanged and hashes on the URL.
-        let album = album_desired(&members, true, true).remove(0);
+        let album = album_desired(&members, true, true, WebpEncodeSettings::default()).remove(0);
         let webp = album.folder_webp.unwrap();
         let mp4 = album.folder_mp4.unwrap();
         assert_eq!(mp4.kind, ArtifactKind::FolderMp4);
@@ -4376,11 +4395,13 @@ mod tests {
             "c/al/a.flac",
         )];
         // webp-only keeps the transcode but no raw mp4.
-        let webp_only = album_desired(&members, true, false).remove(0);
+        let webp_only =
+            album_desired(&members, true, false, WebpEncodeSettings::default()).remove(0);
         assert!(webp_only.folder_webp.is_some());
         assert!(webp_only.folder_mp4.is_none());
         // mp4-only keeps the raw source but no transcode.
-        let mp4_only = album_desired(&members, false, true).remove(0);
+        let mp4_only =
+            album_desired(&members, false, true, WebpEncodeSettings::default()).remove(0);
         assert!(mp4_only.folder_webp.is_none());
         assert!(mp4_only.folder_mp4.is_some());
     }
@@ -4393,7 +4414,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let album = album_desired(&members, true, true).remove(0);
+        let album = album_desired(&members, true, true, WebpEncodeSettings::default()).remove(0);
         assert!(album.folder_mp4.is_none());
         assert!(album.folder_webp.is_none());
     }
@@ -4405,7 +4426,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let albums = album_desired(&members, true, false);
+        let albums = album_desired(&members, true, false, WebpEncodeSettings::default());
         assert!(albums[0].folder_jpg.is_none());
         assert!(albums[0].folder_webp.is_none());
     }
@@ -4417,7 +4438,7 @@ mod tests {
             album_member(album_clip("b", 1, "t0", "art-b", ""), "r2", "c/al2/b.flac"),
             album_member(album_clip("c", 9, "t0", "art-c", ""), "r1", "c/al1/c.flac"),
         ];
-        let albums = album_desired(&members, false, false);
+        let albums = album_desired(&members, false, false, WebpEncodeSettings::default());
         assert_eq!(albums.len(), 2);
         assert_eq!(albums[0].root_id, "r1");
         assert_eq!(albums[0].folder_jpg.as_ref().unwrap().source_url, "art-c");
@@ -4440,7 +4461,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, true, false);
+        let desired = album_desired(&members, true, false, WebpEncodeSettings::default());
         let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true, &HashMap::new());
         assert_eq!(
             actions,
@@ -4457,7 +4478,7 @@ mod tests {
                     kind: ArtifactKind::FolderWebp,
                     path: "c/al/cover.webp".to_string(),
                     source_url: "vid-a".to_string(),
-                    hash: art_url_hash("vid-a"),
+                    hash: webp_art_hash("vid-a", &WebpEncodeSettings::default()),
                     owner_id: "root".to_string(),
                     content: None,
                 },
@@ -4472,7 +4493,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, false, false);
+        let desired = album_desired(&members, false, false, WebpEncodeSettings::default());
         let mut albums = BTreeMap::new();
         albums.insert(
             "root".to_string(),
@@ -4492,7 +4513,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, false, false);
+        let desired = album_desired(&members, false, false, WebpEncodeSettings::default());
         let mut albums = BTreeMap::new();
         albums.insert(
             "root".to_string(),
@@ -4525,7 +4546,7 @@ mod tests {
                 "c/al/b.flac",
             ),
         ];
-        let desired1 = album_desired(&run1, false, false);
+        let desired1 = album_desired(&run1, false, false, WebpEncodeSettings::default());
         let write1 = plan_album_artifacts(&desired1, &BTreeMap::new(), true, &HashMap::new());
         assert_eq!(write1.len(), 1);
 
@@ -4561,7 +4582,7 @@ mod tests {
                 "c/al/b.flac",
             ),
         ];
-        let desired2 = album_desired(&run2, false, false);
+        let desired2 = album_desired(&run2, false, false, WebpEncodeSettings::default());
         // The winner flipped, but the chosen art content hash did not: no churn.
         assert!(plan_album_artifacts(&desired2, &albums, true, &HashMap::new()).is_empty());
     }
@@ -4590,7 +4611,7 @@ mod tests {
                 "c/al/b.flac",
             ),
         ];
-        let desired = album_desired(&members, false, false);
+        let desired = album_desired(&members, false, false, WebpEncodeSettings::default());
         let actions = plan_album_artifacts(&desired, &albums, true, &HashMap::new());
         assert_eq!(actions.len(), 1);
         assert!(matches!(
@@ -4616,7 +4637,7 @@ mod tests {
                 )
             })
             .collect();
-        let desired = album_desired(&members, true, false);
+        let desired = album_desired(&members, true, false, WebpEncodeSettings::default());
         assert_eq!(desired.len(), 1);
         let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true, &HashMap::new());
         // Exactly one folder.jpg and one cover.webp for the whole 200-clip album.
@@ -4689,7 +4710,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, false, false);
+        let desired = album_desired(&members, false, false, WebpEncodeSettings::default());
 
         assert!(plan_album_artifacts(&desired, &albums, false, &HashMap::new()).is_empty());
 
@@ -4711,7 +4732,10 @@ mod tests {
             "root".to_string(),
             AlbumArt {
                 folder_jpg: Some(stored("c/al/folder.jpg", &art_url_hash("art-a"))),
-                folder_webp: Some(stored("c/al/cover.webp", &art_url_hash("vid-a"))),
+                folder_webp: Some(stored(
+                    "c/al/cover.webp",
+                    &webp_art_hash("vid-a", &WebpEncodeSettings::default()),
+                )),
                 folder_mp4: Some(stored("c/al/cover.mp4", &art_url_hash("vid-a"))),
             },
         );
@@ -4722,7 +4746,7 @@ mod tests {
             "root",
             "c/al/a.flac",
         )];
-        let desired = album_desired(&members, true, false);
+        let desired = album_desired(&members, true, false, WebpEncodeSettings::default());
 
         // Gated off: nothing removed on an unsafe listing.
         assert!(plan_album_artifacts(&desired, &albums, false, &HashMap::new()).is_empty());
@@ -4753,7 +4777,7 @@ mod tests {
                 "c/al1/b.flac",
             ),
         ];
-        let desired = album_desired(&members, true, true);
+        let desired = album_desired(&members, true, true, WebpEncodeSettings::default());
         let actions = plan_album_artifacts(&desired, &BTreeMap::new(), true, &HashMap::new());
         let keys: Vec<(&str, ArtifactKind)> = actions
             .iter()

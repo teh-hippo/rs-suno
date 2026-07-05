@@ -2215,7 +2215,12 @@ mod tests {
             desired_of(&clip_b, &ctx_b, &names[1]),
         ];
 
-        let albums = crate::reconcile::album_desired(&desired, false, false);
+        let albums = crate::reconcile::album_desired(
+            &desired,
+            false,
+            false,
+            crate::ffmpeg::WebpEncodeSettings::default(),
+        );
         assert_eq!(albums.len(), 2, "each distinct root is its own album");
         let jpg_paths: Vec<String> = albums
             .iter()
@@ -2330,7 +2335,12 @@ mod tests {
             desired_of(&real_clip, &real_ctx, &names[0]),
             desired_of(&new_clip, &new_ctx, &names[1]),
         ];
-        let albums = crate::reconcile::album_desired(&desired, false, false);
+        let albums = crate::reconcile::album_desired(
+            &desired,
+            false,
+            false,
+            crate::ffmpeg::WebpEncodeSettings::default(),
+        );
         let jpg_paths: Vec<String> = albums
             .iter()
             .filter_map(|a| a.folder_jpg.as_ref().map(|art| art.path.clone()))

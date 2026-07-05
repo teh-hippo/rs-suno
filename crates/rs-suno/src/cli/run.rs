@@ -1071,6 +1071,7 @@ async fn run_one(
             lyrics: settings.lyrics_sidecar,
             lrc: settings.lrc_sidecar,
             video: settings.video_mp4,
+            webp: settings.animated_cover_webp,
         },
         &NamingConfig {
             template: settings.naming_template.clone(),
@@ -1109,6 +1110,7 @@ async fn run_one(
             &desired,
             settings.animated_covers,
             settings.raw_animated_cover,
+            settings.animated_cover_webp,
         )
     } else {
         Vec::new()

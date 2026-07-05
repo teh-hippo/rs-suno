@@ -6,7 +6,10 @@ use std::path::{Component, Path};
 use crate::client::Stem;
 use crate::config::{AudioFormat, StemFormat};
 use crate::extras::{M3u8Entry, render_clip_details, render_clip_lyrics, render_m3u8};
-use crate::hash::{art_hash, art_url_hash, content_hash, meta_hash, synced_lrc_source_hash};
+use crate::ffmpeg::WebpEncodeSettings;
+use crate::hash::{
+    art_hash, art_url_hash, content_hash, meta_hash, synced_lrc_source_hash, webp_art_hash,
+};
 use crate::lineage::LineageContext;
 use crate::model::Clip;
 use crate::naming::{
@@ -37,6 +40,9 @@ pub struct ArtifactToggles {
     pub lyrics: bool,
     pub lrc: bool,
     pub video: bool,
+    /// The animated-cover encode settings, folded into the `CoverWebp` hash so a
+    /// settings change re-encodes existing covers (see [`webp_art_hash`]).
+    pub webp: WebpEncodeSettings,
 }
 
 /// One fetched playlist to render: its stable id, display name, and ordered
@@ -227,7 +233,8 @@ pub fn clip_stems(
 /// reads a desired that simply lacks a cover as UNKNOWN => KEEP, never a delete,
 /// so a transient empty URL cannot strand or remove an existing cover. The
 /// `CoverJpg` hash tracks the art URL (`art_hash`); the `CoverWebp` hash tracks
-/// the video URL, so a changed source re-transcodes.
+/// the video URL *and* the encode settings (`webp_art_hash`), so a changed
+/// source or a changed quality/lossless/effort setting re-transcodes.
 ///
 /// The generated text sidecars carry their body inline (`content`) and a
 /// per-sidecar `content_hash`, so a change to what the file holds (a retitle for
@@ -261,7 +268,7 @@ fn clip_artifacts(
             kind: ArtifactKind::CoverWebp,
             path: format!("{base}.webp"),
             source_url: clip.video_cover_url.clone(),
-            hash: art_url_hash(&clip.video_cover_url),
+            hash: webp_art_hash(&clip.video_cover_url, &toggles.webp),
             content: None,
         });
     }
@@ -395,7 +402,9 @@ mod tests {
 
     use super::*;
     use crate::config::AudioFormat;
-    use crate::hash::{art_hash, art_url_hash, content_hash, synced_lrc_source_hash};
+    use crate::hash::{
+        art_hash, art_url_hash, content_hash, synced_lrc_source_hash, webp_art_hash,
+    };
     use crate::lineage::LineageContext;
     use crate::naming::NamingConfig;
     use crate::reconcile::{ArtifactKind, SourceMode};
@@ -698,7 +707,8 @@ mod tests {
             cover.path
         );
 
-        let albums = crate::reconcile::album_desired(&desired, false, false);
+        let albums =
+            crate::reconcile::album_desired(&desired, false, false, WebpEncodeSettings::default());
         let folder_jpg = albums[0]
             .folder_jpg
             .as_ref()
@@ -809,7 +819,10 @@ mod tests {
             .expect("animated cover expected");
         assert_eq!(webp.path, format!("{base}.webp"));
         assert_eq!(webp.source_url, with_video.video_cover_url);
-        assert_eq!(webp.hash, art_url_hash(&with_video.video_cover_url));
+        assert_eq!(
+            webp.hash,
+            webp_art_hash(&with_video.video_cover_url, &WebpEncodeSettings::default())
+        );
 
         let no_video = art_clip("id-b");
         let clips = [&no_video];

@@ -13,6 +13,7 @@
 
 use std::hash::{Hash, Hasher};
 
+use crate::ffmpeg::WebpEncodeSettings;
 use crate::lineage::LineageContext;
 use crate::model::Clip;
 use crate::tag::TrackMetadata;
@@ -72,6 +73,37 @@ pub fn art_url_hash(url: &str) -> String {
     } else {
         digest(url.as_bytes())
     }
+}
+
+/// A digest of a transcoded animated-cover source URL *and* the encode settings
+/// that shape its bytes, or the empty string when `url` is empty.
+///
+/// Unlike the raw `cover.mp4` (a verbatim copy, keyed on its URL alone via
+/// [`art_url_hash`]), the animated `cover.webp` and per-song `.webp` are a
+/// transcode: their bytes depend on quality, lossless, effort, frame-rate, and
+/// width as much as on the source. Folding those into the hash means a settings
+/// change (for example raising the default quality) re-encodes existing covers
+/// on the next run, exactly as a changed source URL does, rather than leaving
+/// them stale. An empty URL still maps to the empty "no artifact" sentinel.
+pub fn webp_art_hash(url: &str, settings: &WebpEncodeSettings) -> String {
+    if url.is_empty() {
+        return String::new();
+    }
+    let mut hasher = fnv::FnvHasher::default();
+    hasher.write(url.as_bytes());
+    hasher.write_u8(0);
+    hasher.write_u8(settings.quality);
+    hasher.write_u8(u8::from(settings.lossless));
+    hasher.write_u8(settings.compression_level);
+    hasher.write_u32(settings.max_fps);
+    match settings.max_width {
+        Some(width) => {
+            hasher.write_u8(1);
+            hasher.write_u32(width);
+        }
+        None => hasher.write_u8(0),
+    }
+    format!("{:016x}", hasher.finish())
 }
 
 /// The change-detection version for the synced `.lrc` body. Bump this when the
@@ -169,6 +201,33 @@ mod tests {
             art_hash(&sample()),
             art_url_hash(sample().selected_image_url().unwrap())
         );
+    }
+
+    #[test]
+    fn webp_art_hash_tracks_url_and_every_encode_setting() {
+        use crate::ffmpeg::WebpEncodeSettings;
+        let url = "https://cdn1.suno.ai/video_cover.mp4";
+        let base = WebpEncodeSettings::default();
+        let h = webp_art_hash(url, &base);
+        assert_eq!(h.len(), 16);
+        assert_eq!(h, webp_art_hash(url, &base), "stable for the same inputs");
+        // Empty URL is the "no artifact" sentinel regardless of settings.
+        assert_eq!(webp_art_hash("", &base), "");
+        // A changed source URL re-transcodes.
+        assert_ne!(h, webp_art_hash("https://cdn1.suno.ai/other.mp4", &base));
+        // Every setting that shapes the output bytes moves the hash, so a
+        // settings change re-encodes an existing cover.
+        for mutate in [
+            |s: &mut WebpEncodeSettings| s.quality = s.quality.wrapping_sub(1),
+            |s: &mut WebpEncodeSettings| s.lossless = !s.lossless,
+            |s: &mut WebpEncodeSettings| s.compression_level = s.compression_level.wrapping_add(1),
+            |s: &mut WebpEncodeSettings| s.max_fps = s.max_fps.wrapping_add(1),
+            |s: &mut WebpEncodeSettings| s.max_width = Some(640),
+        ] {
+            let mut settings = base;
+            mutate(&mut settings);
+            assert_ne!(h, webp_art_hash(url, &settings));
+        }
     }
 
     #[test]
