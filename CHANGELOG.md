@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.1](https://github.com/teh-hippo/rs-suno/compare/v0.27.0...v0.27.1) (2026-07-05)
+
+
+### Bug Fixes
+
+* **playlists:** disarm deletion authority on a dropped member; dedupe /me listing ([#221](https://github.com/teh-hippo/rs-suno/issues/221)) ([6e91113](https://github.com/teh-hippo/rs-suno/commit/6e911133cda0d8b436646311c08320b517418a7c))
+
 ## [0.27.0](https://github.com/teh-hippo/rs-suno/compare/v0.26.3...v0.27.0) (2026-07-05)
 
 
