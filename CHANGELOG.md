@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.0](https://github.com/teh-hippo/rs-suno/compare/v0.27.1...v0.28.0) (2026-07-05)
+
+
+### Features
+
+* **billing:** resilient all-optional BillingInfo with quota, status and entitlements ([#223](https://github.com/teh-hippo/rs-suno/issues/223)) ([eb54e6d](https://github.com/teh-hippo/rs-suno/commit/eb54e6d480bc308ef7a4efb0952b87b6b8f47183))
+
 ## [0.27.1](https://github.com/teh-hippo/rs-suno/compare/v0.27.0...v0.27.1) (2026-07-05)
 
 
