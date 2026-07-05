@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.32.0](https://github.com/teh-hippo/rs-suno/compare/v0.31.0...v0.32.0) (2026-07-05)
+
+
+### Features
+
+* **covers:** re-encode covers when encode settings change ([f8f6871](https://github.com/teh-hippo/rs-suno/commit/f8f68711546795699cad0dba7b2474e845e912c7))
+* **covers:** tune animated WebP defaults and add lossless option ([bbdc3bc](https://github.com/teh-hippo/rs-suno/commit/bbdc3bce2ac517ee3dff8684d148444e1007f84b))
+
 ## [0.31.0](https://github.com/teh-hippo/rs-suno/compare/v0.30.0...v0.31.0) (2026-07-05)
 
 
