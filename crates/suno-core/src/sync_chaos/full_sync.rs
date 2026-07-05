@@ -6,7 +6,7 @@
 //! calls for; the property-based layers generalise them.
 
 use super::harness::{
-    ClipSpec, clean_mirror, desired_set, ext, fast_opts, mutating_actions, path_of, probe_local,
+    ClipSpec, clean_mirror, desired_set, fast_opts, mutating_actions, path_of, probe_local,
     run_clean, run_sync, world,
 };
 use crate::config::AudioFormat;
@@ -352,7 +352,7 @@ fn flac_first_sync_renders_transcodes_and_tags() {
     assert_eq!(plan.downloads(), 1);
     assert_eq!(outcome.downloaded, 1);
     let path = path_of(&spec);
-    assert_eq!(ext(spec.format), "flac");
+    assert_eq!(spec.format.ext(), "flac");
     assert_eq!(&fs.read_file(&path).unwrap()[..4], b"fLaC");
     assert_eq!(manifest.get("c001").unwrap().format, AudioFormat::Flac);
 }

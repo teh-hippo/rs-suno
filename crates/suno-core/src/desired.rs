@@ -111,7 +111,7 @@ pub fn build_desired(
         .map(|((clip, name), lineage)| {
             // The extensionless audio path; the sidecars swap the extension.
             let base = rel_to_string(&name.relative_path);
-            let path = format!("{base}.{format}");
+            let path = format!("{base}.{}", format.ext());
             let meta_hash = meta_hash(clip, &lineage);
             let modes = modes_by_id.get(&clip.id).cloned().unwrap_or_default();
             // D6: an empty modes vec would silently lose SYNC-8 copy protection

@@ -139,7 +139,7 @@ fn fetch_destination(
     id: &str,
     format: AudioFormat,
 ) -> (PathBuf, String) {
-    let default_name = format!("{id}.{format}");
+    let default_name = format!("{id}.{}", format.ext());
     if let Some(output) = output {
         return split_file(output, &default_name);
     }
