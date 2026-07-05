@@ -301,17 +301,21 @@ your editor.
 ## auth
 
 ```text
-suno auth [OPTIONS] <COMMAND>
+suno auth
 suno auth refresh [ACCOUNT]
 ```
 
-Re-mint an account's JWT to confirm its stored token still works. With no
-account it uses your single configured account, or `--all` to check every one.
-See [Authentication](authentication.md).
+With no subcommand, `suno auth` opens the online
+[Authentication](authentication.md) guide in your default browser, and prints
+the URL so it is available on a headless host.
 
-`refresh` is the only auth subcommand in v0.22.0. There is no `auth login`,
-`auth status`, or `auth logout` command; provide or update the Clerk `__client`
-token through [Configuration](configuration.md).
+`suno auth refresh` re-mints an account's JWT to confirm its stored token still
+works. With no account it uses your single configured account, or `--all` to
+check every one.
+
+`refresh` is the only auth subcommand. There is no `auth status` or `auth
+logout` command; provide or update the Clerk `__client` token through
+[Configuration](configuration.md).
 
 ## doctor
 

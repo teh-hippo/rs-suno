@@ -13,6 +13,8 @@ default-theme = "rust"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/teh-hippo/rs-suno"
 edit-url-template = "https://github.com/teh-hippo/rs-suno/edit/main/docs/{path}"
+additional-css = ["theme/auth-picker.css"]
+additional-js = ["theme/auth-picker.js"]
 
 [output.html.search]
 enable = true
