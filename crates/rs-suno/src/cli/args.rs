@@ -93,6 +93,7 @@ pub enum AudioFmt {
     Mp3,
     Flac,
     Wav,
+    Alac,
 }
 
 impl From<AudioFmt> for AudioFormat {
@@ -101,6 +102,7 @@ impl From<AudioFmt> for AudioFormat {
             AudioFmt::Mp3 => AudioFormat::Mp3,
             AudioFmt::Flac => AudioFormat::Flac,
             AudioFmt::Wav => AudioFormat::Wav,
+            AudioFmt::Alac => AudioFormat::Alac,
         }
     }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use suno_core::{
     AudioFormat, ClerkAuth, Clock, Ffmpeg, Filesystem, FlagOverrides, LineageContext, SunoClient,
-    TrackMetadata, tag_flac, tag_mp3,
+    TrackMetadata, tag_alac, tag_flac, tag_mp3,
 };
 
 use crate::cli::args::{FetchArgs, GlobalArgs};
@@ -105,10 +105,20 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             let tagged = tag_flac(&flac, &meta, cover.as_deref())?;
             fs.write_atomic(&filename, &tagged)?;
         }
+        AudioFormat::Alac => {
+            let clock = TokioClock;
+            let wav_url = ensure_wav_url(&client, &http, &clock, &id).await?;
+            let wav = download::get_bytes(&http, &wav_url)
+                .await
+                .context("could not download the WAV")?;
+            let alac = ffmpeg.wav_to_lossless(&wav, AudioFormat::Alac).await?;
+            let tagged = tag_alac(&alac, &meta, cover.as_deref())?;
+            fs.write_atomic(&filename, &tagged)?;
+        }
         AudioFormat::Wav => {
             if global.verbosity() >= -1 {
                 eprintln!(
-                    "warning: WAV carries limited metadata; lyrics and album art will be omitted (use flac or mp3 for full tags)"
+                    "warning: WAV carries limited metadata; lyrics and album art will be omitted (use flac, alac, or mp3 for full tags)"
                 );
             }
             let clock = TokioClock;

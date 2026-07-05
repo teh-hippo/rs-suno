@@ -83,7 +83,7 @@ impl TrackMetadata {
     }
 
     /// The Suno-specific fields, paired with their tag description/key.
-    fn suno_fields(&self) -> [(&'static str, &str); 8] {
+    pub(crate) fn suno_fields(&self) -> [(&'static str, &str); 8] {
         [
             ("SUNO_PROMPT", &self.prompt),
             ("SUNO_STYLE", &self.style),
