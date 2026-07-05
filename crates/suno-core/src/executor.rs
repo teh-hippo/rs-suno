@@ -56,6 +56,7 @@ use crate::reconcile::{
     Action, ArtifactKind, Desired, Plan, SourceMode, set_manifest_artifact, set_manifest_stem,
 };
 use crate::tag::{TrackMetadata, tag_flac, tag_mp3, tag_wav};
+use crate::tag_alac::tag_alac;
 
 /// The shared Suno client behind an async mutex, so concurrent audio work can
 /// serialise its order-sensitive API calls (JWT refresh, adaptive limiter)
@@ -1274,6 +1275,7 @@ where
         let tagged = match format {
             AudioFormat::Mp3 => tag_mp3(&existing, &meta, cover.as_deref(), synced),
             AudioFormat::Flac => tag_flac(&existing, &meta, cover.as_deref()),
+            AudioFormat::Alac => tag_alac(&existing, &meta, cover.as_deref()),
             AudioFormat::Wav => unreachable!("WAV handled above"),
         }
         .map_err(|err| permanent_fail(&clip.id, err.to_string()))?;
@@ -1660,11 +1662,11 @@ where
                 tag_mp3(&audio, &meta, cover.as_deref(), synced)
                     .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
-            AudioFormat::Flac => {
+            AudioFormat::Flac | AudioFormat::Alac => {
                 let wav = self.fetch_wav(client_lock, clip).await?;
-                let flac = self
+                let audio = self
                     .ffmpeg
-                    .wav_to_lossless(&wav, AudioFormat::Flac)
+                    .wav_to_lossless(&wav, format)
                     .await
                     .map_err(|err| {
                         if err.is_out_of_space() {
@@ -1674,8 +1676,11 @@ where
                         }
                     })?;
                 let cover = self.fetch_cover(clip).await;
-                tag_flac(&flac, &meta, cover.as_deref())
-                    .map_err(|err| permanent_fail(&clip.id, err.to_string()))
+                let tagged = match format {
+                    AudioFormat::Alac => tag_alac(&audio, &meta, cover.as_deref()),
+                    _ => tag_flac(&audio, &meta, cover.as_deref()),
+                };
+                tagged.map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
             AudioFormat::Wav => {
                 let wav = self.fetch_wav(client_lock, clip).await?;

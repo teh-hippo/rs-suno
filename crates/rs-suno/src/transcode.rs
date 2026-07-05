@@ -102,6 +102,7 @@ pub fn wav_to_lossless(wav: &[u8], format: AudioFormat, scratch_dir: &Path) -> R
 fn lossless_codec_args(format: AudioFormat) -> Result<(&'static str, &'static str)> {
     match format {
         AudioFormat::Flac => Ok(("flac", "flac")),
+        AudioFormat::Alac => Ok(("alac", "ipod")),
         other => bail!("wav_to_lossless cannot encode {other}"),
     }
 }

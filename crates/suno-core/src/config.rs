@@ -23,6 +23,7 @@ pub enum AudioFormat {
     #[default]
     Flac,
     Wav,
+    Alac,
 }
 
 impl AudioFormat {
@@ -34,6 +35,7 @@ impl AudioFormat {
             Self::Mp3 => "mp3",
             Self::Flac => "flac",
             Self::Wav => "wav",
+            Self::Alac => "m4a",
         }
     }
 }
@@ -46,6 +48,7 @@ impl FromStr for AudioFormat {
             "mp3" => Ok(Self::Mp3),
             "flac" => Ok(Self::Flac),
             "wav" => Ok(Self::Wav),
+            "alac" => Ok(Self::Alac),
             other => Err(Error::Config(format!("unknown format '{other}'"))),
         }
     }
@@ -57,6 +60,7 @@ impl fmt::Display for AudioFormat {
             Self::Mp3 => f.write_str("mp3"),
             Self::Flac => f.write_str("flac"),
             Self::Wav => f.write_str("wav"),
+            Self::Alac => f.write_str("alac"),
         }
     }
 }
@@ -803,13 +807,13 @@ pub struct EffectiveSettings {
 impl EffectiveSettings {
     /// Returns `true` when these settings require ffmpeg to be on `PATH`.
     ///
-    /// FLAC output transcodes WAV→FLAC, and an animated WebP cover transcodes
-    /// MP4→WebP, so either needs ffmpeg. Keeping the raw MP4 alongside the WebP
-    /// (the `both` retention) still produces the WebP, so `animated_covers`
-    /// alone decides it; a raw-MP4-only run, or a plain MP3/WAV run with no
-    /// animated covers, needs no ffmpeg.
+    /// Lossless output (FLAC or ALAC) transcodes from the WAV render, and an
+    /// animated WebP cover transcodes MP4→WebP, so either needs ffmpeg. Keeping
+    /// the raw MP4 alongside the WebP (the `both` retention) still produces the
+    /// WebP, so `animated_covers` alone decides it; a raw-MP4-only run, or a
+    /// plain MP3/WAV run with no animated covers, needs no ffmpeg.
     pub fn requires_ffmpeg(&self) -> bool {
-        self.format == AudioFormat::Flac || self.animated_covers
+        matches!(self.format, AudioFormat::Flac | AudioFormat::Alac) || self.animated_covers
     }
 }
 
@@ -1702,7 +1706,12 @@ mod tests {
 
     #[test]
     fn audio_format_display_roundtrip() {
-        for fmt in [AudioFormat::Mp3, AudioFormat::Flac, AudioFormat::Wav] {
+        for fmt in [
+            AudioFormat::Mp3,
+            AudioFormat::Flac,
+            AudioFormat::Wav,
+            AudioFormat::Alac,
+        ] {
             let s = fmt.to_string();
             assert_eq!(s.parse::<AudioFormat>().unwrap(), fmt);
         }
@@ -1713,6 +1722,7 @@ mod tests {
         assert_eq!(AudioFormat::Mp3.ext(), "mp3");
         assert_eq!(AudioFormat::Flac.ext(), "flac");
         assert_eq!(AudioFormat::Wav.ext(), "wav");
+        assert_eq!(AudioFormat::Alac.ext(), "m4a");
     }
 
     #[test]
@@ -1907,6 +1917,13 @@ mod tests {
         assert!(eff.requires_ffmpeg());
         eff.animated_covers = true;
         assert!(eff.requires_ffmpeg());
+    }
+
+    #[test]
+    fn requires_ffmpeg_alac_always_needs_it() {
+        let mut eff = base_settings(AudioFormat::Alac);
+        eff.animated_covers = false;
+        assert!(eff.requires_ffmpeg(), "alac transcodes, so needs ffmpeg");
     }
 
     #[test]

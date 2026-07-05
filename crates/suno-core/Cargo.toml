@@ -15,6 +15,7 @@ fnv = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 id3 = "1"
 metaflac = "0.2"
+mp4ameta = "0.13.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"

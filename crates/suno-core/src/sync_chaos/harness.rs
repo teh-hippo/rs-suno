@@ -199,7 +199,7 @@ pub(super) fn world(specs: &[ClipSpec]) -> ChaosHttp {
             AudioFormat::Mp3 => {
                 http = http.serve(&format!("/{id}.mp3"), audio_bytes(id));
             }
-            AudioFormat::Flac | AudioFormat::Wav => {
+            AudioFormat::Flac | AudioFormat::Wav | AudioFormat::Alac => {
                 http = http
                     .serve(
                         &format!("gen/{id}/wav_file"),

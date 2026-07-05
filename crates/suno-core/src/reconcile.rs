@@ -1182,6 +1182,7 @@ fn rep_key(d: &Desired) -> (&str, &str, &str, u8) {
         AudioFormat::Mp3 => 0,
         AudioFormat::Flac => 1,
         AudioFormat::Wav => 2,
+        AudioFormat::Alac => 3,
     };
     (
         d.path.as_str(),
