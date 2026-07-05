@@ -54,8 +54,9 @@ impl TrackMetadata {
     /// creation year (the clip's own year when the root's is unavailable), so an
     /// album whose tracks cross a calendar boundary groups under one year. The
     /// `album`, `parent`, `root`, and `lineage` tags come from the resolved
-    /// context, never the now-defunct `album_title`/`edited_clip_id`/
-    /// `root_ancestor_id` feed fields. The `lyrics` tag carries the clip's real
+    /// context, not from the clip's own `edited_clip_id` pointer or the removed
+    /// `album_title`/`root_ancestor_id` feed fields. The `lyrics` tag carries the
+    /// clip's real
     /// lyrics, and the generation `prompt` is preserved in its own `SUNO_PROMPT`
     /// tag.
     pub fn from_clip(clip: &Clip, lineage: &LineageContext) -> TrackMetadata {
@@ -428,10 +429,7 @@ mod tests {
             lyrics: "thunder rolls\nover the plains".to_owned(),
             model_name: "chirp-v4".to_owned(),
             major_model_version: "v4".to_owned(),
-            album_title: "Weather Series".to_owned(),
             edited_clip_id: "parentid1234".to_owned(),
-            root_ancestor_id: "rootid567890".to_owned(),
-            lineage_status: "continuation".to_owned(),
             ..Clip::default()
         }
     }

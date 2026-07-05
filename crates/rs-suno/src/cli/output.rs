@@ -58,9 +58,6 @@ struct ClipJson<'a> {
     major_model_version: &'a str,
     display_name: &'a str,
     handle: &'a str,
-    album_title: Option<&'a str>,
-    root_ancestor_id: Option<&'a str>,
-    lineage_status: Option<&'a str>,
     edited_clip_id: Option<&'a str>,
     audio_url: &'a str,
     image_url: &'a str,
@@ -88,9 +85,6 @@ impl<'a> ClipJson<'a> {
             major_model_version: &clip.major_model_version,
             display_name: &clip.display_name,
             handle: &clip.handle,
-            album_title: nullable(&clip.album_title),
-            root_ancestor_id: nullable(&clip.root_ancestor_id),
-            lineage_status: nullable(&clip.lineage_status),
             edited_clip_id: nullable(&clip.edited_clip_id),
             audio_url: &clip.audio_url,
             image_url: &clip.image_url,
@@ -399,9 +393,6 @@ mod tests {
             major_model_version: "v4".to_owned(),
             display_name: "alice".to_owned(),
             handle: "alice".to_owned(),
-            album_title: "Weather".to_owned(),
-            root_ancestor_id: String::new(),
-            lineage_status: "root".to_owned(),
             edited_clip_id: String::new(),
             audio_url: "https://cdn1.suno.ai/3f2a1b4c.mp3".to_owned(),
             image_url: "https://cdn1.suno.ai/i.jpeg".to_owned(),
@@ -424,11 +415,14 @@ mod tests {
         // Empty strings become null.
         assert!(value["gpt_description_prompt"].is_null());
         assert!(value["lyrics"].is_null());
-        assert!(value["root_ancestor_id"].is_null());
         assert!(value["edited_clip_id"].is_null());
         // Present strings stay present.
         assert_eq!(value["prompt"], "an orchestral storm");
-        assert_eq!(value["album_title"], "Weather");
+        // The pruned lineage fields are gone from the schema entirely, never
+        // re-emitted as null placeholders.
+        assert!(!value.as_object().unwrap().contains_key("album_title"));
+        assert!(!value.as_object().unwrap().contains_key("root_ancestor_id"));
+        assert!(!value.as_object().unwrap().contains_key("lineage_status"));
         // Always-present string fields stay strings even when empty.
         assert_eq!(value["video_url"], "");
     }
@@ -444,7 +438,7 @@ mod tests {
     #[test]
     fn lsjson_field_count_is_stable() {
         let value: Value = serde_json::from_str(&lsjson_line(&rich_clip())).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 25);
+        assert_eq!(value.as_object().unwrap().len(), 22);
     }
 
     #[test]

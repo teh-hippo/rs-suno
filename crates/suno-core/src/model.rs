@@ -10,6 +10,11 @@ pub struct Clip {
     pub id: String,
     pub title: String,
     pub audio_url: String,
+    /// Every audio asset Suno lists for the clip (an `mp3` plus, usually, an
+    /// `m4a-opus`). Empty when the API omits `media_urls`, so a clip with no
+    /// listed assets falls back to `audio_url` (then synthesis) exactly as
+    /// before. The `mp3` entry is the authoritative, non-expiring source.
+    pub media_urls: Vec<MediaUrl>,
     pub image_url: String,
     pub image_large_url: String,
     pub video_url: String,
@@ -21,6 +26,13 @@ pub struct Clip {
     pub created_at: String,
     pub display_name: String,
     pub handle: String,
+    /// The clip owner's account id (top-level `user_id`). Feeds the
+    /// foreign-owner attribution check and cross-account dedup; empty when the
+    /// API omits it.
+    pub user_id: String,
+    /// Index within a generation batch (paired gens), for sibling
+    /// disambiguation in naming and dedup. `None` when `batch_index` is absent.
+    pub batch_index: Option<i64>,
     pub is_liked: bool,
     pub is_trashed: bool,
     pub has_vocal: bool,
@@ -34,9 +46,6 @@ pub struct Clip {
     pub lyrics: String,
     pub model_name: String,
     pub major_model_version: String,
-    pub album_title: String,
-    pub root_ancestor_id: String,
-    pub lineage_status: String,
     pub edited_clip_id: String,
     pub task: String,
     pub is_remix: bool,
@@ -48,6 +57,21 @@ pub struct Clip {
     pub override_future_clip_id: String,
     pub history: Vec<HistoryEntry>,
     pub concat_history: Vec<HistoryEntry>,
+}
+
+/// One audio asset from a clip's top-level `media_urls` list.
+///
+/// Suno lists each downloadable rendition (an `mp3`, and usually an
+/// `m4a-opus`) with its `content_type`, `delivery` mode, and an optional
+/// `encoding` version (only the m4a-opus carries one). Every field defaults to
+/// empty when absent, so a reshaped or partial entry degrades rather than
+/// fails.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MediaUrl {
+    pub url: String,
+    pub content_type: String,
+    pub delivery: String,
+    pub encoding: String,
 }
 
 /// One entry in a clip's `history` or `concat_history`, mirroring the API's
@@ -87,6 +111,7 @@ impl Clip {
             id,
             title,
             audio_url,
+            media_urls: parse_media_urls(raw),
             image_url: cdn(raw, "image_url"),
             image_large_url: cdn(raw, "image_large_url"),
             video_url: cdn(raw, "video_url"),
@@ -105,6 +130,8 @@ impl Clip {
             created_at: string(raw, "created_at"),
             display_name: string(raw, "display_name"),
             handle: string(raw, "handle"),
+            user_id: string(raw, "user_id"),
+            batch_index: raw.get("batch_index").and_then(Value::as_i64),
             is_liked: bool_field(raw, "is_liked"),
             is_trashed: bool_field(raw, "is_trashed"),
             has_vocal: bool_field(&metadata, "has_vocal"),
@@ -115,9 +142,6 @@ impl Clip {
             lyrics: string(raw, "lyrics"),
             model_name: string(raw, "model_name"),
             major_model_version: string(raw, "major_model_version"),
-            album_title: string(raw, "album_title"),
-            root_ancestor_id: string(raw, "root_ancestor_id"),
-            lineage_status: string(raw, "lineage_status"),
             edited_clip_id: string(&metadata, "edited_clip_id"),
             task: string(&metadata, "task"),
             is_remix: bool_field(&metadata, "is_remix"),
@@ -132,9 +156,21 @@ impl Clip {
         }
     }
 
-    /// The MP3 source URL: the clip's `audio_url`, or the deterministic CDN URL
-    /// when it is empty.
+    /// The MP3 source URL, in priority order: the API-listed `media_urls` `mp3`
+    /// asset (authoritative and non-expiring), then the clip's `audio_url`, then
+    /// the deterministic CDN URL synthesised from the id.
+    ///
+    /// When `media_urls` is absent the behaviour is unchanged: a present
+    /// `audio_url` is returned verbatim, and an empty one synthesises the CDN
+    /// URL.
     pub fn mp3_url(&self) -> String {
+        if let Some(mp3) = self
+            .media_urls
+            .iter()
+            .find(|media| media.content_type == "mp3" && !media.url.is_empty())
+        {
+            return mp3.url.clone();
+        }
         if self.audio_url.is_empty() {
             format!("{CDN_BASE_URL}/{}.mp3", self.id)
         } else {
@@ -186,6 +222,25 @@ fn bool_field(value: &Value, key: &str) -> bool {
 /// Read a CDN URL field, rewriting the unreliable `cdn2` host to `cdn1`.
 fn cdn(value: &Value, key: &str) -> String {
     string(value, key).replace("cdn2.suno.ai", "cdn1.suno.ai")
+}
+
+/// Read the top-level `media_urls` array into [`MediaUrl`]s.
+///
+/// A missing key or non-array yields an empty `Vec`, and each element defaults
+/// its fields, so a reshaped or partial entry degrades rather than fails.
+fn parse_media_urls(raw: &Value) -> Vec<MediaUrl> {
+    let Some(Value::Array(items)) = raw.get("media_urls") else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|item| MediaUrl {
+            url: string(item, "url"),
+            content_type: string(item, "content_type"),
+            delivery: string(item, "delivery"),
+            encoding: string(item, "encoding"),
+        })
+        .collect()
 }
 
 /// Read `value[key]` as an array of history records into [`HistoryEntry`]s.
@@ -241,6 +296,97 @@ mod tests {
         assert_eq!(clip.mp3_url(), "https://x/real.mp3");
         clip.audio_url = String::new();
         assert_eq!(clip.mp3_url(), "https://cdn1.suno.ai/z.mp3");
+    }
+
+    #[test]
+    fn mp3_url_prefers_the_media_urls_mp3_then_audio_url_then_synthesis() {
+        // The API-listed mp3 asset wins over audio_url.
+        let clip = Clip {
+            id: "z".to_owned(),
+            audio_url: "https://x/real.mp3".to_owned(),
+            media_urls: vec![
+                MediaUrl {
+                    url: "https://media/z.m4a".to_owned(),
+                    content_type: "m4a-opus".to_owned(),
+                    delivery: "progressive".to_owned(),
+                    encoding: "1.0.0".to_owned(),
+                },
+                MediaUrl {
+                    url: "https://cdn1.suno.ai/z.mp3".to_owned(),
+                    content_type: "mp3".to_owned(),
+                    delivery: "progressive".to_owned(),
+                    encoding: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(clip.mp3_url(), "https://cdn1.suno.ai/z.mp3");
+
+        // Absent media_urls falls back to audio_url unchanged (today's behaviour).
+        let no_media = Clip {
+            id: "z".to_owned(),
+            audio_url: "https://x/real.mp3".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(no_media.mp3_url(), "https://x/real.mp3");
+
+        // A media_urls set with only a non-mp3 asset still falls back.
+        let only_m4a = Clip {
+            id: "z".to_owned(),
+            audio_url: String::new(),
+            media_urls: vec![MediaUrl {
+                url: "https://media/z.m4a".to_owned(),
+                content_type: "m4a-opus".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(only_m4a.mp3_url(), "https://cdn1.suno.ai/z.mp3");
+    }
+
+    #[test]
+    fn from_json_reads_media_urls_user_id_and_batch_index() {
+        let raw = serde_json::json!({
+            "id": "clip-1",
+            "user_id": "owner-9",
+            "batch_index": 23,
+            "media_urls": [
+                {
+                    "url": "https://media/clip-1.m4a",
+                    "content_type": "m4a-opus",
+                    "delivery": "progressive",
+                    "encoding": "1.0.0"
+                },
+                {
+                    "url": "https://cdn1.suno.ai/clip-1.mp3",
+                    "content_type": "mp3",
+                    "delivery": "progressive"
+                }
+            ]
+        });
+
+        let clip = Clip::from_json(&raw);
+
+        assert_eq!(clip.user_id, "owner-9");
+        assert_eq!(clip.batch_index, Some(23));
+        assert_eq!(clip.media_urls.len(), 2);
+        assert_eq!(clip.media_urls[0].content_type, "m4a-opus");
+        assert_eq!(clip.media_urls[0].encoding, "1.0.0");
+        // The mp3 entry carries no `encoding`, which must default to empty.
+        assert_eq!(clip.media_urls[1].content_type, "mp3");
+        assert_eq!(clip.media_urls[1].encoding, "");
+        assert_eq!(clip.mp3_url(), "https://cdn1.suno.ai/clip-1.mp3");
+    }
+
+    #[test]
+    fn from_json_defaults_media_urls_user_id_and_batch_index_when_absent() {
+        let clip = Clip::from_json(&serde_json::json!({"id": "clip-1"}));
+        assert!(clip.media_urls.is_empty());
+        assert_eq!(clip.user_id, "");
+        assert_eq!(clip.batch_index, None);
+        // A non-array media_urls degrades to empty, never a panic.
+        let odd = Clip::from_json(&serde_json::json!({"id": "x", "media_urls": "nope"}));
+        assert!(odd.media_urls.is_empty());
     }
 
     #[test]

@@ -432,7 +432,6 @@ mod tests {
         let clip = Clip {
             id: "child".to_owned(),
             title: "Child".to_owned(),
-            album_title: "Ignored Feed Album".to_owned(),
             ..Clip::default()
         };
         let lineage = LineageContext {
@@ -444,8 +443,9 @@ mod tests {
             status: ResolveStatus::Resolved,
         };
         let rendered = render_clip_details(&clip, &lineage);
+        // The album is the resolved root title, never the clip's own title.
         assert!(rendered.contains("Album: Resolved Album\n"));
-        assert!(!rendered.contains("Ignored Feed Album"));
+        assert!(!rendered.contains("Album: Child"));
     }
 
     #[test]

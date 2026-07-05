@@ -638,8 +638,6 @@ mod tests {
             title: title.to_string(),
             display_name: "München".to_string(),
             handle: "munchen".to_string(),
-            album_title: String::new(),
-            root_ancestor_id: String::new(),
             ..Clip::default()
         }
     }
