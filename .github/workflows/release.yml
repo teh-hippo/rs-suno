@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   release:
-    uses: teh-hippo/common-repo-configs/.github/workflows/rust-release.yml@c931fba4d72479caec16ca097b7ce105aa56ede4 # v1
+    uses: teh-hippo/common-repo-configs/.github/workflows/rust-release.yml@564e27e4b612eaabed5f9e0dd6294b2b92b9f5b0 # v2
     permissions:
       contents: write
       id-token: write
@@ -19,3 +19,4 @@ jobs:
     with:
       binary-name: suno
       publish-crates: '["suno-core","rs-suno"]'
+      targets: '[{"target":"x86_64-unknown-linux-musl","os":"ubuntu-24.04","build-tool":"cargo","label":"x86_64-linux"},{"target":"aarch64-unknown-linux-musl","os":"ubuntu-24.04","build-tool":"cross","label":"aarch64-linux"},{"target":"x86_64-pc-windows-msvc","os":"windows-latest","build-tool":"cargo","label":"x86_64-windows","rustflags":"-C target-feature=+crt-static"},{"target":"aarch64-pc-windows-msvc","os":"windows-11-arm","build-tool":"cargo","label":"aarch64-windows","rustflags":"-C target-feature=+crt-static"}]'

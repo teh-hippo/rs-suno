@@ -15,10 +15,24 @@ directory is on your `PATH`.
 
 ### Pre-built binaries
 
-Pre-built binaries for common platforms are attached to each
-[GitHub release](https://github.com/teh-hippo/rs-suno/releases). Download the
-archive for your platform, extract the `suno` binary, and place it somewhere on
-your `PATH`.
+Pre-built binaries are attached to each
+[GitHub release](https://github.com/teh-hippo/rs-suno/releases). The following
+platforms are published:
+
+| Platform | Asset | Notes |
+|---|---|---|
+| Linux x86_64 | `suno-vX-x86_64-linux.tar.gz` | statically linked (musl) |
+| Linux aarch64 | `suno-vX-aarch64-linux.tar.gz` | statically linked (musl) |
+| Windows x86_64 | `suno-vX-x86_64-windows.zip` | native MSVC |
+| Windows aarch64 | `suno-vX-aarch64-windows.zip` | native MSVC |
+
+Download the archive for your platform, extract the `suno` binary, and place it
+somewhere on your `PATH`.
+
+Each archive ships a matching `.sha256` checksum and a build-provenance
+attestation. The binaries are unsigned, so Windows may show a SmartScreen
+"unknown publisher" prompt on first run; verify the download against its
+`.sha256` and attestation if you want to confirm its integrity.
 
 ### Verify the install
 
