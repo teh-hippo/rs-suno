@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use suno_core::{
-    ClerkAuth, Config, EffectiveSettings, FlagOverrides, SunoClient, TOKEN_EXPIRY_WARN_DAYS,
-    TokenExpiry, config::label_to_env,
+    BillingInfo, ClerkAuth, Config, EffectiveSettings, FlagOverrides, SunoClient,
+    TOKEN_EXPIRY_WARN_DAYS, TokenExpiry, config::label_to_env,
 };
 
 use crate::cli::args::GlobalArgs;
@@ -211,7 +211,7 @@ async fn inspect_live(token: &str, http: &ReqwestHttp) -> LiveDiagnostic {
                         "ok as {display_name} ({user_id}); token expiry: {}",
                         describe_expiry(expiry)
                     ),
-                    credits_line: format!("{} remaining", billing.total_credits_left),
+                    credits_line: format_credits_line(&billing),
                     exit_code: ExitCode::Ok,
                 },
                 Err(err) => LiveDiagnostic {
@@ -229,6 +229,40 @@ async fn inspect_live(token: &str, http: &ReqwestHttp) -> LiveDiagnostic {
             credits_line: "skipped (auth failed)".to_owned(),
             exit_code: exit_code_for_core_error(&err),
         },
+    }
+}
+
+/// Render the `doctor` credits line from a billing snapshot.
+///
+/// Reports the remaining balance (or `"unknown"` when absent), enriches it with
+/// the monthly quota and period when present, and appends a short account
+/// health hint. Leak-safe: it prints only counts, the period unit, and status
+/// flags, never a subscription id or other identifier.
+fn format_credits_line(billing: &BillingInfo) -> String {
+    let mut line = match billing.total_credits_left {
+        Some(credits) => format!("{credits} remaining"),
+        None => "unknown".to_owned(),
+    };
+    if let (Some(usage), Some(limit)) = (billing.monthly_usage, billing.monthly_limit) {
+        let period = billing.period.as_deref().unwrap_or("period");
+        write!(line, " ({usage} of {limit} used this {period})").ok();
+    }
+    if let Some(status) = account_status_hint(billing) {
+        write!(line, "; {status}").ok();
+    }
+    line
+}
+
+/// A short account-health hint, or `None` when the account looks healthy.
+fn account_status_hint(billing: &BillingInfo) -> Option<&'static str> {
+    if billing.is_past_due == Some(true) {
+        Some("past due")
+    } else if billing.is_paused == Some(true) {
+        Some("paused")
+    } else if billing.is_active == Some(false) {
+        Some("inactive")
+    } else {
+        None
     }
 }
 
@@ -468,5 +502,30 @@ mod tests {
             worst = max_exit_code(worst, ExitCode::Config);
         }
         assert_eq!(worst, ExitCode::Ok);
+    }
+
+    #[test]
+    fn format_credits_line_reports_balance_quota_and_status() {
+        let healthy = BillingInfo {
+            total_credits_left: Some(2450),
+            monthly_limit: Some(2500),
+            monthly_usage: Some(50),
+            period: Some("month".to_owned()),
+            is_active: Some(true),
+            ..BillingInfo::default()
+        };
+        assert_eq!(
+            format_credits_line(&healthy),
+            "2450 remaining (50 of 2500 used this month)"
+        );
+
+        assert_eq!(format_credits_line(&BillingInfo::default()), "unknown");
+
+        let past_due = BillingInfo {
+            total_credits_left: Some(0),
+            is_past_due: Some(true),
+            ..BillingInfo::default()
+        };
+        assert_eq!(format_credits_line(&past_due), "0 remaining; past due");
     }
 }
