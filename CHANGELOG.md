@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.26.3](https://github.com/teh-hippo/rs-suno/compare/v0.26.2...v0.26.3) (2026-07-05)
+
+
+### Code Refactoring
+
+* **cli:** hoist a single worse exit-code helper ([8ae86fa](https://github.com/teh-hippo/rs-suno/commit/8ae86fa14607452c1cabec25504883fa3f3b0bb5))
+
+
+### Tests
+
+* **suno-core:** remove six unit tests subsumed by stronger siblings ([d2977bb](https://github.com/teh-hippo/rs-suno/commit/d2977bba2c4408cb977dde3ab196df6148963dab))
+
 ## [0.26.2](https://github.com/teh-hippo/rs-suno/compare/v0.26.1...v0.26.2) (2026-07-04)
 
 
