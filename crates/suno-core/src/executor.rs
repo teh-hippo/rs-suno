@@ -1662,13 +1662,17 @@ where
             }
             AudioFormat::Flac => {
                 let wav = self.fetch_wav(client_lock, clip).await?;
-                let flac = self.ffmpeg.wav_to_flac(&wav).await.map_err(|err| {
-                    if err.is_out_of_space() {
-                        disk_fail(&clip.id, "disk full: no space left to transcode")
-                    } else {
-                        permanent_fail(&clip.id, format!("transcode failed: {err}"))
-                    }
-                })?;
+                let flac = self
+                    .ffmpeg
+                    .wav_to_lossless(&wav, AudioFormat::Flac)
+                    .await
+                    .map_err(|err| {
+                        if err.is_out_of_space() {
+                            disk_fail(&clip.id, "disk full: no space left to transcode")
+                        } else {
+                            permanent_fail(&clip.id, format!("transcode failed: {err}"))
+                        }
+                    })?;
                 let cover = self.fetch_cover(clip).await;
                 tag_flac(&flac, &meta, cover.as_deref())
                     .map_err(|err| permanent_fail(&clip.id, err.to_string()))
@@ -5303,9 +5307,10 @@ mod tests {
         }
 
         impl Ffmpeg for RecordingWebpFfmpeg {
-            async fn wav_to_flac(
+            async fn wav_to_lossless(
                 &self,
                 _wav: &[u8],
+                _format: AudioFormat,
             ) -> Result<Vec<u8>, crate::ffmpeg::FfmpegError> {
                 Ok(Vec::new())
             }
@@ -6561,11 +6566,12 @@ mod tests {
         }
 
         impl Ffmpeg for CountingFfmpeg {
-            fn wav_to_flac(
+            fn wav_to_lossless(
                 &self,
                 wav: &[u8],
+                format: AudioFormat,
             ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
-                let fut = self.inner.wav_to_flac(wav);
+                let fut = self.inner.wav_to_lossless(wav, format);
                 let held = self.held.clone();
                 let peak = self.peak.clone();
                 async move {

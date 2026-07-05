@@ -101,7 +101,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             let wav = download::get_bytes(&http, &wav_url)
                 .await
                 .context("could not download the WAV")?;
-            let flac = ffmpeg.wav_to_flac(&wav).await?;
+            let flac = ffmpeg.wav_to_lossless(&wav, AudioFormat::Flac).await?;
             let tagged = tag_flac(&flac, &meta, cover.as_deref())?;
             fs.write_atomic(&filename, &tagged)?;
         }

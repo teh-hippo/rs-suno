@@ -10,6 +10,8 @@
 
 use std::future::Future;
 
+use crate::config::AudioFormat;
+
 /// Why an ffmpeg transcode failed, so the executor can treat a full scratch
 /// disk as a systemic abort rather than a skippable per-clip fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,14 +102,18 @@ impl Default for WebpEncodeSettings {
 /// Async so the adapter can offload the blocking child process without stalling
 /// the runtime; tests resolve immediately.
 pub trait Ffmpeg {
-    /// Transcode `wav` to FLAC bytes.
-    fn wav_to_flac(&self, wav: &[u8]) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send;
+    /// Transcode `wav` to the given lossless `format`'s bytes.
+    fn wav_to_lossless(
+        &self,
+        wav: &[u8],
+        format: AudioFormat,
+    ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send;
 
     /// Transcode an MP4 video preview to animated WebP bytes under `settings`.
     ///
     /// Used to derive a clip's `cover.webp` sidecar from its `video_cover_url`
-    /// MP4. Like [`wav_to_flac`](Ffmpeg::wav_to_flac) the adapter offloads the
-    /// blocking child process; tests resolve immediately.
+    /// MP4. Like [`wav_to_lossless`](Ffmpeg::wav_to_lossless) the adapter offloads
+    /// the blocking child process; tests resolve immediately.
     fn mp4_to_webp(
         &self,
         mp4: &[u8],

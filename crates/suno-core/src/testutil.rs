@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::clock::Clock;
+use crate::config::AudioFormat;
 use crate::ffmpeg::{Ffmpeg, FfmpegError, WebpEncodeSettings};
 use crate::fs::{FileStat, Filesystem, FsError};
 use crate::http::{Http, HttpRequest, HttpResponse, TransportError};
@@ -552,9 +553,10 @@ impl StubFfmpeg {
 }
 
 impl Ffmpeg for StubFfmpeg {
-    fn wav_to_flac(
+    fn wav_to_lossless(
         &self,
         _wav: &[u8],
+        _format: AudioFormat,
     ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
         let out = self.result();
         async move { out }
