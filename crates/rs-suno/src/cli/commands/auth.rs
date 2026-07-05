@@ -11,11 +11,29 @@ use crate::cli::desired::{ExitCode, worse};
 use crate::cli::run;
 use crate::http::ReqwestHttp;
 
-/// Run an `auth` subcommand.
+/// The published authentication guide, opened by a bare `suno auth`.
+const AUTH_GUIDE_URL: &str =
+    "https://teh-hippo.github.io/rs-suno/authentication.html#cookie-capture";
+
+/// Run an `auth` subcommand, or open the guide when none is given.
 pub async fn run_auth(global: &GlobalArgs, args: &AuthArgs) -> Result<ExitCode> {
     match &args.command {
-        AuthCommand::Refresh(refresh) => refresh_accounts(global, refresh).await,
+        Some(AuthCommand::Refresh(refresh)) => refresh_accounts(global, refresh).await,
+        None => Ok(open_guide(global.verbosity())),
     }
+}
+
+/// Open the authentication guide in the default browser, always printing the
+/// URL so it is available on a headless host or when the output is piped.
+fn open_guide(verbosity: i8) -> ExitCode {
+    if verbosity >= -1 {
+        eprintln!("Opening the Suno authentication guide in your browser.");
+    }
+    println!("{AUTH_GUIDE_URL}");
+    if !crate::cli::open_url::open_in_browser(AUTH_GUIDE_URL) && verbosity >= -1 {
+        eprintln!("Could not open a browser automatically; open the URL above manually.");
+    }
+    ExitCode::Ok
 }
 
 async fn refresh_accounts(global: &GlobalArgs, refresh: &AuthRefreshArgs) -> Result<ExitCode> {
