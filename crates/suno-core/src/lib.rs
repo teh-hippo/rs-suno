@@ -67,12 +67,13 @@ pub use hash::{
 };
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use lineage::{
-    Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveOpts, ResolveStatus, RootInfo,
-    edge_type, immediate_parent, lineage_edges, resolve_roots,
+    AttributionEdge, Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveOpts,
+    ResolveStatus, RootInfo, attribution_edges, edge_type, immediate_parent, lineage_edges,
+    resolve_roots,
 };
 pub use lyrics::{AlignedLine, AlignedLineWord, AlignedLyrics, AlignedWord};
 pub use manifest::{ArtifactState, Manifest, ManifestEntry, SyncedLyricsCheck};
-pub use model::{Clip, HistoryEntry, MediaUrl};
+pub use model::{Clip, ClipRoot, HistoryEntry, MediaUrl};
 pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,
     render_clip_names, sanitise_name, stem_file_path, stems_folder,
