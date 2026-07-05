@@ -1829,6 +1829,83 @@ mod tests {
     }
 
     #[test]
+    fn nested_manifest_path_reconciles_without_rename_or_delete() {
+        // Deletion-safety pin (#236). A manifest written by a prior run stores
+        // forward-slash paths (rel_to_string is '/'-only on every OS). Recomputing
+        // the desired state with build_desired must reproduce byte-identical
+        // paths, so reconcile sees no drift and emits neither a Rename nor a
+        // Delete — a Windows '\'-separator regression would surface here as a
+        // spurious Rename that could strand the prior file.
+        let clip = Clip {
+            id: "clipaaaa-1234".to_owned(),
+            title: "Song".to_owned(),
+            display_name: "alice".to_owned(),
+            image_large_url: "https://art.suno.ai/clipaaaa-1234/large.jpg".to_owned(),
+            ..Clip::default()
+        };
+        let clips = [&clip];
+        let modes: HashMap<String, Vec<SourceMode>> = [(clip.id.clone(), vec![SourceMode::Mirror])]
+            .into_iter()
+            .collect();
+        let desired = crate::desired::build_desired(
+            &clips,
+            AudioFormat::Flac,
+            &modes,
+            &HashMap::new(),
+            &BTreeSet::new(),
+            crate::desired::ArtifactToggles::default(),
+            &crate::naming::NamingConfig::default(),
+        );
+        let d = &desired[0];
+
+        // The forward-slash form a prior run would have stored for every path.
+        let stored_audio = d.path.replace('\\', "/");
+        assert!(
+            !stored_audio.contains('\\') && stored_audio.contains('/'),
+            "expected a nested forward-slash path, got {stored_audio}"
+        );
+        let cover = d
+            .artifacts
+            .iter()
+            .find(|a| a.kind == ArtifactKind::CoverJpg)
+            .expect("an art-bearing clip yields a cover.jpg");
+
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            clip.id.clone(),
+            ManifestEntry {
+                path: stored_audio.clone(),
+                format: AudioFormat::Flac,
+                meta_hash: d.meta_hash.clone(),
+                art_hash: d.art_hash.clone(),
+                size: 100,
+                cover_jpg: Some(ArtifactState {
+                    path: cover.path.replace('\\', "/"),
+                    hash: cover.hash.clone(),
+                }),
+                ..Default::default()
+            },
+        );
+        let local: HashMap<String, LocalFile> =
+            [(clip.id.clone(), present(100))].into_iter().collect();
+
+        let plan = reconcile(&manifest, &desired, &local, &mirror_ok());
+
+        assert_eq!(
+            plan.renames(),
+            0,
+            "the recomputed path drifted from the stored forward-slash path"
+        );
+        assert_eq!(plan.deletes(), 0, "no clip should be deleted");
+        assert_eq!(plan.reformats(), 0);
+        assert_eq!(plan.downloads(), 0);
+        assert_eq!(plan.retags(), 0);
+        assert_eq!(plan.artifact_writes(), 0, "the cover.jpg drifted");
+        assert_eq!(plan.artifact_moves(), 0);
+        assert_eq!(plan.skips(), 1, "the unchanged clip is skipped");
+    }
+
+    #[test]
     fn meta_change_retags_in_place() {
         let mut manifest = Manifest::new();
         manifest.insert("a", entry("a.flac", AudioFormat::Flac, "old", "art"));

@@ -631,6 +631,7 @@ mod tests {
     use super::*;
     use crate::lineage::{EdgeType, ResolveStatus};
     use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
 
     fn test_clip(id: &str, title: &str) -> Clip {
         Clip {
@@ -673,8 +674,8 @@ mod tests {
 
         let unicode = render_own(&clip, &NamingConfig::default());
         assert_eq!(
-            unicode.relative_path.to_string_lossy(),
-            "München/Beyoncé 東京/München-Beyoncé 東京 [abc12345]"
+            unicode.relative_path,
+            Path::new("München/Beyoncé 東京/München-Beyoncé 東京 [abc12345]")
         );
 
         let ascii = render_own(
@@ -685,8 +686,8 @@ mod tests {
             },
         );
         assert_eq!(
-            ascii.relative_path.to_string_lossy(),
-            "Munchen/Beyonce/Munchen-Beyonce [abc12345]"
+            ascii.relative_path,
+            Path::new("Munchen/Beyonce/Munchen-Beyonce [abc12345]")
         );
     }
 
@@ -700,8 +701,11 @@ mod tests {
         };
 
         let rendered = render_own(&clip, &NamingConfig::default());
-        let path = rendered.relative_path.to_string_lossy();
-        assert!(path.starts_with("AUX_/CON_/"), "path was {path}");
+        assert!(
+            rendered.relative_path.starts_with("AUX_/CON_"),
+            "path was {}",
+            rendered.relative_path.display()
+        );
         assert!(rendered.base_name.contains("[deadbeef]"));
     }
 
@@ -760,8 +764,8 @@ mod tests {
         let rendered = render_own(&clip, &NamingConfig::default());
         assert_eq!(rendered.base_name, "München-Untitled [12345678]");
         assert_eq!(
-            rendered.relative_path.to_string_lossy(),
-            "München/Untitled/München-Untitled [12345678]"
+            rendered.relative_path,
+            Path::new("München/Untitled/München-Untitled [12345678]")
         );
     }
 
@@ -924,12 +928,12 @@ mod tests {
         let names = render_clip_names(&requests, &NamingConfig::default(), &BTreeSet::new());
 
         assert_eq!(
-            names[0].relative_path.to_string_lossy(),
-            "München/Origin/München-Shared [11111111]"
+            names[0].relative_path,
+            Path::new("München/Origin/München-Shared [11111111]")
         );
         assert_eq!(
-            names[1].relative_path.to_string_lossy(),
-            "München/Origin/München-Shared [22222222]"
+            names[1].relative_path,
+            Path::new("München/Origin/München-Shared [22222222]")
         );
     }
 
@@ -995,8 +999,8 @@ mod tests {
             &NamingConfig::default(),
         );
         assert_eq!(
-            rendered.relative_path.to_string_lossy(),
-            "München/Original/München-Remix [child]"
+            rendered.relative_path,
+            Path::new("München/Original/München-Remix [child]")
         );
     }
 
@@ -1011,8 +1015,8 @@ mod tests {
 
         let rendered = render_own(&clip, &NamingConfig::default());
         assert_eq!(
-            rendered.relative_path.to_string_lossy(),
-            "München/Original/München-Original [root-1]"
+            rendered.relative_path,
+            Path::new("München/Original/München-Original [root-1]")
         );
     }
 
@@ -1082,8 +1086,8 @@ mod tests {
         };
         let names = render_all_own(&[clip], &NamingConfig::default(), &BTreeSet::new());
         assert_eq!(
-            names[0].relative_path.to_string_lossy(),
-            "München/Solo/München-Solo [solo-1]"
+            names[0].relative_path,
+            Path::new("München/Solo/München-Solo [solo-1]")
         );
     }
 
@@ -1206,13 +1210,13 @@ mod tests {
         let names = render_all_own(&[first, second], &config, &BTreeSet::new());
 
         assert_eq!(
-            names[0].relative_path.to_string_lossy(),
-            "München/Alpha",
+            names[0].relative_path,
+            Path::new("München/Alpha"),
             "distinct path was wrongly suffixed"
         );
         assert_eq!(
-            names[1].relative_path.to_string_lossy(),
-            "München/Beta",
+            names[1].relative_path,
+            Path::new("München/Beta"),
             "distinct path was wrongly suffixed"
         );
     }

@@ -2196,7 +2196,10 @@ mod tests {
             crate::reconcile::Desired {
                 clip: clip.clone(),
                 lineage: ctx.clone(),
-                path: format!("{}.flac", name.relative_path.to_string_lossy()),
+                path: format!(
+                    "{}.flac",
+                    crate::desired::rel_to_string(&name.relative_path)
+                ),
                 format: crate::AudioFormat::Flac,
                 meta_hash: String::new(),
                 art_hash: String::new(),
@@ -2309,7 +2312,10 @@ mod tests {
             crate::reconcile::Desired {
                 clip: clip.clone(),
                 lineage: ctx.clone(),
-                path: format!("{}.flac", name.relative_path.to_string_lossy()),
+                path: format!(
+                    "{}.flac",
+                    crate::desired::rel_to_string(&name.relative_path)
+                ),
                 format: crate::AudioFormat::Flac,
                 meta_hash: String::new(),
                 art_hash: String::new(),

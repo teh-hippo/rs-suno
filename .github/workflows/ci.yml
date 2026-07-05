@@ -27,9 +27,9 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
-      # Test the binary crate natively so its Windows-specific IO branches run;
-      # suno-core's platform-agnostic suite runs in the Linux `check` job.
-      - run: cargo test -p rs-suno --all-features --target x86_64-pc-windows-msvc
+      # suno-core's suite is platform-agnostic, so the whole workspace runs here
+      # to exercise the binary crate's Windows IO branches alongside the engine.
+      - run: cargo test --workspace --all-features --target x86_64-pc-windows-msvc
   windows-arm-check:
     runs-on: windows-11-arm
     permissions:
@@ -40,4 +40,4 @@ jobs:
         with:
           targets: aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-features --target aarch64-pc-windows-msvc
+      - run: cargo test --workspace --all-features --target aarch64-pc-windows-msvc
