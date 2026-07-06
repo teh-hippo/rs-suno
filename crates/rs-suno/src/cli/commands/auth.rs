@@ -10,6 +10,7 @@ use crate::cli::args::{AuthArgs, AuthCommand, AuthRefreshArgs, GlobalArgs};
 use crate::cli::desired::{ExitCode, worse};
 use crate::cli::failure;
 use crate::cli::run;
+use crate::cli::token;
 use crate::http::ReqwestHttp;
 
 /// The published authentication guide, opened by a bare `suno auth`.
@@ -60,7 +61,7 @@ async fn refresh_accounts(global: &GlobalArgs, refresh: &AuthRefreshArgs) -> Res
     let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
     let mut worst = ExitCode::Ok;
     for (label, settings) in resolved {
-        let token = match run::resolve_token(&label, &settings).await {
+        let token = match token::resolve_token(&label, &settings).await {
             Ok(Some(token)) => token,
             Ok(None) => {
                 eprintln!(
