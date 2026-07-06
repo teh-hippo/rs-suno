@@ -37,6 +37,8 @@ use crate::cli::desired::{
 };
 use crate::cli::logs;
 use crate::cli::output;
+use crate::cli::task_output;
+use crate::cli::task_output::eprint_t;
 use crate::clock::TokioClock;
 use crate::download::cleanup_stale_parts;
 use crate::ffmpeg::FfmpegAdapter;
@@ -55,29 +57,6 @@ const LAST_RUN_NAME: &str = ".suno-last-run";
 /// deletion-safety logic is entirely unaffected by the concurrency between
 /// accounts.
 const ACCOUNT_CONCURRENCY: usize = 4;
-
-std::thread_local! {
-    /// Per-account stderr buffer. When active (multi-account concurrent path),
-    /// `eprint_t!` writes here instead of directly to stderr, so concurrent
-    /// accounts' output lines never interleave. Flushed atomically after each
-    /// account's thread completes.
-    static TASK_STDERR: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Write a formatted line to the per-account buffer when in a concurrent thread,
-/// or directly to stderr for single-account (sequential) runs.
-macro_rules! eprint_t {
-    ($($arg:tt)*) => {{
-        TASK_STDERR.with(|b| {
-            let mut guard = b.borrow_mut();
-            if let Some(buf) = guard.as_mut() {
-                buf.push(format!($($arg)*));
-            } else {
-                eprintln!($($arg)*);
-            }
-        });
-    }};
-}
 
 /// Which verb is running; it sets the source mode and whether the run executes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,7 +323,7 @@ async fn run(
                 .expect("semaphore closed");
             handles.push(std::thread::spawn(move || {
                 let _permit = permit;
-                TASK_STDERR.with(|b| *b.borrow_mut() = Some(Vec::new()));
+                task_output::capture_task_stderr();
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -360,7 +339,7 @@ async fn run(
                     &e,
                     exit_code,
                 ));
-                let lines = TASK_STDERR.with(|b| b.borrow_mut().take().unwrap_or_default());
+                let lines = task_output::flush_task_stderr();
                 result.map(|code| (code, lines))
             }));
         }
