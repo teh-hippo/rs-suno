@@ -383,18 +383,16 @@ impl Config {
                 .map(String::as_str)
         };
 
-        let format_from_env = env_val("FORMAT")
-            .map(str::parse::<AudioFormat>)
-            .transpose()?;
-
-        let format = flags
-            .settings
-            .format
-            .or(format_from_env)
-            .or_else(|| src.and_then(|s| s.settings.format))
-            .or(acc.settings.format)
-            .or(self.defaults.settings.format)
-            .unwrap_or(AudioFormat::Flac);
+        let format = resolve_enum(
+            flags.settings.format,
+            env_val("FORMAT"),
+            src.and_then(|s| s.settings.format),
+            acc.settings.format,
+            self.defaults.settings.format,
+            None,
+            "FORMAT",
+        )?
+        .unwrap_or(AudioFormat::Flac);
 
         let concurrency = resolve_parsed(
             flags.settings.concurrency,
@@ -486,17 +484,16 @@ impl Config {
             "DOWNLOAD_STEMS",
         )?;
 
-        let stem_format_from_env = env_val("STEM_FORMAT")
-            .map(str::parse::<StemFormat>)
-            .transpose()?;
-        let stem_format = flags
-            .settings
-            .stem_format
-            .or(stem_format_from_env)
-            .or_else(|| src.and_then(|s| s.settings.stem_format))
-            .or(acc.settings.stem_format)
-            .or(self.defaults.settings.stem_format)
-            .unwrap_or_default();
+        let stem_format = resolve_enum(
+            flags.settings.stem_format,
+            env_val("STEM_FORMAT"),
+            src.and_then(|s| s.settings.stem_format),
+            acc.settings.stem_format,
+            self.defaults.settings.stem_format,
+            None,
+            "STEM_FORMAT",
+        )?
+        .unwrap_or_default();
 
         let video_cover_retention = resolve_enum(
             flags.settings.video_cover_retention,
@@ -538,25 +535,15 @@ impl Config {
             defaults_webp.max_fps,
             "ANIMATED_COVER_MAX_FPS",
         )?;
-        let animated_cover_max_width_from_env = env_val("ANIMATED_COVER_MAX_WIDTH")
-            .map(|s| {
-                s.parse().map_err(|_| {
-                    Error::Config(format!(
-                        "invalid ANIMATED_COVER_MAX_WIDTH: '{s}' (expected integer)"
-                    ))
-                })
-            })
-            .transpose()?;
-        let animated_cover_max_width = if let Some(v) = flags.settings.animated_cover_max_width {
-            Some(v)
-        } else if let Some(v) = animated_cover_max_width_from_env {
-            Some(v)
-        } else {
-            src.and_then(|s| s.settings.animated_cover_max_width)
-                .or(acc.settings.animated_cover_max_width)
-                .or(self.defaults.settings.animated_cover_max_width)
-                .or(defaults_webp.max_width)
-        };
+        let animated_cover_max_width = resolve_parsed_opt(
+            flags.settings.animated_cover_max_width,
+            env_val("ANIMATED_COVER_MAX_WIDTH"),
+            src.and_then(|s| s.settings.animated_cover_max_width),
+            acc.settings.animated_cover_max_width,
+            self.defaults.settings.animated_cover_max_width,
+            defaults_webp.max_width,
+            "ANIMATED_COVER_MAX_WIDTH",
+        )?;
         let animated_cover_compression_level = resolve_u8_ranged(
             flags.settings.animated_cover_compression_level,
             env_val("ANIMATED_COVER_COMPRESSION_LEVEL"),
@@ -577,28 +564,25 @@ impl Config {
             "ANIMATED_COVER_LOSSLESS",
         )?;
 
-        let naming_template_from_env = env_val("NAMING_TEMPLATE").map(str::to_owned);
-        let naming_template = flags
-            .settings
-            .naming_template
-            .clone()
-            .or(naming_template_from_env)
-            .or_else(|| src.and_then(|s| s.settings.naming_template.clone()))
-            .or_else(|| acc.settings.naming_template.clone())
-            .or_else(|| self.defaults.settings.naming_template.clone())
-            .unwrap_or_else(|| crate::naming::DEFAULT_TEMPLATE.to_owned());
+        let naming_template = resolve_owned(
+            flags.settings.naming_template.clone(),
+            env_val("NAMING_TEMPLATE"),
+            src.and_then(|s| s.settings.naming_template.clone()),
+            acc.settings.naming_template.clone(),
+            self.defaults.settings.naming_template.clone(),
+        )
+        .unwrap_or_else(|| crate::naming::DEFAULT_TEMPLATE.to_owned());
 
-        let character_set_from_env = env_val("CHARACTER_SET")
-            .map(str::parse::<CharacterSet>)
-            .transpose()?;
-        let character_set = flags
-            .settings
-            .character_set
-            .or(character_set_from_env)
-            .or_else(|| src.and_then(|s| s.settings.character_set))
-            .or(acc.settings.character_set)
-            .or(self.defaults.settings.character_set)
-            .unwrap_or(CharacterSet::Unicode);
+        let character_set = resolve_enum(
+            flags.settings.character_set,
+            env_val("CHARACTER_SET"),
+            src.and_then(|s| s.settings.character_set),
+            acc.settings.character_set,
+            self.defaults.settings.character_set,
+            None,
+            "CHARACTER_SET",
+        )?
+        .unwrap_or(CharacterSet::Unicode);
 
         let token = flags
             .token
@@ -606,13 +590,13 @@ impl Config {
             .or_else(|| env.get(&format!("SUNO_{label_env}_TOKEN")).cloned())
             .or_else(|| env.get("SUNO_TOKEN").cloned());
 
-        let token_command = env
-            .get(&format!("SUNO_{label_env}_TOKEN_COMMAND"))
-            .cloned()
-            .or_else(|| env.get("SUNO_TOKEN_COMMAND").cloned())
-            .or_else(|| src.and_then(|s| s.settings.token_command.clone()))
-            .or_else(|| acc.settings.token_command.clone())
-            .or_else(|| self.defaults.settings.token_command.clone());
+        let token_command = resolve_owned(
+            None,
+            env_val("TOKEN_COMMAND"),
+            src.and_then(|s| s.settings.token_command.clone()),
+            acc.settings.token_command.clone(),
+            self.defaults.settings.token_command.clone(),
+        );
 
         Ok(EffectiveSettings {
             token,
@@ -669,15 +653,38 @@ fn resolve_parsed<T>(
 where
     T: FromStr + Copy,
 {
+    Ok(
+        resolve_parsed_opt(flag, env_str, src, acc, defaults, Some(compiled), name)?
+            .unwrap_or(compiled),
+    )
+}
+
+/// Like [`resolve_parsed`], but the value stays optional at every tier including
+/// the compiled default, so an unset knob resolves to `None` rather than a
+/// scalar fallback. Used where "unset" is itself meaningful (e.g. a native width
+/// with no cap).
+fn resolve_parsed_opt<T>(
+    flag: Option<T>,
+    env_str: Option<&str>,
+    src: Option<T>,
+    acc: Option<T>,
+    defaults: Option<T>,
+    compiled: Option<T>,
+    name: &str,
+) -> Result<Option<T>>
+where
+    T: FromStr + Copy,
+{
     if let Some(v) = flag {
-        return Ok(v);
+        return Ok(Some(v));
     }
     if let Some(s) = env_str {
         return s
             .parse()
+            .map(Some)
             .map_err(|_| Error::Config(format!("invalid {name}: '{s}'")));
     }
-    Ok(src.or(acc).or(defaults).unwrap_or(compiled))
+    Ok(src.or(acc).or(defaults).or(compiled))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -732,6 +739,24 @@ where
             .map_err(|err| Error::Config(format!("invalid {name}: '{s}' ({err})")));
     }
     Ok(src.or(acc).or(defaults).or(compiled))
+}
+
+/// Resolve an owned-`String` knob through the standard precedence. The env value
+/// is taken verbatim (no parse), and the result stays optional so both a required
+/// knob (`naming_template`, via `unwrap_or_else`) and an optional one
+/// (`token_command`) share the one ladder. Pass `flag = None` for knobs with no
+/// CLI flag.
+fn resolve_owned(
+    flag: Option<String>,
+    env_str: Option<&str>,
+    src: Option<String>,
+    acc: Option<String>,
+    defaults: Option<String>,
+) -> Option<String> {
+    flag.or_else(|| env_str.map(str::to_owned))
+        .or(src)
+        .or(acc)
+        .or(defaults)
 }
 
 /// Convert an account label to its environment variable prefix, mirroring the
@@ -920,15 +945,21 @@ mod tests {
         );
     }
 
-    /// Guards that every [`Settings`] field is actually threaded through
-    /// [`Config::resolve`]. Fill `defaults` with a distinct non-compiled-default
-    /// sentinel for every field, resolve with an empty account/source/flags, and
-    /// assert each corresponding [`EffectiveSettings`] scalar reflects the
-    /// sentinel. If a future field is added to `Settings` but its resolve arm is
-    /// forgotten (the one silent-miss Option A cannot close structurally), the
-    /// new assertion here fails. `animated_covers`/`video_cover_retention` are
-    /// coupled (retention, when set, drives both `animated_covers` and
-    /// `raw_animated_cover`); their precedence is proven by the dedicated tests.
+    /// Guards that every [`Settings`] field is threaded through
+    /// [`Config::resolve`]. The `sentinel` literal has no `..Default::default()`,
+    /// so adding a `Settings` field is a compile error here until it is given a
+    /// distinct, non-compiled-default value — forcing the author to this test.
+    /// Resolving with empty account/source/flags then asserts each
+    /// [`EffectiveSettings`] scalar reflects the sentinel.
+    ///
+    /// The per-field `assert_eq!`s below are maintained by hand: this test proves
+    /// a new field is *named* in the sentinel, not that it is *asserted*.
+    /// `EffectiveSettings` deriving no `Default` compile-forces `resolve` to
+    /// populate every output field, so the residual gap is only a field that is
+    /// resolved and constructed but left unasserted here.
+    /// `animated_covers`/`video_cover_retention` are coupled (retention, when
+    /// set, drives both `animated_covers` and `raw_animated_cover`); their
+    /// precedence is proven by the dedicated tests.
     #[test]
     fn resolve_reflects_every_settings_field() {
         let sentinel = Settings {
@@ -1851,6 +1882,73 @@ mod tests {
         assert_eq!(AudioFormat::Flac.ext(), "flac");
         assert_eq!(AudioFormat::Wav.ext(), "wav");
         assert_eq!(AudioFormat::Alac.ext(), "m4a");
+    }
+
+    #[test]
+    fn format_follows_precedence() {
+        let toml = r#"
+            [defaults]
+            format = "wav"
+
+            [accounts.alice]
+            format = "mp3"
+
+            [accounts.alice.sources.liked]
+            format = "alac"
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+
+        // Compiled default (FLAC) when nothing is set.
+        let bare = Config::from_toml("[accounts.bob]\n").unwrap();
+        assert_eq!(
+            bare.resolve("bob", None, &no_env(), &no_flags())
+                .unwrap()
+                .format,
+            AudioFormat::Flac
+        );
+
+        // Per-source wins over account and defaults.
+        let eff = cfg
+            .resolve("alice", Some("liked"), &no_env(), &no_flags())
+            .unwrap();
+        assert_eq!(eff.format, AudioFormat::Alac);
+
+        // Account wins over defaults.
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.format, AudioFormat::Mp3);
+
+        // Global env overrides file.
+        let env: HashMap<String, String> =
+            [("SUNO_FORMAT".into(), "wav".into())].into_iter().collect();
+        let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
+        assert_eq!(eff.format, AudioFormat::Wav);
+
+        // Per-account env overrides global env.
+        let env: HashMap<String, String> = [
+            ("SUNO_FORMAT".into(), "wav".into()),
+            ("SUNO_ALICE_FORMAT".into(), "flac".into()),
+        ]
+        .into_iter()
+        .collect();
+        let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
+        assert_eq!(eff.format, AudioFormat::Flac);
+
+        // Flag overrides env.
+        let flags = FlagOverrides {
+            settings: Settings {
+                format: Some(AudioFormat::Alac),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let eff = cfg.resolve("alice", None, &env, &flags).unwrap();
+        assert_eq!(eff.format, AudioFormat::Alac);
+
+        // An unknown env value is a config error, never a silent default.
+        let bad_env: HashMap<String, String> = [("SUNO_FORMAT".into(), "aiff".into())]
+            .into_iter()
+            .collect();
+        assert!(cfg.resolve("alice", None, &bad_env, &no_flags()).is_err());
     }
 
     #[test]
