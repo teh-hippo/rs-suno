@@ -15,6 +15,7 @@ use crate::cli::args::{FetchArgs, GlobalArgs};
 use crate::cli::desired::ExitCode;
 use crate::cli::failure;
 use crate::cli::run;
+use crate::cli::token;
 use crate::clock::TokioClock;
 use crate::download;
 use crate::ffmpeg::FfmpegAdapter;
@@ -44,7 +45,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             return Ok(ExitCode::Config);
         }
     };
-    let token = match run::resolve_token(&label, &settings).await {
+    let token = match token::resolve_token(&label, &settings).await {
         Ok(Some(token)) => token,
         Ok(None) => {
             eprintln!(
