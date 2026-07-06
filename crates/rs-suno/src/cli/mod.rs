@@ -5,6 +5,7 @@
 //! the filesystem, or the terminal lives here and drives the pure engine through
 //! its ports.
 
+pub mod account;
 pub mod args;
 pub mod commands;
 pub mod desired;

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use suno_core::{ClerkAuth, Config, EffectiveSettings, FlagOverrides};
 
+use crate::cli::account;
 use crate::cli::args::{AuthArgs, AuthCommand, AuthRefreshArgs, GlobalArgs};
 use crate::cli::desired::{ExitCode, worse};
 use crate::cli::failure;
@@ -118,7 +119,7 @@ fn resolve_targets(
             })
             .collect();
     }
-    let resolved = run::single_account(config, global, flags, env)?;
+    let resolved = account::single_account(config, global, flags, env)?;
     Ok(vec![resolved])
 }
 
