@@ -14,6 +14,7 @@ pub mod desired;
 pub mod execute;
 pub mod expiry;
 pub mod failure;
+pub mod identity;
 pub mod last_run;
 pub mod logs;
 pub mod open_url;
