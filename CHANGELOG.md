@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.3](https://github.com/teh-hippo/rs-suno/compare/v0.33.2...v0.33.3) (2026-07-06)
+
+
+### Bug Fixes
+
+* **suno-core:** compare paths case- and NFC-insensitively in reconcile ([92ae8d1](https://github.com/teh-hippo/rs-suno/commit/92ae8d19784fb0c8aba8cf0d7ed527c78f2f5ebd)), closes [#269](https://github.com/teh-hippo/rs-suno/issues/269)
+
 ## [0.33.2](https://github.com/teh-hippo/rs-suno/compare/v0.33.1...v0.33.2) (2026-07-06)
 
 
