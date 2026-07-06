@@ -40,6 +40,7 @@ use crate::cli::logs;
 use crate::cli::output;
 use crate::cli::task_output;
 use crate::cli::task_output::eprint_t;
+use crate::cli::wallclock;
 use crate::clock::TokioClock;
 use crate::download::cleanup_stale_parts;
 use crate::ffmpeg::FfmpegAdapter;
@@ -887,7 +888,7 @@ async fn run_one(
     // albums hold and nothing is rewritten.
     let graph_changed = resolution.is_some();
     if let Some(resolution) = &resolution {
-        store.update(&clips, resolution, &now_rfc3339());
+        store.update(&clips, resolution, &wallclock::now_rfc3339());
     }
     let colliding_albums = store.colliding_root_titles();
     // Preliminary authority for the first-use adoption check, computed before
@@ -1031,7 +1032,7 @@ async fn run_one(
         limit: if truncate { args.limit } else { None },
         since: if truncate { since } else { None },
         min_newest: settings.min_newest as usize,
-        now: now_secs(),
+        now: wallclock::now_secs(),
         last_run: read_last_run(dest),
     };
     let selected = select(&clips, &params);
@@ -1142,7 +1143,12 @@ async fn run_one(
     // without any network fetch.
     if dry_run {
         let manifest = logs::load_manifest(dest)?;
-        suno_core::preview_synced_lrc(&mut desired, &manifest, now_secs(), settings.lrc_sidecar);
+        suno_core::preview_synced_lrc(
+            &mut desired,
+            &manifest,
+            wallclock::now_secs(),
+            settings.lrc_sidecar,
+        );
         let plan = reconcile_run(
             &manifest,
             dest,
@@ -1494,7 +1500,8 @@ async fn resolve_synced_lyrics(
     concurrency: u32,
 ) -> (HashMap<String, AlignedLyrics>, Vec<suno_core::PendingCheck>) {
     let mut synced: HashMap<String, AlignedLyrics> = HashMap::new();
-    let targets = suno_core::synced_lyrics_targets(desired, manifest, now_secs(), enabled);
+    let targets =
+        suno_core::synced_lyrics_targets(desired, manifest, wallclock::now_secs(), enabled);
     let fetched = stream::iter(targets.iter())
         .map(|id| async move { (id.clone(), client.aligned_lyrics(http, id).await) })
         .buffered(concurrency.max(1) as usize)
@@ -1523,7 +1530,7 @@ async fn resolve_synced_lyrics(
 /// reflects that body's hash, so an interrupted or failed write leaves no marker
 /// and is re-resolved next run rather than skipped.
 fn record_synced_lyrics_checks(manifest: &mut Manifest, pending: &[suno_core::PendingCheck]) {
-    let now = now_secs();
+    let now = wallclock::now_secs();
     for check in pending {
         let durable = if check.empty {
             true
@@ -2154,41 +2161,6 @@ fn set_pin(
     *pending_pin = Some(PendingPin { action, notice });
 }
 
-pub(crate) fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// The current UTC instant as an RFC 3339 timestamp (`YYYY-MM-DDThh:mm:ssZ`),
-/// used to stamp `first_seen_at`/`last_seen_at` on graph nodes and edges.
-fn now_rfc3339() -> String {
-    rfc3339_from_unix(now_secs())
-}
-
-/// Format Unix seconds as an RFC 3339 UTC timestamp via Howard Hinnant's
-/// civil-from-days algorithm, avoiding a date-library dependency for a single
-/// audit stamp.
-fn rfc3339_from_unix(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
-    let tod = (secs % 86_400) as i64;
-    let (hour, minute, second) = (tod / 3_600, (tod % 3_600) / 60, tod % 60);
-
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { year + 1 } else { year };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
 fn read_last_run(dest: &Path) -> Option<u64> {
     std::fs::read_to_string(dest.join(LAST_RUN_NAME))
         .ok()?
@@ -2198,7 +2170,7 @@ fn read_last_run(dest: &Path) -> Option<u64> {
 }
 
 fn write_last_run(dest: &Path) {
-    let _ = std::fs::write(dest.join(LAST_RUN_NAME), now_secs().to_string());
+    let _ = std::fs::write(dest.join(LAST_RUN_NAME), wallclock::now_secs().to_string());
 }
 
 /// Resolve when a SIGINT (Ctrl-C) or, on Unix, a SIGTERM arrives.
@@ -2309,7 +2281,7 @@ mod tests {
         let dir = Path::new("target").join(format!(
             "run-last-run-{}-{}",
             std::process::id(),
-            now_secs()
+            wallclock::now_secs()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         write_last_run(&dir);
@@ -2331,8 +2303,11 @@ mod tests {
     async fn reconcile_run_reads_a_missing_destination_as_empty() {
         // The dry-run / check path reads through a missing destination as an
         // empty manifest without creating it, so it never touches disk.
-        let dir =
-            Path::new("target").join(format!("run-nodir-{}-{}", std::process::id(), now_secs()));
+        let dir = Path::new("target").join(format!(
+            "run-nodir-{}-{}",
+            std::process::id(),
+            wallclock::now_secs()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!dir.exists());
         let sources = vec![SourceStatus {

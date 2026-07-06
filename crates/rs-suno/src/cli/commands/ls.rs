@@ -14,6 +14,7 @@ use crate::cli::desired::ExitCode;
 use crate::cli::failure;
 use crate::cli::output;
 use crate::cli::run;
+use crate::cli::wallclock;
 use crate::http::ReqwestHttp;
 
 /// Run `ls` (or `lsjson` when `force_json`).
@@ -76,7 +77,7 @@ pub async fn run_ls(global: &GlobalArgs, args: &LsArgs, force_json: bool) -> Res
         limit: args.limit,
         since,
         min_newest: settings.min_newest as usize,
-        now: run::now_secs(),
+        now: wallclock::now_secs(),
         last_run: None,
     };
     let selected = select(&clips, &params);

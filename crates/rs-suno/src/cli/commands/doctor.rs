@@ -15,6 +15,7 @@ use crate::cli::commands::version;
 use crate::cli::desired::ExitCode;
 use crate::cli::logs;
 use crate::cli::run;
+use crate::cli::wallclock;
 use crate::clock::TokioClock;
 use crate::http::ReqwestHttp;
 
@@ -199,7 +200,7 @@ struct LiveDiagnostic {
 
 async fn inspect_live(token: &str, http: &ReqwestHttp) -> LiveDiagnostic {
     let auth = ClerkAuth::new(token);
-    let now = i64::try_from(run::now_secs()).unwrap_or(i64::MAX);
+    let now = i64::try_from(wallclock::now_secs()).unwrap_or(i64::MAX);
     let expiry = auth.token_expiry(now, TOKEN_EXPIRY_WARN_DAYS * SECS_PER_DAY);
     match auth.authenticate(http).await {
         Ok(user_id) => {
