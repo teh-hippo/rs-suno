@@ -20,6 +20,7 @@ pub mod prompt;
 pub mod run;
 pub mod signal;
 pub mod stems;
+pub mod synced_lyrics;
 pub mod task_output;
 pub mod token;
 pub mod wallclock;
