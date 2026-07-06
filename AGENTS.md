@@ -29,16 +29,25 @@ Never print the token value.
 ```
 crates/
   suno-core/   # pure engine, no direct IO
-    src/auth.rs      # Clerk cookie -> JWT, lifecycle
-    src/client.rs    # SunoClient: feed listing, filter, retry
-    src/model.rs     # Clip, mapped from the API JSON shape
-    src/http.rs      # the Http port (trait) plus request/response types
-    src/consts.rs    # endpoints and tunables
-    src/error.rs     # Error and Result
-    src/testutil.rs  # in-memory Http double (test only)
+    src/auth.rs        # Clerk cookie -> JWT, lifecycle
+    src/client.rs      # SunoClient: feed listing, filter, retry
+    src/model.rs       # Clip, mapped from the API JSON shape
+    src/http.rs        # the Http port (trait) plus request/response types
+    src/reconcile.rs   # desired-vs-local plan and the deletion-safety gates
+    src/area.rs        # multi-area sync planner: authority/enumeration predicates
+    src/config.rs      # layered settings resolved from one shared `Settings` shape
+    src/graph.rs       # lineage node/edge graph + the `LineageStore` on-disk container
+    src/identity.rs    # account-identity / adoption gate (trust-on-first-use pin)
+    src/album_art.rs   # album/playlist art state
+    src/consts.rs      # endpoints and tunables
+    src/error.rs       # Error and Result
+    src/testutil.rs    # in-memory Http double (test only)
   rs-suno/     # thin binary `suno`
-    src/main.rs      # clap commands
-    src/http.rs      # reqwest adapter implementing Http
+    src/main.rs        # entry point
+    src/http.rs        # reqwest adapter implementing Http
+    src/cli/run.rs     # thin sync/copy/check entry plus the run_one orchestrator
+    src/cli/*.rs       # one focused concern each: token, account, config_load,
+                       # execute, areas, prompt, last_run, signal, ... (see #252)
 ```
 
 ## Architecture
