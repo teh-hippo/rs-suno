@@ -11,6 +11,7 @@ use suno_core::{ClerkAuth, FlagOverrides, SunoClient};
 
 use crate::cli::args::{GlobalArgs, LsArgs, OutputFormat};
 use crate::cli::desired::ExitCode;
+use crate::cli::failure;
 use crate::cli::output;
 use crate::cli::run;
 use crate::http::ReqwestHttp;
@@ -60,7 +61,7 @@ pub async fn run_ls(global: &GlobalArgs, args: &LsArgs, force_json: bool) -> Res
     let auth = ClerkAuth::new(&token);
     let user_id = match auth.authenticate(&http).await {
         Ok(user_id) => user_id,
-        Err(err) => return Ok(run::report_auth_failure(&label, &err)),
+        Err(err) => return Ok(failure::report_auth_failure(&label, &err)),
     };
     let display_name = auth.display_name().to_owned();
     crate::cli::expiry::warn_token_expiry(&label, &auth, global.verbosity());
@@ -68,7 +69,7 @@ pub async fn run_ls(global: &GlobalArgs, args: &LsArgs, force_json: bool) -> Res
 
     let (clips, _complete, _) = match client.list_clips(&http, args.liked, args.limit).await {
         Ok(result) => result,
-        Err(err) => return Ok(run::report_listing_failure(&label, &err)),
+        Err(err) => return Ok(failure::report_listing_failure(&label, &err)),
     };
 
     let params = SelectParams {

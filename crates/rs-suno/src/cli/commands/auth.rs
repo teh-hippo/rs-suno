@@ -8,6 +8,7 @@ use suno_core::{ClerkAuth, Config, EffectiveSettings, FlagOverrides};
 
 use crate::cli::args::{AuthArgs, AuthCommand, AuthRefreshArgs, GlobalArgs};
 use crate::cli::desired::{ExitCode, worse};
+use crate::cli::failure;
 use crate::cli::run;
 use crate::http::ReqwestHttp;
 
@@ -82,7 +83,7 @@ async fn refresh_accounts(global: &GlobalArgs, refresh: &AuthRefreshArgs) -> Res
                     eprintln!("Re-authenticated '{label}' as {}", auth.display_name());
                 }
             }
-            Err(err) => worst = worse(worst, run::report_auth_failure(&label, &err)),
+            Err(err) => worst = worse(worst, failure::report_auth_failure(&label, &err)),
         }
     }
     Ok(worst)
