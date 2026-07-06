@@ -4,6 +4,7 @@
 //! [`Http`] port, which a CLI adapter implements, so the engine stays testable
 //! in isolation.
 
+mod area;
 mod auth;
 mod backoff;
 mod client;
@@ -40,6 +41,10 @@ mod testutil;
 #[cfg(test)]
 mod sync_chaos;
 
+pub use area::{
+    AreaKind, AreaListing, adoption_enumerated, area_enumerated, area_mode, build_modes_by_id,
+    build_scoped_playlist_desired, library_authoritative, source_statuses, union_clips,
+};
 pub use auth::{ClerkAuth, TOKEN_EXPIRY_WARN_DAYS, TokenExpiry, classify_token_expiry};
 pub use client::{BillingInfo, Playlist, Stem, SunoClient};
 pub use clock::Clock;

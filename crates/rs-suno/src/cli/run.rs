@@ -18,21 +18,22 @@ use anyhow::{Context, Result};
 use futures_util::stream::{self, StreamExt};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
-    AdoptDecision, AlbumArt, AlbumDesired, AlignedLyrics, ArtifactToggles, ClerkAuth, Clip, Config,
-    Error as CoreError, ExecOptions, Filesystem, FlagOverrides, LIKED_PLAYLIST_ID, LineageContext,
-    LocalFile, Manifest, NamingConfig, Owner, OwnerGate, PlaylistDesired, PlaylistInput,
-    PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode, SourceStatus, Stem, SunoClient,
-    adopt_decision, album_desired, area_authoritative, area_fully_enumerated, build_desired,
-    build_playlist_desired, clip_stems, deletion_allowed, is_downloadable, narrows_downloads,
+    AdoptDecision, AlbumArt, AlbumDesired, AlignedLyrics, AreaKind, AreaListing, ArtifactToggles,
+    ClerkAuth, Clip, Config, Error as CoreError, ExecOptions, Filesystem, FlagOverrides,
+    LIKED_PLAYLIST_ID, LineageContext, LocalFile, Manifest, NamingConfig, Owner, OwnerGate,
+    PlaylistDesired, PlaylistInput, PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode,
+    SourceStatus, Stem, SunoClient, adopt_decision, adoption_enumerated, album_desired, area_mode,
+    build_desired, build_modes_by_id, build_playlist_desired, build_scoped_playlist_desired,
+    clip_stems, deletion_allowed, is_downloadable, library_authoritative, narrows_downloads,
     owner_gate, plan_album_artifacts, plan_playlist_artifacts, reconcile, resolve_roots,
+    source_statuses, union_clips,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
 use crate::cli::commands::version;
 use crate::cli::desired::{
-    Confirm, ExitCode, PlaylistPolicy, ResolvedSelection, build_modes_by_id, confirm_decision,
-    confirmed, is_narrowed, mass_delete_abort, resolve_playlist, resolve_selection, run_exit_code,
-    worse,
+    Confirm, ExitCode, PlaylistPolicy, ResolvedSelection, confirm_decision, confirmed, is_narrowed,
+    mass_delete_abort, resolve_playlist, resolve_selection, run_exit_code, worse,
 };
 use crate::cli::logs;
 use crate::cli::output;
@@ -1013,7 +1014,7 @@ async fn run_one(
         .map(|area| {
             (
                 area_mode(area, force_copy),
-                area.clips.iter().map(|clip| clip.id.clone()).collect(),
+                area.clips().iter().map(|clip| clip.id.clone()).collect(),
             )
         })
         .collect();
@@ -1568,113 +1569,6 @@ fn record_synced_lyrics_checks(manifest: &mut Manifest, pending: &[suno_core::Pe
     }
 }
 
-/// One area's listing outcome for the multi-area planner.
-///
-/// The `authoritative_ignoring_empty` flag is the area's completeness verdict
-/// *before* the empty-mirror guard (§5), which [`area_enumerated`] applies later
-/// against the final mode, so a copy-verb override that turns a Mirror area Copy
-/// re-scores an empty area correctly.
-struct AreaListing {
-    kind: AreaKind,
-    /// The resolved (pre copy-override) mode for this area.
-    mode: SourceMode,
-    /// The area's downloadable clips.
-    clips: Vec<Clip>,
-    /// Completeness modulo the empty-mirror guard: `true` when the listing
-    /// drained, was not deliberately narrowed, and lost no member to the
-    /// downloadable filter.
-    authoritative_ignoring_empty: bool,
-}
-
-/// Which kind of area a listing came from, carrying playlist identity so its
-/// `.m3u8` can be maintained by id and name.
-enum AreaKind {
-    Library,
-    Liked,
-    Playlist { id: String, name: String },
-}
-
-/// This area's mode after the copy-verb / force-additive override.
-fn area_mode(area: &AreaListing, force_copy: bool) -> SourceMode {
-    if force_copy {
-        SourceMode::Copy
-    } else {
-        area.mode
-    }
-}
-
-/// Whether this area is authoritative for deletion, applying the empty-mirror
-/// guard (§5) against the final mode.
-fn area_enumerated(area: &AreaListing, force_copy: bool) -> bool {
-    area_fully_enumerated(
-        area.authoritative_ignoring_empty,
-        area.clips.is_empty(),
-        area_mode(area, force_copy),
-    )
-}
-
-/// Whether a Library area is present and fully enumerated (the implicit
-/// protector counts; `library="off"` leaves no Library area, so this is false).
-fn library_authoritative(areas: &[AreaListing], force_copy: bool) -> bool {
-    areas
-        .iter()
-        .any(|a| matches!(a.kind, AreaKind::Library) && area_enumerated(a, force_copy))
-}
-
-/// The per-source enumeration status of every area, for the deletion verdict.
-fn source_statuses(areas: &[AreaListing], force_copy: bool) -> Vec<SourceStatus> {
-    areas
-        .iter()
-        .map(|area| SourceStatus {
-            mode: area_mode(area, force_copy),
-            fully_enumerated: area_enumerated(area, force_copy),
-        })
-        .collect()
-}
-
-/// Whether first-use adoption can confirm identity from this run's listing.
-///
-/// An authoritative Library is the usual anchor, but a fully-enumerated Mirror
-/// source of any kind (e.g. a playlist under `library="off"`) also arms
-/// deletion. Deleting against an account this library was never pinned to is
-/// the hole the owner pin closes (#149), so such a run is treated as enumerated:
-/// `adopt_decision` then confirms identity by clip overlap and aborts on a
-/// foreign account instead of skipping the pin.
-fn adoption_enumerated(areas: &[AreaListing], force_copy: bool) -> bool {
-    library_authoritative(areas, force_copy)
-        || deletion_allowed(&source_statuses(areas, force_copy))
-}
-
-/// Build the clip union across areas in canonical order, first area winning per
-/// id so the Library payload is kept (H1).
-fn union_clips(areas: &[AreaListing]) -> Vec<Clip> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut union: Vec<Clip> = Vec::new();
-    for area in areas {
-        for clip in &area.clips {
-            if seen.insert(clip.id.clone()) {
-                union.push(clip.clone());
-            }
-        }
-    }
-    union
-}
-
-/// A playlist area whose listing could not be resolved or fetched: it holds no
-/// clips and is never authoritative, so it suppresses deletion without ever
-/// vanishing from the sources (§6).
-fn unresolved_playlist_area(mode: SourceMode) -> AreaListing {
-    AreaListing {
-        kind: AreaKind::Playlist {
-            id: String::new(),
-            name: String::new(),
-        },
-        mode,
-        clips: Vec::new(),
-        authoritative_ignoring_empty: false,
-    }
-}
-
 /// List every selected area (IO), in canonical order Library > Liked > Playlist.
 ///
 /// A failed *secondary* area (liked, a playlist, or the unfiltered library
@@ -1703,42 +1597,37 @@ async fn enumerate_areas(
             // Protector / configured Library: list the whole feed, ignoring any
             // `--limit`/`--since` so a stray narrowing never disarms it (D2).
             match client.list_clips(http, false, None).await {
-                Ok((clips, complete, any_filtered)) => areas.push(AreaListing {
-                    kind: AreaKind::Library,
-                    mode: lib.mode,
+                Ok((clips, complete, any_filtered)) => areas.push(AreaListing::listed(
+                    AreaKind::Library,
+                    lib.mode,
                     clips,
+                    complete,
+                    any_filtered,
                     // The protector ignores `--limit`/`--since` (narrowed=false)
                     // but still disarms on filter loss (#248).
-                    authoritative_ignoring_empty: area_authoritative(complete, any_filtered, false),
-                }),
+                    false,
+                )),
                 Err(err) => {
                     if verbosity >= -1 {
                         eprint_t!(
                             "warning: library listing failed ({err}); suppressing deletion this run"
                         );
                     }
-                    areas.push(AreaListing {
-                        kind: AreaKind::Library,
-                        mode: lib.mode,
-                        clips: Vec::new(),
-                        authoritative_ignoring_empty: false,
-                    });
+                    areas.push(AreaListing::failed(AreaKind::Library, lib.mode));
                 }
             }
         } else {
             // Plain Library run: honours `--limit`, and a listing failure aborts
             // exactly as today (the run has no other data source).
             match client.list_clips(http, false, args.limit).await {
-                Ok((clips, complete, any_filtered)) => areas.push(AreaListing {
-                    kind: AreaKind::Library,
-                    mode: lib.mode,
+                Ok((clips, complete, any_filtered)) => areas.push(AreaListing::listed(
+                    AreaKind::Library,
+                    lib.mode,
                     clips,
-                    authoritative_ignoring_empty: area_authoritative(
-                        complete,
-                        any_filtered,
-                        narrowed,
-                    ),
-                }),
+                    complete,
+                    any_filtered,
+                    narrowed,
+                )),
                 Err(err) => return Err(report_listing_failure(label, &err)),
             }
         }
@@ -1746,24 +1635,21 @@ async fn enumerate_areas(
 
     if let Some(mode) = selection.liked {
         match client.list_clips(http, true, None).await {
-            Ok((clips, complete, any_filtered)) => areas.push(AreaListing {
-                kind: AreaKind::Liked,
+            Ok((clips, complete, any_filtered)) => areas.push(AreaListing::listed(
+                AreaKind::Liked,
                 mode,
                 clips,
-                authoritative_ignoring_empty: area_authoritative(complete, any_filtered, narrowed),
-            }),
+                complete,
+                any_filtered,
+                narrowed,
+            )),
             Err(err) => {
                 if verbosity >= -1 {
                     eprint_t!(
                         "warning: liked feed failed to list ({err}); suppressing deletion this run"
                     );
                 }
-                areas.push(AreaListing {
-                    kind: AreaKind::Liked,
-                    mode,
-                    clips: Vec::new(),
-                    authoritative_ignoring_empty: false,
-                });
+                areas.push(AreaListing::failed(AreaKind::Liked, mode));
             }
         }
     }
@@ -1801,7 +1687,7 @@ async fn enumerate_areas(
                                     "warning: a configured playlist could not be resolved ({err}); leaving its .m3u8 untouched"
                                 );
                             }
-                            areas.push(unresolved_playlist_area(*mode));
+                            areas.push(AreaListing::unresolved_playlist(*mode));
                             continue;
                         }
                     };
@@ -1840,11 +1726,11 @@ async fn enumerate_areas(
             }
             (PlaylistPolicy::Explicit(list), None) => {
                 for (_, mode) in list {
-                    areas.push(unresolved_playlist_area(*mode));
+                    areas.push(AreaListing::unresolved_playlist(*mode));
                 }
             }
             (PlaylistPolicy::All { default, .. }, None) => {
-                areas.push(unresolved_playlist_area(*default));
+                areas.push(AreaListing::unresolved_playlist(*default));
             }
             (PlaylistPolicy::None, _) => {}
         }
@@ -1871,15 +1757,17 @@ async fn list_playlist_area(
             let raw_len = raw.len();
             let clips: Vec<Clip> = raw.into_iter().filter(is_downloadable).collect();
             let any_filtered = clips.len() < raw_len;
-            AreaListing {
-                kind: AreaKind::Playlist {
+            AreaListing::listed(
+                AreaKind::Playlist {
                     id: id.to_owned(),
                     name: name.to_owned(),
                 },
                 mode,
                 clips,
-                authoritative_ignoring_empty: area_authoritative(complete, any_filtered, narrowed),
-            }
+                complete,
+                any_filtered,
+                narrowed,
+            )
         }
         Err(err) => {
             if verbosity >= -1 {
@@ -1887,74 +1775,15 @@ async fn list_playlist_area(
                     "warning: playlist '{name}' members failed to list ({err}); suppressing deletion this run"
                 );
             }
-            AreaListing {
-                kind: AreaKind::Playlist {
+            AreaListing::failed(
+                AreaKind::Playlist {
                     id: id.to_owned(),
                     name: name.to_owned(),
                 },
                 mode,
-                clips: Vec::new(),
-                authoritative_ignoring_empty: false,
-            }
+            )
         }
     }
-}
-
-/// Build the `.m3u8` desired state for an area-scoped run (no authoritative
-/// Library). Only the playlist and liked areas that fully enumerated their
-/// members are rendered, and only when `members_intact` (the union was not
-/// truncated by `--limit`/`--since`, so `desired` still holds every member);
-/// every other stored playlist id is protected so no `.m3u8` is rewritten or
-/// deleted from a partial view (B2/D3).
-fn build_scoped_playlist_desired(
-    areas: &[AreaListing],
-    desired: &[suno_core::Desired],
-    store: &suno_core::LineageStore,
-    protected: &mut BTreeSet<String>,
-    force_copy: bool,
-    members_intact: bool,
-) -> (Vec<PlaylistDesired>, bool) {
-    let mut owned: Vec<(String, String, Vec<Clip>)> = Vec::new();
-    for area in areas {
-        match &area.kind {
-            AreaKind::Playlist { id, name } => {
-                if members_intact && !id.is_empty() && area_enumerated(area, force_copy) {
-                    owned.push((id.clone(), name.clone(), area.clips.clone()));
-                } else if !id.is_empty() {
-                    protected.insert(id.clone());
-                }
-            }
-            AreaKind::Liked => {
-                if members_intact && area_enumerated(area, force_copy) {
-                    owned.push((
-                        LIKED_PLAYLIST_ID.to_owned(),
-                        "Liked Songs".to_owned(),
-                        area.clips.clone(),
-                    ));
-                } else {
-                    protected.insert(LIKED_PLAYLIST_ID.to_owned());
-                }
-            }
-            AreaKind::Library => {}
-        }
-    }
-    let rendered: BTreeSet<&str> = owned.iter().map(|(id, _, _)| id.as_str()).collect();
-    // Protect every stored playlist this run is not authoritatively rewriting, so
-    // a non-selected playlist's `.m3u8` is never treated as stale.
-    for id in store.playlists.keys() {
-        if !rendered.contains(id.as_str()) {
-            protected.insert(id.clone());
-        }
-    }
-    let inputs: Vec<PlaylistInput<'_>> = owned
-        .iter()
-        .map(|(id, name, members)| PlaylistInput {
-            id: id.as_str(),
-            name: name.as_str(),
-            members: members.as_slice(),
-        })
-        .collect();
-    (build_playlist_desired(&inputs, desired), true)
 }
 
 /// Print the account's own playlists to help a user correct a `--playlist` typo.
@@ -2445,6 +2274,7 @@ async fn wait_for_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use suno_core::area_enumerated;
 
     fn config_with(accounts: &[(&str, Option<&str>)]) -> Config {
         let mut cfg = Config::default();
@@ -2946,254 +2776,14 @@ mod tests {
     }
 
     fn area(kind: AreaKind, mode: SourceMode, ids: &[&str], authoritative: bool) -> AreaListing {
-        AreaListing {
+        AreaListing::listed(
             kind,
             mode,
-            clips: ids.iter().map(|id| tclip(id)).collect(),
-            authoritative_ignoring_empty: authoritative,
-        }
-    }
-
-    // Test 5: an empty Mirror area is never authoritative (a legitimately empty
-    // mirror is indistinguishable from a dropped listing), so deletion is
-    // suppressed. An empty Copy area stays enumerated (it protects nothing).
-    #[test]
-    fn empty_mirror_area_is_not_enumerated() {
-        let mirror = area(AreaKind::Liked, SourceMode::Mirror, &[], true);
-        assert!(!area_enumerated(&mirror, false));
-        let copy = area(AreaKind::Liked, SourceMode::Copy, &[], true);
-        assert!(area_enumerated(&copy, false));
-        // A non-empty mirror that fully listed is authoritative.
-        let full = area(AreaKind::Liked, SourceMode::Mirror, &["x"], true);
-        assert!(area_enumerated(&full, false));
-    }
-
-    // A run under `library="off"` that mirrors a fully-enumerated playlist can
-    // delete, so first-use adoption must confirm identity (enumerated == true)
-    // rather than SkipPin into a delete against an unconfirmed account (#149).
-    #[test]
-    fn adoption_enumerated_covers_a_mirror_playlist_under_library_off() {
-        let playlist = |mode, ids: &[&str], auth| {
-            area(
-                AreaKind::Playlist {
-                    id: "p".into(),
-                    name: "P".into(),
-                },
-                mode,
-                ids,
-                auth,
-            )
-        };
-        // library="off" + a fully-enumerated Mirror playlist arms deletion.
-        assert!(adoption_enumerated(
-            &[playlist(SourceMode::Mirror, &["pl"], true)],
-            false
-        ));
-        // A copy-only run cannot delete, so identity need not be confirmed.
-        assert!(!adoption_enumerated(
-            &[playlist(SourceMode::Copy, &["pl"], true)],
-            false
-        ));
-        // An empty mirror (a dropped or ambiguous listing) is not authoritative.
-        assert!(!adoption_enumerated(
-            &[playlist(SourceMode::Mirror, &[], true)],
-            false
-        ));
-        // A partial (non-authoritative) mirror listing does not arm adoption.
-        assert!(!adoption_enumerated(
-            &[playlist(SourceMode::Mirror, &["pl"], false)],
-            false
-        ));
-        // A force-copy (additive) run never deletes, so never forces the pin.
-        assert!(!adoption_enumerated(
-            &[playlist(SourceMode::Mirror, &["pl"], true)],
-            true
-        ));
-        // The classic authoritative-library anchor still counts.
-        assert!(adoption_enumerated(
-            &[area(AreaKind::Library, SourceMode::Mirror, &["lib"], true)],
-            false,
-        ));
-    }
-
-    // library_authoritative counts the implicit protector but is false for
-    // `library="off"` (no library area at all).
-    #[test]
-    fn library_authoritative_counts_protector_not_off() {
-        let with_protector = vec![
-            area(AreaKind::Library, SourceMode::Copy, &["lib"], true),
-            area(
-                AreaKind::Playlist {
-                    id: "p".into(),
-                    name: "P".into(),
-                },
-                SourceMode::Mirror,
-                &["pl"],
-                true,
-            ),
-        ];
-        assert!(library_authoritative(&with_protector, false));
-
-        let off = vec![area(
-            AreaKind::Playlist {
-                id: "p".into(),
-                name: "P".into(),
-            },
-            SourceMode::Mirror,
-            &["pl"],
-            true,
-        )];
-        assert!(!library_authoritative(&off, false));
-    }
-
-    /// (can_delete, library_authoritative, truncate) for a set of areas, exactly
-    /// as `run_one` computes them, for the #148 scenario traces.
-    fn verdict(areas: &[AreaListing]) -> (bool, bool, bool) {
-        let can_delete = deletion_allowed(&source_statuses(areas, false));
-        let lib_auth = library_authoritative(areas, false);
-        (
-            can_delete,
-            lib_auth,
-            narrows_downloads(can_delete, lib_auth),
-        )
-    }
-
-    fn pl_area(mode: SourceMode, ids: &[&str], authoritative: bool) -> AreaListing {
-        area(
-            AreaKind::Playlist {
-                id: "p".into(),
-                name: "P".into(),
-            },
-            mode,
-            ids,
+            ids.iter().map(|id| tclip(id)).collect(),
             authoritative,
+            false,
+            false,
         )
-    }
-
-    // The #148 behaviour change at the area level: a narrowed playlist mirror
-    // neither enumerates nor arms deletion; the same listing un-narrowed does both.
-    #[test]
-    fn narrowed_playlist_mirror_disarms_deletion() {
-        let narrowed = pl_area(
-            SourceMode::Mirror,
-            &["a"],
-            area_authoritative(true, false, true),
-        );
-        assert!(!area_enumerated(&narrowed, false));
-        assert!(!deletion_allowed(&source_statuses(&[narrowed], false)));
-
-        let full = pl_area(
-            SourceMode::Mirror,
-            &["a"],
-            area_authoritative(true, false, false),
-        );
-        assert!(area_enumerated(&full, false));
-        assert!(deletion_allowed(&source_statuses(&[full], false)));
-    }
-
-    // #148 scenario (c): a narrowed playlist mirror WITH the injected full-library
-    // protector does not delete (the playlist disarms) and does not narrow
-    // downloads (the protector lists the whole library, which drives index/art).
-    #[test]
-    fn narrowed_playlist_with_protector_neither_deletes_nor_narrows() {
-        let areas = vec![
-            area(AreaKind::Library, SourceMode::Copy, &["lib"], true),
-            pl_area(
-                SourceMode::Mirror,
-                &["pl"],
-                area_authoritative(true, false, true),
-            ),
-        ];
-        let (can_delete, lib_auth, truncate) = verdict(&areas);
-        assert!(!can_delete, "narrowed playlist mirror is disarmed");
-        assert!(lib_auth, "the protector is an authoritative library");
-        assert!(
-            !truncate,
-            "the full library is listed, so downloads are not narrowed"
-        );
-    }
-
-    // #148 scenario (d): a narrowed playlist mirror under `library="off"` (no
-    // protector) does not delete and DOES narrow downloads, matching a narrowed
-    // library-only or liked run.
-    #[test]
-    fn narrowed_playlist_off_disarms_and_narrows() {
-        let areas = vec![pl_area(
-            SourceMode::Mirror,
-            &["pl"],
-            area_authoritative(true, false, true),
-        )];
-        let (can_delete, lib_auth, truncate) = verdict(&areas);
-        assert!(!can_delete, "narrowed playlist mirror is disarmed");
-        assert!(!lib_auth, "library=off leaves no library area");
-        assert!(
-            truncate,
-            "no armed deletion and no full library, so downloads narrow"
-        );
-    }
-
-    // #148 regression guard for scenario (e): a configured unfiltered
-    // `library="mirror"` lists the whole feed regardless of `--limit`/`--since`,
-    // so it stays armed and authoritative. The fix must NOT disarm it — that is
-    // the #149/D2 guarantee that closes the token-swap hole.
-    #[test]
-    fn configured_full_library_mirror_still_deletes_when_narrowed() {
-        let areas = vec![area(AreaKind::Library, SourceMode::Mirror, &["lib"], true)];
-        let (can_delete, lib_auth, truncate) = verdict(&areas);
-        assert!(
-            can_delete,
-            "the configured full-library mirror still deletes"
-        );
-        assert!(lib_auth);
-        assert!(
-            !truncate,
-            "the full library is listed, so downloads are not narrowed"
-        );
-    }
-
-    // A narrowed `library="off"` mirror playlist cannot delete (#148), so first-use
-    // adoption skips the pin rather than confirming identity — the #149 rule that
-    // only a delete-capable run must confirm the account composes cleanly.
-    #[test]
-    fn adoption_skips_pin_on_a_narrowed_library_off_playlist() {
-        let areas = vec![pl_area(
-            SourceMode::Mirror,
-            &["pl"],
-            area_authoritative(true, false, true),
-        )];
-        assert!(!adoption_enumerated(&areas, false));
-    }
-
-    // H1: the union keeps the first area's payload per id (Library wins over a
-    // later playlist copy of the same clip).
-    #[test]
-    fn union_keeps_first_area_payload() {
-        let mut lib = tclip("shared");
-        lib.title = "Library".to_owned();
-        let mut pl = tclip("shared");
-        pl.title = "Playlist".to_owned();
-        let areas = vec![
-            AreaListing {
-                kind: AreaKind::Library,
-                mode: SourceMode::Copy,
-                clips: vec![lib, tclip("lib-only")],
-                authoritative_ignoring_empty: true,
-            },
-            AreaListing {
-                kind: AreaKind::Playlist {
-                    id: "p".into(),
-                    name: "P".into(),
-                },
-                mode: SourceMode::Mirror,
-                clips: vec![pl],
-                authoritative_ignoring_empty: true,
-            },
-        ];
-        let union = union_clips(&areas);
-        assert_eq!(union.len(), 2);
-        assert_eq!(union[0].id, "shared");
-        assert_eq!(union[0].title, "Library");
-        assert_eq!(union[1].id, "lib-only");
     }
 
     // D1 / Test 3: `sync --playlist X --mode mirror` (no config) protects
@@ -3250,7 +2840,7 @@ mod tests {
             .map(|a| {
                 (
                     area_mode(a, force_copy),
-                    a.clips.iter().map(|c| c.id.clone()).collect(),
+                    a.clips().iter().map(|c| c.id.clone()).collect(),
                 )
             })
             .collect();
@@ -3309,121 +2899,5 @@ mod tests {
         // Only the orphan with no source area is deleted; the library-exclusive
         // file and the copy-protected shared clip survive.
         assert_eq!(deleted, vec!["gone-orphan"]);
-    }
-
-    // Test 9: a single failed (non-enumerated) area suppresses deletion for the
-    // whole run, even when another area is armed and fully enumerated.
-    #[test]
-    fn a_failed_area_suppresses_deletion_for_the_run() {
-        let areas = [
-            area(AreaKind::Liked, SourceMode::Mirror, &["a"], true),
-            // Playlist listing failed: empty and non-authoritative.
-            area(
-                AreaKind::Playlist {
-                    id: "p".into(),
-                    name: "P".into(),
-                },
-                SourceMode::Mirror,
-                &[],
-                false,
-            ),
-        ];
-        let sources: Vec<SourceStatus> = areas
-            .iter()
-            .map(|a| SourceStatus {
-                mode: area_mode(a, false),
-                fully_enumerated: area_enumerated(a, false),
-            })
-            .collect();
-        assert!(!deletion_allowed(&sources));
-    }
-
-    // Test 8: with every area enumerated, a mixed Mirror + Copy selection deletes
-    // only orphans exclusive to a Mirror area; a Copy area's orphan is protected
-    // and the run remains armed.
-    #[test]
-    fn mixed_mode_deletes_only_mirror_exclusive_orphans() {
-        use suno_core::{LocalFile, Manifest, ManifestEntry, reconcile};
-
-        let areas = vec![
-            area(AreaKind::Liked, SourceMode::Mirror, &["m-live"], true),
-            area(
-                AreaKind::Playlist {
-                    id: "p".into(),
-                    name: "P".into(),
-                },
-                SourceMode::Copy,
-                &["c-live"],
-                true,
-            ),
-        ];
-        let sources: Vec<SourceStatus> = areas
-            .iter()
-            .map(|a| SourceStatus {
-                mode: area_mode(a, false),
-                fully_enumerated: area_enumerated(a, false),
-            })
-            .collect();
-        assert!(deletion_allowed(&sources));
-
-        let area_modes: Vec<(SourceMode, Vec<String>)> = areas
-            .iter()
-            .map(|a| {
-                (
-                    area_mode(a, false),
-                    a.clips.iter().map(|c| c.id.clone()).collect(),
-                )
-            })
-            .collect();
-        let modes = build_modes_by_id(&area_modes);
-        let union = union_clips(&areas);
-        let desired = build_desired(
-            &union.iter().collect::<Vec<_>>(),
-            suno_core::AudioFormat::Flac,
-            &modes,
-            &HashMap::new(),
-            &BTreeSet::new(),
-            ArtifactToggles::default(),
-            &suno_core::NamingConfig::default(),
-        );
-
-        let mut manifest = Manifest::new();
-        // Orphans: one previously from the mirror area, one from the copy area.
-        for id in ["m-live", "c-live", "m-orphan", "c-orphan"] {
-            manifest.insert(
-                id,
-                ManifestEntry {
-                    path: format!("{id}.flac"),
-                    format: suno_core::AudioFormat::Flac,
-                    size: 100,
-                    // The copy-area orphan carries the preserve marker a prior copy
-                    // run stamped, so it can never be deleted.
-                    preserve: id == "c-orphan",
-                    ..Default::default()
-                },
-            );
-        }
-        let local: HashMap<String, LocalFile> = manifest
-            .iter()
-            .map(|(id, _)| {
-                (
-                    id.clone(),
-                    LocalFile {
-                        exists: true,
-                        size: 100,
-                    },
-                )
-            })
-            .collect();
-        let plan = reconcile(&manifest, &desired, &local, &sources);
-        let deleted: Vec<&str> = plan
-            .actions
-            .iter()
-            .filter_map(|a| match a {
-                suno_core::Action::Delete { clip_id, .. } => Some(clip_id.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(deleted, vec!["m-orphan"]);
     }
 }
