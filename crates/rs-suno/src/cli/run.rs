@@ -20,7 +20,7 @@ use suno_core::{
     AdoptDecision, AlbumArt, AlbumDesired, AlignedLyrics, AreaKind, AreaListing, ArtifactToggles,
     ClerkAuth, Clip, Config, ExecOptions, Filesystem, FlagOverrides, LIKED_PLAYLIST_ID,
     LineageContext, LocalFile, Manifest, NamingConfig, Owner, OwnerGate, PlaylistDesired,
-    PlaylistInput, PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode, SourceStatus, Stem,
+    PlaylistInput, PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode, SourceStatus,
     SunoClient, adopt_decision, adoption_enumerated, album_desired, area_mode, build_desired,
     build_modes_by_id, build_playlist_desired, build_scoped_playlist_desired, clip_stems,
     deletion_allowed, is_downloadable, library_authoritative, narrows_downloads, owner_gate,
@@ -42,6 +42,7 @@ use crate::cli::logs;
 use crate::cli::output;
 use crate::cli::prompt;
 use crate::cli::signal;
+use crate::cli::stems;
 use crate::cli::task_output;
 use crate::cli::task_output::eprint_t;
 use crate::cli::token;
@@ -224,55 +225,6 @@ async fn run(
         }
     }
     Ok(worst)
-}
-
-/// Strip the resolved format's extension from an audio path, giving the
-/// extensionless base the sidecars and the `.stems` folder are built from.
-/// Falls back to the whole path if the extension is somehow absent.
-fn strip_format_ext(path: &str, format: suno_core::AudioFormat) -> &str {
-    path.strip_suffix(&format!(".{}", format.ext()))
-        .unwrap_or(path)
-}
-
-/// List existing stems for the selected clips, when the feature is on.
-///
-/// Read-only and free: it pages the stems listing (`GET`) and NEVER generates or
-/// spends credits. Returns a map from clip id to its AUTHORITATIVE stem set. A
-/// clip is present ONLY when its listing fully enumerated at least one stem; a
-/// clip absent from the map (feature off, `has_stem` false, or an
-/// indeterminate/failed/partial/`400` listing) means "keep existing local
-/// stems", so this can never drive a stem deletion. `has_stem` is the
-/// precondition, so a clip Suno reports as stemless is never even queried.
-async fn list_existing_stems(
-    enabled: bool,
-    clips: &[&Clip],
-    client: &SunoClient<TokioClock>,
-    http: &ReqwestHttp,
-    concurrency: u32,
-) -> HashMap<String, Vec<Stem>> {
-    let mut out = HashMap::new();
-    if !enabled {
-        return out;
-    }
-    let candidates: Vec<&Clip> = clips.iter().copied().filter(|clip| clip.has_stem).collect();
-    let fetched = stream::iter(candidates)
-        .map(|clip| async move {
-            (
-                clip.id.clone(),
-                client.list_stems(http, &clip.id).await.ok(),
-            )
-        })
-        .buffered(concurrency.max(1) as usize)
-        .collect::<Vec<_>>()
-        .await;
-    for (id, result) in fetched {
-        if let Some((stems, true)) = result
-            && !stems.is_empty()
-        {
-            out.insert(id, stems);
-        }
-    }
-    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -721,7 +673,7 @@ async fn run_one(
     // `has_stem` is true, and only an authoritative set drives removals — an
     // absent/indeterminate listing leaves a clip's `stems` at `None` so existing
     // local stems are kept. This path never generates or spends credits.
-    let stems_by_id = list_existing_stems(
+    let stems_by_id = stems::list_existing_stems(
         settings.download_stems,
         &selected,
         &client,
@@ -731,7 +683,7 @@ async fn run_one(
     .await;
     if settings.download_stems {
         for d in &mut desired {
-            let base = strip_format_ext(&d.path, settings.format);
+            let base = stems::strip_format_ext(&d.path, settings.format);
             d.stems = stems_by_id
                 .get(&d.clip.id)
                 .map(|stems| clip_stems(base, stems, settings.stem_format, settings.character_set));

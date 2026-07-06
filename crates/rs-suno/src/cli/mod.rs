@@ -19,6 +19,7 @@ pub mod output;
 pub mod prompt;
 pub mod run;
 pub mod signal;
+pub mod stems;
 pub mod task_output;
 pub mod token;
 pub mod wallclock;
