@@ -10,11 +10,11 @@ use suno_core::{
     TOKEN_EXPIRY_WARN_DAYS, TokenExpiry, config::label_to_env,
 };
 
+use crate::cli::account;
 use crate::cli::args::GlobalArgs;
 use crate::cli::commands::version;
 use crate::cli::desired::ExitCode;
 use crate::cli::logs;
-use crate::cli::run;
 use crate::cli::wallclock;
 use crate::clock::TokioClock;
 use crate::http::ReqwestHttp;
@@ -181,7 +181,7 @@ fn resolve_targets(
             .collect();
     }
 
-    let (label, settings) = run::single_account(config, global, flags, env)?;
+    let (label, settings) = account::single_account(config, global, flags, env)?;
     let root = config
         .and_then(|cfg| cfg.accounts.get(&label))
         .and_then(|account| account.root.clone());

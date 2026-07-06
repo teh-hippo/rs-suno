@@ -11,6 +11,7 @@ use suno_core::{
     TrackMetadata, tag_alac, tag_flac, tag_mp3,
 };
 
+use crate::cli::account;
 use crate::cli::args::{FetchArgs, GlobalArgs};
 use crate::cli::desired::ExitCode;
 use crate::cli::failure;
@@ -38,7 +39,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
         Ok(config) => config,
         Err(code) => return Ok(code),
     };
-    let (label, settings) = match run::single_account(config.as_ref(), global, &flags, &env) {
+    let (label, settings) = match account::single_account(config.as_ref(), global, &flags, &env) {
         Ok(resolved) => resolved,
         Err(message) => {
             eprintln!("error: {message}");
