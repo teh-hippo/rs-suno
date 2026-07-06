@@ -6,6 +6,7 @@
 //! its ports.
 
 pub mod account;
+pub mod areas;
 pub mod args;
 pub mod commands;
 pub mod config_load;
