@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0](https://github.com/teh-hippo/rs-suno/compare/v0.33.4...v0.34.0) (2026-07-06)
+
+
+### Features
+
+* embed animated WebP cover so media servers show it ([#288](https://github.com/teh-hippo/rs-suno/issues/288)) ([b33346a](https://github.com/teh-hippo/rs-suno/commit/b33346a9c692a913f37b986729ab67ae9777dfcb))
+
 ## [0.33.4](https://github.com/teh-hippo/rs-suno/compare/v0.33.3...v0.33.4) (2026-07-06)
 
 
