@@ -103,9 +103,7 @@ fn resolve_targets(
         let settings = resolve_named(config, account, env, flags)?;
         return Ok(vec![(account.clone(), settings)]);
     }
-    account::resolve_all_or_single(config, global, flags, env, |label, settings| {
-        (label, settings)
-    })
+    account::resolve_all_or_single(config, global, flags, env)
 }
 
 /// Resolve a named account, erroring when no config holds it.
@@ -207,6 +205,6 @@ mod tests {
         };
         let err = resolve_targets(None, &global, &refresh, &env(), &FlagOverrides::default())
             .unwrap_err();
-        assert!(err.contains("--all requires"));
+        assert_eq!(err, "--all needs a config file with at least one account");
     }
 }

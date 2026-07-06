@@ -36,23 +36,18 @@ pub fn plan_targets(
     sel: &Selection<'_>,
 ) -> std::result::Result<Vec<TargetSpec>, String> {
     if sel.all {
-        let cfg = config.ok_or("--all needs a config file with at least one account")?;
-        if cfg.accounts.is_empty() {
-            return Err("--all: no accounts are configured".to_owned());
-        }
+        let (cfg, labels) = all_account_labels(config)?;
         if sel.dest.is_some() {
             return Err(
                 "--all cannot be combined with a DEST; each account uses its configured root"
                     .to_owned(),
             );
         }
-        let mut labels: Vec<&String> = cfg.accounts.keys().collect();
-        labels.sort();
         return labels
             .into_iter()
             .map(|label| {
-                account_root(cfg, label).map(|dest| TargetSpec {
-                    label: label.clone(),
+                account_root(cfg, &label).map(|dest| TargetSpec {
+                    label,
                     dest,
                     implicit: false,
                 })
@@ -109,6 +104,22 @@ pub fn plan_targets(
             }])
         }
     }
+}
+
+/// The configured account labels in sorted order for an `--all` run, or a
+/// config-error message when there is no config or no account. The one home for
+/// the `--all` missing-config / empty-set policy and wording, shared by
+/// `plan_targets` and `resolve_all_or_single` so they cannot drift.
+fn all_account_labels(
+    config: Option<&Config>,
+) -> std::result::Result<(&Config, Vec<String>), String> {
+    let cfg = config.ok_or("--all needs a config file with at least one account")?;
+    let mut labels: Vec<String> = cfg.accounts.keys().cloned().collect();
+    labels.sort();
+    if labels.is_empty() {
+        return Err("--all: no accounts are configured".to_owned());
+    }
+    Ok((cfg, labels))
 }
 
 fn account_root(cfg: &Config, label: &str) -> std::result::Result<PathBuf, String> {
@@ -199,38 +210,32 @@ pub(crate) fn single_account(
 }
 
 /// Resolve the accounts a fan-out command (`auth refresh --all`, `doctor --all`)
-/// touches, or the single account otherwise, mapping each resolved account to
-/// the caller's per-target shape via `make`.
+/// touches, or the single account otherwise, returning each label with its
+/// resolved settings.
 ///
 /// `--all` lists every configured account in sorted order and errors on an empty
 /// set; without it, [`single_account`] picks the sole/`--account`/token target.
 /// This is the one home for that fan-out policy so `auth` and `doctor` cannot
 /// drift.
-pub(crate) fn resolve_all_or_single<T>(
+pub(crate) fn resolve_all_or_single(
     config: Option<&Config>,
     global: &GlobalArgs,
     flags: &FlagOverrides,
     env: &HashMap<String, String>,
-    mut make: impl FnMut(String, EffectiveSettings) -> T,
-) -> std::result::Result<Vec<T>, String> {
+) -> std::result::Result<Vec<(String, EffectiveSettings)>, String> {
     if global.all {
-        let cfg = config.ok_or_else(|| "--all requires a valid config file".to_owned())?;
-        let mut labels: Vec<String> = cfg.accounts.keys().cloned().collect();
-        labels.sort();
-        if labels.is_empty() {
-            return Err("no accounts are configured".to_owned());
-        }
+        let (cfg, labels) = all_account_labels(config)?;
         return labels
             .into_iter()
             .map(|label| {
                 cfg.resolve(&label, None, env, flags)
-                    .map(|settings| make(label, settings))
+                    .map(|settings| (label, settings))
                     .map_err(|err| err.to_string())
             })
             .collect();
     }
     let (label, settings) = single_account(config, global, flags, env)?;
-    Ok(vec![make(label, settings)])
+    Ok(vec![(label, settings)])
 }
 
 /// A one-account config used when running purely from `--token`/env.
@@ -387,14 +392,16 @@ mod tests {
             all: true,
             ..Default::default()
         };
-        let labels = resolve_all_or_single(
+        let labels: Vec<String> = resolve_all_or_single(
             Some(&cfg),
             &global,
             &FlagOverrides::default(),
             &HashMap::new(),
-            |label, _settings| label,
         )
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
         assert_eq!(labels, vec!["alice", "bob", "charlie"]);
     }
 
@@ -404,15 +411,9 @@ mod tests {
             all: true,
             ..Default::default()
         };
-        let err = resolve_all_or_single(
-            None,
-            &global,
-            &FlagOverrides::default(),
-            &HashMap::new(),
-            |label, _settings| label,
-        )
-        .unwrap_err();
-        assert!(err.contains("--all requires"));
+        let err = resolve_all_or_single(None, &global, &FlagOverrides::default(), &HashMap::new())
+            .unwrap_err();
+        assert_eq!(err, "--all needs a config file with at least one account");
     }
 
     #[test]
@@ -427,23 +428,56 @@ mod tests {
             &global,
             &FlagOverrides::default(),
             &HashMap::new(),
-            |label, _settings| label,
         )
         .unwrap_err();
-        assert_eq!(err, "no accounts are configured");
+        assert_eq!(err, "--all: no accounts are configured");
+    }
+
+    #[test]
+    fn all_messages_match_across_both_paths() {
+        let global = GlobalArgs {
+            all: true,
+            ..Default::default()
+        };
+
+        // Missing config: `plan_targets` and `resolve_all_or_single` must agree.
+        let plan_missing = plan_targets(None, &sel(true, None, None, true)).unwrap_err();
+        let resolve_missing =
+            resolve_all_or_single(None, &global, &FlagOverrides::default(), &HashMap::new())
+                .unwrap_err();
+        assert_eq!(plan_missing, resolve_missing);
+        assert_eq!(
+            plan_missing,
+            "--all needs a config file with at least one account"
+        );
+
+        // Empty config: the two paths must still emit the identical message.
+        let empty = Config::default();
+        let plan_empty = plan_targets(Some(&empty), &sel(true, None, None, true)).unwrap_err();
+        let resolve_empty = resolve_all_or_single(
+            Some(&empty),
+            &global,
+            &FlagOverrides::default(),
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(plan_empty, resolve_empty);
+        assert_eq!(plan_empty, "--all: no accounts are configured");
     }
 
     #[test]
     fn resolve_all_or_single_single_fallback() {
         let cfg = config_with(&[("alice", None)]);
-        let targets = resolve_all_or_single(
+        let labels: Vec<String> = resolve_all_or_single(
             Some(&cfg),
             &GlobalArgs::default(),
             &FlagOverrides::default(),
             &HashMap::new(),
-            |label, _settings| label,
         )
-        .unwrap();
-        assert_eq!(targets, vec!["alice"]);
+        .unwrap()
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
+        assert_eq!(labels, vec!["alice"]);
     }
 }
