@@ -2137,4 +2137,78 @@ mod tests {
         let archived = store.archived_parents();
         assert_eq!(archived.get("b").map(String::as_str), Some("a"));
     }
+
+    #[test]
+    fn full_store_json_is_stable_across_the_split() {
+        // Golden anchor spanning ALL THREE domains at once: the lineage graph
+        // (nodes + edges + resolution_cache), the album/playlist art state, and
+        // the identity owner pin. If any field, serde attribute, key name,
+        // nesting, or emitted key order ever drifts, this fails, guarding the
+        // on-disk `.suno-lineage.json` format the domain split must not change.
+        let mut store = LineageStore::new();
+        store.update(&chain_clips(), &chain_resolution(), "now");
+        store.albums.insert(
+            "a".to_owned(),
+            AlbumArt {
+                folder_jpg: Some(crate::ArtifactState {
+                    path: "alice/Root/folder.jpg".to_owned(),
+                    hash: "jpg-h".to_owned(),
+                }),
+                folder_webp: None,
+                folder_mp4: None,
+            },
+        );
+        store.playlists.insert(
+            "liked".to_owned(),
+            PlaylistState {
+                name: "Liked".to_owned(),
+                path: "Liked.m3u8".to_owned(),
+                hash: "pl-h".to_owned(),
+            },
+        );
+        store.pin_owner(Owner {
+            user_id: "user_a".to_owned(),
+            display_name: "Alice".to_owned(),
+        });
+
+        // (1) Exact key set, nesting, and values across every domain.
+        let value = serde_json::to_value(&store).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version": 1,
+                "nodes": {
+                    "a": {"title": "Root", "created_at": "t0", "clip_type": "gen", "task": "", "is_remix": false, "is_trashed": false, "status": "observed", "first_seen_at": "now", "last_seen_at": "now"},
+                    "b": {"title": "Remaster", "created_at": "t1", "clip_type": "upsample", "task": "upsample", "is_remix": false, "is_trashed": false, "status": "observed", "first_seen_at": "now", "last_seen_at": "now"},
+                    "c": {"title": "Cover", "created_at": "t2", "clip_type": "gen", "task": "cover", "is_remix": false, "is_trashed": false, "status": "observed", "first_seen_at": "now", "last_seen_at": "now"}
+                },
+                "edges": [
+                    {"child_id": "b", "parent_id": "a", "edge_type": "remaster", "role": "primary", "source_field": "upsample_clip_id", "ordinal": 0, "status": "active", "first_seen_at": "now", "last_seen_at": "now"},
+                    {"child_id": "c", "parent_id": "b", "edge_type": "cover", "role": "primary", "source_field": "cover_clip_id", "ordinal": 0, "status": "active", "first_seen_at": "now", "last_seen_at": "now"}
+                ],
+                "resolution_cache": {
+                    "a": {"root_id": "a", "status": "resolved", "algorithm_version": 1, "computed_at": "now"},
+                    "b": {"root_id": "a", "status": "resolved", "algorithm_version": 1, "computed_at": "now"},
+                    "c": {"root_id": "a", "status": "resolved", "algorithm_version": 1, "computed_at": "now"}
+                },
+                "albums": {"a": {"folder_jpg": {"path": "alice/Root/folder.jpg", "hash": "jpg-h"}}},
+                "playlists": {"liked": {"name": "Liked", "path": "Liked.m3u8", "hash": "pl-h"}},
+                "owner": {"user_id": "user_a", "display_name": "Alice"}
+            })
+        );
+
+        // (2) Exact serialised bytes, including emitted key order (struct field
+        // declaration order; map keys sorted). Any reordering fails here.
+        let expected = r#"{"schema_version":1,"nodes":{"a":{"title":"Root","created_at":"t0","clip_type":"gen","task":"","is_remix":false,"is_trashed":false,"status":"observed","first_seen_at":"now","last_seen_at":"now"},"b":{"title":"Remaster","created_at":"t1","clip_type":"upsample","task":"upsample","is_remix":false,"is_trashed":false,"status":"observed","first_seen_at":"now","last_seen_at":"now"},"c":{"title":"Cover","created_at":"t2","clip_type":"gen","task":"cover","is_remix":false,"is_trashed":false,"status":"observed","first_seen_at":"now","last_seen_at":"now"}},"edges":[{"child_id":"b","parent_id":"a","edge_type":"remaster","role":"primary","source_field":"upsample_clip_id","ordinal":0,"status":"active","first_seen_at":"now","last_seen_at":"now"},{"child_id":"c","parent_id":"b","edge_type":"cover","role":"primary","source_field":"cover_clip_id","ordinal":0,"status":"active","first_seen_at":"now","last_seen_at":"now"}],"resolution_cache":{"a":{"root_id":"a","status":"resolved","algorithm_version":1,"computed_at":"now"},"b":{"root_id":"a","status":"resolved","algorithm_version":1,"computed_at":"now"},"c":{"root_id":"a","status":"resolved","algorithm_version":1,"computed_at":"now"}},"albums":{"a":{"folder_jpg":{"path":"alice/Root/folder.jpg","hash":"jpg-h"}}},"playlists":{"liked":{"name":"Liked","path":"Liked.m3u8","hash":"pl-h"}},"owner":{"user_id":"user_a","display_name":"Alice"}}"#;
+        assert_eq!(serde_json::to_string(&store).unwrap(), expected);
+
+        // (3) The three `#[serde(skip)]` runtime overlays never reach disk.
+        assert!(value.get("album_overrides").is_none());
+        assert!(value.get("eligible_root_ids").is_none());
+        assert!(value.get("edge_index").is_none());
+
+        // And it round-trips back to an equal store.
+        let back: LineageStore = serde_json::from_str(expected).unwrap();
+        assert_eq!(store, back);
+    }
 }
