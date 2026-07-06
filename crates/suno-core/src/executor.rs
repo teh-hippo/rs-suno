@@ -39,6 +39,7 @@ use std::time::Duration;
 use futures_util::lock::Mutex as AsyncMutex;
 use futures_util::stream::{self, StreamExt};
 
+use crate::album_art::{AlbumArt, PlaylistState};
 use crate::backoff::{backoff_delay, retry_after};
 use crate::client::SunoClient;
 use crate::clock::Clock;
@@ -46,7 +47,6 @@ use crate::config::{AudioFormat, StemFormat};
 use crate::error::Error;
 use crate::ffmpeg::{Ffmpeg, WebpEncodeSettings};
 use crate::fs::Filesystem;
-use crate::graph::{AlbumArt, PlaylistState};
 use crate::http::{Http, HttpRequest};
 use crate::lineage::LineageContext;
 use crate::lyrics::AlignedLyrics;

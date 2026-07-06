@@ -35,9 +35,9 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use crate::album_art::{AlbumArt, PlaylistState};
 use crate::config::{AudioFormat, StemFormat};
 use crate::ffmpeg::WebpEncodeSettings;
-use crate::graph::{AlbumArt, PlaylistState};
 use crate::hash::{art_hash, art_url_hash, webp_art_hash};
 use crate::lineage::LineageContext;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};

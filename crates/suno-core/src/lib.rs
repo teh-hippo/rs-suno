@@ -4,6 +4,7 @@
 //! [`Http`] port, which a CLI adapter implements, so the engine stays testable
 //! in isolation.
 
+mod album_art;
 mod area;
 mod auth;
 mod backoff;
@@ -41,6 +42,7 @@ mod testutil;
 #[cfg(test)]
 mod sync_chaos;
 
+pub use album_art::{AlbumArt, PlaylistState};
 pub use area::{
     AreaKind, AreaListing, adoption_enumerated, area_enumerated, area_mode, build_modes_by_id,
     build_scoped_playlist_desired, library_authoritative, source_statuses, union_clips,
@@ -66,8 +68,8 @@ pub use extras::{
 pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind, WebpEncodeSettings};
 pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
 pub use graph::{
-    AdoptDecision, AlbumArt, CacheEntry, LineageStore, Node, Owner, OwnerGate, PlaylistState,
-    StoredEdge, adopt_decision, owner_gate,
+    AdoptDecision, CacheEntry, LineageStore, Node, Owner, OwnerGate, StoredEdge, adopt_decision,
+    owner_gate,
 };
 pub use hash::{
     SYNCED_LRC_VERSION, art_hash, art_url_hash, content_hash, meta_hash, synced_lrc_source_hash,
