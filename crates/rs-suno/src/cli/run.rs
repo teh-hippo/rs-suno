@@ -17,9 +17,9 @@ use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
     ArtifactToggles, ClerkAuth, Config, FlagOverrides, LineageContext, NamingConfig, OwnerGate,
     PlaylistState, ResolveOpts, SourceMode, SunoClient, adopt_decision, adoption_enumerated,
-    album_desired, area_mode, build_desired, build_modes_by_id, build_scoped_playlist_desired,
-    clip_stems, deletion_allowed, library_authoritative, narrows_downloads, owner_gate,
-    resolve_roots, source_statuses, union_clips,
+    album_desired, build_desired, build_modes_by_id, build_scoped_playlist_desired, clip_stems,
+    deletion_allowed, library_authoritative, narrows_downloads, owner_gate, resolve_roots,
+    source_statuses, union_clips,
 };
 
 use crate::cli::account;
@@ -631,16 +631,7 @@ async fn assemble(
     // Every clip's modes across the areas holding it, so each Desired carries the
     // Copy protection of any Copy area even when a Mirror area also holds it
     // (SYNC-8).
-    let area_modes: Vec<(SourceMode, Vec<String>)> = areas
-        .iter()
-        .map(|area| {
-            (
-                area_mode(area, force_copy),
-                area.clips().iter().map(|clip| clip.id.clone()).collect(),
-            )
-        })
-        .collect();
-    let modes_by_id = build_modes_by_id(&area_modes);
+    let modes_by_id = build_modes_by_id(areas, force_copy);
 
     let since = match args.since.as_deref().map(RecencySpec::parse).transpose() {
         Ok(since) => since,
@@ -983,7 +974,7 @@ async fn execute_run(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use suno_core::{AreaKind, AreaListing, Clip, area_enumerated};
+    use suno_core::{AreaKind, AreaListing, Clip, area_enumerated, area_mode};
 
     #[test]
     fn worse_prefers_higher_code() {
@@ -1135,16 +1126,7 @@ mod tests {
             .collect();
         assert!(deletion_allowed(&sources), "armed and fully enumerated");
 
-        let area_modes: Vec<(SourceMode, Vec<String>)> = areas
-            .iter()
-            .map(|a| {
-                (
-                    area_mode(a, force_copy),
-                    a.clips().iter().map(|c| c.id.clone()).collect(),
-                )
-            })
-            .collect();
-        let modes = build_modes_by_id(&area_modes);
+        let modes = build_modes_by_id(&areas, force_copy);
         // The library-exclusive clip is Copy-only; the shared clip is protected.
         assert_eq!(modes["lib-only"], vec![SourceMode::Copy]);
         assert_eq!(modes["shared"], vec![SourceMode::Mirror, SourceMode::Copy]);
