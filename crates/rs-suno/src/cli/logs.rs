@@ -9,17 +9,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write as _;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use suno_core::{Action, Clip, Failure, LineageStore, Manifest, Plan, render_library_index};
 
-#[cfg(unix)]
-use crate::download::set_permissions_or_remove;
-use crate::download::{write_atomic, write_atomic_private};
+use crate::download::write_atomic;
 
 /// The manifest file name, kept beside the mirrored library.
 pub const MANIFEST_NAME: &str = ".suno-manifest.json";
@@ -37,8 +33,6 @@ pub const GRAPH_NAME: &str = ".suno-lineage.json";
 const LOCK_NAME: &str = ".suno.lock";
 const FAILURES_NAME: &str = ".suno-failures.log";
 const AUDIT_NAME: &str = ".suno-audit.log";
-#[cfg(unix)]
-const PRIVATE_FILE_MODE: u32 = 0o600;
 
 /// Resolve the effective config path: the explicit override, else the platform
 /// default. Returns `None` only when no home or config directory can be found.
@@ -82,9 +76,7 @@ pub fn load_manifest(dest: &Path) -> Result<Manifest> {
 /// Save `manifest` beside `dest` atomically.
 pub fn save_manifest(dest: &Path, manifest: &Manifest) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(manifest).context("could not serialise the manifest")?;
-    let path = dest.join(MANIFEST_NAME);
-    write_atomic_private(&path, &bytes).context("could not write the manifest")?;
-    set_private_file_permissions(&path).context("could not secure the manifest")
+    write_atomic(&dest.join(MANIFEST_NAME), &bytes).context("could not write the manifest")
 }
 
 /// Load the lineage graph store beside `dest`, returning an empty one when absent.
@@ -107,9 +99,7 @@ pub fn load_graph(dest: &Path) -> Result<LineageStore> {
 pub fn save_graph(dest: &Path, store: &LineageStore) -> Result<()> {
     let bytes =
         serde_json::to_vec_pretty(store).context("could not serialise the lineage store")?;
-    let path = dest.join(GRAPH_NAME);
-    write_atomic_private(&path, &bytes).context("could not write the lineage store")?;
-    set_private_file_permissions(&path).context("could not secure the lineage store")
+    write_atomic(&dest.join(GRAPH_NAME), &bytes).context("could not write the lineage store")
 }
 
 /// Render and write the library index at `dest` atomically.
@@ -142,17 +132,9 @@ impl Drop for LockGuard {
 /// Acquire the single-run lock beside `dest`, failing when another run holds it.
 pub fn acquire_lock(dest: &Path) -> Result<LockGuard> {
     let path = dest.join(LOCK_NAME);
-    let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    opts.mode(PRIVATE_FILE_MODE);
-    match opts.open(&path) {
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(mut file) => {
             let _ = writeln!(file, "{}", std::process::id());
-            if let Err(err) = set_private_file_permissions(&path) {
-                return Err(err)
-                    .with_context(|| format!("could not secure lock {}", path.display()));
-            }
             Ok(LockGuard { path })
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => bail!(
@@ -248,28 +230,13 @@ pub fn append_owner_pin(
 
 /// Append `text` to `path`, creating it if needed.
 fn append(path: &Path, text: &str) -> Result<()> {
-    let mut opts = OpenOptions::new();
-    opts.create(true).append(true);
-    #[cfg(unix)]
-    opts.mode(PRIVATE_FILE_MODE);
-    let mut file = opts
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
         .open(path)
         .with_context(|| format!("could not open {}", path.display()))?;
     file.write_all(text.as_bytes())
-        .with_context(|| format!("could not append to {}", path.display()))?;
-    set_private_file_permissions(path)
-}
-
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    set_permissions_or_remove(path, PRIVATE_FILE_MODE)
-        .with_context(|| format!("could not set permissions on {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+        .with_context(|| format!("could not append to {}", path.display()))
 }
 
 /// Current Unix time in seconds, saturating to 0 before the epoch.
@@ -548,16 +515,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn state_files_use_private_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
-        fn mode(path: &Path) -> u32 {
-            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    fn state_files_are_written() {
+        fn exists(path: &Path) -> bool {
+            std::fs::metadata(path).is_ok()
         }
 
-        let dir = temp_dir("private-perms");
+        let dir = temp_dir("state-files");
         save_manifest(&dir, &Manifest::new()).unwrap();
         save_graph(&dir, &LineageStore::new()).unwrap();
         let failures = vec![Failure {
@@ -574,11 +538,11 @@ mod tests {
         append_audit(&dir, &plan, &HashSet::new(), &HashMap::new()).unwrap();
         let lock = acquire_lock(&dir).unwrap();
 
-        assert_eq!(mode(&dir.join(MANIFEST_NAME)), 0o600);
-        assert_eq!(mode(&dir.join(GRAPH_NAME)), 0o600);
-        assert_eq!(mode(&dir.join(FAILURES_NAME)), 0o600);
-        assert_eq!(mode(&dir.join(AUDIT_NAME)), 0o600);
-        assert_eq!(mode(&dir.join(LOCK_NAME)), 0o600);
+        assert!(exists(&dir.join(MANIFEST_NAME)));
+        assert!(exists(&dir.join(GRAPH_NAME)));
+        assert!(exists(&dir.join(FAILURES_NAME)));
+        assert!(exists(&dir.join(AUDIT_NAME)));
+        assert!(exists(&dir.join(LOCK_NAME)));
 
         drop(lock);
         let _ = std::fs::remove_dir_all(&dir);
