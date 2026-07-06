@@ -22,6 +22,7 @@ mod fs;
 mod graph;
 mod hash;
 mod http;
+mod identity;
 mod limiter;
 mod lineage;
 mod lyrics;
@@ -67,14 +68,12 @@ pub use extras::{
 };
 pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind, WebpEncodeSettings};
 pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
-pub use graph::{
-    AdoptDecision, CacheEntry, LineageStore, Node, Owner, OwnerGate, StoredEdge, adopt_decision,
-    owner_gate,
-};
+pub use graph::{CacheEntry, LineageStore, Node, StoredEdge};
 pub use hash::{
     SYNCED_LRC_VERSION, art_hash, art_url_hash, content_hash, meta_hash, synced_lrc_source_hash,
 };
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
+pub use identity::{AdoptDecision, Owner, OwnerGate, adopt_decision, owner_gate};
 pub use lineage::{
     AttributionEdge, Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveOpts,
     ResolveStatus, RootInfo, attribution_edges, edge_type, immediate_parent, lineage_edges,
