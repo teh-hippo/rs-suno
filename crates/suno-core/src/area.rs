@@ -160,6 +160,20 @@ pub fn union_clips(areas: &[AreaListing]) -> Vec<Clip> {
     union
 }
 
+/// Whether the scoped `.m3u8` desired set may authorise playlist deletes: the
+/// union was not truncated (`members_intact`) and every playlist-rendering area
+/// (Playlist, Liked) fully enumerated. Library areas render no `.m3u8`, so they
+/// never gate this. Mirrors the async twin, which reports non-enumerated when a
+/// listing is partial rather than authorising a delete from a partial view (B2).
+#[must_use]
+pub fn playlists_enumerated(areas: &[AreaListing], force_copy: bool, members_intact: bool) -> bool {
+    members_intact
+        && areas.iter().all(|area| match area.kind {
+            AreaKind::Library => true,
+            AreaKind::Liked | AreaKind::Playlist { .. } => area_enumerated(area, force_copy),
+        })
+}
+
 /// Build the `.m3u8` desired state for an area-scoped run (no authoritative
 /// Library). Only the playlist and liked areas that fully enumerated their
 /// members are rendered, and only when `members_intact` (the union was not
@@ -214,21 +228,29 @@ pub fn build_scoped_playlist_desired(
             members: members.as_slice(),
         })
         .collect();
-    (build_playlist_desired(&inputs, desired), true)
+    (
+        build_playlist_desired(&inputs, desired),
+        playlists_enumerated(areas, force_copy, members_intact),
+    )
 }
 
-/// Fold a union of per-area clip lists into `modes_by_id`, mapping each clip id
-/// to the deduplicated, canonical-order list of every area mode holding it.
+/// Fold every area's clips into `modes_by_id`, mapping each clip id to the
+/// deduplicated, canonical-order list of every area mode holding it.
 ///
-/// `areas` is processed in canonical area order (Library, Liked, Playlists), and
-/// each clip's modes are normalised to `[Mirror, Copy]` order, mirroring
+/// `areas` is processed in canonical area order (Library, Liked, Playlists), each
+/// area's mode taken after the copy-verb override via [`area_mode`], and each
+/// clip's modes are normalised to `[Mirror, Copy]` order, mirroring
 /// `aggregate_desired` so a clip held by both a mirror and a copy area is
 /// copy-protected (SYNC-8).
-pub fn build_modes_by_id(areas: &[(SourceMode, Vec<String>)]) -> HashMap<String, Vec<SourceMode>> {
+pub fn build_modes_by_id(
+    areas: &[AreaListing],
+    force_copy: bool,
+) -> HashMap<String, Vec<SourceMode>> {
     let mut map: HashMap<String, (bool, bool)> = HashMap::new();
-    for (mode, ids) in areas {
-        for id in ids {
-            let entry = map.entry(id.clone()).or_insert((false, false));
+    for area in areas {
+        let mode = area_mode(area, force_copy);
+        for clip in &area.clips {
+            let entry = map.entry(clip.id.clone()).or_insert((false, false));
             match mode {
                 SourceMode::Mirror => entry.0 = true,
                 SourceMode::Copy => entry.1 = true,
@@ -568,16 +590,7 @@ mod tests {
             .collect();
         assert!(deletion_allowed(&sources));
 
-        let area_modes: Vec<(SourceMode, Vec<String>)> = areas
-            .iter()
-            .map(|a| {
-                (
-                    area_mode(a, false),
-                    a.clips.iter().map(|c| c.id.clone()).collect(),
-                )
-            })
-            .collect();
-        let modes = build_modes_by_id(&area_modes);
+        let modes = build_modes_by_id(&areas, false);
         let union = union_clips(&areas);
         let desired = build_desired(
             &union.iter().collect::<Vec<_>>(),
@@ -633,12 +646,76 @@ mod tests {
     // `[Mirror, Copy]`, so build_desired carries the Copy protection.
     #[test]
     fn build_modes_by_id_copy_wins_and_dedups() {
-        let map = build_modes_by_id(&[
-            (SourceMode::Mirror, vec!["a".to_owned(), "b".to_owned()]),
-            (SourceMode::Copy, vec!["b".to_owned(), "c".to_owned()]),
-        ]);
+        let areas = [
+            area(AreaKind::Liked, SourceMode::Mirror, &["a", "b"], true),
+            pl_area(SourceMode::Copy, &["b", "c"], true),
+        ];
+        let map = build_modes_by_id(&areas, false);
         assert_eq!(map["a"], vec![SourceMode::Mirror]);
         assert_eq!(map["b"], vec![SourceMode::Mirror, SourceMode::Copy]);
         assert_eq!(map["c"], vec![SourceMode::Copy]);
+    }
+
+    // playlists_enumerated is the scoped `.m3u8` delete gate: true only when the
+    // union is intact and every playlist-rendering area fully enumerated.
+    #[test]
+    fn playlists_enumerated_gates_on_every_playlist_area() {
+        // Every playlist/liked area enumerated and the union intact -> true.
+        assert!(playlists_enumerated(
+            &[
+                area(AreaKind::Liked, SourceMode::Mirror, &["a"], true),
+                pl_area(SourceMode::Mirror, &["b"], true),
+            ],
+            false,
+            true,
+        ));
+
+        // A failed playlist listing (empty, non-authoritative) disarms the gate.
+        assert!(!playlists_enumerated(
+            &[
+                area(AreaKind::Liked, SourceMode::Mirror, &["a"], true),
+                AreaListing::unresolved_playlist(SourceMode::Mirror),
+            ],
+            false,
+            true,
+        ));
+
+        // A failed liked listing disarms the gate too.
+        assert!(!playlists_enumerated(
+            &[
+                AreaListing::failed(AreaKind::Liked, SourceMode::Mirror),
+                pl_area(SourceMode::Mirror, &["b"], true),
+            ],
+            false,
+            true,
+        ));
+
+        // A truncated union disarms the gate even when every area enumerated.
+        assert!(!playlists_enumerated(
+            &[
+                area(AreaKind::Liked, SourceMode::Mirror, &["a"], true),
+                pl_area(SourceMode::Mirror, &["b"], true),
+            ],
+            false,
+            false,
+        ));
+    }
+
+    // Library areas render no `.m3u8`, so a library-only (or empty) set never
+    // gates the playlist delete authority: the flag just follows members_intact.
+    #[test]
+    fn playlists_enumerated_ignores_library_only_sets() {
+        assert!(playlists_enumerated(
+            &[area(AreaKind::Library, SourceMode::Mirror, &["lib"], true)],
+            false,
+            true,
+        ));
+        assert!(!playlists_enumerated(
+            &[area(AreaKind::Library, SourceMode::Mirror, &["lib"], true)],
+            false,
+            false,
+        ));
+        assert!(playlists_enumerated(&[], false, true));
+        assert!(!playlists_enumerated(&[], false, false));
     }
 }
