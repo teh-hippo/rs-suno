@@ -12,6 +12,7 @@ pub mod config_load;
 pub mod desired;
 pub mod expiry;
 pub mod failure;
+pub mod last_run;
 pub mod logs;
 pub mod open_url;
 pub mod output;
