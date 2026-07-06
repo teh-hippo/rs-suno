@@ -46,15 +46,19 @@ pub struct LineageStore {
     pub(crate) resolution_cache: BTreeMap<String, CacheEntry>,
     /// The reconciled folder-art state per album, keyed by the album's stable
     /// root id (HARDENING H2). Additive: absent in older stores, defaults empty.
+    /// Stays `pub`: the CLI executor and reconcile inputs borrow this map across
+    /// the crate boundary (`&mut store.albums`).
     pub albums: BTreeMap<String, AlbumArt>,
     /// The reconciled `.m3u8` state per playlist, keyed by the playlist's Suno
     /// id (the synthetic `"liked"` id for the liked feed). Additive: absent in
     /// older stores, defaults empty.
+    /// Stays `pub`: the CLI executor and reconcile inputs borrow this map across
+    /// the crate boundary (`&mut store.playlists`).
     pub playlists: BTreeMap<String, PlaylistState>,
     /// The Suno account this library is pinned to (trust-on-first-use). Absent
     /// in older stores and in a fresh library until the first run adopts it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<Owner>,
+    pub(crate) owner: Option<Owner>,
     /// Manual album-name overrides, keyed by lineage root id, layered over the
     /// store each run from config (see [`set_album_overrides`]). Runtime-only:
     /// it is never serialised, so it can never persist into the durable graph or
@@ -62,7 +66,7 @@ pub struct LineageStore {
     ///
     /// [`set_album_overrides`]: LineageStore::set_album_overrides
     #[serde(skip)]
-    pub album_overrides: BTreeMap<String, String>,
+    pub(crate) album_overrides: BTreeMap<String, String>,
     /// The set of root ids eligible for an album name (an override or a
     /// collision suffix): every non-empty `root_id` that appears as a *value* in
     /// [`resolution_cache`](Self::resolution_cache). This is the single source
@@ -1285,12 +1289,12 @@ mod tests {
         // The album-art collection is additive: a store written before folder
         // art existed loads with no albums and no folder art.
         assert!(store.albums.is_empty());
-        assert!(store.album_art("x").is_none());
+        assert!(!store.albums.contains_key("x"));
         // The playlist collection is likewise additive: absent in an older
         // store, it defaults empty (HARDENING B2: no stored playlist means no
         // reconcile ever treats one as stale).
         assert!(store.playlists.is_empty());
-        assert!(store.playlist("x").is_none());
+        assert!(!store.playlists.contains_key("x"));
     }
 
     #[test]
