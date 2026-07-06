@@ -155,16 +155,20 @@ fn resolve_targets(
     env: &HashMap<String, String>,
     flags: &FlagOverrides,
 ) -> std::result::Result<Vec<DoctorTarget>, String> {
-    account::resolve_all_or_single(config, global, flags, env, |label, settings| {
-        let root = config
-            .and_then(|cfg| cfg.accounts.get(&label))
-            .and_then(|account| account.root.clone());
-        DoctorTarget {
-            label,
-            settings,
-            root,
-        }
-    })
+    let targets = account::resolve_all_or_single(config, global, flags, env)?;
+    Ok(targets
+        .into_iter()
+        .map(|(label, settings)| {
+            let root = config
+                .and_then(|cfg| cfg.accounts.get(&label))
+                .and_then(|account| account.root.clone());
+            DoctorTarget {
+                label,
+                settings,
+                root,
+            }
+        })
+        .collect())
 }
 
 struct LiveDiagnostic {
