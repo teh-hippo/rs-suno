@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.2](https://github.com/teh-hippo/rs-suno/compare/v0.33.1...v0.33.2) (2026-07-06)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate clap_complete to v4.6.7 ([b4ea083](https://github.com/teh-hippo/rs-suno/commit/b4ea083c59cda63fc877864f2b2261e67b74fe2e))
+
 ## [0.33.1](https://github.com/teh-hippo/rs-suno/compare/v0.33.0...v0.33.1) (2026-07-05)
 
 
