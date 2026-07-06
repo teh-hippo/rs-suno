@@ -59,7 +59,11 @@ use crate::pathkey::{canonical_path_key, same_fs_path};
 pub enum ArtifactKind {
     /// The per-song external cover, sourced from `image_large_url`.
     CoverJpg,
-    /// The per-song animated cover, derived from `video_cover_url`.
+    /// Retired: the per-song animated cover is now embedded in the audio file's
+    /// front-cover picture, not written as a `<track>.webp` sidecar. The kind is
+    /// kept so a `.webp` written by an older version stays tracked and is cleaned
+    /// up (it is delete-eligible; see [`removed_kind_delete_eligible`]); it is
+    /// never emitted into a new desired set.
     CoverWebp,
     /// The per-song plain-text details dump (generated, inline content).
     DetailsTxt,
@@ -695,14 +699,20 @@ fn is_per_clip_kind(kind: ArtifactKind) -> bool {
 /// Whether a no-longer-desired ("removed kind") artifact may be delete-reconciled
 /// while its owning clip's audio is kept this run.
 ///
-/// Cover art deliberately opts out: a clip's art or video-preview URL can be
+/// The static `CoverJpg` deliberately opts out: a clip's art URL can be
 /// transiently absent for a run (the feed omits it, or a fetch fails), and the
 /// desired set then simply lacks that cover. Treating that absence as a removal
 /// and deleting the on-disk sidecar would churn a perfectly good cover, so an
-/// empty/transient URL must KEEP the existing file. A cover is therefore removed
-/// only by [`co_delete_artifacts`], when the owning clip leaves every mirror
-/// source and its audio is deleted (a fully gated path). The removed-kind
-/// mechanism is kept intact for any future sidecar kind that genuinely wants it.
+/// empty/transient URL must KEEP the existing file. `CoverJpg` is therefore
+/// removed only by [`co_delete_artifacts`], when the owning clip leaves every
+/// mirror source and its audio is deleted (a fully gated path).
+///
+/// `CoverWebp` is the opposite: it is a RETIRED kind. The per-clip animated
+/// cover is now embedded in the audio file, never written as a `<track>.webp`
+/// sidecar, so a desired set NEVER contains `CoverWebp` — its absence is
+/// unconditional, not transient. It is therefore delete-eligible so any
+/// `.webp` sidecar left by an older version is cleaned up on the next
+/// deletion-enabled run, through the same gate every other delete passes.
 ///
 /// The text sidecars split on totality. [`render_clip_details`](crate::render_clip_details)
 /// is TOTAL (always renders), so a desired `DetailsTxt` is absent only when the
@@ -720,11 +730,11 @@ fn is_per_clip_kind(kind: ArtifactKind) -> bool {
 fn removed_kind_delete_eligible(kind: ArtifactKind) -> bool {
     match kind {
         ArtifactKind::CoverJpg
-        | ArtifactKind::CoverWebp
         | ArtifactKind::LyricsTxt
         | ArtifactKind::Lrc
         | ArtifactKind::VideoMp4 => false,
-        ArtifactKind::DetailsTxt
+        ArtifactKind::CoverWebp
+        | ArtifactKind::DetailsTxt
         | ArtifactKind::FolderJpg
         | ArtifactKind::FolderWebp
         | ArtifactKind::FolderMp4
@@ -3740,6 +3750,45 @@ mod tests {
             path: "a.details.txt".to_string(),
             owner_id: "a".to_string(),
         }));
+    }
+
+    #[test]
+    fn cover_webp_retired_sidecar_is_deleted_through_the_gate() {
+        // The `<track>.webp` sidecar is retired: the animated cover is embedded
+        // now, so a desired set never contains CoverWebp. A `.webp` left by an
+        // older version is delete-reconciled through the shared gate (unlike
+        // CoverJpg, which opts out because its absence can be a transient URL).
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.cover_webp = Some(cover("a.webp", "v1"));
+        manifest.insert("a", e);
+        let d = vec![desired_arts("a", vec![])];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(plan.artifact_deletes(), 1);
+        assert!(plan.actions.contains(&Action::DeleteArtifact {
+            kind: ArtifactKind::CoverWebp,
+            path: "a.webp".to_string(),
+            owner_id: "a".to_string(),
+        }));
+    }
+
+    #[test]
+    fn cover_webp_retired_cleanup_respects_the_deletion_gate() {
+        // The retirement cleanup is still fully gated: on a run where deletion is
+        // disarmed (a partial, non-authoritative listing), the stale `.webp` is
+        // KEPT, never dropped on an unsafe listing.
+        let mut manifest = Manifest::new();
+        let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+        e.cover_webp = Some(cover("a.webp", "v1"));
+        manifest.insert("a", e);
+        let d = vec![desired_arts("a", vec![])];
+        let not_enumerated = vec![SourceStatus {
+            mode: SourceMode::Mirror,
+            fully_enumerated: false,
+        }];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &not_enumerated);
+        assert_eq!(plan.artifact_deletes(), 0);
+        assert_eq!(plan.deletes(), 0);
     }
 
     #[test]

@@ -205,10 +205,14 @@ The optional per-song sidecars follow the same gated deletion path as the audio,
 but they differ in when an on-disk file is removed after the feature is turned
 off:
 
-- **Covers (`cover.jpg` / `cover.webp`).** A clip's art URL can be missing for a
-  run (the feed omits it, or a fetch fails), so an absent cover is treated as
-  UNKNOWN and the existing file is kept. A cover is only removed when its whole
-  song leaves every source and the audio is deleted with it.
+- **Static cover (`cover.jpg`).** A clip's art URL can be missing for a run (the
+  feed omits it, or a fetch fails), so an absent cover is treated as UNKNOWN and
+  the existing `.jpg` is kept. It is only removed when its whole song leaves
+  every source and the audio is deleted with it.
+- **Animated cover (`.webp`) — retired.** Earlier versions wrote a per-song
+  `<track>.webp`; the animated cover is now embedded in the audio file instead.
+  Any leftover `.webp` sidecar is cleaned up (deleted) on the next
+  deletion-enabled run, through the same gate as every other delete.
 - **Details (`.details.txt`).** The details dump is always renderable, so once
   the feature is off the sidecar can only be intentionally unwanted. Turning
   `details_sidecar` off therefore removes the existing `.details.txt` on the next

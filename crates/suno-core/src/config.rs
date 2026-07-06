@@ -38,6 +38,14 @@ impl AudioFormat {
             Self::Alac => "m4a",
         }
     }
+
+    /// Whether an animated WebP can be embedded as this format's front cover.
+    ///
+    /// FLAC, MP3, and WAV embed an `image/webp` picture; ALAC (`mp4ameta` `covr`)
+    /// supports only JPEG/PNG/BMP artwork, so it always embeds the static JPEG.
+    pub fn embeds_animated_cover(self) -> bool {
+        !matches!(self, Self::Alac)
+    }
 }
 
 impl FromStr for AudioFormat {
@@ -1671,11 +1679,11 @@ mod tests {
 
     #[test]
     fn animated_cover_lossless_defaults_off_and_follows_precedence() {
-        // The compiled default is a visually transparent lossy encode: quality
-        // 95, effort 4, lossy (not lossless).
+        // The compiled default is a bounded lossy encode that fits the FLAC
+        // picture cap: quality 90, effort 4, lossy (not lossless).
         let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
         let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
-        assert_eq!(eff.animated_cover_webp.quality, 95);
+        assert_eq!(eff.animated_cover_webp.quality, 90);
         assert_eq!(eff.animated_cover_webp.compression_level, 4);
         assert!(!eff.animated_cover_webp.lossless);
 
@@ -1722,15 +1730,16 @@ mod tests {
     }
 
     #[test]
-    fn animated_cover_max_width_defaults_to_native() {
-        // With nothing configured, the width cap is None (source width).
+    fn animated_cover_max_width_defaults_to_bounded() {
+        // With nothing configured, the width cap is the bounded default (640 px)
+        // so the embedded animated cover reliably fits the FLAC picture cap.
         let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
         assert_eq!(
             cfg.resolve("alice", None, &no_env(), &no_flags())
                 .unwrap()
                 .animated_cover_webp
                 .max_width,
-            None
+            Some(640)
         );
     }
 

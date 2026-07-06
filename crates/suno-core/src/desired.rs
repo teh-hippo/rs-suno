@@ -8,7 +8,7 @@ use crate::config::{AudioFormat, StemFormat};
 use crate::extras::{M3u8Entry, render_clip_details, render_clip_lyrics, render_m3u8};
 use crate::ffmpeg::WebpEncodeSettings;
 use crate::hash::{
-    art_hash, art_url_hash, content_hash, meta_hash, synced_lrc_source_hash, webp_art_hash,
+    art_hash, art_url_hash, content_hash, embedded_art_hash, meta_hash, synced_lrc_source_hash,
 };
 use crate::lineage::LineageContext;
 use crate::model::Clip;
@@ -27,12 +27,13 @@ pub const LIKED_PLAYLIST_ID: &str = "liked";
 
 /// The per-song sidecar toggles resolved for a run.
 ///
-/// Each mirrors one resolved setting: `animated_covers` gates the `cover.webp`,
-/// `details` the `.details.txt` dump, `lyrics` the `.lyrics.txt` file, `lrc`
-/// the synced `.lrc` sidecar (Suno's word/line-level timed lyrics, which also
-/// drives the MP3 `SYLT` frame and the plain lyric tag), and `video` the
-/// standalone `.mp4` music video. All default off, matching the compiled config
-/// defaults.
+/// Each mirrors one resolved setting: `animated_covers` embeds a bounded
+/// animated WebP as the audio file's front cover (in place of the static JPEG)
+/// for clips with a video preview, `details` the `.details.txt` dump, `lyrics`
+/// the `.lyrics.txt` file, `lrc` the synced `.lrc` sidecar (Suno's word/line-level
+/// timed lyrics, which also drives the MP3 `SYLT` frame and the plain lyric tag),
+/// and `video` the standalone `.mp4` music video. All default off, matching the
+/// compiled config defaults.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ArtifactToggles {
     pub animated_covers: bool,
@@ -40,8 +41,8 @@ pub struct ArtifactToggles {
     pub lyrics: bool,
     pub lrc: bool,
     pub video: bool,
-    /// The animated-cover encode settings, folded into the `CoverWebp` hash so a
-    /// settings change re-encodes existing covers (see [`webp_art_hash`]).
+    /// The animated-cover encode settings, folded into the embedded-cover hash
+    /// (see [`embedded_art_hash`]) so a settings change re-embeds existing covers.
     pub webp: WebpEncodeSettings,
 }
 
@@ -136,7 +137,11 @@ pub fn build_desired(
                 path,
                 format,
                 meta_hash,
-                art_hash: art_hash(clip),
+                art_hash: embedded_art_hash(
+                    clip,
+                    toggles.animated_covers && format.embeds_animated_cover(),
+                    &toggles.webp,
+                ),
                 modes,
                 trashed: clip.is_trashed,
                 private: false,
@@ -227,14 +232,14 @@ pub fn clip_stems(
 /// The per-clip sidecars desired alongside `base`, the extensionless audio path
 /// (so each sidecar sits next to the audio file).
 ///
-/// A static `CoverJpg` is emitted whenever the clip has non-empty selected art;
-/// an animated `CoverWebp` only when `toggles.animated_covers` is set and the
-/// clip carries a video preview. An empty art URL emits NO `CoverJpg`: reconcile
-/// reads a desired that simply lacks a cover as UNKNOWN => KEEP, never a delete,
-/// so a transient empty URL cannot strand or remove an existing cover. The
-/// `CoverJpg` hash tracks the art URL (`art_hash`); the `CoverWebp` hash tracks
-/// the video URL *and* the encode settings (`webp_art_hash`), so a changed
-/// source or a changed quality/lossless/effort setting re-transcodes.
+/// A static `CoverJpg` is emitted whenever the clip has non-empty selected art.
+/// An empty art URL emits NO `CoverJpg`: reconcile reads a desired that simply
+/// lacks a cover as UNKNOWN => KEEP, never a delete, so a transient empty URL
+/// cannot strand or remove an existing cover. The `CoverJpg` hash tracks the art
+/// URL (`art_hash`). The animated cover is not a sidecar: when
+/// `toggles.animated_covers` is set it is embedded as the audio file's front
+/// cover (see [`embedded_art_hash`] and the executor), which is what media
+/// servers such as Navidrome actually read.
 ///
 /// The generated text sidecars carry their body inline (`content`) and a
 /// per-sidecar `content_hash`, so a change to what the file holds (a retitle for
@@ -260,15 +265,6 @@ fn clip_artifacts(
             path: format!("{base}.jpg"),
             source_url: url.to_owned(),
             hash: art_hash(clip),
-            content: None,
-        });
-    }
-    if toggles.animated_covers && !clip.video_cover_url.is_empty() {
-        artifacts.push(DesiredArtifact {
-            kind: ArtifactKind::CoverWebp,
-            path: format!("{base}.webp"),
-            source_url: clip.video_cover_url.clone(),
-            hash: webp_art_hash(&clip.video_cover_url, &toggles.webp),
             content: None,
         });
     }
@@ -402,9 +398,7 @@ mod tests {
 
     use super::*;
     use crate::config::AudioFormat;
-    use crate::hash::{
-        art_hash, art_url_hash, content_hash, synced_lrc_source_hash, webp_art_hash,
-    };
+    use crate::hash::{art_hash, art_url_hash, content_hash, synced_lrc_source_hash};
     use crate::lineage::LineageContext;
     use crate::naming::NamingConfig;
     use crate::reconcile::{ArtifactKind, SourceMode};
@@ -780,14 +774,15 @@ mod tests {
     }
 
     #[test]
-    fn build_desired_emits_cover_webp_only_when_animated_and_video_present() {
+    fn animated_covers_embed_via_art_hash_not_a_webp_sidecar() {
         let with_video = Clip {
             video_cover_url: "https://cdn.suno.ai/id-a/video.mp4".to_owned(),
             ..art_clip("id-a")
         };
         let clips = [&with_video];
 
-        let desired = build_desired(
+        // Feature off: only the static CoverJpg sidecar; art_hash is the static hash.
+        let off = build_desired(
             &clips,
             AudioFormat::Flac,
             &modes_for(&clips, SourceMode::Mirror),
@@ -796,37 +791,14 @@ mod tests {
             ArtifactToggles::default(),
             &NamingConfig::default(),
         );
-        assert_eq!(desired[0].artifacts.len(), 1);
-        assert_eq!(desired[0].artifacts[0].kind, ArtifactKind::CoverJpg);
+        assert_eq!(off[0].artifacts.len(), 1);
+        assert_eq!(off[0].artifacts[0].kind, ArtifactKind::CoverJpg);
+        assert_eq!(off[0].art_hash, crate::hash::art_hash(&with_video));
 
-        let desired = build_desired(
-            &clips,
-            AudioFormat::Flac,
-            &modes_for(&clips, SourceMode::Mirror),
-            &no_contexts(),
-            &no_collisions(),
-            ArtifactToggles {
-                animated_covers: true,
-                ..Default::default()
-            },
-            &NamingConfig::default(),
-        );
-        let base = desired[0].path.strip_suffix(".flac").unwrap();
-        let webp = desired[0]
-            .artifacts
-            .iter()
-            .find(|art| art.kind == ArtifactKind::CoverWebp)
-            .expect("animated cover expected");
-        assert_eq!(webp.path, format!("{base}.webp"));
-        assert_eq!(webp.source_url, with_video.video_cover_url);
-        assert_eq!(
-            webp.hash,
-            webp_art_hash(&with_video.video_cover_url, &WebpEncodeSettings::default())
-        );
-
-        let no_video = art_clip("id-b");
-        let clips = [&no_video];
-        let desired = build_desired(
+        // Feature on: still NO `CoverWebp` sidecar and the `.jpg` stays static,
+        // but the audio's art_hash now reflects the animated-WebP embed intent,
+        // so it drifts from the static hash and triggers a retag.
+        let on = build_desired(
             &clips,
             AudioFormat::Flac,
             &modes_for(&clips, SourceMode::Mirror),
@@ -839,11 +811,67 @@ mod tests {
             &NamingConfig::default(),
         );
         assert!(
-            desired[0]
+            on[0]
                 .artifacts
                 .iter()
                 .all(|art| art.kind != ArtifactKind::CoverWebp)
         );
+        assert_eq!(
+            on[0]
+                .artifacts
+                .iter()
+                .filter(|a| a.kind == ArtifactKind::CoverJpg)
+                .count(),
+            1
+        );
+        assert_ne!(
+            on[0].art_hash, off[0].art_hash,
+            "embed intent drifts the art hash"
+        );
+        assert_eq!(
+            on[0].art_hash,
+            crate::hash::embedded_art_hash(&with_video, true, &WebpEncodeSettings::default())
+        );
+
+        // A clip with no video preview is unaffected: art_hash stays static.
+        let no_video = art_clip("id-b");
+        let clips = [&no_video];
+        let on_novideo = build_desired(
+            &clips,
+            AudioFormat::Flac,
+            &modes_for(&clips, SourceMode::Mirror),
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                animated_covers: true,
+                ..Default::default()
+            },
+            &NamingConfig::default(),
+        );
+        assert!(
+            on_novideo[0]
+                .artifacts
+                .iter()
+                .all(|art| art.kind != ArtifactKind::CoverWebp)
+        );
+        assert_eq!(on_novideo[0].art_hash, crate::hash::art_hash(&no_video));
+
+        // ALAC cannot embed WebP, so even with a video preview its art_hash stays
+        // static (it always embeds the JPEG).
+        let clips = [&with_video];
+        let alac = build_desired(
+            &clips,
+            AudioFormat::Alac,
+            &modes_for(&clips, SourceMode::Mirror),
+            &no_contexts(),
+            &no_collisions(),
+            ArtifactToggles {
+                animated_covers: true,
+                ..Default::default()
+            },
+            &NamingConfig::default(),
+        );
+        assert_eq!(alac[0].art_hash, crate::hash::art_hash(&with_video));
     }
 
     #[test]

@@ -98,5 +98,5 @@ pub use synced::{
     PendingCheck, SYNCED_LRC_RECHECK_SECS, apply_synced_lrc, preview_synced_lrc,
     synced_lyrics_targets,
 };
-pub use tag::{TrackMetadata, tag_flac, tag_mp3};
+pub use tag::{Cover, TrackMetadata, flac_picture_data_budget, tag_flac, tag_mp3};
 pub use tag_alac::tag_alac;

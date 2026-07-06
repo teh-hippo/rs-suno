@@ -493,10 +493,11 @@ fn strictly_under(path: &str, base: &str) -> bool {
     }
 }
 
-/// A stub [`Ffmpeg`] that returns canned bytes (or a failure) for both the
-/// FLAC and animated-WebP transcode paths.
+/// A stub [`Ffmpeg`] that returns canned bytes (or a failure) for the FLAC and
+/// animated-WebP transcode paths independently.
 pub(crate) struct StubFfmpeg {
-    output: Vec<u8>,
+    lossless: Vec<u8>,
+    webp: Vec<u8>,
     fault: Option<StubFault>,
 }
 
@@ -507,28 +508,33 @@ enum StubFault {
     OutOfSpace,
 }
 
+/// Canned animated-WebP bytes for the cover path, small enough to fit the FLAC
+/// picture budget so the embed uses WebP unless a test overrides the size.
+fn canned_webp() -> Vec<u8> {
+    b"RIFF\x00\x00\x00\x00WEBP-canned-anim".to_vec()
+}
+
 impl StubFfmpeg {
-    /// Returns a minimal, structurally valid FLAC the pure tagger can parse.
+    /// Returns a minimal, structurally valid FLAC for `wav_to_lossless` and small
+    /// canned WebP bytes for `mp4_to_webp`, so the pure tagger can parse both.
     pub(crate) fn flac() -> Self {
         Self {
-            output: minimal_flac(),
+            lossless: minimal_flac(),
+            webp: canned_webp(),
             fault: None,
         }
     }
 
-    /// Returns canned WebP bytes for the animated-cover path, so core tests
-    /// exercise `mp4_to_webp` without invoking a real ffmpeg.
+    /// Alias of [`flac`](Self::flac) for tests whose focus is the WebP path.
     pub(crate) fn webp() -> Self {
-        Self {
-            output: b"RIFF\x00\x00\x00\x00WEBP-canned-anim".to_vec(),
-            fault: None,
-        }
+        Self::flac()
     }
 
     /// Always fails, to exercise the transcode-failure path (FLAC or WebP).
     pub(crate) fn failing() -> Self {
         Self {
-            output: Vec::new(),
+            lossless: Vec::new(),
+            webp: Vec::new(),
             fault: Some(StubFault::Generic),
         }
     }
@@ -536,14 +542,22 @@ impl StubFfmpeg {
     /// Always fails out-of-space, to exercise the disk-full transcode abort.
     pub(crate) fn out_of_space() -> Self {
         Self {
-            output: Vec::new(),
+            lossless: Vec::new(),
+            webp: Vec::new(),
             fault: Some(StubFault::OutOfSpace),
         }
     }
 
-    fn result(&self) -> Result<Vec<u8>, FfmpegError> {
+    /// Override the WebP transcode output, e.g. an oversized cover to exercise
+    /// the FLAC fit-guard's JPEG fallback.
+    pub(crate) fn with_webp(mut self, webp: Vec<u8>) -> Self {
+        self.webp = webp;
+        self
+    }
+
+    fn outcome(&self, output: &[u8]) -> Result<Vec<u8>, FfmpegError> {
         match &self.fault {
-            None => Ok(self.output.clone()),
+            None => Ok(output.to_vec()),
             Some(StubFault::Generic) => Err(FfmpegError::new("simulated transcode failure")),
             Some(StubFault::OutOfSpace) => Err(FfmpegError::out_of_space(
                 "simulated out-of-space transcode",
@@ -558,7 +572,7 @@ impl Ffmpeg for StubFfmpeg {
         _wav: &[u8],
         _format: AudioFormat,
     ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
-        let out = self.result();
+        let out = self.outcome(&self.lossless);
         async move { out }
     }
 
@@ -567,7 +581,7 @@ impl Ffmpeg for StubFfmpeg {
         _mp4: &[u8],
         _settings: WebpEncodeSettings,
     ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
-        let out = self.result();
+        let out = self.outcome(&self.webp);
         async move { out }
     }
 }
