@@ -4,8 +4,6 @@
 //! TOML text directly. `show` redacts every token-bearing setting.
 
 use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -14,12 +12,7 @@ use suno_core::Config;
 use crate::cli::args::{ConfigAddAccountArgs, ConfigArgs, ConfigCommand, GlobalArgs};
 use crate::cli::desired::ExitCode;
 use crate::cli::logs;
-#[cfg(unix)]
-use crate::download::set_permissions_or_remove;
-use crate::download::write_atomic_private;
-
-const PRIVATE_CONFIG_FILE_MODE: u32 = 0o600;
-const PRIVATE_CONFIG_DIR_MODE: u32 = 0o700;
+use crate::download::write_atomic;
 
 /// Run a `config` subcommand.
 pub fn run_config(global: &GlobalArgs, args: &ConfigArgs) -> Result<ExitCode> {
@@ -404,39 +397,19 @@ fn account_block(label: &str, token: &str, root: Option<&str>) -> String {
 }
 
 /// Write config text atomically, creating the parent directory.
+///
+/// The config can hold a token, but it is written in plaintext with the
+/// platform's default permissions: std has no portable owner-only primitive and
+/// there is no lightweight cross-platform crate for one. Keep secrets out of the
+/// file by using `token_command` with a secret manager, or restrict the file
+/// yourself (for example `chmod 600`).
 fn write_config(path: &Path, body: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
-        set_private_permissions(parent, PRIVATE_CONFIG_DIR_MODE)?;
     }
-    write_atomic_private(path, body.as_bytes())
-        .with_context(|| format!("could not write {}", path.display()))?;
-    secure_private_file(path, PRIVATE_CONFIG_FILE_MODE)
-}
-
-#[cfg(unix)]
-fn set_private_permissions(path: &Path, mode: u32) -> Result<()> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .with_context(|| format!("could not set permissions on {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn secure_private_file(path: &Path, mode: u32) -> Result<()> {
-    set_permissions_or_remove(path, mode)
-        .with_context(|| format!("could not set permissions on {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_permissions(_path: &Path, _mode: u32) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn secure_private_file(_path: &Path, _mode: u32) -> Result<()> {
-    Ok(())
+    write_atomic(path, body.as_bytes())
+        .with_context(|| format!("could not write {}", path.display()))
 }
 
 /// Escape a string for a double-quoted TOML value.
@@ -607,29 +580,20 @@ mod tests {
         assert!(shown.contains("\"abc123\" = copy  # (unknown)"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn write_config_sets_private_permissions() {
-        use std::os::unix::fs::PermissionsExt;
+    fn write_config_creates_parent_and_writes_body() {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir =
-            Path::new("target").join(format!("config-private-{}-{stamp}", std::process::id()));
+        let dir = Path::new("target").join(format!("config-write-{}-{stamp}", std::process::id()));
         let path = dir.join("suno/config.toml");
-        write_config(&path, "[accounts.default]\ntoken = \"x\"\n").unwrap();
+        let body = "[accounts.default]\ntoken = \"x\"\n";
+        write_config(&path, body).unwrap();
 
-        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        let dir_mode = std::fs::metadata(path.parent().unwrap())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(file_mode, 0o600);
-        assert_eq!(dir_mode, 0o700);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
 
         let _ = std::fs::remove_dir_all(dir);
     }

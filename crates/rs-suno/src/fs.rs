@@ -220,6 +220,17 @@ mod tests {
         dir
     }
 
+    /// Create a directory symlink for tests, portably. Returns `false` when the
+    /// platform refuses (Windows without the symlink privilege) so the caller
+    /// can skip rather than fail: `symlink` on Unix, `symlink_dir` on Windows.
+    fn try_symlink_dir(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(target, link);
+        made.is_ok()
+    }
+
     #[test]
     fn accepts_a_nested_relative_path() {
         let root = temp_root();
@@ -326,20 +337,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
-    #[cfg(unix)]
     #[test]
     fn rejects_a_write_through_a_symlinked_parent() {
-        use std::os::unix::fs::symlink;
         let root = temp_root();
         let outside = temp_root();
         std::fs::create_dir_all(&outside).unwrap();
         let adapter = FsAdapter::new(root.clone());
         // A local co-user plants "root/Artist" -> outside, aiming the write out.
-        symlink(
-            std::fs::canonicalize(&outside).unwrap(),
-            root.join("Artist"),
-        )
-        .unwrap();
+        if !try_symlink_dir(
+            &std::fs::canonicalize(&outside).unwrap(),
+            &root.join("Artist"),
+        ) {
+            return;
+        }
 
         assert!(adapter.write_atomic("Artist/song.flac", b"x").is_err());
         // Nothing landed in the symlink target.
@@ -349,21 +359,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
-    #[cfg(unix)]
     #[test]
     fn rejects_a_remove_through_a_symlinked_parent() {
-        use std::os::unix::fs::symlink;
         let root = temp_root();
         let outside = temp_root();
         std::fs::create_dir_all(&outside).unwrap();
         // A victim file the mirror must never delete through the planted link.
         std::fs::write(outside.join("victim"), b"keep").unwrap();
         let adapter = FsAdapter::new(root.clone());
-        symlink(
-            std::fs::canonicalize(&outside).unwrap(),
-            root.join("Artist"),
-        )
-        .unwrap();
+        if !try_symlink_dir(
+            &std::fs::canonicalize(&outside).unwrap(),
+            &root.join("Artist"),
+        ) {
+            return;
+        }
 
         assert!(adapter.remove("Artist/victim").is_err());
         assert!(outside.join("victim").exists());
@@ -372,20 +381,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
-    #[cfg(unix)]
     #[test]
     fn rejects_a_rename_target_through_a_symlinked_parent() {
-        use std::os::unix::fs::symlink;
         let root = temp_root();
         let outside = temp_root();
         std::fs::create_dir_all(&outside).unwrap();
         let adapter = FsAdapter::new(root.clone());
         adapter.write_atomic("from.flac", b"x").unwrap();
-        symlink(
-            std::fs::canonicalize(&outside).unwrap(),
-            root.join("Artist"),
-        )
-        .unwrap();
+        if !try_symlink_dir(
+            &std::fs::canonicalize(&outside).unwrap(),
+            &root.join("Artist"),
+        ) {
+            return;
+        }
 
         assert!(adapter.rename("from.flac", "Artist/to.flac").is_err());
         assert!(!outside.join("to.flac").exists());
@@ -394,16 +402,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
-    #[cfg(unix)]
     #[test]
     fn prune_does_not_follow_a_symlink_out_of_the_root() {
-        use std::os::unix::fs::symlink;
         let root = temp_root();
         let outside = temp_root();
         // An empty directory outside the root that the prune must never reach.
         std::fs::create_dir_all(outside.join("victim_empty")).unwrap();
         let adapter = FsAdapter::new(root.clone());
-        symlink(std::fs::canonicalize(&outside).unwrap(), root.join("link")).unwrap();
+        if !try_symlink_dir(
+            &std::fs::canonicalize(&outside).unwrap(),
+            &root.join("link"),
+        ) {
+            return;
+        }
 
         adapter.prune_empty_dirs("").unwrap();
 
@@ -414,17 +425,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
-    #[cfg(unix)]
     #[test]
     fn prune_rejects_a_symlinked_named_root() {
-        use std::os::unix::fs::symlink;
         let root = temp_root();
         let outside = temp_root();
         std::fs::create_dir_all(outside.join("victim_empty")).unwrap();
         let adapter = FsAdapter::new(root.clone());
         // A named base that is itself a planted symlink must be refused, not
         // walked: read_dir(base) would otherwise escape the root.
-        symlink(std::fs::canonicalize(&outside).unwrap(), root.join("album")).unwrap();
+        if !try_symlink_dir(
+            &std::fs::canonicalize(&outside).unwrap(),
+            &root.join("album"),
+        ) {
+            return;
+        }
 
         assert!(adapter.prune_empty_dirs("album").is_err());
         assert!(outside.join("victim_empty").exists());

@@ -38,8 +38,6 @@ use crate::cli::logs;
 use crate::cli::output;
 use crate::clock::TokioClock;
 use crate::download::cleanup_stale_parts;
-#[cfg(unix)]
-use crate::download::set_permissions_or_remove;
 use crate::ffmpeg::FfmpegAdapter;
 use crate::fs::FsAdapter;
 use crate::http::ReqwestHttp;
@@ -49,8 +47,6 @@ const WAV_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How many deletion paths the confirmation prompt lists before summarising.
 const PROMPT_PATH_LIMIT: usize = 3;
 const LAST_RUN_NAME: &str = ".suno-last-run";
-#[cfg(unix)]
-const PRIVATE_STATE_FILE_MODE: u32 = 0o600;
 /// Maximum number of accounts processed concurrently when `--all` targets
 /// multiple accounts. Accounts share no mutable state (separate clients,
 /// tokens, destination roots, manifests, and lineage files), so per-account
@@ -501,6 +497,10 @@ async fn run_token_command(label: &str, command: &str) -> std::result::Result<St
     Ok(token.to_owned())
 }
 
+/// Build the process that runs a `token_command` under the platform's default
+/// shell, so a command can use pipes and expansion (for example
+/// `pass show suno | head -1`). The shell is the only platform-specific part:
+/// `sh -c` on Unix, `cmd /C` on Windows.
 #[cfg(unix)]
 fn token_command_process(command: &str) -> Command {
     let mut cmd = Command::new("sh");
@@ -2413,14 +2413,13 @@ fn read_last_run(dest: &Path) -> Option<u64> {
 }
 
 fn write_last_run(dest: &Path) {
-    let path = dest.join(LAST_RUN_NAME);
-    if std::fs::write(&path, now_secs().to_string()).is_ok() {
-        #[cfg(unix)]
-        let _ = set_permissions_or_remove(&path, PRIVATE_STATE_FILE_MODE);
-    }
+    let _ = std::fs::write(dest.join(LAST_RUN_NAME), now_secs().to_string());
 }
 
 /// Resolve when a SIGINT (Ctrl-C) or, on Unix, a SIGTERM arrives.
+///
+/// `ctrl_c` is cross-platform; the extra `SIGTERM` arm is Unix-only because
+/// Windows has no such signal.
 async fn wait_for_signal() {
     #[cfg(unix)]
     {
@@ -2519,24 +2518,16 @@ mod tests {
         format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 
-    #[cfg(unix)]
     #[test]
-    fn last_run_marker_uses_private_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn last_run_marker_round_trips() {
         let dir = Path::new("target").join(format!(
-            "run-last-run-perms-{}-{}",
+            "run-last-run-{}-{}",
             std::process::id(),
             now_secs()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         write_last_run(&dir);
-        let mode = std::fs::metadata(dir.join(LAST_RUN_NAME))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
+        assert!(read_last_run(&dir).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

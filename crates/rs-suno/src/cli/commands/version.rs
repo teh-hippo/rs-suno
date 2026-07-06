@@ -59,6 +59,7 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
         if candidate.is_file() {
             return Some(candidate);
         }
+        // On Windows an executable in PATH carries an `.exe` suffix the bare name omits.
         if cfg!(windows) {
             let exe = dir.join(format!("{name}.exe"));
             if exe.is_file() {

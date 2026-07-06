@@ -3,8 +3,6 @@
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -40,113 +38,37 @@ pub async fn cover(http: &impl Http, clip: &Clip) -> Option<Vec<u8>> {
 /// The temp name is process-unique so two concurrent writers never race on it,
 /// and a drop guard removes it if writing or the final rename fails.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    write_atomic_impl(path, bytes, false)
+    write_atomic_with(path, bytes, replace)
 }
 
-/// Write `bytes` to `path` atomically via a temporary file and rename.
-///
-/// On Unix the temporary file is created with private (`0600`) permissions. That
-/// mode is not applied on non-Unix platforms, where the private flag is ignored.
-pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    write_atomic_impl(path, bytes, true)
-}
-
-fn write_atomic_impl(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
-    write_atomic_with(path, bytes, private, replace)
-}
-
-fn write_atomic_with<F>(
-    path: &Path,
-    bytes: &[u8],
-    private: bool,
-    replace_fn: F,
-) -> std::io::Result<()>
+fn write_atomic_with<F>(path: &Path, bytes: &[u8], replace_fn: F) -> std::io::Result<()>
 where
     F: FnOnce(&Path, &Path) -> std::io::Result<()>,
 {
     let tmp = temp_sibling(path);
     let _scratch = Scratch(tmp.clone());
-    write_temp_file(&tmp, bytes, private)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    file.write_all(bytes)?;
     replace_fn(&tmp, path)?;
     Ok(())
-}
-
-#[cfg(unix)]
-fn write_temp_file(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
-    let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true);
-    if private {
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(path)?;
-    file.write_all(bytes)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_temp_file(path: &Path, bytes: &[u8], _private: bool) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)?;
-    Ok(())
-}
-
-/// Apply `mode` to `path`. If hardening fails, remove the file only when its
-/// current permissions are looser than `mode`; a file already at least as
-/// restrictive as `mode` is kept so a transient chmod failure never discards it.
-#[cfg(unix)]
-pub fn set_permissions_or_remove(path: &Path, mode: u32) -> std::io::Result<()> {
-    set_permissions_or_remove_with(path, mode, |path| {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-    })
-}
-
-#[cfg(unix)]
-fn set_permissions_or_remove_with<F>(
-    path: &Path,
-    mode: u32,
-    set_permissions: F,
-) -> std::io::Result<()>
-where
-    F: FnOnce(&Path) -> std::io::Result<()>,
-{
-    let Err(err) = set_permissions(path) else {
-        return Ok(());
-    };
-    // Hardening failed. Keep the file when its permissions are already at least
-    // as restrictive as the target (they grant nothing beyond `mode`); only
-    // remove it when leaving it could expose it more widely than intended.
-    if let Ok(meta) = std::fs::metadata(path) {
-        let current = meta.permissions().mode() & 0o777;
-        if current & !(mode & 0o777) == 0 {
-            return Ok(());
-        }
-    }
-    match std::fs::remove_file(path) {
-        Ok(()) => Err(err),
-        Err(remove_err) => Err(std::io::Error::new(
-            err.kind(),
-            format!(
-                "{err}; also could not remove insecure file {}: {remove_err}",
-                path.display()
-            ),
-        )),
-    }
 }
 
 /// Rename `from` onto `to`, replacing any existing destination without ever
 /// leaving `to` missing.
 ///
-/// `std::fs::rename` overwrites atomically on Unix but fails on Windows when the
-/// destination exists. The fallback first stashes the current destination aside,
-/// swaps in the new file, and only drops the stash once the swap succeeds; a
-/// failed swap restores the stash, so a valid file always sits at `to`.
+/// A plain `std::fs::rename` replaces the destination on most platforms, but can
+/// fail when `to` already exists and cannot be replaced in a single step
+/// (notably a case-only rename that resolves to one file). The fallback first
+/// stashes the current destination aside, swaps in the new file, and only drops
+/// the stash once the swap succeeds; a failed swap restores the stash, so a
+/// valid file always sits at `to`.
 ///
 /// On a cross-device move (EXDEV / `CrossesDevices`) the file is first copied
 /// to a temporary sibling of `to` (same filesystem), then renamed locally.
 ///
-/// When `from` and `to` are the same inode (case-only rename on a
-/// case-insensitive filesystem) the stash path is skipped; an intermediate
-/// rename is used on Windows to satisfy `MoveFile` semantics.
+/// When `from` and `to` are the same file (a case-only rename on a
+/// case-insensitive filesystem) the stash path is skipped and an intermediate
+/// rename is used, since stashing the destination would also move the source.
 pub(crate) fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
@@ -200,45 +122,30 @@ fn stash_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Rename when `from` and `to` are the same inode (case-only rename on a
-/// case-insensitive filesystem). The direct rename works on Unix/macOS; on
-/// Windows `MoveFile` refuses same-inode moves, so an intermediate name is used.
+/// Rename when `from` and `to` are the same file differing only in case on a
+/// case-insensitive filesystem. A direct rename can be refused when the source
+/// and destination resolve to a single file, so an intermediate name is always
+/// used.
 fn case_only_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        let mid = to.with_file_name(format!(
-            ".{}.{}.rename",
-            to.file_name()
-                .map(|n| n.to_string_lossy())
-                .unwrap_or_default(),
-            unique_stamp()
-        ));
-        std::fs::rename(from, &mid)?;
-        std::fs::rename(&mid, to)
-    }
-    #[cfg(not(windows))]
-    std::fs::rename(from, to)
+    let mid = to.with_file_name(format!(
+        ".{}.{}.rename",
+        to.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default(),
+        unique_stamp()
+    ));
+    std::fs::rename(from, &mid)?;
+    std::fs::rename(&mid, to)
 }
 
-/// True when `a` and `b` refer to the same on-disk file.
+/// True when `a` and `b` resolve to the same on-disk file.
 ///
-/// On Unix this compares device + inode numbers. On other platforms it falls
-/// back to canonicalized-path equality (catches case-insensitive NTFS).
+/// Uses canonicalised-path equality, which also catches a case-only difference
+/// on a case-insensitive filesystem (both names resolve to the stored casing).
 fn same_file(a: &Path, b: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        match (std::fs::metadata(a), std::fs::metadata(b)) {
-            (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
-            _ => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-            (Ok(ca), Ok(cb)) => ca == cb,
-            _ => false,
-        }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
     }
 }
 
@@ -319,8 +226,6 @@ fn cleanup_stale_parts_older_than(dir: &Path, threshold: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn write_atomic_replaces_and_leaves_no_temp() {
@@ -365,82 +270,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn write_atomic_private_uses_owner_only_permissions() {
-        let dir = Path::new("target").join(format!("write-atomic-private-{}", unique_stamp()));
+    fn write_atomic_cleans_up_temp_on_rename_failure() {
+        let dir = Path::new("target").join(format!("write-atomic-fail-{}", unique_stamp()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("secret.bin");
-
-        write_atomic_private(&path, b"secret").unwrap();
-
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        let names: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec!["secret.bin".to_owned()]);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn set_permissions_or_remove_cleans_up_on_failure() {
-        let dir = Path::new("target").join(format!("write-atomic-cleanup-{}", unique_stamp()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("secret.bin");
-        std::fs::write(&path, b"secret").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-
-        let err = set_permissions_or_remove_with(&path, 0o600, |_path| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "no chmod",
-            ))
-        })
-        .unwrap_err();
-
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-        assert!(!path.exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn set_permissions_or_remove_keeps_already_restrictive_file() {
-        let dir = Path::new("target").join(format!("write-atomic-keep-{}", unique_stamp()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("secret.bin");
-        std::fs::write(&path, b"secret").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        set_permissions_or_remove_with(&path, 0o600, |_path| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "no chmod",
-            ))
-        })
-        .unwrap();
-
-        assert!(path.exists());
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn write_atomic_private_cleans_up_temp_on_rename_failure() {
-        let dir = Path::new("target").join(format!("write-atomic-private-fail-{}", unique_stamp()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("secret.bin");
+        let path = dir.join("clip.bin");
         assert!(
-            write_atomic_with(&path, b"secret", true, |_tmp, _path| {
+            write_atomic_with(&path, b"data", |_tmp, _path| {
                 Err(std::io::Error::other("rename failed"))
             })
             .is_err()
@@ -501,23 +337,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn same_file_detects_same_inode() {
+    fn same_file_matches_only_the_same_path() {
         let dir = Path::new("target").join(format!("samefile-{}", unique_stamp()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.bin");
         std::fs::write(&a, b"x").unwrap();
-        // Hard link: same inode, different name.
-        let b = dir.join("b.bin");
-        std::fs::hard_link(&a, &b).unwrap();
 
-        assert!(same_file(&a, &b));
+        // A path is the same file as itself, even reached via a redundant `.`.
         assert!(same_file(&a, &a));
+        assert!(same_file(&a, &dir.join(".").join("a.bin")));
 
+        // A distinct file with identical contents is not the same file.
         let c = dir.join("c.bin");
         std::fs::write(&c, b"x").unwrap();
         assert!(!same_file(&a, &c));
+
+        // A path that cannot be canonicalised (missing) never matches.
+        assert!(!same_file(&a, &dir.join("missing.bin")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn case_only_rename_moves_via_intermediate() {
+        let dir = Path::new("target").join(format!("case-rename-{}", unique_stamp()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("song.mp3");
+        let to = dir.join("renamed.mp3");
+        std::fs::write(&from, b"audio").unwrap();
+
+        case_only_rename(&from, &to).unwrap();
+
+        assert_eq!(std::fs::read(&to).unwrap(), b"audio");
+        assert!(!from.exists());
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["renamed.mp3".to_owned()]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
