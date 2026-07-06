@@ -40,6 +40,7 @@ use crate::cli::failure;
 use crate::cli::last_run;
 use crate::cli::logs;
 use crate::cli::output;
+use crate::cli::signal;
 use crate::cli::task_output;
 use crate::cli::task_output::eprint_t;
 use crate::cli::token;
@@ -1009,7 +1010,7 @@ async fn execute_plan(
         };
         tokio::select! {
             out = suno_core::execute(&plan, &mut manifest, &mut store.albums, &mut store.playlists, desired, &synced, ports, &opts) => Some(out),
-            _ = wait_for_signal() => None,
+            _ = signal::wait_for_signal() => None,
         }
     };
 
@@ -1805,32 +1806,6 @@ fn set_pin(
     });
     *owner_dirty = true;
     *pending_pin = Some(PendingPin { action, notice });
-}
-
-/// Resolve when a SIGINT (Ctrl-C) or, on Unix, a SIGTERM arrives.
-///
-/// `ctrl_c` is cross-platform; the extra `SIGTERM` arm is Unix-only because
-/// Windows has no such signal.
-async fn wait_for_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(term) => term,
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
 }
 
 #[cfg(test)]
