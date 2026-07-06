@@ -14,11 +14,11 @@ use std::io::IsTerminal;
 use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
-    AdoptDecision, ArtifactToggles, ClerkAuth, Config, FlagOverrides, LineageContext, NamingConfig,
-    Owner, OwnerGate, PlaylistState, ResolveOpts, SourceMode, SunoClient, adopt_decision,
-    adoption_enumerated, album_desired, area_mode, build_desired, build_modes_by_id,
-    build_scoped_playlist_desired, clip_stems, deletion_allowed, library_authoritative,
-    narrows_downloads, owner_gate, resolve_roots, source_statuses, union_clips,
+    ArtifactToggles, ClerkAuth, Config, FlagOverrides, LineageContext, NamingConfig, OwnerGate,
+    PlaylistState, ResolveOpts, SourceMode, SunoClient, adopt_decision, adoption_enumerated,
+    album_desired, area_mode, build_desired, build_modes_by_id, build_scoped_playlist_desired,
+    clip_stems, deletion_allowed, library_authoritative, narrows_downloads, owner_gate,
+    resolve_roots, source_statuses, union_clips,
 };
 
 use crate::cli::account;
@@ -31,6 +31,7 @@ use crate::cli::desired::{
 };
 use crate::cli::execute;
 use crate::cli::failure;
+use crate::cli::identity::{Identity, IdentityContext, IdentityOutcome};
 use crate::cli::last_run;
 use crate::cli::logs;
 use crate::cli::output;
@@ -320,74 +321,34 @@ async fn run_one(
     // album title is resolved, so the folder path, ALBUM tag, change hash, index
     // and disambiguation all reflect the preferred name from one source.
     store.set_album_overrides(settings.album_overrides.clone());
-    let mut owner_dirty = false;
-    // A pin/adopt/re-pin that actually happens this run: its notice is printed
-    // and its audit line written only on the executing path, where the pin is
-    // persisted (F1: check/dry-run must not claim a pin they never save).
-    let mut pending_pin: Option<PendingPin> = None;
+    let mut identity = Identity::default();
+    let identity_ctx = IdentityContext {
+        configured_id: settings.account_id.as_deref(),
+        user_id: &user_id,
+        account: &account,
+        dest,
+        allow_account_change: args.allow_account_change,
+        verbosity,
+    };
 
     // PHASE 1: decide identity with no network via the pure gate, then apply
-    // the side-effects (pin, refresh, abort) here.
+    // the side-effects (pin, refresh, abort) via `identity`.
     let gate = owner_gate(
         store.owner(),
         settings.account_id.as_deref(),
         &user_id,
         args.allow_account_change,
     );
-    let mut force_additive = gate.is_additive();
-    match gate {
-        OwnerGate::AbortConfigMismatch => {
-            eprint_t!(
-                "error: the configured account_id ({}) does not match the authenticated account (id {}). Refusing to run to protect the library.",
-                short_id(settings.account_id.as_deref().unwrap_or_default()),
-                short_id(&user_id)
-            );
-            return Ok(ExitCode::Safety);
+    match identity.apply_owner_gate(&mut store, gate, &identity_ctx) {
+        IdentityOutcome::Abort { code, message } => {
+            eprint_t!("{message}");
+            return Ok(code);
         }
-        OwnerGate::AbortMismatch => {
-            let pinned = store.owner().expect("mismatch implies a pinned owner");
-            eprint_t!(
-                "error: this library belongs to {} (id {}) but the token authenticates as {} (id {}). Refusing to run to protect the library. Pass --allow-account-change to re-pin it to the authenticated account, or use a different destination.",
-                pinned.display_name,
-                short_id(&pinned.user_id),
-                account,
-                short_id(&user_id)
-            );
-            return Ok(ExitCode::Safety);
-        }
-        OwnerGate::Repin => {
-            let previous = store
-                .owner()
-                .map(|owner| owner.display_name.clone())
-                .unwrap_or_default();
-            set_pin(
-                &mut store,
-                &mut owner_dirty,
-                &mut pending_pin,
-                &user_id,
-                &account,
-                "REPIN",
-                format!(
-                    "notice: re-pinned this library from {} to {} (id {}); this run is additive (no deletions). Run 'sync' again to mirror.",
-                    previous,
-                    account,
-                    short_id(&user_id)
-                ),
-            );
-        }
-        OwnerGate::Proceed => {
-            if store.refresh_display_name(&account) {
-                owner_dirty = true;
-            }
-            if args.allow_account_change && verbosity >= 0 {
-                eprint_t!(
-                    "notice: --allow-account-change had no effect; this library already belongs to {} (id {}).",
-                    account,
-                    short_id(&user_id)
-                );
+        IdentityOutcome::Continue { notice } => {
+            if let Some(notice) = notice {
+                eprint_t!("{notice}");
             }
         }
-        OwnerGate::FirstUse => {}
     }
 
     let client = SunoClient::new(auth, TokioClock);
@@ -398,7 +359,7 @@ async fn run_one(
     // is neither explicitly selected nor `"off"`, an implicit full-library copy
     // protector is injected so a Mirror area can never delete a library-exclusive
     // file (D1).
-    let force_copy_initial = verb == Verb::Copy || force_additive;
+    let force_copy_initial = verb == Verb::Copy || identity.force_additive();
     let selection = resolve_selection(
         verb.mode(),
         args.mode.map(SourceMode::from),
@@ -511,63 +472,11 @@ async fn run_one(
             enumerated,
             args.allow_account_change,
         );
-        force_additive = force_additive || decision.is_additive();
-        match decision {
-            AdoptDecision::PinFresh => {
-                set_pin(
-                    &mut store,
-                    &mut owner_dirty,
-                    &mut pending_pin,
-                    &user_id,
-                    &account,
-                    "PIN",
-                    format!(
-                        "notice: pinned this library to {} (id {}).",
-                        account,
-                        short_id(&user_id)
-                    ),
-                );
-            }
-            AdoptDecision::PinAdopt => {
-                set_pin(
-                    &mut store,
-                    &mut owner_dirty,
-                    &mut pending_pin,
-                    &user_id,
-                    &account,
-                    "ADOPT",
-                    format!(
-                        "notice: adopted this existing library for {} (id {}).",
-                        account,
-                        short_id(&user_id)
-                    ),
-                );
-            }
-            AdoptDecision::AdoptForced => {
-                set_pin(
-                    &mut store,
-                    &mut owner_dirty,
-                    &mut pending_pin,
-                    &user_id,
-                    &account,
-                    "ADOPT",
-                    format!(
-                        "notice: adopted this library for {} (id {}) despite no overlap; this run is additive (no deletions). Run 'sync' again to mirror.",
-                        account,
-                        short_id(&user_id)
-                    ),
-                );
-            }
-            AdoptDecision::Abort => {
-                eprint_t!(
-                    "error: none of the authenticated account's clips ({}, id {}) match this library at {}. Refusing to run in case the token authenticates as a different Suno account. Pass --allow-account-change to adopt it, or use a different destination.",
-                    account,
-                    short_id(&user_id),
-                    dest.display()
-                );
-                return Ok(ExitCode::Safety);
-            }
-            AdoptDecision::SkipPin => {}
+        if let IdentityOutcome::Abort { code, message } =
+            identity.apply_adopt_decision(&mut store, decision, &identity_ctx)
+        {
+            eprint_t!("{message}");
+            return Ok(code);
         }
     }
 
@@ -575,7 +484,7 @@ async fn run_one(
     // verb or a force-additive run (re-pin/adopt) rewrites every area to Copy, so
     // no Mirror source remains and deletion is impossible; the protector already
     // never armed anything.
-    let force_copy = verb == Verb::Copy || force_additive;
+    let force_copy = verb == Verb::Copy || identity.force_additive();
     let sources = source_statuses(&areas, force_copy);
     let can_delete = deletion_allowed(&sources);
     // Art, `.m3u8`, and the library index are gated on an authoritative Library:
@@ -824,13 +733,13 @@ async fn run_one(
     // resolution (`graph_changed`) or when the identity guard pinned or updated
     // the owner (`owner_dirty`); an owner-only change must persist even when
     // resolution failed, so a first-use adoption is durable.
-    if graph_changed || owner_dirty {
+    if graph_changed || identity.owner_dirty() {
         logs::save_graph(dest, &store)?;
     }
     // Announce and audit an actual pin only now, on the executing path, so a
     // notice is never printed for a pin that check/dry-run would not persist
     // (F1). The full id goes to the audit file, never to stderr.
-    if let Some(pin) = &pending_pin {
+    if let Some(pin) = identity.pending_pin() {
         if verbosity >= -1 {
             eprint_t!("{}", pin.notice);
         }
@@ -839,7 +748,7 @@ async fn run_one(
         }
     }
 
-    let is_sync = verb == Verb::Sync && !force_additive;
+    let is_sync = verb == Verb::Sync && !identity.force_additive();
     // The mass-delete cap counts every destructive action, audio and sidecar
     // alike (HARDENING B2), so a run that would mass-delete artifacts aborts too.
     let delete_count = plan.deletes() + plan.artifact_deletes() + plan.stem_deletes();
@@ -908,41 +817,6 @@ async fn run_one(
         library_authoritative,
     )
     .await
-}
-
-/// The first eight characters of an id, for user-facing messages. The full id
-/// (and never the token) may go to the audit file, but only a short prefix is
-/// ever printed.
-fn short_id(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
-}
-
-/// A pin/adopt/re-pin that this run will apply: its audit action (`PIN`,
-/// `ADOPT`, or `REPIN`) and the stderr notice, both deferred to the executing
-/// path so they are emitted only when the pin is actually persisted.
-struct PendingPin {
-    action: &'static str,
-    notice: String,
-}
-
-/// Record a pin/adopt/re-pin: pin the owner in `store`, mark `owner_dirty`,
-/// and queue the `PendingPin` notice. Called from the four owner-gate arms
-/// that differ only in `action` and `notice`.
-fn set_pin(
-    store: &mut suno_core::LineageStore,
-    owner_dirty: &mut bool,
-    pending_pin: &mut Option<PendingPin>,
-    user_id: &str,
-    account: &str,
-    action: &'static str,
-    notice: String,
-) {
-    store.pin_owner(Owner {
-        user_id: user_id.to_owned(),
-        display_name: account.to_owned(),
-    });
-    *owner_dirty = true;
-    *pending_pin = Some(PendingPin { action, notice });
 }
 
 #[cfg(test)]

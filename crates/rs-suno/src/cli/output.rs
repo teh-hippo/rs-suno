@@ -257,8 +257,11 @@ fn artifact_label(kind: ArtifactKind) -> &'static str {
     }
 }
 
-/// The first eight characters of a clip id, for compact progress lines.
-fn short_id(id: &str) -> String {
+/// The first eight characters of an id, for compact progress lines and
+/// user-facing messages. Char-based so a multi-byte code point is never split;
+/// the full id (and never the token) may go to the audit file, but only this
+/// short prefix is ever printed.
+pub(crate) fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
