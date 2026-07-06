@@ -5,7 +5,7 @@
 //! to a process exit code. Keeping these out of the IO orchestration lets the
 //! safety-critical rules be unit-tested directly.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use suno_core::{
     AreaMode, AreasConfig, ExecOutcome, LIKED_PLAYLIST_ID, Playlist, RunStatus, SourceMode,
@@ -282,38 +282,6 @@ fn rewrite_all_copy(
     }
 }
 
-/// Fold a union of per-area clip lists into `modes_by_id`, mapping each clip id
-/// to the deduplicated, canonical-order list of every area mode holding it.
-///
-/// `areas` is processed in canonical area order (Library, Liked, Playlists), and
-/// each clip's modes are normalised to `[Mirror, Copy]` order, mirroring
-/// `aggregate_desired` so a clip held by both a mirror and a copy area is
-/// copy-protected (SYNC-8).
-pub fn build_modes_by_id(areas: &[(SourceMode, Vec<String>)]) -> HashMap<String, Vec<SourceMode>> {
-    let mut map: HashMap<String, (bool, bool)> = HashMap::new();
-    for (mode, ids) in areas {
-        for id in ids {
-            let entry = map.entry(id.clone()).or_insert((false, false));
-            match mode {
-                SourceMode::Mirror => entry.0 = true,
-                SourceMode::Copy => entry.1 = true,
-            }
-        }
-    }
-    map.into_iter()
-        .map(|(id, (mirror, copy))| {
-            let mut modes = Vec::new();
-            if mirror {
-                modes.push(SourceMode::Mirror);
-            }
-            if copy {
-                modes.push(SourceMode::Copy);
-            }
-            (id, modes)
-        })
-        .collect()
-}
-
 /// Why a `--playlist` value could not be resolved to one of the account's own
 /// playlists. Both variants map to [`ExitCode::Config`] at the call site.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,6 +451,7 @@ pub fn run_exit_code(outcome: &ExecOutcome) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use suno_core::Failure;
 
     #[test]
@@ -757,19 +726,6 @@ mod tests {
         // A mirror override arms the run, so the protector is injected.
         assert!(sel.is_armed());
         assert!(sel.library.unwrap().protector);
-    }
-
-    // Test 7 (SYNC-8): a clip held by a Mirror and a Copy area is stamped
-    // `[Mirror, Copy]`, so build_desired carries the Copy protection.
-    #[test]
-    fn build_modes_by_id_copy_wins_and_dedups() {
-        let map = build_modes_by_id(&[
-            (SourceMode::Mirror, vec!["a".to_owned(), "b".to_owned()]),
-            (SourceMode::Copy, vec!["b".to_owned(), "c".to_owned()]),
-        ]);
-        assert_eq!(map["a"], vec![SourceMode::Mirror]);
-        assert_eq!(map["b"], vec![SourceMode::Mirror, SourceMode::Copy]);
-        assert_eq!(map["c"], vec![SourceMode::Copy]);
     }
 
     // Test 11: two distinct clips from two areas render two distinct paths in one
