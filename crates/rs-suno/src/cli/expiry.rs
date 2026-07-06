@@ -6,7 +6,7 @@
 
 use suno_core::{ClerkAuth, TOKEN_EXPIRY_WARN_DAYS, TokenExpiry};
 
-use crate::cli::run;
+use crate::cli::wallclock;
 
 const DAY_SECS: i64 = 86_400;
 
@@ -37,7 +37,7 @@ pub fn warn_token_expiry(label: &str, auth: &ClerkAuth, verbosity: i8) {
     if verbosity < -1 {
         return;
     }
-    let now = run::now_secs() as i64;
+    let now = wallclock::now_secs() as i64;
     let window = TOKEN_EXPIRY_WARN_DAYS * DAY_SECS;
     if let Some(message) = token_expiry_message(label, auth.token_expiry(now, window)) {
         eprintln!("{message}");
