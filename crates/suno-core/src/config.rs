@@ -161,13 +161,25 @@ impl fmt::Display for VideoCoverRetention {
     }
 }
 
-/// Global default settings applied when no account or source override applies.
+/// The overridable settings block, shared verbatim by every precedence tier.
+///
+/// One declaration is the whole point: a new knob is added here once and every
+/// tier that flattens it (global [`Defaults`], per-account [`AccountConfig`],
+/// per-source [`SourceConfig`], and the CLI [`FlagOverrides`]) gains it, instead
+/// of being mirrored across the structs where forgetting one silently drops the
+/// setting from a tier.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct Defaults {
+pub struct Settings {
     pub format: Option<AudioFormat>,
     pub concurrency: Option<u32>,
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
+    /// The command whose stdout mints a token. Resolved from the
+    /// `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the per-source, per-account,
+    /// and global `token_command` config keys. There is deliberately no
+    /// `--token-command` flag, so setting this on [`FlagOverrides::settings`] is
+    /// intentionally never read by [`Config::resolve`]; configure it in
+    /// `[defaults]`/`[accounts.<label>]`/`[sources.<name>]` or the environment.
     pub token_command: Option<String>,
     pub animated_covers: Option<bool>,
     pub video_cover_retention: Option<VideoCoverRetention>,
@@ -186,60 +198,31 @@ pub struct Defaults {
     pub character_set: Option<CharacterSet>,
 }
 
+/// Global default settings applied when no account or source override applies.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Defaults {
+    #[serde(flatten)]
+    pub settings: Settings,
+}
+
 /// Per-source overridable settings within an account.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SourceConfig {
-    pub format: Option<AudioFormat>,
-    pub concurrency: Option<u32>,
-    pub retries: Option<u32>,
-    pub min_newest: Option<u32>,
-    pub token_command: Option<String>,
-    pub animated_covers: Option<bool>,
-    pub video_cover_retention: Option<VideoCoverRetention>,
-    pub animated_cover_quality: Option<u8>,
-    pub animated_cover_max_fps: Option<u32>,
-    pub animated_cover_max_width: Option<u32>,
-    pub animated_cover_compression_level: Option<u8>,
-    pub animated_cover_lossless: Option<bool>,
-    pub details_sidecar: Option<bool>,
-    pub lyrics_sidecar: Option<bool>,
-    pub lrc_sidecar: Option<bool>,
-    pub video_mp4: Option<bool>,
-    pub download_stems: Option<bool>,
-    pub stem_format: Option<StemFormat>,
-    pub naming_template: Option<String>,
-    pub character_set: Option<CharacterSet>,
+    #[serde(flatten)]
+    pub settings: Settings,
 }
 
 /// Configuration for a single named account.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AccountConfig {
     pub token: Option<String>,
-    pub token_command: Option<String>,
     pub root: Option<String>,
     /// Optional Suno user id to assert this account authenticates as, refusing
     /// to run on a mismatch (a belt-and-braces check alongside the on-disk
     /// owner pin in the lineage store).
     pub account_id: Option<String>,
-    pub format: Option<AudioFormat>,
-    pub concurrency: Option<u32>,
-    pub retries: Option<u32>,
-    pub min_newest: Option<u32>,
-    pub animated_covers: Option<bool>,
-    pub video_cover_retention: Option<VideoCoverRetention>,
-    pub animated_cover_quality: Option<u8>,
-    pub animated_cover_max_fps: Option<u32>,
-    pub animated_cover_max_width: Option<u32>,
-    pub animated_cover_compression_level: Option<u8>,
-    pub animated_cover_lossless: Option<bool>,
-    pub details_sidecar: Option<bool>,
-    pub lyrics_sidecar: Option<bool>,
-    pub lrc_sidecar: Option<bool>,
-    pub video_mp4: Option<bool>,
-    pub download_stems: Option<bool>,
-    pub stem_format: Option<StemFormat>,
-    pub naming_template: Option<String>,
-    pub character_set: Option<CharacterSet>,
+    #[serde(flatten)]
+    pub settings: Settings,
     #[serde(default)]
     pub sources: HashMap<String, SourceConfig>,
     /// Per-area mode selection (`sync` vs `copy`) for this account's library,
@@ -405,99 +388,100 @@ impl Config {
             .transpose()?;
 
         let format = flags
+            .settings
             .format
             .or(format_from_env)
-            .or_else(|| src.and_then(|s| s.format))
-            .or(acc.format)
-            .or(self.defaults.format)
+            .or_else(|| src.and_then(|s| s.settings.format))
+            .or(acc.settings.format)
+            .or(self.defaults.settings.format)
             .unwrap_or(AudioFormat::Flac);
 
         let concurrency = resolve_parsed(
-            flags.concurrency,
+            flags.settings.concurrency,
             env_val("CONCURRENCY"),
-            src.and_then(|s| s.concurrency),
-            acc.concurrency,
-            self.defaults.concurrency,
+            src.and_then(|s| s.settings.concurrency),
+            acc.settings.concurrency,
+            self.defaults.settings.concurrency,
             4,
             "CONCURRENCY",
         )?;
 
         let retries = resolve_parsed(
-            flags.retries,
+            flags.settings.retries,
             env_val("RETRIES"),
-            src.and_then(|s| s.retries),
-            acc.retries,
-            self.defaults.retries,
+            src.and_then(|s| s.settings.retries),
+            acc.settings.retries,
+            self.defaults.settings.retries,
             3,
             "RETRIES",
         )?;
 
         let min_newest = resolve_parsed(
-            flags.min_newest,
+            flags.settings.min_newest,
             env_val("MIN_NEWEST"),
-            src.and_then(|s| s.min_newest),
-            acc.min_newest,
-            self.defaults.min_newest,
+            src.and_then(|s| s.settings.min_newest),
+            acc.settings.min_newest,
+            self.defaults.settings.min_newest,
             1,
             "MIN_NEWEST",
         )?;
 
         let animated_covers = resolve_parsed(
-            flags.animated_covers,
+            flags.settings.animated_covers,
             env_val("ANIMATED_COVERS"),
-            src.and_then(|s| s.animated_covers),
-            acc.animated_covers,
-            self.defaults.animated_covers,
+            src.and_then(|s| s.settings.animated_covers),
+            acc.settings.animated_covers,
+            self.defaults.settings.animated_covers,
             false,
             "ANIMATED_COVERS",
         )?;
 
         let details_sidecar = resolve_parsed(
-            flags.details_sidecar,
+            flags.settings.details_sidecar,
             env_val("DETAILS_SIDECAR"),
-            src.and_then(|s| s.details_sidecar),
-            acc.details_sidecar,
-            self.defaults.details_sidecar,
+            src.and_then(|s| s.settings.details_sidecar),
+            acc.settings.details_sidecar,
+            self.defaults.settings.details_sidecar,
             false,
             "DETAILS_SIDECAR",
         )?;
 
         let lyrics_sidecar = resolve_parsed(
-            flags.lyrics_sidecar,
+            flags.settings.lyrics_sidecar,
             env_val("LYRICS_SIDECAR"),
-            src.and_then(|s| s.lyrics_sidecar),
-            acc.lyrics_sidecar,
-            self.defaults.lyrics_sidecar,
+            src.and_then(|s| s.settings.lyrics_sidecar),
+            acc.settings.lyrics_sidecar,
+            self.defaults.settings.lyrics_sidecar,
             false,
             "LYRICS_SIDECAR",
         )?;
 
         let lrc_sidecar = resolve_parsed(
-            flags.lrc_sidecar,
+            flags.settings.lrc_sidecar,
             env_val("LRC_SIDECAR"),
-            src.and_then(|s| s.lrc_sidecar),
-            acc.lrc_sidecar,
-            self.defaults.lrc_sidecar,
+            src.and_then(|s| s.settings.lrc_sidecar),
+            acc.settings.lrc_sidecar,
+            self.defaults.settings.lrc_sidecar,
             false,
             "LRC_SIDECAR",
         )?;
 
         let video_mp4 = resolve_parsed(
-            flags.video_mp4,
+            flags.settings.video_mp4,
             env_val("VIDEO_MP4"),
-            src.and_then(|s| s.video_mp4),
-            acc.video_mp4,
-            self.defaults.video_mp4,
+            src.and_then(|s| s.settings.video_mp4),
+            acc.settings.video_mp4,
+            self.defaults.settings.video_mp4,
             false,
             "VIDEO_MP4",
         )?;
 
         let download_stems = resolve_parsed(
-            flags.download_stems,
+            flags.settings.download_stems,
             env_val("DOWNLOAD_STEMS"),
-            src.and_then(|s| s.download_stems),
-            acc.download_stems,
-            self.defaults.download_stems,
+            src.and_then(|s| s.settings.download_stems),
+            acc.settings.download_stems,
+            self.defaults.settings.download_stems,
             false,
             "DOWNLOAD_STEMS",
         )?;
@@ -506,19 +490,20 @@ impl Config {
             .map(str::parse::<StemFormat>)
             .transpose()?;
         let stem_format = flags
+            .settings
             .stem_format
             .or(stem_format_from_env)
-            .or_else(|| src.and_then(|s| s.stem_format))
-            .or(acc.stem_format)
-            .or(self.defaults.stem_format)
+            .or_else(|| src.and_then(|s| s.settings.stem_format))
+            .or(acc.settings.stem_format)
+            .or(self.defaults.settings.stem_format)
             .unwrap_or_default();
 
         let video_cover_retention = resolve_enum(
-            flags.video_cover_retention,
+            flags.settings.video_cover_retention,
             env_val("VIDEO_COVER_RETENTION"),
-            src.and_then(|s| s.video_cover_retention),
-            acc.video_cover_retention,
-            self.defaults.video_cover_retention,
+            src.and_then(|s| s.settings.video_cover_retention),
+            acc.settings.video_cover_retention,
+            self.defaults.settings.video_cover_retention,
             None,
             "VIDEO_COVER_RETENTION",
         )?;
@@ -535,21 +520,21 @@ impl Config {
 
         let defaults_webp = WebpEncodeSettings::default();
         let animated_cover_quality = resolve_u8_ranged(
-            flags.animated_cover_quality,
+            flags.settings.animated_cover_quality,
             env_val("ANIMATED_COVER_QUALITY"),
-            src.and_then(|s| s.animated_cover_quality),
-            acc.animated_cover_quality,
-            self.defaults.animated_cover_quality,
+            src.and_then(|s| s.settings.animated_cover_quality),
+            acc.settings.animated_cover_quality,
+            self.defaults.settings.animated_cover_quality,
             defaults_webp.quality,
             "ANIMATED_COVER_QUALITY",
             0..=100,
         )?;
         let animated_cover_max_fps = resolve_parsed(
-            flags.animated_cover_max_fps,
+            flags.settings.animated_cover_max_fps,
             env_val("ANIMATED_COVER_MAX_FPS"),
-            src.and_then(|s| s.animated_cover_max_fps),
-            acc.animated_cover_max_fps,
-            self.defaults.animated_cover_max_fps,
+            src.and_then(|s| s.settings.animated_cover_max_fps),
+            acc.settings.animated_cover_max_fps,
+            self.defaults.settings.animated_cover_max_fps,
             defaults_webp.max_fps,
             "ANIMATED_COVER_MAX_FPS",
         )?;
@@ -562,55 +547,57 @@ impl Config {
                 })
             })
             .transpose()?;
-        let animated_cover_max_width = if let Some(v) = flags.animated_cover_max_width {
+        let animated_cover_max_width = if let Some(v) = flags.settings.animated_cover_max_width {
             Some(v)
         } else if let Some(v) = animated_cover_max_width_from_env {
             Some(v)
         } else {
-            src.and_then(|s| s.animated_cover_max_width)
-                .or(acc.animated_cover_max_width)
-                .or(self.defaults.animated_cover_max_width)
+            src.and_then(|s| s.settings.animated_cover_max_width)
+                .or(acc.settings.animated_cover_max_width)
+                .or(self.defaults.settings.animated_cover_max_width)
                 .or(defaults_webp.max_width)
         };
         let animated_cover_compression_level = resolve_u8_ranged(
-            flags.animated_cover_compression_level,
+            flags.settings.animated_cover_compression_level,
             env_val("ANIMATED_COVER_COMPRESSION_LEVEL"),
-            src.and_then(|s| s.animated_cover_compression_level),
-            acc.animated_cover_compression_level,
-            self.defaults.animated_cover_compression_level,
+            src.and_then(|s| s.settings.animated_cover_compression_level),
+            acc.settings.animated_cover_compression_level,
+            self.defaults.settings.animated_cover_compression_level,
             defaults_webp.compression_level,
             "ANIMATED_COVER_COMPRESSION_LEVEL",
             0..=4,
         )?;
         let animated_cover_lossless = resolve_parsed(
-            flags.animated_cover_lossless,
+            flags.settings.animated_cover_lossless,
             env_val("ANIMATED_COVER_LOSSLESS"),
-            src.and_then(|s| s.animated_cover_lossless),
-            acc.animated_cover_lossless,
-            self.defaults.animated_cover_lossless,
+            src.and_then(|s| s.settings.animated_cover_lossless),
+            acc.settings.animated_cover_lossless,
+            self.defaults.settings.animated_cover_lossless,
             defaults_webp.lossless,
             "ANIMATED_COVER_LOSSLESS",
         )?;
 
         let naming_template_from_env = env_val("NAMING_TEMPLATE").map(str::to_owned);
         let naming_template = flags
+            .settings
             .naming_template
             .clone()
             .or(naming_template_from_env)
-            .or_else(|| src.and_then(|s| s.naming_template.clone()))
-            .or_else(|| acc.naming_template.clone())
-            .or_else(|| self.defaults.naming_template.clone())
+            .or_else(|| src.and_then(|s| s.settings.naming_template.clone()))
+            .or_else(|| acc.settings.naming_template.clone())
+            .or_else(|| self.defaults.settings.naming_template.clone())
             .unwrap_or_else(|| crate::naming::DEFAULT_TEMPLATE.to_owned());
 
         let character_set_from_env = env_val("CHARACTER_SET")
             .map(str::parse::<CharacterSet>)
             .transpose()?;
         let character_set = flags
+            .settings
             .character_set
             .or(character_set_from_env)
-            .or_else(|| src.and_then(|s| s.character_set))
-            .or(acc.character_set)
-            .or(self.defaults.character_set)
+            .or_else(|| src.and_then(|s| s.settings.character_set))
+            .or(acc.settings.character_set)
+            .or(self.defaults.settings.character_set)
             .unwrap_or(CharacterSet::Unicode);
 
         let token = flags
@@ -623,9 +610,9 @@ impl Config {
             .get(&format!("SUNO_{label_env}_TOKEN_COMMAND"))
             .cloned()
             .or_else(|| env.get("SUNO_TOKEN_COMMAND").cloned())
-            .or_else(|| src.and_then(|s| s.token_command.clone()))
-            .or_else(|| acc.token_command.clone())
-            .or_else(|| self.defaults.token_command.clone());
+            .or_else(|| src.and_then(|s| s.settings.token_command.clone()))
+            .or_else(|| acc.settings.token_command.clone())
+            .or_else(|| self.defaults.settings.token_command.clone());
 
         Ok(EffectiveSettings {
             token,
@@ -756,28 +743,15 @@ pub fn label_to_env(label: &str) -> String {
 
 /// CLI flag overrides passed to [`Config::resolve`]. `None` means the flag
 /// was not provided.
+///
+/// The shared [`Settings`] block is nested rather than mirrored; only `token`
+/// is carried top-level, because it is the one identity field with a global
+/// `--token` flag. Note there is no `--token-command` flag, so
+/// `settings.token_command` is never populated from the CLI (see [`Settings`]).
 #[derive(Debug, Default)]
 pub struct FlagOverrides {
     pub token: Option<String>,
-    pub format: Option<AudioFormat>,
-    pub concurrency: Option<u32>,
-    pub retries: Option<u32>,
-    pub min_newest: Option<u32>,
-    pub animated_covers: Option<bool>,
-    pub video_cover_retention: Option<VideoCoverRetention>,
-    pub animated_cover_quality: Option<u8>,
-    pub animated_cover_max_fps: Option<u32>,
-    pub animated_cover_max_width: Option<u32>,
-    pub animated_cover_compression_level: Option<u8>,
-    pub animated_cover_lossless: Option<bool>,
-    pub details_sidecar: Option<bool>,
-    pub lyrics_sidecar: Option<bool>,
-    pub lrc_sidecar: Option<bool>,
-    pub video_mp4: Option<bool>,
-    pub download_stems: Option<bool>,
-    pub stem_format: Option<StemFormat>,
-    pub naming_template: Option<String>,
-    pub character_set: Option<CharacterSet>,
+    pub settings: Settings,
 }
 
 /// Resolved effective settings for one account/source combination.
@@ -894,19 +868,22 @@ mod tests {
             animated_cover_compression_level = 4
         "#;
         let cfg = Config::from_toml(toml).unwrap();
-        assert_eq!(cfg.defaults.format, Some(AudioFormat::Mp3));
-        assert_eq!(cfg.defaults.concurrency, Some(8));
-        assert_eq!(cfg.defaults.retries, Some(5));
-        assert_eq!(cfg.defaults.min_newest, Some(2));
-        assert_eq!(cfg.defaults.animated_covers, Some(true));
+        assert_eq!(cfg.defaults.settings.format, Some(AudioFormat::Mp3));
+        assert_eq!(cfg.defaults.settings.concurrency, Some(8));
+        assert_eq!(cfg.defaults.settings.retries, Some(5));
+        assert_eq!(cfg.defaults.settings.min_newest, Some(2));
+        assert_eq!(cfg.defaults.settings.animated_covers, Some(true));
         assert_eq!(
-            cfg.defaults.video_cover_retention,
+            cfg.defaults.settings.video_cover_retention,
             Some(VideoCoverRetention::Both)
         );
-        assert_eq!(cfg.defaults.animated_cover_quality, Some(85));
-        assert_eq!(cfg.defaults.animated_cover_max_fps, Some(18));
-        assert_eq!(cfg.defaults.animated_cover_max_width, Some(720));
-        assert_eq!(cfg.defaults.animated_cover_compression_level, Some(4));
+        assert_eq!(cfg.defaults.settings.animated_cover_quality, Some(85));
+        assert_eq!(cfg.defaults.settings.animated_cover_max_fps, Some(18));
+        assert_eq!(cfg.defaults.settings.animated_cover_max_width, Some(720));
+        assert_eq!(
+            cfg.defaults.settings.animated_cover_compression_level,
+            Some(4)
+        );
     }
 
     #[test]
@@ -941,6 +918,70 @@ mod tests {
                 album_overrides: BTreeMap::new(),
             }
         );
+    }
+
+    /// Guards that every [`Settings`] field is actually threaded through
+    /// [`Config::resolve`]. Fill `defaults` with a distinct non-compiled-default
+    /// sentinel for every field, resolve with an empty account/source/flags, and
+    /// assert each corresponding [`EffectiveSettings`] scalar reflects the
+    /// sentinel. If a future field is added to `Settings` but its resolve arm is
+    /// forgotten (the one silent-miss Option A cannot close structurally), the
+    /// new assertion here fails. `animated_covers`/`video_cover_retention` are
+    /// coupled (retention, when set, drives both `animated_covers` and
+    /// `raw_animated_cover`); their precedence is proven by the dedicated tests.
+    #[test]
+    fn resolve_reflects_every_settings_field() {
+        let sentinel = Settings {
+            format: Some(AudioFormat::Mp3),
+            concurrency: Some(99),
+            retries: Some(98),
+            min_newest: Some(42),
+            token_command: Some("sentinel-token-cmd".into()),
+            animated_covers: Some(true),
+            video_cover_retention: Some(VideoCoverRetention::Both),
+            animated_cover_quality: Some(77),
+            animated_cover_max_fps: Some(13),
+            animated_cover_max_width: Some(333),
+            animated_cover_compression_level: Some(3),
+            animated_cover_lossless: Some(true),
+            details_sidecar: Some(true),
+            lyrics_sidecar: Some(true),
+            lrc_sidecar: Some(true),
+            video_mp4: Some(true),
+            download_stems: Some(true),
+            stem_format: Some(StemFormat::Mp3),
+            naming_template: Some("SENTINEL/{id}".into()),
+            character_set: Some(CharacterSet::Ascii),
+        };
+        let cfg = Config {
+            defaults: Defaults { settings: sentinel },
+            accounts: HashMap::from([("alice".to_owned(), AccountConfig::default())]),
+        };
+
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+
+        assert_eq!(eff.format, AudioFormat::Mp3);
+        assert_eq!(eff.concurrency, 99);
+        assert_eq!(eff.retries, 98);
+        assert_eq!(eff.min_newest, 42);
+        assert_eq!(eff.token_command.as_deref(), Some("sentinel-token-cmd"));
+        // Retention `both` drives both webp and mp4 retention.
+        assert!(eff.animated_covers);
+        assert!(eff.raw_animated_cover);
+        assert_eq!(eff.video_cover_retention, VideoCoverRetention::Both);
+        assert_eq!(eff.animated_cover_webp.quality, 77);
+        assert_eq!(eff.animated_cover_webp.max_fps, 13);
+        assert_eq!(eff.animated_cover_webp.max_width, Some(333));
+        assert_eq!(eff.animated_cover_webp.compression_level, 3);
+        assert!(eff.animated_cover_webp.lossless);
+        assert!(eff.details_sidecar);
+        assert!(eff.lyrics_sidecar);
+        assert!(eff.lrc_sidecar);
+        assert!(eff.video_mp4);
+        assert!(eff.download_stems);
+        assert_eq!(eff.stem_format, StemFormat::Mp3);
+        assert_eq!(eff.naming_template, "SENTINEL/{id}");
+        assert_eq!(eff.character_set, CharacterSet::Ascii);
     }
 
     #[test]
@@ -1050,7 +1091,10 @@ mod tests {
         let env: HashMap<String, String> =
             [("SUNO_FORMAT".into(), "mp3".into())].into_iter().collect();
         let flags = FlagOverrides {
-            format: Some(AudioFormat::Wav),
+            settings: Settings {
+                format: Some(AudioFormat::Wav),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let eff = cfg.resolve("alice", None, &env, &flags).unwrap();
@@ -1210,7 +1254,10 @@ mod tests {
 
         // Flag overrides env.
         let flags = FlagOverrides {
-            animated_covers: Some(false),
+            settings: Settings {
+                animated_covers: Some(false),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let eff = cfg.resolve("alice", Some("liked"), &env, &flags).unwrap();
@@ -1254,7 +1301,10 @@ mod tests {
         );
 
         let flags = FlagOverrides {
-            video_mp4: Some(false),
+            settings: Settings {
+                video_mp4: Some(false),
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert!(
@@ -1305,7 +1355,10 @@ mod tests {
         );
 
         let flags = FlagOverrides {
-            download_stems: Some(false),
+            settings: Settings {
+                download_stems: Some(false),
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert!(
@@ -1359,7 +1412,10 @@ mod tests {
         );
 
         let flags = FlagOverrides {
-            stem_format: Some(StemFormat::Wav),
+            settings: Settings {
+                stem_format: Some(StemFormat::Wav),
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert_eq!(
@@ -1456,9 +1512,12 @@ mod tests {
         assert_eq!(eff.animated_cover_webp.quality, 90);
 
         let flags = FlagOverrides {
-            animated_cover_quality: Some(95),
-            animated_cover_max_width: Some(512),
-            animated_cover_compression_level: Some(4),
+            settings: Settings {
+                animated_cover_quality: Some(95),
+                animated_cover_max_width: Some(512),
+                animated_cover_compression_level: Some(4),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let eff = cfg.resolve("alice", Some("liked"), &env, &flags).unwrap();
@@ -1610,7 +1669,10 @@ mod tests {
                 .lossless
         );
         let flags = FlagOverrides {
-            animated_cover_lossless: Some(true),
+            settings: Settings {
+                animated_cover_lossless: Some(true),
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert!(
@@ -1683,7 +1745,10 @@ mod tests {
         assert!(eff.lyrics_sidecar);
 
         let flags = FlagOverrides {
-            lyrics_sidecar: Some(false),
+            settings: Settings {
+                lyrics_sidecar: Some(false),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let eff = cfg.resolve("alice", Some("liked"), &env, &flags).unwrap();
@@ -1821,11 +1886,85 @@ mod tests {
 
         // Flag overrides env.
         let flags = FlagOverrides {
-            naming_template: Some("{title}/{id8}".into()),
+            settings: Settings {
+                naming_template: Some("{title}/{id8}".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let eff = cfg.resolve("alice", None, &env, &flags).unwrap();
         assert_eq!(eff.naming_template, "{title}/{id8}");
+    }
+
+    #[test]
+    fn min_newest_follows_precedence() {
+        // `min_newest` is the deletion-safety floor: every tier boundary in its
+        // precedence (flag > per-account env > global env > source > account >
+        // defaults > compiled 1) must hold exactly.
+        let toml = r#"
+            [defaults]
+            min_newest = 5
+
+            [accounts.alice]
+            min_newest = 7
+
+            [accounts.alice.sources.liked]
+            min_newest = 9
+        "#;
+        let cfg = Config::from_toml(toml).unwrap();
+
+        // Compiled default when nothing is set.
+        let bare = Config::from_toml("[accounts.bob]\n").unwrap();
+        assert_eq!(
+            bare.resolve("bob", None, &no_env(), &no_flags())
+                .unwrap()
+                .min_newest,
+            1
+        );
+
+        // Per-source wins over account and defaults.
+        let eff = cfg
+            .resolve("alice", Some("liked"), &no_env(), &no_flags())
+            .unwrap();
+        assert_eq!(eff.min_newest, 9);
+
+        // Account wins over defaults.
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert_eq!(eff.min_newest, 7);
+
+        // Global env overrides file.
+        let env: HashMap<String, String> = [("SUNO_MIN_NEWEST".into(), "11".into())]
+            .into_iter()
+            .collect();
+        let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
+        assert_eq!(eff.min_newest, 11);
+
+        // Per-account env overrides global env.
+        let env: HashMap<String, String> = [
+            ("SUNO_MIN_NEWEST".into(), "11".into()),
+            ("SUNO_ALICE_MIN_NEWEST".into(), "13".into()),
+        ]
+        .into_iter()
+        .collect();
+        let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
+        assert_eq!(eff.min_newest, 13);
+
+        // Flag overrides env.
+        let flags = FlagOverrides {
+            settings: Settings {
+                min_newest: Some(15),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let eff = cfg.resolve("alice", None, &env, &flags).unwrap();
+        assert_eq!(eff.min_newest, 15);
+
+        // An invalid env value is a config error, never a silently lowered floor.
+        let bad_env: HashMap<String, String> = [("SUNO_MIN_NEWEST".into(), "notnum".into())]
+            .into_iter()
+            .collect();
+        assert!(cfg.resolve("alice", None, &bad_env, &no_flags()).is_err());
     }
 
     #[test]
@@ -1851,7 +1990,10 @@ mod tests {
 
         // Flag overrides env.
         let flags = FlagOverrides {
-            character_set: Some(CharacterSet::Ascii),
+            settings: Settings {
+                character_set: Some(CharacterSet::Ascii),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let eff = cfg.resolve("alice", None, &env, &flags).unwrap();

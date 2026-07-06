@@ -50,7 +50,7 @@ pub use client::{BillingInfo, Playlist, Stem, SunoClient};
 pub use clock::Clock;
 pub use config::{
     AccountConfig, AreaMode, AreasConfig, AudioFormat, Config, Defaults, EffectiveSettings,
-    FlagOverrides, SourceConfig, StemFormat, VideoCoverRetention,
+    FlagOverrides, Settings, SourceConfig, StemFormat, VideoCoverRetention,
 };
 pub use desired::{
     ArtifactToggles, LIKED_PLAYLIST_ID, PlaylistInput, build_desired, build_playlist_desired,
