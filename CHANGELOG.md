@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.4](https://github.com/teh-hippo/rs-suno/compare/v0.33.3...v0.33.4) (2026-07-06)
+
+
+### Documentation
+
+* refresh the module structure after the [#251](https://github.com/teh-hippo/rs-suno/issues/251)-[#255](https://github.com/teh-hippo/rs-suno/issues/255) refactors ([81d7d19](https://github.com/teh-hippo/rs-suno/commit/81d7d1972b5c740b0149d5077ea7e77b4095caaf))
+
 ## [0.33.3](https://github.com/teh-hippo/rs-suno/compare/v0.33.2...v0.33.3) (2026-07-06)
 
 
