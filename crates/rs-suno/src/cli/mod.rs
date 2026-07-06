@@ -16,6 +16,7 @@ pub mod last_run;
 pub mod logs;
 pub mod open_url;
 pub mod output;
+pub mod prompt;
 pub mod run;
 pub mod signal;
 pub mod task_output;
