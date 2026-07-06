@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
@@ -27,7 +28,8 @@ use crate::cli::args::{GlobalArgs, SyncArgs};
 use crate::cli::commands::version;
 use crate::cli::config_load;
 use crate::cli::desired::{
-    Confirm, ExitCode, confirm_decision, is_narrowed, mass_delete_abort, resolve_selection, worse,
+    Confirm, ExitCode, ResolvedSelection, confirm_decision, is_narrowed, mass_delete_abort,
+    resolve_selection, worse,
 };
 use crate::cli::execute;
 use crate::cli::failure;
@@ -240,87 +242,21 @@ async fn run_one(
         return Ok(ExitCode::Usage);
     }
 
-    let settings = {
-        let resolved = if target.implicit {
-            account::synthetic_config().resolve("default", None, env, flags)
-        } else {
-            config
-                .expect("non-implicit target has config")
-                .resolve(&target.label, None, env, flags)
-        };
-        match resolved {
-            Ok(settings) => settings,
-            Err(err) => {
-                eprint_t!("error: {err}");
-                return Ok(ExitCode::Config);
-            }
-        }
+    // Resolve settings, authenticate, and load the durable store before a single
+    // feed request (the identity guard runs against it below).
+    let Preflight {
+        settings,
+        http,
+        client,
+        mut store,
+        user_id,
+        account,
+    } = match preflight(target, config, flags, env, verbosity).await? {
+        Ok(pre) => pre,
+        Err(code) => return Ok(code),
     };
-
-    let token = match token::resolve_token(&target.label, &settings).await {
-        Ok(Some(token)) => token,
-        Ok(None) => {
-            eprint_t!(
-                "error: no token for account '{}'; pass --token, set SUNO_TOKEN or SUNO_TOKEN_COMMAND, or set token/token_command in config",
-                target.label
-            );
-            return Ok(ExitCode::Config);
-        }
-        Err(err) => {
-            eprint_t!("error: {err}");
-            return Ok(ExitCode::Config);
-        }
-    };
-
-    if settings.requires_ffmpeg() && version::ffmpeg_version().is_none() {
-        eprint_t!(
-            "error: ffmpeg is required for {} output{} but was not found on PATH; \
-             install ffmpeg or switch to mp3 format",
-            settings.format,
-            if settings.animated_covers && !settings.raw_animated_cover {
-                " and animated WebP covers"
-            } else if settings.animated_covers {
-                " and animated covers"
-            } else {
-                ""
-            }
-        );
-        return Ok(ExitCode::Config);
-    }
-
-    let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
     let dest = &target.dest;
-    let auth = ClerkAuth::new(&token);
-    if let Err(err) = auth.authenticate(&http).await {
-        return Ok(failure::report_auth_failure(&target.label, &err));
-    }
-    let account = auth.display_name().to_owned();
-    crate::cli::expiry::warn_token_expiry(&target.label, &auth, verbosity);
-    // Fail closed: the identity guard cannot run without an authenticated id,
-    // and proceeding would delete against an unverified account. authenticate()
-    // already errors on a missing id; this makes the invariant explicit.
-    let Some(user_id) = auth.user_id() else {
-        eprint_t!(
-            "error: could not determine the authenticated account for '{}'. Refusing to run to protect the library.",
-            target.label
-        );
-        return Ok(ExitCode::Auth);
-    };
 
-    // Load the durable store up front so the identity guard can compare the
-    // authenticated account against the account this library is pinned to,
-    // before a single feed request is made (PHASE 1, below). A mismatch aborts
-    // here so a swapped or mistyped token can never make another account's
-    // clips look absent from source and delete this library's files.
-    let mut store = logs::load_graph(dest)?;
-    // Derive the eligible-root set from the loaded cache so overrides and
-    // collision detection are correct even on a resolution-failed run (where
-    // `store.update` is skipped below); a successful run refreshes it again.
-    store.refresh_eligible_roots();
-    // Layer this account's manual album-name overrides onto the store before any
-    // album title is resolved, so the folder path, ALBUM tag, change hash, index
-    // and disambiguation all reflect the preferred name from one source.
-    store.set_album_overrides(settings.album_overrides.clone());
     let mut identity = Identity::default();
     let identity_ctx = IdentityContext {
         configured_id: settings.account_id.as_deref(),
@@ -351,7 +287,18 @@ async fn run_one(
         }
     }
 
-    let client = SunoClient::new(auth, TokioClock);
+    let ctx = RunCtx {
+        verb,
+        global,
+        args,
+        settings: &settings,
+        client: &client,
+        http: &http,
+        dest,
+        account: &account,
+        verbosity,
+        exit_code,
+    };
 
     // Resolve which areas this run touches and their modes (pure). CLI scope
     // flags win over `[areas]` config; a copy verb or a force-additive run
@@ -447,7 +394,6 @@ async fn run_one(
     if let Some(resolution) = &resolution {
         store.update(&clips, resolution, &wallclock::now_rfc3339());
     }
-    let colliding_albums = store.colliding_root_titles();
     // Preliminary authority for the first-use adoption check, computed before
     // any adoption can flip the run additive. A run that could delete (any
     // fully-enumerated Mirror source, e.g. a playlist under `library="off"`)
@@ -480,17 +426,207 @@ async fn run_one(
         }
     }
 
-    // Assemble the final per-area view now the run's additivity is known. A copy
-    // verb or a force-additive run (re-pin/adopt) rewrites every area to Copy, so
-    // no Mirror source remains and deletion is impossible; the protector already
-    // never armed anything.
+    // Assemble the reconcile inputs now the run's additivity is known. A copy
+    // verb or a force-additive run (re-pin/adopt) rewrites every area to Copy,
+    // so no Mirror source remains and deletion is impossible; the protector
+    // already never armed anything.
     let force_copy = verb == Verb::Copy || identity.force_additive();
-    let sources = source_statuses(&areas, force_copy);
+    let mut assembled = match assemble(
+        &ctx,
+        &areas,
+        &clips,
+        &store,
+        &selection,
+        force_copy,
+        graph_changed,
+    )
+    .await
+    {
+        Ok(assembled) => assembled,
+        Err(code) => return Ok(code),
+    };
+
+    // Dry-run and check report without touching disk; the executing run takes
+    // the lock and commits. Both open with the same reconcile against the
+    // manifest they load.
+    if global.dry_run || verb == Verb::Check {
+        dry_run_report(&ctx, &mut assembled, &store).await
+    } else {
+        execute_run(&ctx, assembled, &mut store, &identity).await
+    }
+}
+
+/// The immutable context of a single account's run: the invocation flags plus
+/// the resolved settings, authenticated client, and destination from
+/// [`preflight`]. Built once and shared by [`assemble`] and the two run-mode
+/// tails so each takes one context instead of a dozen positional arguments.
+struct RunCtx<'a> {
+    verb: Verb,
+    global: &'a GlobalArgs,
+    args: &'a SyncArgs,
+    settings: &'a suno_core::EffectiveSettings,
+    client: &'a SunoClient<TokioClock>,
+    http: &'a ReqwestHttp,
+    dest: &'a Path,
+    account: &'a str,
+    verbosity: i8,
+    exit_code: bool,
+}
+
+/// The authenticated, IO-ready context produced by [`preflight`] before any
+/// feed request: the resolved settings, HTTP adapter and Suno client, the
+/// loaded lineage store, and the authenticated account's id and display name.
+struct Preflight {
+    settings: suno_core::EffectiveSettings,
+    http: ReqwestHttp,
+    client: SunoClient<TokioClock>,
+    store: suno_core::LineageStore,
+    user_id: String,
+    account: String,
+}
+
+/// The plan inputs [`assemble`] produces once the run's additivity is known:
+/// the selected desired set plus the folder-art and playlist desired state and
+/// the deletion gates the reconcile and executor read.
+struct Assembled {
+    desired: Vec<suno_core::Desired>,
+    albums_desired: Vec<suno_core::AlbumDesired>,
+    playlist_desired: Vec<suno_core::PlaylistDesired>,
+    stored_playlists: BTreeMap<String, PlaylistState>,
+    sources: Vec<suno_core::SourceStatus>,
+    library_authoritative: bool,
+    playlists_enumerated: bool,
+    graph_changed: bool,
+}
+
+/// Resolve settings, mint an authenticated client, and load the durable store,
+/// before any feed request. Returns the ready context, or an [`ExitCode`] for
+/// every preflight refusal (bad config, missing token or ffmpeg, an auth
+/// failure, or an unidentifiable account) so the caller returns it unchanged.
+async fn preflight(
+    target: &account::TargetSpec,
+    config: Option<&Config>,
+    flags: &FlagOverrides,
+    env: &HashMap<String, String>,
+    verbosity: i8,
+) -> Result<std::result::Result<Preflight, ExitCode>> {
+    let settings = {
+        let resolved = if target.implicit {
+            account::synthetic_config().resolve("default", None, env, flags)
+        } else {
+            config
+                .expect("non-implicit target has config")
+                .resolve(&target.label, None, env, flags)
+        };
+        match resolved {
+            Ok(settings) => settings,
+            Err(err) => {
+                eprint_t!("error: {err}");
+                return Ok(Err(ExitCode::Config));
+            }
+        }
+    };
+
+    let token = match token::resolve_token(&target.label, &settings).await {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            eprint_t!(
+                "error: no token for account '{}'; pass --token, set SUNO_TOKEN or SUNO_TOKEN_COMMAND, or set token/token_command in config",
+                target.label
+            );
+            return Ok(Err(ExitCode::Config));
+        }
+        Err(err) => {
+            eprint_t!("error: {err}");
+            return Ok(Err(ExitCode::Config));
+        }
+    };
+
+    if settings.requires_ffmpeg() && version::ffmpeg_version().is_none() {
+        eprint_t!(
+            "error: ffmpeg is required for {} output{} but was not found on PATH; \
+             install ffmpeg or switch to mp3 format",
+            settings.format,
+            if settings.animated_covers && !settings.raw_animated_cover {
+                " and animated WebP covers"
+            } else if settings.animated_covers {
+                " and animated covers"
+            } else {
+                ""
+            }
+        );
+        return Ok(Err(ExitCode::Config));
+    }
+
+    let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
+    let dest = &target.dest;
+    let auth = ClerkAuth::new(&token);
+    if let Err(err) = auth.authenticate(&http).await {
+        return Ok(Err(failure::report_auth_failure(&target.label, &err)));
+    }
+    let account = auth.display_name().to_owned();
+    crate::cli::expiry::warn_token_expiry(&target.label, &auth, verbosity);
+    // Fail closed: the identity guard cannot run without an authenticated id,
+    // and proceeding would delete against an unverified account. authenticate()
+    // already errors on a missing id; this makes the invariant explicit.
+    let Some(user_id) = auth.user_id() else {
+        eprint_t!(
+            "error: could not determine the authenticated account for '{}'. Refusing to run to protect the library.",
+            target.label
+        );
+        return Ok(Err(ExitCode::Auth));
+    };
+
+    // Load the durable store up front so the identity guard can compare the
+    // authenticated account against the account this library is pinned to,
+    // before a single feed request is made. A mismatch aborts so a swapped or
+    // mistyped token can never make another account's clips look absent from
+    // source and delete this library's files.
+    let mut store = logs::load_graph(dest)?;
+    // Derive the eligible-root set from the loaded cache so overrides and
+    // collision detection are correct even on a resolution-failed run (where
+    // `store.update` is skipped below); a successful run refreshes it again.
+    store.refresh_eligible_roots();
+    // Layer this account's manual album-name overrides onto the store before any
+    // album title is resolved, so the folder path, ALBUM tag, change hash, index
+    // and disambiguation all reflect the preferred name from one source.
+    store.set_album_overrides(settings.album_overrides.clone());
+
+    let client = SunoClient::new(auth, TokioClock);
+    Ok(Ok(Preflight {
+        settings,
+        http,
+        client,
+        store,
+        user_id,
+        account,
+    }))
+}
+
+/// Assemble the reconcile inputs once the run's additivity is known: resolve
+/// the per-area modes and deletion gates, select and name the clips, thread in
+/// existing stems, and build the folder-art and playlist desired state. Returns
+/// [`ExitCode::Config`] for an unparseable `--since`.
+async fn assemble(
+    ctx: &RunCtx<'_>,
+    areas: &[suno_core::AreaListing],
+    clips: &[suno_core::Clip],
+    store: &suno_core::LineageStore,
+    selection: &ResolvedSelection,
+    force_copy: bool,
+    graph_changed: bool,
+) -> std::result::Result<Assembled, ExitCode> {
+    let settings = ctx.settings;
+    let args = ctx.args;
+    let verbosity = ctx.verbosity;
+
+    let sources = source_statuses(areas, force_copy);
     let can_delete = deletion_allowed(&sources);
     // Art, `.m3u8`, and the library index are gated on an authoritative Library:
     // a Library area present in the selection (the implicit protector counts;
     // `library="off"` does not) that fully enumerated.
-    let library_authoritative = library_authoritative(&areas, force_copy);
+    let library_authoritative = library_authoritative(areas, force_copy);
+    let colliding_albums = store.colliding_root_titles();
 
     // Every clip's modes across the areas holding it, so each Desired carries the
     // Copy protection of any Copy area even when a Mirror area also holds it
@@ -510,7 +646,7 @@ async fn run_one(
         Ok(since) => since,
         Err(message) => {
             eprint_t!("error: {message}");
-            return Ok(ExitCode::Config);
+            return Err(ExitCode::Config);
         }
     };
     // `--limit`/`--since` narrow the selection only on a run that cannot delete
@@ -538,9 +674,9 @@ async fn run_one(
         since: if truncate { since } else { None },
         min_newest: settings.min_newest as usize,
         now: wallclock::now_secs(),
-        last_run: last_run::read_last_run(dest),
+        last_run: last_run::read_last_run(ctx.dest),
     };
-    let selected = select(&clips, &params);
+    let selected = select(clips, &params);
     let contexts: HashMap<String, LineageContext> = selected
         .iter()
         .map(|clip| (clip.id.clone(), store.context_for(clip)))
@@ -574,8 +710,8 @@ async fn run_one(
     let stems_by_id = stems::list_existing_stems(
         settings.download_stems,
         &selected,
-        &client,
-        &http,
+        ctx.client,
+        ctx.http,
         settings.concurrency,
     )
     .await;
@@ -613,8 +749,8 @@ async fn run_one(
     let (playlist_desired, playlists_enumerated) =
         if selection.is_plain_library() && library_authoritative {
             areas::fetch_playlist_desired(
-                &client,
-                &http,
+                ctx.client,
+                ctx.http,
                 &desired,
                 &mut protected_playlists,
                 verbosity,
@@ -623,9 +759,9 @@ async fn run_one(
             .await
         } else {
             build_scoped_playlist_desired(
-                &areas,
+                areas,
                 &desired,
-                &store,
+                store,
                 &mut protected_playlists,
                 force_copy,
                 !truncate,
@@ -640,60 +776,84 @@ async fn run_one(
         .map(|(id, state)| (id.clone(), state.clone()))
         .collect();
 
-    let dry_run = global.dry_run || verb == Verb::Check;
+    Ok(Assembled {
+        desired,
+        albums_desired,
+        playlist_desired,
+        stored_playlists,
+        sources,
+        library_authoritative,
+        playlists_enumerated,
+        graph_changed,
+    })
+}
 
-    // Dry-run and check report without touching disk: the destination is not
-    // created and no lock is taken. A missing manifest reads as empty. The synced
-    // `.lrc` preview reflects which clips would be (re)fetched and written,
-    // without any network fetch.
-    if dry_run {
-        let manifest = logs::load_manifest(dest)?;
-        suno_core::preview_synced_lrc(
-            &mut desired,
-            &manifest,
-            wallclock::now_secs(),
-            settings.lrc_sidecar,
-        );
-        let plan = execute::reconcile_run(
-            &manifest,
-            dest,
-            &desired,
-            &albums_desired,
-            &store.albums,
-            &playlist_desired,
-            &stored_playlists,
-            &sources,
-            library_authoritative,
-            playlists_enumerated,
-        )
-        .await;
-        if verbosity >= 1 {
-            let no_failures = HashSet::new();
-            for line in output::action_lines(&plan, &no_failures, verbosity) {
-                eprint_t!("{line}");
-            }
+/// The dry-run / check tail: report the plan without touching disk. No lock is
+/// taken and the destination is not created; a missing manifest reads as empty.
+/// The synced `.lrc` preview reflects which clips would be written, with no
+/// network fetch. `check --exit-code` returns [`ExitCode::General`] on changes.
+async fn dry_run_report(
+    ctx: &RunCtx<'_>,
+    assembled: &mut Assembled,
+    store: &suno_core::LineageStore,
+) -> Result<ExitCode> {
+    let manifest = logs::load_manifest(ctx.dest)?;
+    suno_core::preview_synced_lrc(
+        &mut assembled.desired,
+        &manifest,
+        wallclock::now_secs(),
+        ctx.settings.lrc_sidecar,
+    );
+    let plan = execute::reconcile_run(&execute::ReconcileInputs {
+        manifest: &manifest,
+        dest: ctx.dest,
+        desired: &assembled.desired,
+        albums_desired: &assembled.albums_desired,
+        albums: &store.albums,
+        playlist_desired: &assembled.playlist_desired,
+        playlists: &assembled.stored_playlists,
+        sources: &assembled.sources,
+        library_authoritative: assembled.library_authoritative,
+        playlists_enumerated: assembled.playlists_enumerated,
+    })
+    .await;
+    if ctx.verbosity >= 1 {
+        let no_failures = HashSet::new();
+        for line in output::action_lines(&plan, &no_failures, ctx.verbosity) {
+            eprint_t!("{line}");
         }
-        if verbosity >= -1 {
-            eprint_t!("{}", output::dry_summary(&account, &plan));
-            // Read-only orphan report: audio files on disk that no manifest entry
-            // tracks (moved or renamed by hand, or left from an older layout).
-            // Listed only, never matched to a clip, renamed, or deleted (#146).
-            let orphans = suno_core::untracked_audio(&manifest, &execute::walk_audio_files(dest));
-            if !orphans.is_empty() {
-                eprint_t!("{}", output::orphan_report(&orphans));
-            }
-        }
-        if verb == Verb::Check && exit_code && prompt::plan_has_changes(&plan) {
-            return Ok(ExitCode::General);
-        }
-        return Ok(ExitCode::Ok);
     }
+    if ctx.verbosity >= -1 {
+        eprint_t!("{}", output::dry_summary(ctx.account, &plan));
+        // Read-only orphan report: audio files on disk that no manifest entry
+        // tracks (moved or renamed by hand, or left from an older layout).
+        // Listed only, never matched to a clip, renamed, or deleted (#146).
+        let orphans = suno_core::untracked_audio(&manifest, &execute::walk_audio_files(ctx.dest));
+        if !orphans.is_empty() {
+            eprint_t!("{}", output::orphan_report(&orphans));
+        }
+    }
+    if ctx.verb == Verb::Check && ctx.exit_code && prompt::plan_has_changes(&plan) {
+        return Ok(ExitCode::General);
+    }
+    Ok(ExitCode::Ok)
+}
 
-    // The executing run creates the destination, then takes the lock *before*
-    // loading the manifest so a concurrent run cannot plan against it and then
-    // execute a stale plan over the other run's writes. The lock lives to the
-    // end of the function, covering reconcile, the confirmation prompt, and
-    // execute.
+/// The executing tail: create the destination, take the lock *before* loading
+/// the manifest so a concurrent run cannot plan against it then execute a stale
+/// plan, reconcile under the lock, persist the graph and any pin before execute
+/// (durability H4), gate deletions (the mass-delete cap and the confirmation
+/// prompt), then run the plan. The lock lives to the end of the function.
+async fn execute_run(
+    ctx: &RunCtx<'_>,
+    mut assembled: Assembled,
+    store: &mut suno_core::LineageStore,
+    identity: &Identity,
+) -> Result<ExitCode> {
+    let dest = ctx.dest;
+    let settings = ctx.settings;
+    let verbosity = ctx.verbosity;
+
     std::fs::create_dir_all(dest)
         .with_context(|| format!("could not create {}", dest.display()))?;
     let _lock = logs::acquire_lock(dest)?;
@@ -705,27 +865,27 @@ async fn run_one(
     // then plans the `.lrc` writes from the ACTUAL body, and the executor embeds
     // the same alignment as MP3 `SYLT`/plain-lyric tags.
     let (synced, pending_checks) = synced_lyrics::resolve_synced_lyrics(
-        &mut desired,
+        &mut assembled.desired,
         &manifest,
-        &client,
-        &http,
+        ctx.client,
+        ctx.http,
         settings.lrc_sidecar,
         verbosity,
         settings.concurrency,
     )
     .await;
-    let plan = execute::reconcile_run(
-        &manifest,
+    let plan = execute::reconcile_run(&execute::ReconcileInputs {
+        manifest: &manifest,
         dest,
-        &desired,
-        &albums_desired,
-        &store.albums,
-        &playlist_desired,
-        &stored_playlists,
-        &sources,
-        library_authoritative,
-        playlists_enumerated,
-    )
+        desired: &assembled.desired,
+        albums_desired: &assembled.albums_desired,
+        albums: &store.albums,
+        playlist_desired: &assembled.playlist_desired,
+        playlists: &assembled.stored_playlists,
+        sources: &assembled.sources,
+        library_authoritative: assembled.library_authoritative,
+        playlists_enumerated: assembled.playlists_enumerated,
+    })
     .await;
 
     // Persist the lineage graph *before* execute (durability H4), under the same
@@ -733,8 +893,8 @@ async fn run_one(
     // resolution (`graph_changed`) or when the identity guard pinned or updated
     // the owner (`owner_dirty`); an owner-only change must persist even when
     // resolution failed, so a first-use adoption is durable.
-    if graph_changed || identity.owner_dirty() {
-        logs::save_graph(dest, &store)?;
+    if assembled.graph_changed || identity.owner_dirty() {
+        logs::save_graph(dest, store)?;
     }
     // Announce and audit an actual pin only now, on the executing path, so a
     // notice is never printed for a pin that check/dry-run would not persist
@@ -748,23 +908,23 @@ async fn run_one(
         }
     }
 
-    let is_sync = verb == Verb::Sync && !identity.force_additive();
+    let is_sync = ctx.verb == Verb::Sync && !identity.force_additive();
     // The mass-delete cap counts every destructive action, audio and sidecar
     // alike (HARDENING B2), so a run that would mass-delete artifacts aborts too.
     let delete_count = plan.deletes() + plan.artifact_deletes() + plan.stem_deletes();
     if is_sync
         && mass_delete_abort(
-            desired.len(),
+            assembled.desired.len(),
             manifest.len(),
             delete_count,
             settings.min_newest,
-            args.min_newest == Some(0),
-            global.yes,
+            ctx.args.min_newest == Some(0),
+            ctx.global.yes,
         )
     {
         eprint_t!(
             "error: sync aborted -- deletion safety rule triggered\n\nThe listing yielded {} clip(s), which would delete {} of {} local file(s).\nThis is almost certainly a listing error. No files were deleted.\n\nIf you intended to delete everything, pass --min-newest 0 --yes to confirm.",
-            desired.len(),
+            assembled.desired.len(),
             delete_count,
             manifest.len()
         );
@@ -774,7 +934,7 @@ async fn run_one(
     match confirm_decision(
         is_sync,
         delete_count,
-        global.yes,
+        ctx.global.yes,
         std::io::stdin().is_terminal(),
     ) {
         Confirm::Proceed => {}
@@ -796,25 +956,25 @@ async fn run_one(
     if verbosity == 0 {
         eprint_t!(
             "{}",
-            output::progress_start(verb.progress_word(), &account, &plan)
+            output::progress_start(ctx.verb.progress_word(), ctx.account, &plan)
         );
     }
 
     execute::execute_plan(
-        verb.summary_label(),
+        ctx.verb.summary_label(),
         plan,
-        &desired,
+        &assembled.desired,
         manifest,
         synced,
         pending_checks,
-        &mut store,
-        &client,
-        &http,
+        store,
+        ctx.client,
+        ctx.http,
         dest,
-        &settings,
-        &account,
+        settings,
+        ctx.account,
         verbosity,
-        library_authoritative,
+        assembled.library_authoritative,
     )
     .await
 }

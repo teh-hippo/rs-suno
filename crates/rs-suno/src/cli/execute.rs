@@ -192,6 +192,22 @@ pub(crate) async fn execute_plan(
     Ok(run_exit_code(&outcome))
 }
 
+/// The inputs to [`reconcile_run`]: the loaded manifest and destination plus the
+/// assembled desired state and the deletion gates. Bundled so both run-mode
+/// tails build one value instead of threading ten positional arguments.
+pub(crate) struct ReconcileInputs<'a> {
+    pub manifest: &'a suno_core::Manifest,
+    pub dest: &'a Path,
+    pub desired: &'a [suno_core::Desired],
+    pub albums_desired: &'a [AlbumDesired],
+    pub albums: &'a BTreeMap<String, AlbumArt>,
+    pub playlist_desired: &'a [PlaylistDesired],
+    pub playlists: &'a BTreeMap<String, PlaylistState>,
+    pub sources: &'a [SourceStatus],
+    pub library_authoritative: bool,
+    pub playlists_enumerated: bool,
+}
+
 /// Reconcile `desired` against `manifest` (already loaded), then append the
 /// folder-art and playlist plans.
 ///
@@ -215,34 +231,28 @@ pub(crate) async fn execute_plan(
 /// carries the extra `library_authoritative` gate: without an authoritative
 /// Library the folder view is partial, so art is neither rewritten (the caller
 /// passes an empty `albums_desired`) nor deleted.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn reconcile_run(
-    manifest: &suno_core::Manifest,
-    dest: &Path,
-    desired: &[suno_core::Desired],
-    albums_desired: &[AlbumDesired],
-    albums: &BTreeMap<String, AlbumArt>,
-    playlist_desired: &[PlaylistDesired],
-    playlists: &BTreeMap<String, PlaylistState>,
-    sources: &[SourceStatus],
-    library_authoritative: bool,
-    playlists_enumerated: bool,
-) -> suno_core::Plan {
-    let local = stat_manifest(dest, manifest, albums, playlists).await;
-    let can_delete = deletion_allowed(sources);
-    let art_can_delete = can_delete && library_authoritative;
-    let mut plan = reconcile(manifest, desired, &local, sources);
+pub(crate) async fn reconcile_run(inputs: &ReconcileInputs<'_>) -> suno_core::Plan {
+    let local = stat_manifest(
+        inputs.dest,
+        inputs.manifest,
+        inputs.albums,
+        inputs.playlists,
+    )
+    .await;
+    let can_delete = deletion_allowed(inputs.sources);
+    let art_can_delete = can_delete && inputs.library_authoritative;
+    let mut plan = reconcile(inputs.manifest, inputs.desired, &local, inputs.sources);
     plan.actions.extend(plan_album_artifacts(
-        albums_desired,
-        albums,
+        inputs.albums_desired,
+        inputs.albums,
         art_can_delete,
         &local,
     ));
     plan.actions.extend(plan_playlist_artifacts(
-        playlist_desired,
-        playlists,
+        inputs.playlist_desired,
+        inputs.playlists,
         can_delete,
-        playlists_enumerated,
+        inputs.playlists_enumerated,
         &local,
     ));
     plan
@@ -387,18 +397,18 @@ mod tests {
             fully_enumerated: false,
         }];
         let manifest = logs::load_manifest(&dir).unwrap();
-        let plan = reconcile_run(
-            &manifest,
-            &dir,
-            &[],
-            &[],
-            &BTreeMap::new(),
-            &[],
-            &BTreeMap::new(),
-            &sources,
-            false,
-            false,
-        )
+        let plan = reconcile_run(&ReconcileInputs {
+            manifest: &manifest,
+            dest: &dir,
+            desired: &[],
+            albums_desired: &[],
+            albums: &BTreeMap::new(),
+            playlist_desired: &[],
+            playlists: &BTreeMap::new(),
+            sources: &sources,
+            library_authoritative: false,
+            playlists_enumerated: false,
+        })
         .await;
         assert!(manifest.is_empty());
         assert!(plan.actions.is_empty());
