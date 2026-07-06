@@ -138,71 +138,89 @@ fn show(global: &GlobalArgs) -> Result<ExitCode> {
 fn render_show(config: &Config) -> String {
     let mut out = String::new();
     let d = &config.defaults;
-    if d.format.is_some()
-        || d.concurrency.is_some()
-        || d.retries.is_some()
-        || d.min_newest.is_some()
-        || d.token_command.is_some()
-        || d.animated_covers.is_some()
-        || d.video_cover_retention.is_some()
-        || d.animated_cover_quality.is_some()
-        || d.animated_cover_max_fps.is_some()
-        || d.animated_cover_max_width.is_some()
-        || d.animated_cover_compression_level.is_some()
-        || d.animated_cover_lossless.is_some()
-        || d.naming_template.is_some()
-        || d.character_set.is_some()
+    if d.settings.format.is_some()
+        || d.settings.concurrency.is_some()
+        || d.settings.retries.is_some()
+        || d.settings.min_newest.is_some()
+        || d.settings.token_command.is_some()
+        || d.settings.animated_covers.is_some()
+        || d.settings.video_cover_retention.is_some()
+        || d.settings.animated_cover_quality.is_some()
+        || d.settings.animated_cover_max_fps.is_some()
+        || d.settings.animated_cover_max_width.is_some()
+        || d.settings.animated_cover_compression_level.is_some()
+        || d.settings.animated_cover_lossless.is_some()
+        || d.settings.naming_template.is_some()
+        || d.settings.character_set.is_some()
     {
         out.push_str("[defaults]\n");
-        push_opt(&mut out, "format", d.format.map(|f| f.to_string()));
+        push_opt(&mut out, "format", d.settings.format.map(|f| f.to_string()));
         push_reserved(
             &mut out,
             "concurrency",
-            d.concurrency.map(|v| v.to_string()),
+            d.settings.concurrency.map(|v| v.to_string()),
         );
-        push_opt(&mut out, "retries", d.retries.map(|v| v.to_string()));
-        push_opt(&mut out, "min_newest", d.min_newest.map(|v| v.to_string()));
-        push_redacted(&mut out, "token_command", d.token_command.as_deref());
+        push_opt(
+            &mut out,
+            "retries",
+            d.settings.retries.map(|v| v.to_string()),
+        );
+        push_opt(
+            &mut out,
+            "min_newest",
+            d.settings.min_newest.map(|v| v.to_string()),
+        );
+        push_redacted(
+            &mut out,
+            "token_command",
+            d.settings.token_command.as_deref(),
+        );
         push_opt(
             &mut out,
             "animated_covers",
-            d.animated_covers.map(|v| v.to_string()),
+            d.settings.animated_covers.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "video_cover_retention",
-            d.video_cover_retention.map(|v| v.to_string()),
+            d.settings.video_cover_retention.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_cover_quality",
-            d.animated_cover_quality.map(|v| v.to_string()),
+            d.settings.animated_cover_quality.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_cover_max_fps",
-            d.animated_cover_max_fps.map(|v| v.to_string()),
+            d.settings.animated_cover_max_fps.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_cover_max_width",
-            d.animated_cover_max_width.map(|v| v.to_string()),
+            d.settings.animated_cover_max_width.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_cover_compression_level",
-            d.animated_cover_compression_level.map(|v| v.to_string()),
+            d.settings
+                .animated_cover_compression_level
+                .map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_cover_lossless",
-            d.animated_cover_lossless.map(|v| v.to_string()),
+            d.settings.animated_cover_lossless.map(|v| v.to_string()),
         );
-        push_opt(&mut out, "naming_template", d.naming_template.clone());
+        push_opt(
+            &mut out,
+            "naming_template",
+            d.settings.naming_template.clone(),
+        );
         push_opt(
             &mut out,
             "character_set",
-            d.character_set.map(|v| v.to_string()),
+            d.settings.character_set.map(|v| v.to_string()),
         );
         out.push('\n');
     }
@@ -216,103 +234,135 @@ fn render_show(config: &Config) -> String {
             Some(_) => "  token = [redacted]\n",
             None => "  token = [not set]\n",
         });
-        push_redacted(&mut out, "token_command", acc.token_command.as_deref());
+        push_redacted(
+            &mut out,
+            "token_command",
+            acc.settings.token_command.as_deref(),
+        );
         push_opt(&mut out, "root", acc.root.clone());
-        push_opt(&mut out, "format", acc.format.map(|f| f.to_string()));
+        push_opt(
+            &mut out,
+            "format",
+            acc.settings.format.map(|f| f.to_string()),
+        );
         push_reserved(
             &mut out,
             "concurrency",
-            acc.concurrency.map(|v| v.to_string()),
+            acc.settings.concurrency.map(|v| v.to_string()),
         );
-        push_opt(&mut out, "retries", acc.retries.map(|v| v.to_string()));
+        push_opt(
+            &mut out,
+            "retries",
+            acc.settings.retries.map(|v| v.to_string()),
+        );
         push_opt(
             &mut out,
             "min_newest",
-            acc.min_newest.map(|v| v.to_string()),
+            acc.settings.min_newest.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_covers",
-            acc.animated_covers.map(|v| v.to_string()),
+            acc.settings.animated_covers.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "video_cover_retention",
-            acc.video_cover_retention.map(|v| v.to_string()),
+            acc.settings.video_cover_retention.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_cover_quality",
-            acc.animated_cover_quality.map(|v| v.to_string()),
+            acc.settings.animated_cover_quality.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_cover_max_fps",
-            acc.animated_cover_max_fps.map(|v| v.to_string()),
+            acc.settings.animated_cover_max_fps.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_cover_max_width",
-            acc.animated_cover_max_width.map(|v| v.to_string()),
+            acc.settings.animated_cover_max_width.map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_cover_compression_level",
-            acc.animated_cover_compression_level.map(|v| v.to_string()),
+            acc.settings
+                .animated_cover_compression_level
+                .map(|v| v.to_string()),
         );
         push_opt(
             &mut out,
             "animated_cover_lossless",
-            acc.animated_cover_lossless.map(|v| v.to_string()),
+            acc.settings.animated_cover_lossless.map(|v| v.to_string()),
         );
-        push_opt(&mut out, "naming_template", acc.naming_template.clone());
+        push_opt(
+            &mut out,
+            "naming_template",
+            acc.settings.naming_template.clone(),
+        );
         push_opt(
             &mut out,
             "character_set",
-            acc.character_set.map(|v| v.to_string()),
+            acc.settings.character_set.map(|v| v.to_string()),
         );
         let mut sources: Vec<&String> = acc.sources.keys().collect();
         sources.sort();
         for name in sources {
             let src = &acc.sources[name];
             out.push_str(&format!("  [accounts.{label}.sources.{name}]\n"));
-            push_redacted(&mut out, "    token_command", src.token_command.as_deref());
-            push_opt(&mut out, "    format", src.format.map(|f| f.to_string()));
-            push_opt(&mut out, "    naming_template", src.naming_template.clone());
+            push_redacted(
+                &mut out,
+                "    token_command",
+                src.settings.token_command.as_deref(),
+            );
+            push_opt(
+                &mut out,
+                "    format",
+                src.settings.format.map(|f| f.to_string()),
+            );
+            push_opt(
+                &mut out,
+                "    naming_template",
+                src.settings.naming_template.clone(),
+            );
             push_opt(
                 &mut out,
                 "    character_set",
-                src.character_set.map(|v| v.to_string()),
+                src.settings.character_set.map(|v| v.to_string()),
             );
             push_opt(
                 &mut out,
                 "    video_cover_retention",
-                src.video_cover_retention.map(|v| v.to_string()),
+                src.settings.video_cover_retention.map(|v| v.to_string()),
             );
             push_opt(
                 &mut out,
                 "    animated_cover_quality",
-                src.animated_cover_quality.map(|v| v.to_string()),
+                src.settings.animated_cover_quality.map(|v| v.to_string()),
             );
             push_opt(
                 &mut out,
                 "    animated_cover_max_fps",
-                src.animated_cover_max_fps.map(|v| v.to_string()),
+                src.settings.animated_cover_max_fps.map(|v| v.to_string()),
             );
             push_opt(
                 &mut out,
                 "    animated_cover_max_width",
-                src.animated_cover_max_width.map(|v| v.to_string()),
+                src.settings.animated_cover_max_width.map(|v| v.to_string()),
             );
             push_opt(
                 &mut out,
                 "    animated_cover_compression_level",
-                src.animated_cover_compression_level.map(|v| v.to_string()),
+                src.settings
+                    .animated_cover_compression_level
+                    .map(|v| v.to_string()),
             );
             push_opt(
                 &mut out,
                 "    animated_cover_lossless",
-                src.animated_cover_lossless.map(|v| v.to_string()),
+                src.settings.animated_cover_lossless.map(|v| v.to_string()),
             );
         }
         if let Some(areas) = &acc.areas {

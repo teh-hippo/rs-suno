@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use suno_core::{Config, FlagOverrides};
+use suno_core::{Config, FlagOverrides, Settings};
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
 use crate::cli::desired::ExitCode;
@@ -62,25 +62,30 @@ pub(crate) fn load_config(override_path: Option<&Path>) -> Result<ConfigState> {
 pub(crate) fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverrides {
     FlagOverrides {
         token: global.token.clone(),
-        format: args.format.map(Into::into),
-        concurrency: args.concurrency,
-        retries: args.retries,
-        min_newest: args.min_newest,
-        // A presence-only toggle can only enable; absence defers to config/env.
-        animated_covers: args.animated_covers.then_some(true),
-        video_cover_retention: args.video_cover_retention.map(Into::into),
-        animated_cover_quality: args.animated_cover_quality,
-        animated_cover_max_fps: args.animated_cover_max_fps,
-        animated_cover_max_width: args.animated_cover_max_width,
-        animated_cover_compression_level: args.animated_cover_compression_level,
-        animated_cover_lossless: args.animated_cover_lossless.then_some(true),
-        details_sidecar: args.details_sidecar.then_some(true),
-        lyrics_sidecar: args.lyrics_sidecar.then_some(true),
-        lrc_sidecar: args.lrc_sidecar.then_some(true),
-        video_mp4: args.video_mp4.then_some(true),
-        download_stems: args.download_stems.then_some(true),
-        stem_format: args.stem_format.map(Into::into),
-        naming_template: args.naming_template.clone(),
-        character_set: args.character_set.map(Into::into),
+        settings: Settings {
+            format: args.format.map(Into::into),
+            concurrency: args.concurrency,
+            retries: args.retries,
+            min_newest: args.min_newest,
+            // A presence-only toggle can only enable; absence defers to config/env.
+            animated_covers: args.animated_covers.then_some(true),
+            video_cover_retention: args.video_cover_retention.map(Into::into),
+            animated_cover_quality: args.animated_cover_quality,
+            animated_cover_max_fps: args.animated_cover_max_fps,
+            animated_cover_max_width: args.animated_cover_max_width,
+            animated_cover_compression_level: args.animated_cover_compression_level,
+            animated_cover_lossless: args.animated_cover_lossless.then_some(true),
+            details_sidecar: args.details_sidecar.then_some(true),
+            lyrics_sidecar: args.lyrics_sidecar.then_some(true),
+            lrc_sidecar: args.lrc_sidecar.then_some(true),
+            video_mp4: args.video_mp4.then_some(true),
+            download_stems: args.download_stems.then_some(true),
+            stem_format: args.stem_format.map(Into::into),
+            naming_template: args.naming_template.clone(),
+            character_set: args.character_set.map(Into::into),
+            // There is no `--token-command` flag; `token_command` resolves only
+            // from config/env, so it stays `None` here (see `Settings`).
+            ..Default::default()
+        },
     }
 }

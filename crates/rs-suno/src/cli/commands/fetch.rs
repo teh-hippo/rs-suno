@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use suno_core::{
-    AudioFormat, ClerkAuth, Clock, Ffmpeg, Filesystem, FlagOverrides, LineageContext, SunoClient,
-    TrackMetadata, tag_alac, tag_flac, tag_mp3,
+    AudioFormat, ClerkAuth, Clock, Ffmpeg, Filesystem, FlagOverrides, LineageContext, Settings,
+    SunoClient, TrackMetadata, tag_alac, tag_flac, tag_mp3,
 };
 
 use crate::cli::account;
@@ -31,8 +31,10 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     let env: HashMap<String, String> = std::env::vars().collect();
     let flags = FlagOverrides {
         token: global.token.clone(),
-        format: args.format.map(Into::into),
-        ..FlagOverrides::default()
+        settings: Settings {
+            format: args.format.map(Into::into),
+            ..Settings::default()
+        },
     };
 
     let config = match config_load::load_config_reported(global.config.as_deref()) {
