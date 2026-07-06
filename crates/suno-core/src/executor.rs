@@ -39,7 +39,7 @@ use std::time::Duration;
 use futures_util::lock::Mutex as AsyncMutex;
 use futures_util::stream::{self, StreamExt};
 
-use crate::album_art::{AlbumArt, PlaylistState};
+use crate::album_art::{AlbumArt, PlaylistState, set_album_artifact, set_playlist};
 use crate::backoff::{backoff_delay, retry_after};
 use crate::client::SunoClient;
 use crate::clock::Clock;
@@ -1149,7 +1149,9 @@ where
             }
         }
         if is_album_kind(kind) {
-            albums.entry(owner_id.to_owned()).or_default().set(
+            set_album_artifact(
+                albums,
+                &owner_id,
                 kind,
                 Some(ArtifactState {
                     path: path.to_owned(),
@@ -1157,13 +1159,14 @@ where
                 }),
             );
         } else if is_playlist_kind(kind) {
-            playlists.insert(
-                owner_id.to_owned(),
-                PlaylistState {
+            set_playlist(
+                playlists,
+                &owner_id,
+                Some(PlaylistState {
                     name: playlist_name_from_path(&path),
                     path: path.to_owned(),
                     hash: hash.to_owned(),
-                },
+                }),
             );
         } else if let Some(entry) = manifest.entries.get_mut(&owner_id) {
             set_manifest_artifact(
@@ -1499,14 +1502,9 @@ where
             .remove(path)
             .map_err(|err| permanent_fail(owner_id, format!("artifact delete failed: {err}")))?;
         if is_album_kind(kind) {
-            if let Some(art) = albums.get_mut(owner_id) {
-                art.set(kind, None);
-                if art.is_empty() {
-                    albums.remove(owner_id);
-                }
-            }
+            set_album_artifact(albums, owner_id, kind, None);
         } else if is_playlist_kind(kind) {
-            playlists.remove(owner_id);
+            set_playlist(playlists, owner_id, None);
         } else if let Some(entry) = manifest.entries.get_mut(owner_id) {
             set_manifest_artifact(entry, kind, None);
         }

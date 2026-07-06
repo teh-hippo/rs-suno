@@ -8,9 +8,10 @@
 //! the types and their store accessors live in their own module. Kept
 //! relational so they migrate cleanly to SQLite `album_art`/`playlists` tables.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::LineageStore;
 use crate::manifest::ArtifactState;
 use crate::reconcile::ArtifactKind;
 
@@ -101,62 +102,45 @@ pub struct PlaylistState {
     pub hash: String,
 }
 
-impl LineageStore {
-    /// The reconciled folder-art state for the album rooted at `root_id`.
-    pub fn album_art(&self, root_id: &str) -> Option<&AlbumArt> {
-        self.albums.get(root_id)
-    }
-
-    /// Set (or clear, with `None`) one folder-art `kind` for the album rooted at
-    /// `root_id`.
-    ///
-    /// A set upserts the album row; a clear that empties the row removes it, so
-    /// the store never accumulates dead all-`None` album entries. This is the
-    /// store-level counterpart the CLI persists after the executor mutates the
-    /// [`albums`](Self::albums) map in place.
-    pub fn set_album_artifact(
-        &mut self,
-        root_id: &str,
-        kind: ArtifactKind,
-        state: Option<ArtifactState>,
-    ) {
-        match state {
-            Some(state) => self
-                .albums
-                .entry(root_id.to_owned())
-                .or_default()
-                .set(kind, Some(state)),
-            None => {
-                if let Some(art) = self.albums.get_mut(root_id) {
-                    art.set(kind, None);
-                    if art.is_empty() {
-                        self.albums.remove(root_id);
-                    }
+/// Upsert (`Some`) or clear (`None`) one folder-art `kind` for the album rooted
+/// at `root_id`. A clear that empties the row removes it, so the store never
+/// keeps a dead all-`None` album entry. Single home for the prune-when-empty
+/// invariant shared by the executor write/clear paths.
+pub(crate) fn set_album_artifact(
+    albums: &mut BTreeMap<String, AlbumArt>,
+    root_id: &str,
+    kind: ArtifactKind,
+    state: Option<ArtifactState>,
+) {
+    match state {
+        Some(state) => albums
+            .entry(root_id.to_owned())
+            .or_default()
+            .set(kind, Some(state)),
+        None => {
+            if let Some(art) = albums.get_mut(root_id) {
+                art.set(kind, None);
+                if art.is_empty() {
+                    albums.remove(root_id);
                 }
             }
         }
     }
+}
 
-    /// The reconciled `.m3u8` state for the playlist with `id`, if present.
-    pub fn playlist(&self, id: &str) -> Option<&PlaylistState> {
-        self.playlists.get(id)
-    }
-
-    /// Upsert (with `Some`) or remove (with `None`) the `.m3u8` state for the
-    /// playlist `id`.
-    ///
-    /// This is the store-level counterpart the CLI persists after the executor
-    /// mutates the [`playlists`](Self::playlists) map in place: a write records
-    /// the new state; a delete clears the row so the store never keeps a
-    /// dangling entry for a playlist whose file was removed.
-    pub fn set_playlist(&mut self, id: &str, state: Option<PlaylistState>) {
-        match state {
-            Some(state) => {
-                self.playlists.insert(id.to_owned(), state);
-            }
-            None => {
-                self.playlists.remove(id);
-            }
+/// Upsert (`Some`) or remove (`None`) the `.m3u8` state for playlist `id`, so a
+/// delete never leaves a dangling row.
+pub(crate) fn set_playlist(
+    playlists: &mut BTreeMap<String, PlaylistState>,
+    id: &str,
+    state: Option<PlaylistState>,
+) {
+    match state {
+        Some(state) => {
+            playlists.insert(id.to_owned(), state);
+        }
+        None => {
+            playlists.remove(id);
         }
     }
 }
@@ -164,6 +148,7 @@ impl LineageStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LineageStore;
 
     #[test]
     fn album_art_roundtrips_and_reads_by_kind() {
@@ -198,7 +183,7 @@ mod tests {
             "jpg-h"
         );
 
-        let art = back.album_art("root-1").unwrap();
+        let art = back.albums.get("root-1").unwrap();
         assert_eq!(
             art.artifact(ArtifactKind::FolderJpg).unwrap().path,
             "alice/Album/folder.jpg"
@@ -232,12 +217,17 @@ mod tests {
             path: "a/folder.jpg".to_owned(),
             hash: "h1".to_owned(),
         };
-        store.set_album_artifact("root-1", ArtifactKind::FolderJpg, Some(jpg.clone()));
-        assert_eq!(store.album_art("root-1").unwrap().folder_jpg, Some(jpg));
+        set_album_artifact(
+            &mut store.albums,
+            "root-1",
+            ArtifactKind::FolderJpg,
+            Some(jpg.clone()),
+        );
+        assert_eq!(store.albums.get("root-1").unwrap().folder_jpg, Some(jpg));
 
         // Clearing the only slot prunes the whole album row (no dead entries).
-        store.set_album_artifact("root-1", ArtifactKind::FolderJpg, None);
-        assert!(store.album_art("root-1").is_none());
+        set_album_artifact(&mut store.albums, "root-1", ArtifactKind::FolderJpg, None);
+        assert!(!store.albums.contains_key("root-1"));
         assert!(store.albums.is_empty());
     }
 
@@ -252,12 +242,14 @@ mod tests {
             path: p.to_owned(),
             hash: "h".to_owned(),
         };
-        store.set_album_artifact(
+        set_album_artifact(
+            &mut store.albums,
             "root-1",
             ArtifactKind::FolderWebp,
             Some(state("a/cover.webp")),
         );
-        store.set_album_artifact(
+        set_album_artifact(
+            &mut store.albums,
             "root-1",
             ArtifactKind::FolderMp4,
             Some(state("a/cover.mp4")),
@@ -265,16 +257,17 @@ mod tests {
 
         // FolderWebp is cleared first (its kind sorts before FolderMp4); the row
         // must stay because the raw cover is still tracked.
-        store.set_album_artifact("root-1", ArtifactKind::FolderWebp, None);
+        set_album_artifact(&mut store.albums, "root-1", ArtifactKind::FolderWebp, None);
         let art = store
-            .album_art("root-1")
+            .albums
+            .get("root-1")
             .expect("row kept while folder_mp4 remains");
         assert!(!art.is_empty());
         assert!(art.folder_mp4.is_some());
 
         // Clearing the last slot finally prunes the row.
-        store.set_album_artifact("root-1", ArtifactKind::FolderMp4, None);
-        assert!(store.album_art("root-1").is_none());
+        set_album_artifact(&mut store.albums, "root-1", ArtifactKind::FolderMp4, None);
+        assert!(!store.albums.contains_key("root-1"));
         assert!(store.albums.is_empty());
     }
 
@@ -300,7 +293,7 @@ mod tests {
         assert_eq!(pl.get("path").unwrap(), "Road Trip.m3u8");
         assert_eq!(pl.get("hash").unwrap(), "abc123");
 
-        let stored = back.playlist("pl1").unwrap();
+        let stored = back.playlists.get("pl1").unwrap();
         assert_eq!(stored.name, "Road Trip");
         assert_eq!(stored.hash, "abc123");
     }
@@ -313,8 +306,8 @@ mod tests {
             path: "Mix.m3u8".to_owned(),
             hash: "h1".to_owned(),
         };
-        store.set_playlist("pl1", Some(state.clone()));
-        assert_eq!(store.playlist("pl1"), Some(&state));
+        set_playlist(&mut store.playlists, "pl1", Some(state.clone()));
+        assert_eq!(store.playlists.get("pl1"), Some(&state));
 
         // A rewrite replaces the row in place.
         let renamed = PlaylistState {
@@ -322,12 +315,12 @@ mod tests {
             path: "Mix v2.m3u8".to_owned(),
             hash: "h2".to_owned(),
         };
-        store.set_playlist("pl1", Some(renamed.clone()));
-        assert_eq!(store.playlist("pl1"), Some(&renamed));
+        set_playlist(&mut store.playlists, "pl1", Some(renamed.clone()));
+        assert_eq!(store.playlists.get("pl1"), Some(&renamed));
 
         // Clearing removes the row so no dangling entry survives a delete.
-        store.set_playlist("pl1", None);
-        assert!(store.playlist("pl1").is_none());
+        set_playlist(&mut store.playlists, "pl1", None);
+        assert!(!store.playlists.contains_key("pl1"));
         assert!(store.playlists.is_empty());
     }
 }
