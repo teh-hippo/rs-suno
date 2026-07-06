@@ -17,3 +17,10 @@ opt-level = "s"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# The workflow is fully agentic (no interactive debuggers), but panic and test
+# backtraces still need file:line to locate failures. "line-tables-only" keeps
+# that while dropping the heavier variable/type debug info the linker would
+# otherwise process on every relink, cutting compile/link time and target size.
+[profile.dev]
+debug = "line-tables-only"
