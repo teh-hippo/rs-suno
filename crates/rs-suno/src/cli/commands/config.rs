@@ -114,7 +114,7 @@ fn add_account(global: &GlobalArgs, add: &ConfigAddAccountArgs) -> Result<ExitCo
 
 fn show(global: &GlobalArgs) -> Result<ExitCode> {
     let path = logs::config_path(global.config.as_deref());
-    let config = match crate::cli::run::load_config_reported(global.config.as_deref()) {
+    let config = match crate::cli::config_load::load_config_reported(global.config.as_deref()) {
         Ok(Some(config)) => config,
         Ok(None) => {
             let where_ = path

@@ -13,9 +13,9 @@ use suno_core::{
 
 use crate::cli::account;
 use crate::cli::args::{FetchArgs, GlobalArgs};
+use crate::cli::config_load;
 use crate::cli::desired::ExitCode;
 use crate::cli::failure;
-use crate::cli::run;
 use crate::cli::token;
 use crate::clock::TokioClock;
 use crate::download;
@@ -35,7 +35,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
         ..FlagOverrides::default()
     };
 
-    let config = match run::load_config_reported(global.config.as_deref()) {
+    let config = match config_load::load_config_reported(global.config.as_deref()) {
         Ok(config) => config,
         Err(code) => return Ok(code),
     };

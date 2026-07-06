@@ -8,6 +8,7 @@
 pub mod account;
 pub mod args;
 pub mod commands;
+pub mod config_load;
 pub mod desired;
 pub mod expiry;
 pub mod failure;

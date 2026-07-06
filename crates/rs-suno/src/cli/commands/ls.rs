@@ -11,10 +11,10 @@ use suno_core::{ClerkAuth, FlagOverrides, SunoClient};
 
 use crate::cli::account;
 use crate::cli::args::{GlobalArgs, LsArgs, OutputFormat};
+use crate::cli::config_load;
 use crate::cli::desired::ExitCode;
 use crate::cli::failure;
 use crate::cli::output;
-use crate::cli::run;
 use crate::cli::token;
 use crate::cli::wallclock;
 use crate::http::ReqwestHttp;
@@ -27,7 +27,7 @@ pub async fn run_ls(global: &GlobalArgs, args: &LsArgs, force_json: bool) -> Res
         ..FlagOverrides::default()
     };
 
-    let config = match run::load_config_reported(global.config.as_deref()) {
+    let config = match config_load::load_config_reported(global.config.as_deref()) {
         Ok(config) => config,
         Err(code) => return Ok(code),
     };

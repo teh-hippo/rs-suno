@@ -8,9 +8,9 @@ use suno_core::{ClerkAuth, Config, EffectiveSettings, FlagOverrides};
 
 use crate::cli::account;
 use crate::cli::args::{AuthArgs, AuthCommand, AuthRefreshArgs, GlobalArgs};
+use crate::cli::config_load;
 use crate::cli::desired::{ExitCode, worse};
 use crate::cli::failure;
-use crate::cli::run;
 use crate::cli::token;
 use crate::http::ReqwestHttp;
 
@@ -46,7 +46,7 @@ async fn refresh_accounts(global: &GlobalArgs, refresh: &AuthRefreshArgs) -> Res
         ..FlagOverrides::default()
     };
 
-    let config = match run::load_config_reported(global.config.as_deref()) {
+    let config = match config_load::load_config_reported(global.config.as_deref()) {
         Ok(config) => config,
         Err(code) => return Ok(code),
     };
