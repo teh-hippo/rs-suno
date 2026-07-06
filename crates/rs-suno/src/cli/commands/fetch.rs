@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use suno_core::{
-    AudioFormat, ClerkAuth, Clock, Ffmpeg, Filesystem, FlagOverrides, LineageContext, Settings,
-    SunoClient, TrackMetadata, tag_alac, tag_flac, tag_mp3,
+    AudioFormat, ClerkAuth, Clock, Cover, Ffmpeg, Filesystem, FlagOverrides, LineageContext,
+    Settings, SunoClient, TrackMetadata, tag_alac, tag_flac, tag_mp3,
 };
 
 use crate::cli::account;
@@ -97,7 +97,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             let audio = download::get_bytes(&http, &url)
                 .await
                 .context("could not download the MP3")?;
-            let tagged = tag_mp3(&audio, &meta, cover.as_deref(), None)?;
+            let tagged = tag_mp3(&audio, &meta, cover.as_deref().map(Cover::jpeg), None)?;
             fs.write_atomic(&filename, &tagged)?;
         }
         AudioFormat::Flac => {
@@ -107,7 +107,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
                 .await
                 .context("could not download the WAV")?;
             let flac = ffmpeg.wav_to_lossless(&wav, AudioFormat::Flac).await?;
-            let tagged = tag_flac(&flac, &meta, cover.as_deref())?;
+            let tagged = tag_flac(&flac, &meta, cover.as_deref().map(Cover::jpeg))?;
             fs.write_atomic(&filename, &tagged)?;
         }
         AudioFormat::Alac => {
@@ -117,7 +117,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
                 .await
                 .context("could not download the WAV")?;
             let alac = ffmpeg.wav_to_lossless(&wav, AudioFormat::Alac).await?;
-            let tagged = tag_alac(&alac, &meta, cover.as_deref())?;
+            let tagged = tag_alac(&alac, &meta, cover.as_deref().map(Cover::jpeg))?;
             fs.write_atomic(&filename, &tagged)?;
         }
         AudioFormat::Wav => {

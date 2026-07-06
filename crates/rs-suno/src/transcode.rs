@@ -274,13 +274,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_webp_filter_keeps_native_width_and_caps_fps() {
-        // The default keeps the source resolution: only the fps cap applies, then
-        // the RGB conversion for colour-faithful output.
+    fn default_webp_filter_bounds_width_and_caps_fps() {
+        // The default bounds the width to 640 px so the embedded animated cover
+        // reliably fits the FLAC picture cap, then caps fps and converts to RGB.
         assert_eq!(
             video_filter(&WebpEncodeSettings::default()),
-            "fps=24,format=rgba"
+            "scale='min(640,iw)':-2,fps=24,format=rgba"
         );
+        // No width cap keeps the source resolution: only the fps cap applies.
+        let native = WebpEncodeSettings {
+            max_width: None,
+            ..Default::default()
+        };
+        assert_eq!(video_filter(&native), "fps=24,format=rgba");
         // An explicit width cap scales a wider source down to an even height.
         let capped = WebpEncodeSettings {
             max_width: Some(720),
@@ -295,7 +301,7 @@ mod tests {
     #[test]
     fn lossy_quality_uses_q_scale_and_default_compression_effort() {
         let settings = WebpEncodeSettings::default();
-        assert_eq!(quality_args(&settings), vec!["-q:v", "95"]);
+        assert_eq!(quality_args(&settings), vec!["-q:v", "90"]);
         // Effort defaults to level 4; callers can choose any level 0-4.
         assert_eq!(compression_args(&settings), vec!["-compression_level", "4"]);
         let full_effort = WebpEncodeSettings {

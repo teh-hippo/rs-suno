@@ -19,8 +19,54 @@ use crate::lineage::{EdgeType, LineageContext};
 use crate::lyrics::AlignedLyrics;
 use crate::model::Clip;
 
-const COVER_MIME: &str = "image/jpeg";
 const LANG: &str = "eng";
+
+/// An embedded cover image: its raw bytes paired with its MIME type. The MIME
+/// travels with the bytes so the executor can embed an animated `image/webp`
+/// where the container allows it (FLAC within its size cap, MP3, WAV) or a
+/// static `image/jpeg` otherwise.
+#[derive(Debug, Clone, Copy)]
+pub struct Cover<'a> {
+    pub bytes: &'a [u8],
+    pub mime: &'a str,
+}
+
+impl<'a> Cover<'a> {
+    /// A static JPEG cover.
+    pub fn jpeg(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            mime: "image/jpeg",
+        }
+    }
+
+    /// An animated WebP cover.
+    pub fn webp(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            mime: "image/webp",
+        }
+    }
+}
+
+/// A FLAC metadata block length is a 24-bit field, so a single block body cannot
+/// exceed this. `metaflac` silently truncates the length on overflow (writing a
+/// corrupt file whose length prefix disagrees with the body, which then panics
+/// its own reader), so [`tag_flac`] refuses any picture that would exceed it.
+const FLAC_METADATA_BLOCK_MAX: usize = (1 << 24) - 1;
+
+/// Fixed overhead of a FLAC PICTURE block body, excluding the MIME and
+/// description strings and the image data: eight 4-byte fields (picture type,
+/// MIME length, description length, width, height, colour depth, colour count,
+/// and data length).
+const FLAC_PICTURE_FIXED_OVERHEAD: usize = 32;
+
+/// The largest image-data payload that fits a FLAC PICTURE block for a cover of
+/// the given `mime` and an empty description. The executor uses this to decide
+/// whether an encoded animated WebP fits FLAC, and [`tag_flac`] enforces it.
+pub fn flac_picture_data_budget(mime: &str) -> usize {
+    FLAC_METADATA_BLOCK_MAX - FLAC_PICTURE_FIXED_OVERHEAD - mime.len()
+}
 
 /// The metadata tags written into a downloaded audio file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
@@ -112,7 +158,7 @@ impl TrackMetadata {
 pub fn tag_mp3(
     audio: &[u8],
     meta: &TrackMetadata,
-    cover: Option<&[u8]>,
+    cover: Option<Cover<'_>>,
     synced: Option<&AlignedLyrics>,
 ) -> Result<Vec<u8>> {
     let existing = id3::Tag::read_from2(Cursor::new(audio)).ok();
@@ -158,12 +204,12 @@ pub fn tag_mp3(
             });
         }
     }
-    if let Some(bytes) = cover {
+    if let Some(cover) = cover {
         tag.add_frame(Picture {
-            mime_type: COVER_MIME.to_owned(),
+            mime_type: cover.mime.to_owned(),
             picture_type: PictureType::CoverFront,
             description: String::new(),
-            data: bytes.to_vec(),
+            data: cover.bytes.to_vec(),
         });
     }
     match synced.and_then(build_sylt) {
@@ -209,15 +255,21 @@ fn build_sylt(aligned: &AlignedLyrics) -> Option<SynchronisedLyrics> {
 
 /// Tag `audio` (a FLAC byte stream) with `meta`, returning the tagged bytes.
 ///
-/// Replaces the Vorbis comments, embeds `cover` as a front-cover `PICTURE`
-/// block, and preserves the original `STREAMINFO` and audio frames. Works in
-/// memory: the existing metadata blocks are rewritten and the audio frames are
-/// appended unchanged.
+/// Replaces the Vorbis comments, embeds `cover` as the sole front-cover
+/// `PICTURE` block, and preserves the original `STREAMINFO` and audio frames.
+/// Works in memory: the existing metadata blocks are rewritten and the audio
+/// frames are appended unchanged.
+///
+/// A FLAC PICTURE block is bounded by a 24-bit length field, and `metaflac`
+/// silently truncates that length on overflow (corrupting the file), so a cover
+/// whose bytes exceed [`flac_picture_data_budget`] is rejected with an error
+/// rather than embedded. The executor sizes the animated WebP to fit and falls
+/// back to a static JPEG before reaching this guard, which is a backstop.
 ///
 /// When `meta` carries no lyrics text (a plain retag), any existing `LYRICS`
 /// comment is preserved rather than dropped, so a retag never loses embedded
 /// lyrics.
-pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Result<Vec<u8>> {
+pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) -> Result<Vec<u8>> {
     let mut tag = metaflac::Tag::read_from(&mut Cursor::new(audio))
         .map_err(|err| Error::Tag(format!("could not read FLAC metadata: {err}")))?;
 
@@ -235,11 +287,23 @@ pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Res
     if meta.lyrics.is_empty() && !existing_lyrics.is_empty() {
         tag.set_vorbis("LYRICS", existing_lyrics);
     }
-    if let Some(bytes) = cover {
+    if let Some(cover) = cover {
+        let budget = flac_picture_data_budget(cover.mime);
+        if cover.bytes.len() > budget {
+            return Err(Error::Tag(format!(
+                "cover image is {} bytes, over the {}-byte FLAC picture limit",
+                cover.bytes.len(),
+                budget
+            )));
+        }
+        // Exactly one front cover: drop any existing picture before adding ours
+        // (metaflac's add_picture already replaces the same type; this is
+        // explicit so a stale picture of any type cannot linger).
+        tag.remove_blocks(metaflac::BlockType::Picture);
         tag.add_picture(
-            COVER_MIME,
+            cover.mime,
             metaflac::block::PictureType::CoverFront,
-            bytes.to_vec(),
+            cover.bytes.to_vec(),
         );
     }
 
@@ -264,7 +328,7 @@ pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Res
 pub fn tag_wav(
     audio: &[u8],
     meta: &TrackMetadata,
-    cover: Option<&[u8]>,
+    cover: Option<Cover<'_>>,
     synced: Option<&AlignedLyrics>,
 ) -> Result<Vec<u8>> {
     let existing = id3::Tag::read_from2(Cursor::new(audio)).ok();
@@ -309,12 +373,12 @@ pub fn tag_wav(
             });
         }
     }
-    if let Some(bytes) = cover {
+    if let Some(cover) = cover {
         tag.add_frame(Picture {
-            mime_type: COVER_MIME.to_owned(),
+            mime_type: cover.mime.to_owned(),
             picture_type: PictureType::CoverFront,
             description: String::new(),
-            data: bytes.to_vec(),
+            data: cover.bytes.to_vec(),
         });
     }
     match synced.and_then(build_sylt) {
@@ -579,7 +643,7 @@ mod tests {
     fn mp3_round_trips_core_tags() {
         let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
         let cover = b"\xFF\xD8\xFFcover-bytes".to_vec();
-        let tagged = tag_mp3(b"", &meta, Some(&cover), None).unwrap();
+        let tagged = tag_mp3(b"", &meta, Some(Cover::jpeg(&cover)), None).unwrap();
 
         let tag = id3::Tag::read_from2(Cursor::new(tagged)).unwrap();
         assert_eq!(tag.title(), Some("Electric Storm"));
@@ -619,7 +683,7 @@ mod tests {
 
         let picture = tag.pictures().next().unwrap();
         assert_eq!(picture.picture_type, PictureType::CoverFront);
-        assert_eq!(picture.mime_type, COVER_MIME);
+        assert_eq!(picture.mime_type, "image/jpeg");
         assert_eq!(picture.data, cover);
     }
 
@@ -775,7 +839,7 @@ mod tests {
         let audio = minimal_flac();
         let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
         let cover = b"\xFF\xD8\xFFflac-cover".to_vec();
-        let tagged = tag_flac(&audio, &meta, Some(&cover)).unwrap();
+        let tagged = tag_flac(&audio, &meta, Some(Cover::jpeg(&cover))).unwrap();
 
         let tag = metaflac::Tag::read_from(&mut Cursor::new(&tagged)).unwrap();
         let vorbis = tag.vorbis_comments().unwrap();
@@ -818,6 +882,27 @@ mod tests {
         // The audio frames after the metadata survive untouched.
         let frames = metaflac::Tag::skip_metadata(&mut Cursor::new(&tagged));
         assert_eq!(frames, FLAC_AUDIO_FRAMES);
+    }
+
+    #[test]
+    fn flac_embeds_webp_cover_and_rejects_oversized() {
+        let audio = minimal_flac();
+        let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+
+        // A small animated WebP embeds with the image/webp mime, exactly once.
+        let webp = b"RIFF\x00\x00\x00\x00WEBP-small-anim".to_vec();
+        let tagged = tag_flac(&audio, &meta, Some(Cover::webp(&webp))).unwrap();
+        let tag = metaflac::Tag::read_from(&mut Cursor::new(&tagged)).unwrap();
+        let pics: Vec<_> = tag.pictures().collect();
+        assert_eq!(pics.len(), 1, "exactly one front cover");
+        assert_eq!(pics[0].mime_type, "image/webp");
+        assert_eq!(pics[0].data, webp);
+
+        // A cover one byte over the 24-bit FLAC picture budget is refused, never
+        // silently truncated into a corrupt file.
+        let too_big = vec![0u8; flac_picture_data_budget("image/webp") + 1];
+        let err = tag_flac(&audio, &meta, Some(Cover::webp(&too_big))).unwrap_err();
+        assert!(matches!(err, Error::Tag(_)));
     }
 
     const FLAC_AUDIO_FRAMES: &[u8] = b"\xFF\xF8audio-frame-payload";
@@ -887,7 +972,7 @@ mod tests {
         let audio = minimal_wav();
         let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
         let cover = b"\xFF\xD8\xFFwav-cover".to_vec();
-        let tagged = tag_wav(&audio, &meta, Some(&cover), None).unwrap();
+        let tagged = tag_wav(&audio, &meta, Some(Cover::jpeg(&cover)), None).unwrap();
 
         let tag = id3::Tag::read_from2(Cursor::new(&tagged)).unwrap();
         assert_eq!(tag.title(), Some("Electric Storm"));
@@ -921,7 +1006,7 @@ mod tests {
 
         let picture = tag.pictures().next().unwrap();
         assert_eq!(picture.picture_type, PictureType::CoverFront);
-        assert_eq!(picture.mime_type, COVER_MIME);
+        assert_eq!(picture.mime_type, "image/jpeg");
         assert_eq!(picture.data, cover);
     }
 

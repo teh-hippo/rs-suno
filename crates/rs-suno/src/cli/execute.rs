@@ -59,6 +59,7 @@ pub(crate) async fn execute_plan(
         wav_poll_attempts: WAV_POLL_ATTEMPTS,
         wav_poll_interval: WAV_POLL_INTERVAL,
         concurrency: settings.concurrency,
+        embed_animated_cover: settings.animated_covers,
         cover_webp: settings.animated_cover_webp,
     };
     let started = std::time::Instant::now();

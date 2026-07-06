@@ -73,12 +73,14 @@ never treated as a deletion).
 
 ## Cover art
 
-Each download carries and produces static JPEG cover art:
+Each download carries cover art:
 
 - **Embedded front cover** inside the audio file, so players that read embedded
-  art show it.
+  art show it. By default this is a static JPEG; with animated covers enabled it
+  becomes an animated WebP for clips that have a video preview (see below).
 - **A per-song cover** written beside each audio file, sharing the track's name
-  with a `.jpg` extension.
+  with a `.jpg` extension. This is always the static JPEG, so folder-based
+  browsers and players without WebP support still show art.
 - **An album cover** named `folder.jpg` in each album folder, which folder-based
   players and media servers use as the album thumbnail. It is chosen
   deterministically from the most-played art-bearing clip in the album.
@@ -86,58 +88,62 @@ Each download carries and produces static JPEG cover art:
 ## Animated covers
 
 Suno clips have a short looping video preview. `rs-suno` can turn that into an
-**animated WebP** cover. This is opt-in, because it costs an extra transcode per
-clip.
-
-WebP is the right format for this: media servers that show animated covers
-(Navidrome, for example) animate WebP, APNG, and GIF on cover zoom but do **not**
-accept video (MP4/WebM). Of those, WebP gives the best quality for the size, so
-it is what `rs-suno` produces. (The raw `cover.mp4` below is for archival, not for
-a server to animate.)
+**animated WebP** and embed it as the audio file's front cover, so a media server
+that animates embedded art (Navidrome, for example) plays it. This is opt-in,
+because it costs an extra transcode per clip.
 
 Enable it per run with `--animated-covers`, `--video-cover-retention webp`, or
-set `video_cover_retention = "webp"` in your
-[config](configuration.md). You can also tune encoder knobs with
-`animated_cover_quality`, `animated_cover_max_fps`,
-`animated_cover_max_width`, and `animated_cover_compression_level`.
+set `video_cover_retention = "webp"` (or `animated_covers = true`) in your
+[config](configuration.md). Clips with no video preview keep the static JPEG, as
+do ALAC (`.m4a`) files, whose container cannot hold a WebP picture.
 
-The default encode is **quality 95 at effort 4**, which is visually transparent
-(measured around 46 dB against the source on real covers) yet a fraction of the
-lossless size, and encodes in seconds. The frame rate and resolution of the
-source are preserved (no upscaling; the width cap only ever scales down), and the
-YUV-to-RGB conversion honours the source's colour tags, so the cover matches the
-original video's colours.
+WebP is the right format for the embed: media servers that show animated covers
+animate WebP, APNG, and GIF but do **not** accept video (MP4/WebM), and WebP
+gives the best quality for the size.
+
+### The FLAC size cap
+
+A FLAC picture is stored in a metadata block whose length is a 24-bit field, so a
+single embedded picture cannot exceed about 16 MiB. A lossless animated cover is
+far larger than that (a 5 s preview is around 145 MB, and even a lossless 384 px
+encode is around 34 MB), so the FLAC embed must be a **bounded lossy** encode.
+The default is **quality 90 scaled to at most 640 px** (about 11 MiB for a typical
+5 s cover, comfortably under the cap), tunable with `animated_cover_quality`,
+`animated_cover_max_fps`, `animated_cover_max_width`, and
+`animated_cover_compression_level`. If an encode still would not fit (an unusual
+cover, or quality and width set very high), `rs-suno` embeds the static JPEG for
+that track instead, so the file is always valid. MP3 and WAV picture limits are
+far higher, but the same bounded default is used to keep covers modest, because a
+media server serves the embedded image at full size everywhere, including grids.
+
+### Client support
+
+Animation renders only where the client both reads embedded art **and** decodes
+animated WebP: the Navidrome web UI in a modern browser does, while many native
+and mobile Subsonic clients show the first frame only. A player that cannot read
+a WebP embedded cover at all falls back to the `.jpg` per-song cover or
+`folder.jpg`, so a library never loses its static art. The animated cover is
+stored once per track (embedded), so enabling it grows every animated track by
+roughly the encoded cover size.
 
 ### Lossless covers
 
 For a bit-exact cover, set `--animated-cover-lossless` (or
-`animated_cover_lossless = true`). Be warned that lossless animated video is
-intrinsically enormous: a five-second preview is around **145 MB** (roughly 30
-times the source), because a lossless codec cannot use the motion compression a
-lossy one does. Quality 95 is visually indistinguishable at a fraction of the
-size, so lossless is off by default and worth it only if you truly want the exact
-frames. Effort is capped at 4 for every mode, because effort 6 produces the same
-size for many times the encode time.
-
-With animated covers on, and for clips that have a video preview, `rs-suno` also
-writes:
-
-- a per-song animated cover beside each audio file, sharing the track's name
-  with a `.webp` extension, and
-- an album animated cover named `cover.webp` in each album folder, chosen from
-  the earliest clip in the album that has a video preview.
-
-The static `.jpg` covers are always written as well, so players without WebP
-support still show art.
+`animated_cover_lossless = true`). Lossless animated video is intrinsically
+enormous (a five-second preview is around **145 MB**), far larger than the
+embedded-cover size cap, so a lossless cover always overflows it and the track
+falls back to the static JPEG. Lossless is therefore not useful for embedded
+covers; leave it off. Effort is capped at 4 for every mode, because effort 6
+produces the same size for many times the encode time.
 
 ### Keeping the raw source
 
-The WebP is a re-encode. To keep Suno's original animation untouched, choose
-`--video-cover-retention mp4` (or `video_cover_retention = "mp4"`): it writes the
-album's `video_cover_url` verbatim as `cover.mp4`, with no transcode and no
-ffmpeg. Use `both` to keep the raw `cover.mp4` beside the transcoded
-`cover.webp`; the two come from the same album variant, and the source is
-fetched only once.
+The embedded WebP is a re-encode. To keep Suno's original animation untouched,
+choose `--video-cover-retention mp4` (or `video_cover_retention = "mp4"`): it
+writes the album's `video_cover_url` verbatim as `cover.mp4`, with no transcode
+and no ffmpeg. Use `both` to embed the animated WebP and also keep the raw
+`cover.mp4`; the two come from the same album variant, and the source is fetched
+only once.
 
 This is a different asset from `--video-mp4`, which downloads the standalone
 music video (`video_url`) beside each song.
@@ -167,16 +173,16 @@ like:
 alice/
   Neon Horizon/
     folder.jpg
-    cover.webp
     alice-Neon Horizon [a1b2c3d4].flac
     alice-Neon Horizon [a1b2c3d4].jpg
-    alice-Neon Horizon [a1b2c3d4].webp
     alice-Neon Horizon [a1b2c3d4].lrc
     alice-Neon Horizon (Remix) [8d9e0f1a].flac
     alice-Neon Horizon (Remix) [8d9e0f1a].jpg
-    alice-Neon Horizon (Remix) [8d9e0f1a].webp
     alice-Neon Horizon (Remix) [8d9e0f1a].lrc
 ```
 
-Without `--animated-covers`, the `.webp` files and `cover.webp` are simply not
-written; without `lrc_sidecar`, the `.lrc` files are not written.
+The animated cover is embedded inside each `.flac` (for clips with a video
+preview), not written as a separate file. With `--video-cover-retention mp4` or
+`both`, a raw `cover.mp4` also lands in the album folder. Without
+`--animated-covers`, the embedded cover is the static JPEG; without
+`lrc_sidecar`, the `.lrc` files are not written.

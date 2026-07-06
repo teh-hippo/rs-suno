@@ -217,10 +217,12 @@ pub struct SyncArgs {
     /// Simultaneous downloads (default 4).
     #[arg(long, value_name = "N")]
     pub concurrency: Option<u32>,
-    /// Also write an animated cover.webp from each clip's video preview.
+    /// Embed an animated WebP front cover (in place of the static JPEG) for
+    /// clips with a video preview.
     #[arg(long)]
     pub animated_covers: bool,
-    /// Keep video-cover artifacts: webp, mp4, both, or neither.
+    /// Animated-cover control: webp embeds it, mp4 keeps the raw cover.mp4, both,
+    /// or neither.
     #[arg(long, value_enum, value_name = "MODE")]
     pub video_cover_retention: Option<CoverRetentionArg>,
     /// Animated-cover quality, 0-100 (higher is larger).
@@ -229,15 +231,17 @@ pub struct SyncArgs {
     /// Animated-cover max FPS.
     #[arg(long, value_name = "N")]
     pub animated_cover_max_fps: Option<u32>,
-    /// Animated-cover width cap in pixels.
+    /// Animated-cover width cap in pixels (default 640; raise at the risk of a
+    /// JPEG fallback on FLAC).
     #[arg(long, value_name = "PIXELS")]
     pub animated_cover_max_width: Option<u32>,
     /// Animated-cover compression effort, 0-4 (higher is smaller/slower).
     #[arg(long, value_name = "N")]
     pub animated_cover_compression_level: Option<u8>,
-    /// Encode the animated cover losslessly. Bit-exact but very large (a few
-    /// seconds of video can be ~145 MB); off by default (quality 95 is visually
-    /// transparent at a fraction of the size).
+    /// Encode the animated cover losslessly. Bit-exact but far larger than the
+    /// embedded-cover size cap (a few seconds of video can be ~145 MB), so a
+    /// lossless cover always overflows it and the track falls back to the static
+    /// JPEG; leave it off for embedded covers.
     #[arg(long)]
     pub animated_cover_lossless: bool,
     /// Re-pin this library to the authenticated account (use only when you

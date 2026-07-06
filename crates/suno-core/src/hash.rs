@@ -132,6 +132,59 @@ pub fn art_hash(clip: &Clip) -> String {
     art_url_hash(clip.selected_image_url().unwrap_or(""))
 }
 
+/// The embedded-cover sentinel that accounts for the animated-WebP embed.
+///
+/// When `embed_animated` is set and the clip has a `video_cover_url`, the audio
+/// file embeds a bounded animated WebP derived from that source, so its identity
+/// is the source URL, the encode `settings`, AND the static image URL. The
+/// static URL is folded in because the WebP falls back to that static JPEG when
+/// it will not fit the container, so a later change to the static art must still
+/// re-tag a fallen-back file. This hashes the embed *intent*, not the runtime
+/// fit outcome: `build_desired` and dry-run are pure and cannot know the encoded
+/// size, so a fit fallback must not churn — the stored and desired hashes still
+/// match on the next run, while a settings or source change re-embeds.
+///
+/// Otherwise (feature off, no video preview, or an ALAC target, which cannot
+/// embed WebP) it is the plain static [`art_hash`], so a non-animated clip is
+/// unaffected by this feature.
+///
+/// Gating the WebP-intent branch on `video_cover_url` presence is deliberate: it
+/// scopes an enable-time re-tag to exactly the clips that have a preview, rather
+/// than rewriting the whole library (a toggle-only hash would). The trade-off is
+/// that if the feed were to omit a clip's `video_cover_url` for a run, the hash
+/// would fall back to static and re-tag, then re-tag again when it reappears. In
+/// practice a preview is an immutable generated asset and the v3 feed returns
+/// complete clips, so this does not flap; and it is bounded churn (a tag
+/// rewrite), never data loss, since the audio stream is preserved.
+pub fn embedded_art_hash(
+    clip: &Clip,
+    embed_animated: bool,
+    settings: &WebpEncodeSettings,
+) -> String {
+    if embed_animated && !clip.video_cover_url.is_empty() {
+        let mut hasher = fnv::FnvHasher::default();
+        hasher.write(b"webp-embed\0");
+        hasher.write(clip.video_cover_url.as_bytes());
+        hasher.write_u8(0);
+        hasher.write(clip.selected_image_url().unwrap_or("").as_bytes());
+        hasher.write_u8(0);
+        hasher.write_u8(settings.quality);
+        hasher.write_u8(u8::from(settings.lossless));
+        hasher.write_u8(settings.compression_level);
+        hasher.write_u32(settings.max_fps);
+        match settings.max_width {
+            Some(width) => {
+                hasher.write_u8(1);
+                hasher.write_u32(width);
+            }
+            None => hasher.write_u8(0),
+        }
+        format!("{:016x}", hasher.finish())
+    } else {
+        art_hash(clip)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,7 +275,7 @@ mod tests {
             |s: &mut WebpEncodeSettings| s.lossless = !s.lossless,
             |s: &mut WebpEncodeSettings| s.compression_level = s.compression_level.wrapping_add(1),
             |s: &mut WebpEncodeSettings| s.max_fps = s.max_fps.wrapping_add(1),
-            |s: &mut WebpEncodeSettings| s.max_width = Some(640),
+            |s: &mut WebpEncodeSettings| s.max_width = None,
         ] {
             let mut settings = base;
             mutate(&mut settings);

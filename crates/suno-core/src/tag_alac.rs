@@ -11,7 +11,7 @@ use std::io::Cursor;
 use mp4ameta::{Data, FreeformIdent, Img, Tag};
 
 use crate::error::{Error, Result};
-use crate::tag::TrackMetadata;
+use crate::tag::{Cover, TrackMetadata};
 
 /// The iTunes reverse-DNS mean for the freeform (`----`) atoms.
 const APPLE_ITUNES_MEAN: &str = "com.apple.iTunes";
@@ -22,7 +22,10 @@ const APPLE_ITUNES_MEAN: &str = "com.apple.iTunes";
 /// `©day`, comment via `©cmt`, and lyrics via `©lyr`), the precise `DATE` and the
 /// eight Suno fields as freeform atoms, and embeds `cover` as the `covr` artwork.
 /// The MP4 structure is read from and rewritten into an in-memory cursor.
-pub fn tag_alac(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Result<Vec<u8>> {
+///
+/// `mp4ameta` models `covr` artwork as JPEG/PNG/BMP only, so the ALAC path never
+/// embeds an animated WebP; the executor always hands this a static JPEG.
+pub fn tag_alac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) -> Result<Vec<u8>> {
     let mut file = Cursor::new(audio.to_vec());
     let mut tag = Tag::read_from(&mut file)
         .map_err(|err| Error::Tag(format!("could not read MP4 metadata: {err}")))?;
@@ -59,8 +62,8 @@ pub fn tag_alac(audio: &[u8], meta: &TrackMetadata, cover: Option<&[u8]>) -> Res
         set_freeform(&mut tag, name, value);
     }
 
-    if let Some(bytes) = cover {
-        tag.set_artwork(Img::jpeg(bytes.to_vec()));
+    if let Some(cover) = cover {
+        tag.set_artwork(Img::jpeg(cover.bytes.to_vec()));
     }
 
     tag.write_to(&mut file)
@@ -134,7 +137,7 @@ mod tests {
             ..Default::default()
         };
         let cover = b"\xff\xd8\xff\xe0jpeg-bytes".to_vec();
-        let tagged = tag_alac(&audio, &meta, Some(&cover)).unwrap();
+        let tagged = tag_alac(&audio, &meta, Some(Cover::jpeg(&cover))).unwrap();
 
         let tag = Tag::read_from(&mut Cursor::new(tagged)).unwrap();
         assert_eq!(tag.title(), Some("Neon Horizon"));

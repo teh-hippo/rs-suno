@@ -55,7 +55,7 @@ use crate::model::Clip;
 use crate::reconcile::{
     Action, ArtifactKind, Desired, Plan, SourceMode, set_manifest_artifact, set_manifest_stem,
 };
-use crate::tag::{TrackMetadata, tag_flac, tag_mp3, tag_wav};
+use crate::tag::{Cover, TrackMetadata, flac_picture_data_budget, tag_flac, tag_mp3, tag_wav};
 use crate::tag_alac::tag_alac;
 
 /// The shared Suno client behind an async mutex, so concurrent audio work can
@@ -76,6 +76,10 @@ pub struct ExecOptions {
     /// How many clips' audio to fetch, transcode, and tag concurrently. Clamped
     /// to at least one, so a zero collapses to sequential rather than stalling.
     pub concurrency: u32,
+    /// Embed a bounded animated WebP as the audio file's front cover (in place of
+    /// the static JPEG) for clips that carry a video preview. Off leaves the
+    /// static JPEG embed unchanged.
+    pub embed_animated_cover: bool,
     /// Settings used for animated WebP cover transcodes.
     pub cover_webp: WebpEncodeSettings,
 }
@@ -87,6 +91,7 @@ impl Default for ExecOptions {
             wav_poll_attempts: 24,
             wav_poll_interval: Duration::from_secs(5),
             concurrency: 4,
+            embed_animated_cover: false,
             cover_webp: WebpEncodeSettings::default(),
         }
     }
@@ -550,6 +555,22 @@ enum Prepared {
     Audio(RenderedAudio),
     Artifact(PreparedArtifact),
     Stem(PreparedStem),
+}
+
+/// A cover image resolved for embedding: owned bytes plus their MIME type.
+struct EmbedCover {
+    bytes: Vec<u8>,
+    mime: &'static str,
+}
+
+impl EmbedCover {
+    /// Borrow as the [`Cover`] the taggers take.
+    fn as_cover(&self) -> Cover<'_> {
+        Cover {
+            bytes: &self.bytes,
+            mime: self.mime,
+        }
+    }
 }
 
 /// What an applied action did, for the outcome counters.
@@ -1258,27 +1279,33 @@ where
 
         if format == AudioFormat::Wav {
             let (meta, synced) = self.track_meta(clip, lineage);
-            let cover = self.fetch_cover(clip).await;
+            let cover = self.resolve_cover(clip, format).await?;
             let existing = self.fs.read(path).map_err(|err| {
                 permanent_fail(&clip.id, format!("could not read for retag: {err}"))
             })?;
-            let tagged = tag_wav(&existing, &meta, cover.as_deref(), synced)
-                .map_err(|err| permanent_fail(&clip.id, err.to_string()))?;
+            let tagged = tag_wav(
+                &existing,
+                &meta,
+                cover.as_ref().map(EmbedCover::as_cover),
+                synced,
+            )
+            .map_err(|err| permanent_fail(&clip.id, err.to_string()))?;
             let size = self.write_verify(&clip.id, path, &tagged)?;
             self.refresh_hashes(manifest, &clip.id, Some(size));
             return Ok(Effect::Retagged);
         }
 
         let (meta, synced) = self.track_meta(clip, lineage);
-        let cover = self.fetch_cover(clip).await;
+        let cover = self.resolve_cover(clip, format).await?;
+        let cover = cover.as_ref().map(EmbedCover::as_cover);
         let existing = self
             .fs
             .read(path)
             .map_err(|err| permanent_fail(&clip.id, format!("could not read for retag: {err}")))?;
         let tagged = match format {
-            AudioFormat::Mp3 => tag_mp3(&existing, &meta, cover.as_deref(), synced),
-            AudioFormat::Flac => tag_flac(&existing, &meta, cover.as_deref()),
-            AudioFormat::Alac => tag_alac(&existing, &meta, cover.as_deref()),
+            AudioFormat::Mp3 => tag_mp3(&existing, &meta, cover, synced),
+            AudioFormat::Flac => tag_flac(&existing, &meta, cover),
+            AudioFormat::Alac => tag_alac(&existing, &meta, cover),
             AudioFormat::Wav => unreachable!("WAV handled above"),
         }
         .map_err(|err| permanent_fail(&clip.id, err.to_string()))?;
@@ -1656,9 +1683,14 @@ where
                     .fetch_bytes(&url)
                     .await
                     .map_err(|err| err.attribute(&clip.id))?;
-                let cover = self.fetch_cover(clip).await;
-                tag_mp3(&audio, &meta, cover.as_deref(), synced)
-                    .map_err(|err| permanent_fail(&clip.id, err.to_string()))
+                let cover = self.resolve_cover(clip, format).await?;
+                tag_mp3(
+                    &audio,
+                    &meta,
+                    cover.as_ref().map(EmbedCover::as_cover),
+                    synced,
+                )
+                .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
             AudioFormat::Flac | AudioFormat::Alac => {
                 let wav = self.fetch_wav(client_lock, clip).await?;
@@ -1673,18 +1705,24 @@ where
                             permanent_fail(&clip.id, format!("transcode failed: {err}"))
                         }
                     })?;
-                let cover = self.fetch_cover(clip).await;
+                let cover = self.resolve_cover(clip, format).await?;
+                let cover = cover.as_ref().map(EmbedCover::as_cover);
                 let tagged = match format {
-                    AudioFormat::Alac => tag_alac(&audio, &meta, cover.as_deref()),
-                    _ => tag_flac(&audio, &meta, cover.as_deref()),
+                    AudioFormat::Alac => tag_alac(&audio, &meta, cover),
+                    _ => tag_flac(&audio, &meta, cover),
                 };
                 tagged.map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
             AudioFormat::Wav => {
                 let wav = self.fetch_wav(client_lock, clip).await?;
-                let cover = self.fetch_cover(clip).await;
-                tag_wav(&wav, &meta, cover.as_deref(), synced)
-                    .map_err(|err| permanent_fail(&clip.id, err.to_string()))
+                let cover = self.resolve_cover(clip, format).await?;
+                tag_wav(
+                    &wav,
+                    &meta,
+                    cover.as_ref().map(EmbedCover::as_cover),
+                    synced,
+                )
+                .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
         }
     }
@@ -1853,6 +1891,72 @@ where
             }
         }
         None
+    }
+
+    /// Resolve the cover to embed in `clip`'s audio for `format`.
+    ///
+    /// When animated covers are enabled, the container can embed WebP
+    /// ([`AudioFormat::embeds_animated_cover`]), and the clip has a
+    /// `video_cover_url`, this fetches that MP4 preview, transcodes it to a
+    /// bounded animated WebP, and — if the result fits the FLAC picture budget —
+    /// embeds it as `image/webp`. It falls back to the static JPEG (exactly what
+    /// a coverless clip embeds today) when the feature is off, the clip has no
+    /// preview, the container is ALAC, the encode overflows the budget, or the
+    /// fetch/transcode fails for any non-systemic reason. A disk-full transcode
+    /// aborts the run, like the audio transcode path.
+    async fn resolve_cover(
+        &self,
+        clip: &Clip,
+        format: AudioFormat,
+    ) -> Result<Option<EmbedCover>, Fail> {
+        if self.opts.embed_animated_cover
+            && format.embeds_animated_cover()
+            && !clip.video_cover_url.is_empty()
+        {
+            match self.animated_cover_webp(clip).await {
+                Ok(webp) if webp.len() <= flac_picture_data_budget("image/webp") => {
+                    return Ok(Some(EmbedCover {
+                        bytes: webp,
+                        mime: "image/webp",
+                    }));
+                }
+                // Oversized encode: keep the file valid by embedding the static
+                // JPEG instead (the intent hash is unchanged, so this does not
+                // churn; a settings change that makes it fit re-embeds).
+                Ok(_) => {}
+                // A full scratch disk is systemic: abort like the audio path.
+                Err(fail) if matches!(fail.class, Class::Disk) => return Err(fail),
+                // Any other fetch/transcode failure is best-effort, exactly like a
+                // failed static-cover fetch: fall back to the JPEG.
+                Err(_) => {}
+            }
+        }
+        Ok(self.fetch_cover(clip).await.map(|bytes| EmbedCover {
+            bytes,
+            mime: "image/jpeg",
+        }))
+    }
+
+    /// Fetch the clip's MP4 preview and transcode it to an animated WebP.
+    ///
+    /// A disk-full transcode is classified [`Class::Disk`] so [`resolve_cover`]
+    /// can abort the run; every other failure is per-clip and triggers the JPEG
+    /// fallback.
+    async fn animated_cover_webp(&self, clip: &Clip) -> Result<Vec<u8>, Fail> {
+        let mp4 = self
+            .fetch_bytes(&clip.video_cover_url)
+            .await
+            .map_err(|err| err.attribute(&clip.id))?;
+        self.ffmpeg
+            .mp4_to_webp(&mp4, self.opts.cover_webp)
+            .await
+            .map_err(|err| {
+                if err.is_out_of_space() {
+                    disk_fail(&clip.id, "disk full: no space left to transcode cover")
+                } else {
+                    permanent_fail(&clip.id, format!("cover transcode failed: {err}"))
+                }
+            })
     }
 
     /// Write `bytes` atomically, then confirm the on-disk size (SYNC-13/14).
@@ -2144,6 +2248,7 @@ mod tests {
             wav_poll_attempts: 2,
             wav_poll_interval: Duration::from_secs(5),
             concurrency: 4,
+            embed_animated_cover: false,
             cover_webp: WebpEncodeSettings::default(),
         }
     }
@@ -5197,112 +5302,296 @@ mod tests {
     }
 
     #[test]
-    fn write_artifact_transcodes_animated_cover_to_webp() {
-        // A CoverWebp fetches the clip's MP4 preview, runs it through the ffmpeg
-        // port, and writes the transcoded WebP (not the fetched MP4), recording
-        // the sidecar on the owning entry.
-        let mut manifest = Manifest::new();
-        manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
+    fn download_embeds_animated_webp_cover_when_enabled() {
+        // With animated covers on and a video preview present, the audio embeds
+        // the transcoded WebP (image/webp) as its front cover, not the static JPEG.
+        let c = Clip {
+            video_cover_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+            ..art_clip("a")
+        };
+        let d = desired(c.clone(), AudioFormat::Mp3);
         let plan = Plan {
-            actions: vec![Action::WriteArtifact {
-                kind: ArtifactKind::CoverWebp,
-                path: "a/cover.webp".to_owned(),
-                source_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
-                hash: "v1".to_owned(),
-                owner_id: "a".to_owned(),
-                content: None,
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format: AudioFormat::Mp3,
             }],
         };
-        let http = ScriptedHttp::new().route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec()));
+        let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
+            .route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec()))
+            .route("a/large.jpg", Reply::ok(b"static-jpg".to_vec()));
         let fs = MemFs::new();
-        let ffmpeg = StubFfmpeg::webp();
+        let opts = ExecOptions {
+            embed_animated_cover: true,
+            ..ExecOptions::default()
+        };
+        let mut manifest = Manifest::new();
 
         let outcome = run(
             &plan,
             &mut manifest,
-            &[],
+            &[d],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &opts,
+        );
+
+        assert_eq!(outcome.downloaded, 1);
+        assert_eq!(outcome.failed(), 0);
+        let written = fs.read_file("a.mp3").unwrap();
+        let tag = id3::Tag::read_from2(std::io::Cursor::new(&written)).unwrap();
+        let pic = tag.pictures().next().expect("embedded cover");
+        assert_eq!(pic.mime_type, "image/webp");
+        assert!(
+            pic.data.starts_with(b"RIFF"),
+            "the embedded cover is the transcoded WebP"
+        );
+        // The MP4 preview was fetched and transcoded; the static JPEG was not needed.
+        assert_eq!(http.count("a/video.mp4"), 1);
+        assert_eq!(http.count("a/large.jpg"), 0);
+    }
+
+    #[test]
+    fn download_keeps_static_jpeg_cover_when_embed_disabled() {
+        // With the feature off (default), even a clip with a video preview embeds
+        // the static JPEG and never fetches or transcodes the MP4.
+        let c = Clip {
+            video_cover_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+            ..art_clip("a")
+        };
+        let d = desired(c.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format: AudioFormat::Mp3,
+            }],
+        };
+        let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
+            .route("a/large.jpg", Reply::ok(b"static-jpg".to_vec()));
+        let fs = MemFs::new();
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d],
+            &http,
+            &fs,
+            &StubFfmpeg::flac(),
+            &RecordingClock::new(),
+            &ExecOptions::default(),
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        let written = fs.read_file("a.mp3").unwrap();
+        let tag = id3::Tag::read_from2(std::io::Cursor::new(&written)).unwrap();
+        let pic = tag.pictures().next().expect("embedded cover");
+        assert_eq!(pic.mime_type, "image/jpeg");
+        assert_eq!(pic.data, b"static-jpg");
+        assert_eq!(http.count("a/video.mp4"), 0);
+    }
+
+    #[test]
+    fn oversized_animated_cover_falls_back_to_jpeg_embed() {
+        // A transcoded WebP that would overflow the FLAC picture cap is not
+        // embedded; the audio falls back to the static JPEG so the file stays
+        // valid (and no re-tag loop, since the intent hash is unchanged).
+        let c = Clip {
+            video_cover_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+            ..art_clip("a")
+        };
+        let d = desired(c.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format: AudioFormat::Mp3,
+            }],
+        };
+        let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
+            .route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec()))
+            .route("a/large.jpg", Reply::ok(b"static-jpg".to_vec()));
+        let fs = MemFs::new();
+        let oversize = vec![b'R'; flac_picture_data_budget("image/webp") + 1];
+        let ffmpeg = StubFfmpeg::flac().with_webp(oversize);
+        let opts = ExecOptions {
+            embed_animated_cover: true,
+            ..ExecOptions::default()
+        };
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d],
             &http,
             &fs,
             &ffmpeg,
             &RecordingClock::new(),
-            &ExecOptions::default(),
+            &opts,
         );
 
-        assert_eq!(outcome.artifacts_written, 1);
         assert_eq!(outcome.failed(), 0);
-        assert_eq!(outcome.status, RunStatus::Completed);
-        // The fetched MP4 was transcoded: the file holds the ffmpeg WebP output.
-        assert_eq!(http.count("a/video.mp4"), 1);
-        let written = fs.read_file("a/cover.webp").unwrap();
-        assert_ne!(written, b"mp4-bytes");
-        assert!(written.starts_with(b"RIFF"));
-        assert_eq!(
-            manifest.get("a").unwrap().cover_webp,
-            Some(ArtifactState {
-                path: "a/cover.webp".to_owned(),
-                hash: "v1".to_owned(),
-            })
-        );
+        let written = fs.read_file("a.mp3").unwrap();
+        let tag = id3::Tag::read_from2(std::io::Cursor::new(&written)).unwrap();
+        let pic = tag.pictures().next().expect("embedded cover");
+        assert_eq!(pic.mime_type, "image/jpeg");
+        assert_eq!(pic.data, b"static-jpg");
     }
 
     #[test]
-    fn write_artifact_webp_transcode_failure_is_per_clip() {
-        // A transcode failure is attributed to the owning clip: it is a per-clip
-        // failure, the run completes, no sidecar is written, and the slot stays
-        // empty. A healthy static cover in the same run still succeeds.
-        let mut manifest = Manifest::new();
-        manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
-        manifest.insert("b", entry("b.mp3", AudioFormat::Mp3));
+    fn cover_transcode_failure_falls_back_to_jpeg_embed() {
+        // A non-systemic MP4 fetch/transcode failure never fails the audio: the
+        // embed falls back to the static JPEG, best-effort like a failed cover
+        // fetch, and the run completes.
+        let c = Clip {
+            video_cover_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+            ..art_clip("a")
+        };
+        let d = desired(c.clone(), AudioFormat::Mp3);
         let plan = Plan {
-            actions: vec![
-                Action::WriteArtifact {
-                    kind: ArtifactKind::CoverWebp,
-                    path: "a/cover.webp".to_owned(),
-                    source_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
-                    hash: "v1".to_owned(),
-                    owner_id: "a".to_owned(),
-                    content: None,
-                },
-                Action::WriteArtifact {
-                    kind: ArtifactKind::CoverJpg,
-                    path: "b/cover.jpg".to_owned(),
-                    source_url: "https://art.suno.ai/b/large.jpg".to_owned(),
-                    hash: "h1".to_owned(),
-                    owner_id: "b".to_owned(),
-                    content: None,
-                },
-            ],
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format: AudioFormat::Mp3,
+            }],
         };
         let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
             .route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec()))
-            .route("b/large.jpg", Reply::ok(b"jpg-b".to_vec()));
+            .route("a/large.jpg", Reply::ok(b"static-jpg".to_vec()));
         let fs = MemFs::new();
+        let opts = ExecOptions {
+            embed_animated_cover: true,
+            ..ExecOptions::default()
+        };
+        let mut manifest = Manifest::new();
 
         let outcome = run(
             &plan,
             &mut manifest,
-            &[],
+            &[d],
             &http,
             &fs,
             &StubFfmpeg::failing(),
             &RecordingClock::new(),
-            &ExecOptions::default(),
+            &opts,
         );
 
         assert_eq!(outcome.status, RunStatus::Completed);
-        assert_eq!(outcome.failed(), 1);
-        assert_eq!(outcome.failures[0].clip_id, "a");
-        // The animated cover failed to transcode: nothing written, slot empty.
-        assert!(!fs.exists("a/cover.webp"));
-        assert_eq!(manifest.get("a").unwrap().cover_webp, None);
-        // The static cover in the same run still succeeded.
-        assert_eq!(outcome.artifacts_written, 1);
-        assert_eq!(fs.read_file("b/cover.jpg").unwrap(), b"jpg-b");
-        assert!(manifest.get("b").unwrap().cover_jpg.is_some());
+        assert_eq!(outcome.failed(), 0);
+        let written = fs.read_file("a.mp3").unwrap();
+        let tag = id3::Tag::read_from2(std::io::Cursor::new(&written)).unwrap();
+        assert_eq!(tag.pictures().next().unwrap().mime_type, "image/jpeg");
     }
 
     #[test]
-    fn write_artifact_uses_configured_webp_settings() {
+    fn disk_full_cover_transcode_aborts_the_run() {
+        // A full scratch disk during the cover transcode is systemic: it aborts
+        // the run (exit 9) rather than silently skipping the cover.
+        let c = Clip {
+            video_cover_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+            ..art_clip("a")
+        };
+        let d = desired(c.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format: AudioFormat::Mp3,
+            }],
+        };
+        let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
+            .route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec()));
+        let fs = MemFs::new();
+        let opts = ExecOptions {
+            embed_animated_cover: true,
+            ..ExecOptions::default()
+        };
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d],
+            &http,
+            &fs,
+            &StubFfmpeg::out_of_space(),
+            &RecordingClock::new(),
+            &opts,
+        );
+
+        assert_eq!(outcome.status, RunStatus::DiskFull);
+    }
+
+    #[test]
+    fn video_only_clip_never_embeds_the_mp4_as_a_cover() {
+        // A clip with a video preview but no static image must never embed the
+        // MP4 bytes as a picture: when the WebP transcode fails and there is no
+        // static image to fall back to, the audio is written with no cover.
+        let c = Clip {
+            video_cover_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+            ..clip("a")
+        };
+        let d = desired(c.clone(), AudioFormat::Mp3);
+        let plan = Plan {
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format: AudioFormat::Mp3,
+            }],
+        };
+        let http = ScriptedHttp::new()
+            .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
+            .route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec()));
+        let fs = MemFs::new();
+        let opts = ExecOptions {
+            embed_animated_cover: true,
+            ..ExecOptions::default()
+        };
+        let mut manifest = Manifest::new();
+
+        let outcome = run(
+            &plan,
+            &mut manifest,
+            &[d],
+            &http,
+            &fs,
+            &StubFfmpeg::failing(),
+            &RecordingClock::new(),
+            &opts,
+        );
+
+        assert_eq!(outcome.failed(), 0);
+        let written = fs.read_file("a.mp3").unwrap();
+        let tag = id3::Tag::read_from2(std::io::Cursor::new(&written)).unwrap();
+        assert!(
+            tag.pictures().next().is_none(),
+            "no cover embedded, never the MP4"
+        );
+        assert!(
+            !written
+                .windows(b"mp4-bytes".len())
+                .any(|w| w == b"mp4-bytes"),
+            "the MP4 bytes must not be embedded as artwork"
+        );
+    }
+
+    #[test]
+    fn embed_uses_configured_webp_settings() {
         use std::sync::{Arc, Mutex};
 
         struct RecordingWebpFfmpeg {
@@ -5329,16 +5618,17 @@ mod tests {
             }
         }
 
-        let mut manifest = Manifest::new();
-        manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
+        let c = Clip {
+            video_cover_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+            ..art_clip("a")
+        };
+        let d = desired(c.clone(), AudioFormat::Mp3);
         let plan = Plan {
-            actions: vec![Action::WriteArtifact {
-                kind: ArtifactKind::CoverWebp,
-                path: "a/cover.webp".to_owned(),
-                source_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
-                hash: "v1".to_owned(),
-                owner_id: "a".to_owned(),
-                content: None,
+            actions: vec![Action::Download {
+                clip: c.clone(),
+                lineage: LineageContext::own_root(&c),
+                path: d.path.clone(),
+                format: AudioFormat::Mp3,
             }],
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -5346,6 +5636,7 @@ mod tests {
             seen: Arc::clone(&seen),
         };
         let opts = ExecOptions {
+            embed_animated_cover: true,
             cover_webp: WebpEncodeSettings {
                 quality: 88,
                 max_fps: 12,
@@ -5358,9 +5649,11 @@ mod tests {
 
         let _ = run(
             &plan,
-            &mut manifest,
-            &[],
-            &ScriptedHttp::new().route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec())),
+            &mut Manifest::new(),
+            &[d],
+            &ScriptedHttp::new()
+                .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
+                .route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec())),
             &MemFs::new(),
             &ffmpeg,
             &RecordingClock::new(),

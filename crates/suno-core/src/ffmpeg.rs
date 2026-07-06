@@ -63,12 +63,16 @@ impl FfmpegError {
 /// Encoder settings for the animated WebP cover derived from a clip's MP4
 /// preview.
 ///
-/// The [`Default`] is visually transparent lossy: quality 95 at effort
-/// (`compression_level`) 4. Measurement on real Suno covers showed 95 reaches
-/// ~46 dB (indistinguishable from lossless for a cover) at roughly a fifth of
-/// the lossless size, and that effort 6 only matches effort 4's size for 7-13x
-/// the encode time, so effort is capped at 4. Lossless is opt-in and much
-/// larger (a 5 s cover is ~145 MB versus ~31 MB at quality 95).
+/// The animated WebP is embedded as the audio file's front-cover picture. A
+/// FLAC PICTURE block is length-prefixed with a 24-bit field, so a single
+/// picture cannot exceed ~16 MiB; a real 5 s Suno cover at quality 95 with no
+/// width cap is ~31 MiB and would never fit. The [`Default`] is therefore a
+/// bounded lossy profile that reliably fits that ceiling: quality 90 at effort
+/// (`compression_level`) 4, scaled to at most 640 px wide (owner measurement:
+/// ~11 MiB, ~30% headroom under the cap; 800 px is ~14.5 MiB with far thinner
+/// margin). Effort is capped at 4 because effort 6 only matches its size for
+/// 7-13x the encode time. Lossless is opt-in and far larger (a 5 s cover is
+/// ~145 MB), so it fits only the larger MP3/ALAC containers, never FLAC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebpEncodeSettings {
     /// Lossy encoder quality, 0-100 (higher is better and larger). Ignored when
@@ -92,9 +96,9 @@ pub struct WebpEncodeSettings {
 impl Default for WebpEncodeSettings {
     fn default() -> Self {
         Self {
-            quality: 95,
+            quality: 90,
             max_fps: 24,
-            max_width: None,
+            max_width: Some(640),
             lossless: false,
             compression_level: 4,
         }

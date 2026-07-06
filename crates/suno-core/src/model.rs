@@ -228,27 +228,34 @@ impl Clip {
         }
     }
 
-    /// Cover-art URLs in preference order (large image, image, video cover),
-    /// dropping any that are empty.
+    /// Static cover-art image URLs in preference order (large image, then
+    /// image), dropping any that are empty.
+    ///
+    /// The `video_cover_url` preview is deliberately excluded: it is an MP4, not
+    /// an embeddable still image, so embedding it as a JPEG/WebP picture would
+    /// corrupt the artwork. A clip with only a video preview therefore yields no
+    /// embeddable cover (the animated cover is handled separately, by embedding a
+    /// transcoded WebP).
     pub fn cover_candidates(&self) -> Vec<&str> {
-        [
-            self.image_large_url.as_str(),
-            self.image_url.as_str(),
-            self.video_cover_url.as_str(),
-        ]
-        .into_iter()
-        .filter(|url| !url.is_empty())
-        .collect()
+        [self.image_large_url.as_str(), self.image_url.as_str()]
+            .into_iter()
+            .filter(|url| !url.is_empty())
+            .collect()
     }
 
-    /// The preferred cover-art URL, or `None` when the clip carries no art.
+    /// The preferred static cover-art image URL, or `None` when the clip carries
+    /// no still image.
+    ///
+    /// Like [`cover_candidates`](Self::cover_candidates), the `video_cover_url`
+    /// preview (an MP4) is deliberately excluded: this drives the static `.jpg`
+    /// sidecars, the album `folder.jpg`, and the embedded-cover identity hash,
+    /// none of which can use a video. A clip with only a video preview yields
+    /// `None`.
     pub fn selected_image_url(&self) -> Option<&str> {
         if !self.image_large_url.is_empty() {
             Some(self.image_large_url.as_str())
         } else if !self.image_url.is_empty() {
             Some(self.image_url.as_str())
-        } else if !self.video_cover_url.is_empty() {
-            Some(self.video_cover_url.as_str())
         } else {
             None
         }
@@ -663,16 +670,20 @@ mod tests {
     }
 
     #[test]
-    fn cover_candidates_are_ordered_and_filtered() {
-        let clip = art_clip("L", "", "V");
-        assert_eq!(clip.cover_candidates(), vec!["L", "V"]);
+    fn cover_candidates_are_static_images_ordered_and_filtered() {
+        // The video preview (an MP4) is never an embeddable still, so it is
+        // excluded; only the static image URLs remain, in preference order.
+        assert_eq!(art_clip("L", "I", "V").cover_candidates(), vec!["L", "I"]);
+        assert_eq!(art_clip("L", "", "V").cover_candidates(), vec!["L"]);
+        assert!(art_clip("", "", "V").cover_candidates().is_empty());
     }
 
     #[test]
-    fn selected_image_url_prefers_large_then_image_then_video() {
+    fn selected_image_url_prefers_large_then_image_and_excludes_video() {
         assert_eq!(art_clip("L", "I", "V").selected_image_url(), Some("L"));
         assert_eq!(art_clip("", "I", "V").selected_image_url(), Some("I"));
-        assert_eq!(art_clip("", "", "V").selected_image_url(), Some("V"));
+        // A video-only clip has no still image to embed or write as a `.jpg`.
+        assert_eq!(art_clip("", "", "V").selected_image_url(), None);
         assert_eq!(art_clip("", "", "").selected_image_url(), None);
     }
 

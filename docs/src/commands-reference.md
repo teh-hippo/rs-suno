@@ -72,13 +72,13 @@ configured `root` is used.
 | `--min-newest <N>` | `1` | Newest clips always kept when a recency filter applies. |
 | `--retries <N>` | `3` | Download retry attempts per clip. |
 | `--concurrency <N>` | `4` | Simultaneous downloads. |
-| `--animated-covers` | off | Also write animated WebP covers from video previews. |
-| `--video-cover-retention <neither\|webp\|mp4\|both>` | `neither` | Album video-cover retention: `webp` keeps the transcoded `cover.webp`, `mp4` keeps the raw `cover.mp4` (no transcode), `both` keeps both. Overrides `--animated-covers`; the standalone music video stays on `--video-mp4`. |
-| `--animated-cover-quality <N>` | `95` | Animated WebP quality (`0..100`). The default is visually transparent; ignored with `--animated-cover-lossless`. |
+| `--animated-covers` | off | Embed an animated WebP front cover (instead of the static JPEG) for clips with a video preview. |
+| `--video-cover-retention <neither\|webp\|mp4\|both>` | `neither` | Unified animated-cover control: `webp` embeds the animated WebP cover, `mp4` keeps the raw `cover.mp4` (no transcode), `both` does both. Overrides `--animated-covers`; the standalone music video stays on `--video-mp4`. |
+| `--animated-cover-quality <N>` | `90` | Animated WebP quality (`0..100`). The default fits the ~16 MiB FLAC picture cap; ignored with `--animated-cover-lossless`. |
 | `--animated-cover-max-fps <N>` | `24` | Animated WebP frame-rate cap. |
-| `--animated-cover-max-width <PIXELS>` | native | Animated WebP width cap (omit to keep source width). |
+| `--animated-cover-max-width <PIXELS>` | `640` | Animated WebP width cap (raise for sharper covers at the risk of a JPEG fallback on FLAC). |
 | `--animated-cover-compression-level <N>` | `4` | Animated WebP compression effort (`0..4`). |
-| `--animated-cover-lossless` | off | Encode the animated cover losslessly (bit-exact). Very large (a few seconds can be ~145 MB); quality `95` looks the same at a fraction of the size. |
+| `--animated-cover-lossless` | off | Encode the animated cover losslessly (bit-exact). Far larger than the embedded-cover size cap (a few seconds can be ~145 MB), so a lossless cover always falls back to the static JPEG; leave it off. |
 | `--allow-account-change` | off | Re-pin this library to the authenticated account. The run is additive and deletes nothing. |
 | `--details-sidecar` | off | Also write a plain-text `.details.txt` sidecar next to each song. |
 | `--lyrics-sidecar` | off | Also write a plain-text `.lyrics.txt` sidecar next to each song. |
