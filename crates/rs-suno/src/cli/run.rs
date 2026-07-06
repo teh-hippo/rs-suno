@@ -9,7 +9,7 @@
 //! manifest, logs, and last-run marker.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
@@ -33,13 +33,14 @@ use crate::cli::args::{GlobalArgs, SyncArgs};
 use crate::cli::commands::version;
 use crate::cli::config_load;
 use crate::cli::desired::{
-    Confirm, ExitCode, PlaylistPolicy, ResolvedSelection, confirm_decision, confirmed, is_narrowed,
+    Confirm, ExitCode, PlaylistPolicy, ResolvedSelection, confirm_decision, is_narrowed,
     mass_delete_abort, resolve_playlist, resolve_selection, run_exit_code, worse,
 };
 use crate::cli::failure;
 use crate::cli::last_run;
 use crate::cli::logs;
 use crate::cli::output;
+use crate::cli::prompt;
 use crate::cli::signal;
 use crate::cli::task_output;
 use crate::cli::task_output::eprint_t;
@@ -53,8 +54,6 @@ use crate::http::ReqwestHttp;
 
 const WAV_POLL_ATTEMPTS: u32 = 24;
 const WAV_POLL_INTERVAL: Duration = Duration::from_secs(5);
-/// How many deletion paths the confirmation prompt lists before summarising.
-const PROMPT_PATH_LIMIT: usize = 3;
 /// Maximum number of accounts processed concurrently when `--all` targets
 /// multiple accounts. Accounts share no mutable state (separate clients,
 /// tokens, destination roots, manifests, and lineage files), so per-account
@@ -834,7 +833,7 @@ async fn run_one(
                 eprint_t!("{}", output::orphan_report(&orphans));
             }
         }
-        if verb == Verb::Check && exit_code && plan_has_changes(&plan) {
+        if verb == Verb::Check && exit_code && prompt::plan_has_changes(&plan) {
             return Ok(ExitCode::General);
         }
         return Ok(ExitCode::Ok);
@@ -930,7 +929,7 @@ async fn run_one(
     ) {
         Confirm::Proceed => {}
         Confirm::Prompt => {
-            if !prompt_delete(&plan, verbosity)? {
+            if !prompt::prompt_delete(&plan, verbosity)? {
                 eprint_t!("Aborted; no changes made.");
                 return Ok(ExitCode::Ok);
             }
@@ -1725,54 +1724,6 @@ fn walk_audio_files(dest: &Path) -> Vec<String> {
     out
 }
 
-/// True when the plan would change disk (anything but skips).
-fn plan_has_changes(plan: &suno_core::Plan) -> bool {
-    plan.downloads()
-        + plan.reformats()
-        + plan.retags()
-        + plan.renames()
-        + plan.artifact_moves()
-        + plan.stem_moves()
-        + plan.deletes()
-        + plan.artifact_writes()
-        + plan.artifact_deletes()
-        + plan.stem_writes()
-        + plan.stem_deletes()
-        > 0
-}
-
-/// Every path this plan would remove: audio deletes and sidecar (artifact)
-/// deletes alike, so the confirmation listing reflects the full destructive
-/// footprint, not just the audio files.
-fn deletion_paths(plan: &suno_core::Plan) -> Vec<String> {
-    plan.actions
-        .iter()
-        .filter_map(|action| match action {
-            suno_core::Action::Delete { path, .. }
-            | suno_core::Action::DeleteArtifact { path, .. }
-            | suno_core::Action::DeleteStem { path, .. } => Some(path.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Print the deletion list and read a `[y/N]` answer from stdin.
-fn prompt_delete(plan: &suno_core::Plan, verbosity: i8) -> Result<bool> {
-    let paths = deletion_paths(plan);
-    let show = if verbosity >= 1 {
-        paths.len()
-    } else {
-        PROMPT_PATH_LIMIT
-    };
-    eprint!("{} [y/N] ", output::delete_prompt(&paths, show));
-    std::io::stderr().flush().ok();
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .context("could not read confirmation")?;
-    Ok(confirmed(&answer))
-}
-
 /// The first eight characters of an id, for user-facing messages. The full id
 /// (and never the token) may go to the audit file, but only a short prefix is
 /// ever printed.
@@ -1876,67 +1827,6 @@ mod tests {
         assert_eq!(Verb::Check.mode(), SourceMode::Mirror);
         assert_eq!(Verb::Copy.mode(), SourceMode::Copy);
         assert_eq!(Verb::Copy.summary_label(), "Copy");
-    }
-
-    #[test]
-    fn artifact_only_deletes_drive_the_confirmation_gate() {
-        use suno_core::{Action, ArtifactKind, Plan};
-        // A plan with zero audio deletes but several sidecar deletes must still
-        // gate: run.rs feeds plan.deletes() + plan.artifact_deletes() into
-        // confirm_decision, so it prompts on a TTY and refuses without one.
-        let plan = Plan {
-            actions: (0..3)
-                .map(|i| Action::DeleteArtifact {
-                    kind: ArtifactKind::CoverJpg,
-                    path: format!("c{i}/cover.jpg"),
-                    owner_id: format!("c{i}"),
-                })
-                .collect(),
-        };
-        let delete_count = plan.deletes() + plan.artifact_deletes();
-        assert_eq!(plan.deletes(), 0);
-        assert_eq!(delete_count, 3);
-
-        assert_eq!(
-            confirm_decision(true, delete_count, false, true),
-            Confirm::Prompt
-        );
-        assert_eq!(
-            confirm_decision(true, delete_count, false, false),
-            Confirm::RefuseNonInteractive
-        );
-        assert_eq!(
-            confirm_decision(true, delete_count, true, false),
-            Confirm::Proceed
-        );
-
-        // The confirmation listing includes the sidecar paths.
-        assert_eq!(
-            deletion_paths(&plan),
-            vec!["c0/cover.jpg", "c1/cover.jpg", "c2/cover.jpg"]
-        );
-    }
-
-    #[test]
-    fn deletion_paths_lists_both_audio_and_sidecar_removals() {
-        use suno_core::{Action, ArtifactKind, Plan};
-        let plan = Plan {
-            actions: vec![
-                Action::Delete {
-                    path: "a.flac".to_owned(),
-                    clip_id: "a".to_owned(),
-                },
-                Action::DeleteArtifact {
-                    kind: ArtifactKind::CoverJpg,
-                    path: "a/cover.jpg".to_owned(),
-                    owner_id: "a".to_owned(),
-                },
-                Action::Skip {
-                    clip_id: "z".to_owned(),
-                },
-            ],
-        };
-        assert_eq!(deletion_paths(&plan), vec!["a.flac", "a/cover.jpg"]);
     }
 
     #[tokio::test]
