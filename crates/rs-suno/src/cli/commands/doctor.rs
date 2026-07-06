@@ -155,41 +155,16 @@ fn resolve_targets(
     env: &HashMap<String, String>,
     flags: &FlagOverrides,
 ) -> std::result::Result<Vec<DoctorTarget>, String> {
-    if global.all {
-        let cfg = config.ok_or_else(|| "--all requires a valid config file".to_owned())?;
-        let mut labels: Vec<String> = cfg.accounts.keys().cloned().collect();
-        labels.sort();
-        if labels.is_empty() {
-            return Err("no accounts are configured".to_owned());
+    account::resolve_all_or_single(config, global, flags, env, |label, settings| {
+        let root = config
+            .and_then(|cfg| cfg.accounts.get(&label))
+            .and_then(|account| account.root.clone());
+        DoctorTarget {
+            label,
+            settings,
+            root,
         }
-        return labels
-            .into_iter()
-            .map(|label| {
-                let settings = cfg
-                    .resolve(&label, None, env, flags)
-                    .map_err(|err| err.to_string())?;
-                let root = cfg
-                    .accounts
-                    .get(&label)
-                    .and_then(|account| account.root.clone());
-                Ok(DoctorTarget {
-                    label,
-                    settings,
-                    root,
-                })
-            })
-            .collect();
-    }
-
-    let (label, settings) = account::single_account(config, global, flags, env)?;
-    let root = config
-        .and_then(|cfg| cfg.accounts.get(&label))
-        .and_then(|account| account.root.clone());
-    Ok(vec![DoctorTarget {
-        label,
-        settings,
-        root,
-    }])
+    })
 }
 
 struct LiveDiagnostic {
@@ -422,6 +397,55 @@ mod tests {
             areas: None,
             album_overrides: std::collections::BTreeMap::new(),
         }
+    }
+
+    fn cfg_with_roots(entries: &[(&str, Option<&str>)]) -> Config {
+        let mut cfg = Config::default();
+        for (label, root) in entries {
+            cfg.accounts.insert(
+                (*label).to_owned(),
+                suno_core::AccountConfig {
+                    root: root.map(str::to_owned),
+                    ..Default::default()
+                },
+            );
+        }
+        cfg
+    }
+
+    #[test]
+    fn resolve_targets_all_populates_root() {
+        let cfg = cfg_with_roots(&[("bob", None), ("alice", Some("/lib/alice"))]);
+        let global = GlobalArgs {
+            all: true,
+            ..Default::default()
+        };
+        let targets = resolve_targets(
+            Some(&cfg),
+            &global,
+            &HashMap::new(),
+            &FlagOverrides::default(),
+        )
+        .unwrap();
+        assert_eq!(targets[0].label, "alice");
+        assert_eq!(targets[0].root.as_deref(), Some("/lib/alice"));
+        assert_eq!(targets[1].label, "bob");
+        assert_eq!(targets[1].root, None);
+    }
+
+    #[test]
+    fn resolve_targets_single_populates_root() {
+        let cfg = cfg_with_roots(&[("alice", Some("/lib/alice"))]);
+        let targets = resolve_targets(
+            Some(&cfg),
+            &GlobalArgs::default(),
+            &HashMap::new(),
+            &FlagOverrides::default(),
+        )
+        .unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].label, "alice");
+        assert_eq!(targets[0].root.as_deref(), Some("/lib/alice"));
     }
 
     #[test]

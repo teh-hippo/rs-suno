@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use suno_core::{Config, FlagOverrides};
+use suno_core::{Config, EffectiveSettings, FlagOverrides};
 
 use crate::cli::args::GlobalArgs;
 use crate::cli::token;
@@ -150,7 +150,7 @@ pub(crate) fn single_account(
     global: &GlobalArgs,
     flags: &FlagOverrides,
     env: &HashMap<String, String>,
-) -> std::result::Result<(String, suno_core::EffectiveSettings), String> {
+) -> std::result::Result<(String, EffectiveSettings), String> {
     let token_available = token::token_available(global, env);
     let (label, implicit) = if global.all {
         return Err(
@@ -196,6 +196,41 @@ pub(crate) fn single_account(
     }
     .map_err(|err| err.to_string())?;
     Ok((label, settings))
+}
+
+/// Resolve the accounts a fan-out command (`auth refresh --all`, `doctor --all`)
+/// touches, or the single account otherwise, mapping each resolved account to
+/// the caller's per-target shape via `make`.
+///
+/// `--all` lists every configured account in sorted order and errors on an empty
+/// set; without it, [`single_account`] picks the sole/`--account`/token target.
+/// This is the one home for that fan-out policy so `auth` and `doctor` cannot
+/// drift.
+pub(crate) fn resolve_all_or_single<T>(
+    config: Option<&Config>,
+    global: &GlobalArgs,
+    flags: &FlagOverrides,
+    env: &HashMap<String, String>,
+    mut make: impl FnMut(String, EffectiveSettings) -> T,
+) -> std::result::Result<Vec<T>, String> {
+    if global.all {
+        let cfg = config.ok_or_else(|| "--all requires a valid config file".to_owned())?;
+        let mut labels: Vec<String> = cfg.accounts.keys().cloned().collect();
+        labels.sort();
+        if labels.is_empty() {
+            return Err("no accounts are configured".to_owned());
+        }
+        return labels
+            .into_iter()
+            .map(|label| {
+                cfg.resolve(&label, None, env, flags)
+                    .map(|settings| make(label, settings))
+                    .map_err(|err| err.to_string())
+            })
+            .collect();
+    }
+    let (label, settings) = single_account(config, global, flags, env)?;
+    Ok(vec![make(label, settings)])
 }
 
 /// A one-account config used when running purely from `--token`/env.
@@ -343,5 +378,72 @@ mod tests {
         let err = plan_targets(Some(&cfg), &sel(false, None, None, true)).unwrap_err();
         assert!(err.contains("--account"));
         assert!(err.contains("--all"));
+    }
+
+    #[test]
+    fn resolve_all_or_single_all_sorted() {
+        let cfg = config_with(&[("charlie", None), ("alice", None), ("bob", None)]);
+        let global = GlobalArgs {
+            all: true,
+            ..Default::default()
+        };
+        let labels = resolve_all_or_single(
+            Some(&cfg),
+            &global,
+            &FlagOverrides::default(),
+            &HashMap::new(),
+            |label, _settings| label,
+        )
+        .unwrap();
+        assert_eq!(labels, vec!["alice", "bob", "charlie"]);
+    }
+
+    #[test]
+    fn resolve_all_or_single_all_without_config_errors() {
+        let global = GlobalArgs {
+            all: true,
+            ..Default::default()
+        };
+        let err = resolve_all_or_single(
+            None,
+            &global,
+            &FlagOverrides::default(),
+            &HashMap::new(),
+            |label, _settings| label,
+        )
+        .unwrap_err();
+        assert!(err.contains("--all requires"));
+    }
+
+    #[test]
+    fn resolve_all_or_single_all_empty_errors() {
+        let cfg = Config::default();
+        let global = GlobalArgs {
+            all: true,
+            ..Default::default()
+        };
+        let err = resolve_all_or_single(
+            Some(&cfg),
+            &global,
+            &FlagOverrides::default(),
+            &HashMap::new(),
+            |label, _settings| label,
+        )
+        .unwrap_err();
+        assert_eq!(err, "no accounts are configured");
+    }
+
+    #[test]
+    fn resolve_all_or_single_single_fallback() {
+        let cfg = config_with(&[("alice", None)]);
+        let targets = resolve_all_or_single(
+            Some(&cfg),
+            &GlobalArgs::default(),
+            &FlagOverrides::default(),
+            &HashMap::new(),
+            |label, _settings| label,
+        )
+        .unwrap();
+        assert_eq!(targets, vec!["alice"]);
     }
 }
