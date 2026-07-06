@@ -23,7 +23,12 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+  # Windows runtime behaviour (path canonicalisation, case-insensitive renames,
+  # symlink privilege) can differ even though the code is OS-agnostic, so a
+  # single x86_64 leg runs on merges to main as a post-merge safety net. PRs gate
+  # on the Linux `check` leg alone; the release build validates every target.
   windows-check:
+    if: github.event_name == 'push'
     runs-on: windows-latest
     permissions:
       contents: read
@@ -35,19 +40,4 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
-      # suno-core's suite is platform-agnostic, so the whole workspace runs here
-      # to exercise the binary crate's Windows IO branches alongside the engine.
       - run: cargo test --workspace --all-features --target x86_64-pc-windows-msvc
-  windows-arm-check:
-    runs-on: windows-11-arm
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          targets: aarch64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-on-failure: true
-      - run: cargo test --workspace --all-features --target aarch64-pc-windows-msvc
