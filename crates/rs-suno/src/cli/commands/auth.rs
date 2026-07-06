@@ -103,24 +103,9 @@ fn resolve_targets(
         let settings = resolve_named(config, account, env, flags)?;
         return Ok(vec![(account.clone(), settings)]);
     }
-    if global.all {
-        let cfg = config.ok_or_else(|| "--all requires a config file".to_owned())?;
-        let mut labels: Vec<String> = cfg.accounts.keys().cloned().collect();
-        labels.sort();
-        if labels.is_empty() {
-            return Err("no accounts are configured".to_owned());
-        }
-        return labels
-            .into_iter()
-            .map(|label| {
-                cfg.resolve(&label, None, env, flags)
-                    .map(|settings| (label, settings))
-                    .map_err(|err| err.to_string())
-            })
-            .collect();
-    }
-    let resolved = account::single_account(config, global, flags, env)?;
-    Ok(vec![resolved])
+    account::resolve_all_or_single(config, global, flags, env, |label, settings| {
+        (label, settings)
+    })
 }
 
 /// Resolve a named account, erroring when no config holds it.
