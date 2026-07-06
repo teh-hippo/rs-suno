@@ -10,6 +10,7 @@ pub mod args;
 pub mod commands;
 pub mod config_load;
 pub mod desired;
+pub mod execute;
 pub mod expiry;
 pub mod failure;
 pub mod last_run;
