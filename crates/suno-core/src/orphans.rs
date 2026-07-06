@@ -17,6 +17,7 @@
 use std::collections::BTreeSet;
 
 use crate::manifest::Manifest;
+use crate::pathkey::canonical_path_key;
 
 /// The audio paths in `on_disk` that no manifest entry tracks, sorted and
 /// de-duplicated.
@@ -26,14 +27,20 @@ use crate::manifest::Manifest;
 /// destination filtered to audio files, so sidecars, folder art, playlists, and
 /// the hidden `.suno-*` files never appear and need no exclusion here. The
 /// result is a pure function of its inputs: no filesystem, network, or clock.
+///
+/// Tracked and on-disk paths are compared by their filesystem-canonical key
+/// (NFC + lowercase, see [`canonical_path_key`]), so a tracked file the walk
+/// recorded under a different case or Unicode normalisation is not mis-reported
+/// as an orphan on a case-insensitive or NFC-folding filesystem.
 pub fn untracked_audio(manifest: &Manifest, on_disk: &[String]) -> Vec<String> {
-    let tracked: BTreeSet<&str> = manifest
+    let tracked: BTreeSet<String> = manifest
         .iter()
         .flat_map(|(_, entry)| std::iter::once(entry.path.as_str()).chain(entry.artifact_paths()))
+        .map(canonical_path_key)
         .collect();
     let mut orphans: Vec<String> = on_disk
         .iter()
-        .filter(|path| !tracked.contains(path.as_str()))
+        .filter(|path| !tracked.contains(&canonical_path_key(path)))
         .cloned()
         .collect();
     orphans.sort();
@@ -53,6 +60,21 @@ mod tests {
             format: AudioFormat::Flac,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn tracked_file_with_case_or_nfc_mismatch_is_not_an_orphan() {
+        // #269: on a case-insensitive or NFC-folding filesystem the walk can
+        // record a tracked file under a different case or Unicode normalisation.
+        // The canonical comparison keeps it from being mis-reported as an orphan.
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry("Creator/Song.flac"));
+        manifest.insert("b", entry("Creator/\u{00e9}toile.flac")); // é as NFC
+        let on_disk = vec![
+            "Creator/song.flac".to_owned(),           // same file, different case
+            "Creator/e\u{0301}toile.flac".to_owned(), // same file, NFD encoding
+        ];
+        assert!(untracked_audio(&manifest, &on_disk).is_empty());
     }
 
     #[test]

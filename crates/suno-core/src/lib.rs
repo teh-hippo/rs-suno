@@ -27,6 +27,7 @@ mod manifest;
 mod model;
 mod naming;
 mod orphans;
+mod pathkey;
 pub mod reconcile;
 pub mod select;
 mod synced;

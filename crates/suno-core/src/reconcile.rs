@@ -42,6 +42,7 @@ use crate::hash::{art_hash, art_url_hash, webp_art_hash};
 use crate::lineage::LineageContext;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
+use crate::pathkey::{canonical_path_key, same_fs_path};
 
 /// The class of an external sidecar artifact a clip (or album/library) owns.
 ///
@@ -830,7 +831,7 @@ fn needs_write_drift(
         None => true,
         Some((stored_hash, stored_path)) => {
             stored_hash != want_hash
-                || stored_path != want_path
+                || !same_fs_path(stored_path, want_path)
                 || local
                     .get(stored_path)
                     .is_some_and(|f| !f.exists || f.size == 0)
@@ -891,7 +892,7 @@ fn plan_clip_artifacts(
             // falls back to a fetch-and-write if the old file has since vanished.
             if let Some(state) = state
                 && state.hash == artifact.hash
-                && state.path != artifact.path
+                && !same_fs_path(&state.path, &artifact.path)
                 && artifact.content.is_none()
                 && local
                     .get(&state.path)
@@ -1032,7 +1033,7 @@ fn plan_clip_stems(
         let state = entry.and_then(|e| e.stems.get(&stem.key));
         let needs_write = match state {
             None => true,
-            Some(state) => state.hash != stem.hash || state.path != stem.path,
+            Some(state) => state.hash != stem.hash || !same_fs_path(&state.path, &stem.path),
         };
         if needs_write {
             // Downgrade a pure relocation to a rename: only the path drifted and
@@ -1041,7 +1042,7 @@ fn plan_clip_stems(
             // back to a fetch-and-write if the old file has since vanished.
             if let Some(state) = state
                 && state.hash == stem.hash
-                && state.path != stem.path
+                && !same_fs_path(&state.path, &stem.path)
                 && local
                     .get(&state.path)
                     .is_some_and(|f| f.exists && f.size > 0)
@@ -1200,12 +1201,19 @@ fn rep_key(d: &Desired) -> (&str, &str, &str, u8) {
 /// file the same plan just produced. This covers the audio [`Action::Delete`],
 /// every artifact [`Action::DeleteArtifact`] class, and every
 /// [`Action::DeleteStem`].
+///
+/// Paths are compared by their filesystem-canonical key (NFC + lowercase, see
+/// [`canonical_path_key`]), not byte-exact, so a departed clip's delete is
+/// suppressed even when it differs from a kept clip's fresh write target only by
+/// letter case or Unicode normalisation. On a case-insensitive or NFC-folding
+/// filesystem those name the same file, and a byte-exact match would miss the
+/// alias and delete the file the run just wrote.
 fn suppress_path_aliasing(actions: &mut [Action]) {
     // Collect the delete indices whose path a write or move also targets this
-    // run, borrowing the paths rather than cloning them. Only aliased deletes
-    // are rewritten below, so the common (no-alias) case allocates nothing.
+    // run. Only aliased deletes are rewritten below, so the common (no-alias)
+    // case does no extra work beyond building the canonical target set.
     let aliased: Vec<usize> = {
-        let targets: BTreeSet<&str> = actions
+        let targets: BTreeSet<String> = actions
             .iter()
             .filter_map(|a| match a {
                 Action::Download { path, .. }
@@ -1217,6 +1225,7 @@ fn suppress_path_aliasing(actions: &mut [Action]) {
                 | Action::MoveStem { to, .. } => Some(to.as_str()),
                 _ => None,
             })
+            .map(canonical_path_key)
             .collect();
         actions
             .iter()
@@ -1225,7 +1234,7 @@ fn suppress_path_aliasing(actions: &mut [Action]) {
                 Action::Delete { path, .. }
                 | Action::DeleteArtifact { path, .. }
                 | Action::DeleteStem { path, .. } => {
-                    targets.contains(path.as_str()).then_some(index)
+                    targets.contains(&canonical_path_key(path)).then_some(index)
                 }
                 _ => None,
             })
@@ -1307,7 +1316,7 @@ fn plan_desired(
         return;
     }
 
-    if d.path != entry.path {
+    if !same_fs_path(&d.path, &entry.path) {
         out.push(Action::Rename {
             from: entry.path.clone(),
             to: d.path.clone(),
@@ -1953,6 +1962,59 @@ mod tests {
             vec![Action::Rename {
                 from: "old/a.flac".to_string(),
                 to: "new/a.flac".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn case_only_path_change_is_not_a_rename() {
+        // MEDIUM (#269): a same-clip path that changed only by case (or NFC/NFD)
+        // between runs names one file on a case-insensitive or NFC-folding
+        // filesystem, so it must not emit a rename-onto-self.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry("Creator/Song.flac", AudioFormat::Flac, "m", "art"),
+        );
+        let d = vec![desired(
+            "a",
+            "Creator/song.flac",
+            AudioFormat::Flac,
+            "m",
+            "art",
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(
+            plan.actions,
+            vec![Action::Skip {
+                clip_id: "a".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn case_only_path_change_with_meta_drift_retags_in_place() {
+        // The canonical-equal path still retags when metadata drifted, at the
+        // existing (old-cased) path, with no rename.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            entry("Creator/Song.flac", AudioFormat::Flac, "old", "art"),
+        );
+        let d = vec![desired(
+            "a",
+            "Creator/song.flac",
+            AudioFormat::Flac,
+            "new",
+            "art",
+        )];
+        let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+        assert_eq!(
+            plan.actions,
+            vec![Action::Retag {
+                clip: clip("a"),
+                lineage: lineage("a"),
+                path: "Creator/Song.flac".to_string(),
             }]
         );
     }
@@ -2640,6 +2702,60 @@ mod tests {
                 .actions
                 .iter()
                 .any(|a| matches!(a, Action::Delete { .. }))
+        );
+        assert_eq!(plan.downloads(), 1);
+    }
+
+    #[test]
+    fn delete_suppressed_when_path_case_aliases_download_target() {
+        // HIGH (#269): a departed clip's delete path and a kept clip's fresh
+        // download target differ only by case. On a case-insensitive filesystem
+        // they name one file, so executing the plan would delete the file the
+        // same run just wrote. The canonical match must suppress the delete.
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "b",
+            entry("Creator/Song.flac", AudioFormat::Flac, "m", "art"),
+        );
+        let d = vec![desired(
+            "a",
+            "Creator/song.flac",
+            AudioFormat::Flac,
+            "m",
+            "art",
+        )];
+        let plan = reconcile(&manifest, &d, &HashMap::new(), &mirror_ok());
+        assert!(
+            !plan
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::Delete { .. })),
+            "case-only alias was not suppressed: {:?}",
+            plan.actions
+        );
+        assert_eq!(plan.downloads(), 1);
+        assert!(plan.actions.contains(&Action::Skip {
+            clip_id: "b".to_string()
+        }));
+    }
+
+    #[test]
+    fn delete_suppressed_when_path_nfc_aliases_download_target() {
+        // HIGH (#269): the same guard for NFC vs NFD encodings of one name,
+        // which an NFC-folding filesystem (macOS APFS) treats as one file.
+        let nfc = "Creator/\u{00e9}toile.flac"; // é as U+00E9
+        let nfd = "Creator/e\u{0301}toile.flac"; // é as e + U+0301
+        let mut manifest = Manifest::new();
+        manifest.insert("b", entry(nfd, AudioFormat::Flac, "m", "art"));
+        let d = vec![desired("a", nfc, AudioFormat::Flac, "m", "art")];
+        let plan = reconcile(&manifest, &d, &HashMap::new(), &mirror_ok());
+        assert!(
+            !plan
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::Delete { .. })),
+            "NFC/NFD alias was not suppressed: {:?}",
+            plan.actions
         );
         assert_eq!(plan.downloads(), 1);
     }

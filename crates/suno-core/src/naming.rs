@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use unicode_normalization::UnicodeNormalization as _;
 
 use crate::Clip;
 use crate::error::{Error, Result};
 use crate::lineage::LineageContext;
+use crate::pathkey::canonical_path_key;
 
 /// The default relative path template.
 ///
@@ -133,12 +133,6 @@ pub fn render_clip_names(
     }
 
     rendered
-}
-
-/// Filesystem-canonical key: NFC-normalise then lowercase, so paths that differ
-/// only by case or by NFC/NFD encoding hash to the same bucket.
-fn canonical_path_key(path: &str) -> String {
-    path.nfc().flat_map(char::to_lowercase).collect()
 }
 
 /// The album path component for every request, with a clip whose root title
@@ -554,8 +548,12 @@ fn sanitise_component(
         return "item".to_string();
     }
     let mut result = result.to_string();
-    if !result.ends_with('_') && is_reserved_name(&result) {
-        result.push('_');
+    if is_reserved_name(&result) {
+        // Guard the stem, not the whole component: `NUL.mp3` must become
+        // `NUL_.mp3`, since `NUL.mp3_` keeps `NUL` as its dot-stem and stays a
+        // Windows device name.
+        let stem_end = result.find('.').unwrap_or(result.len());
+        result.insert(stem_end, '_');
     }
     result
 }
@@ -707,6 +705,25 @@ mod tests {
             rendered.relative_path.display()
         );
         assert!(rendered.base_name.contains("[deadbeef]"));
+    }
+
+    #[test]
+    fn reserved_name_with_dotted_title_guards_the_stem_not_the_component() {
+        // A bare `{title}` file component whose title is a device name with an
+        // extension: the guard must land on the stem (`NUL_.mp3`), not the whole
+        // component (`NUL.mp3_`), which would keep `NUL` as the dot-stem.
+        let config = NamingConfig {
+            template: "{title}".to_string(),
+            ..NamingConfig::default()
+        };
+        let clip = test_clip("abcd1234-x", "NUL.mp3");
+        let rendered = render_own(&clip, &config);
+        let component = rendered.relative_path.to_string_lossy();
+        assert_eq!(component, "NUL_.mp3");
+        assert!(
+            !is_reserved_name(&component),
+            "component {component} is still a reserved device name"
+        );
     }
 
     #[test]
