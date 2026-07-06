@@ -19,14 +19,14 @@ use futures_util::stream::{self, StreamExt};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
     AdoptDecision, AlbumArt, AlbumDesired, AlignedLyrics, AreaKind, AreaListing, ArtifactToggles,
-    ClerkAuth, Clip, Config, Error as CoreError, ExecOptions, Filesystem, FlagOverrides,
-    LIKED_PLAYLIST_ID, LineageContext, LocalFile, Manifest, NamingConfig, Owner, OwnerGate,
-    PlaylistDesired, PlaylistInput, PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode,
-    SourceStatus, Stem, SunoClient, adopt_decision, adoption_enumerated, album_desired, area_mode,
-    build_desired, build_modes_by_id, build_playlist_desired, build_scoped_playlist_desired,
-    clip_stems, deletion_allowed, is_downloadable, library_authoritative, narrows_downloads,
-    owner_gate, plan_album_artifacts, plan_playlist_artifacts, reconcile, resolve_roots,
-    source_statuses, union_clips,
+    ClerkAuth, Clip, Config, ExecOptions, Filesystem, FlagOverrides, LIKED_PLAYLIST_ID,
+    LineageContext, LocalFile, Manifest, NamingConfig, Owner, OwnerGate, PlaylistDesired,
+    PlaylistInput, PlaylistState, Ports, ResolveOpts, RunStatus, SourceMode, SourceStatus, Stem,
+    SunoClient, adopt_decision, adoption_enumerated, album_desired, area_mode, build_desired,
+    build_modes_by_id, build_playlist_desired, build_scoped_playlist_desired, clip_stems,
+    deletion_allowed, is_downloadable, library_authoritative, narrows_downloads, owner_gate,
+    plan_album_artifacts, plan_playlist_artifacts, reconcile, resolve_roots, source_statuses,
+    union_clips,
 };
 
 use crate::cli::args::{GlobalArgs, SyncArgs};
@@ -35,6 +35,7 @@ use crate::cli::desired::{
     Confirm, ExitCode, PlaylistPolicy, ResolvedSelection, confirm_decision, confirmed, is_narrowed,
     mass_delete_abort, resolve_playlist, resolve_selection, run_exit_code, worse,
 };
+use crate::cli::failure;
 use crate::cli::logs;
 use crate::cli::output;
 use crate::cli::task_output;
@@ -693,7 +694,7 @@ async fn run_one(
     let dest = &target.dest;
     let auth = ClerkAuth::new(&token);
     if let Err(err) = auth.authenticate(&http).await {
-        return Ok(report_auth_failure(&target.label, &err));
+        return Ok(failure::report_auth_failure(&target.label, &err));
     }
     let account = auth.display_name().to_owned();
     crate::cli::expiry::warn_token_expiry(&target.label, &auth, verbosity);
@@ -1607,7 +1608,7 @@ async fn enumerate_areas(
                     any_filtered,
                     narrowed,
                 )),
-                Err(err) => return Err(report_listing_failure(label, &err)),
+                Err(err) => return Err(failure::report_listing_failure(label, &err)),
             }
         }
     }
@@ -1639,7 +1640,7 @@ async fn enumerate_areas(
             Ok(playlists) => Some(playlists),
             Err(err) => {
                 if selection.cli_scoped {
-                    return Err(report_listing_failure(label, &err));
+                    return Err(failure::report_listing_failure(label, &err));
                 }
                 if verbosity >= -1 {
                     eprint_t!(
@@ -2107,30 +2108,6 @@ fn prompt_delete(plan: &suno_core::Plan, verbosity: i8) -> Result<bool> {
         .read_line(&mut answer)
         .context("could not read confirmation")?;
     Ok(confirmed(&answer))
-}
-
-pub(crate) fn report_auth_failure(label: &str, err: &CoreError) -> ExitCode {
-    eprint_t!(
-        "error: authentication failed for account '{label}'\n\nThe stored token may have expired. Re-authenticate with:\n  suno auth refresh {label}\n\nIf the token was rotated in Suno, update it with:\n  suno config add-account {label} --token <new-token>"
-    );
-    let _ = err;
-    ExitCode::Auth
-}
-
-pub(crate) fn report_listing_failure(label: &str, err: &CoreError) -> ExitCode {
-    match err {
-        CoreError::Auth(_) => report_auth_failure(label, err),
-        CoreError::Connection(_) | CoreError::RateLimited { .. } => {
-            eprint_t!(
-                "error: could not list the library for '{label}': {err}\n  No files were written. Re-run when connectivity is restored."
-            );
-            ExitCode::Transient
-        }
-        other => {
-            eprint_t!("error: could not list the library for '{label}': {other}");
-            ExitCode::General
-        }
-    }
 }
 
 /// A one-account config used when running purely from `--token`/env.

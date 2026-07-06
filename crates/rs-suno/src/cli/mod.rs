@@ -9,6 +9,7 @@ pub mod args;
 pub mod commands;
 pub mod desired;
 pub mod expiry;
+pub mod failure;
 pub mod logs;
 pub mod open_url;
 pub mod output;

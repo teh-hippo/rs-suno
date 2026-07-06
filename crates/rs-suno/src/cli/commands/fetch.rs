@@ -13,6 +13,7 @@ use suno_core::{
 
 use crate::cli::args::{FetchArgs, GlobalArgs};
 use crate::cli::desired::ExitCode;
+use crate::cli::failure;
 use crate::cli::run;
 use crate::clock::TokioClock;
 use crate::download;
@@ -68,7 +69,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
     let auth = ClerkAuth::new(&token);
     if let Err(err) = auth.authenticate(&http).await {
-        return Ok(run::report_auth_failure(&label, &err));
+        return Ok(failure::report_auth_failure(&label, &err));
     }
     crate::cli::expiry::warn_token_expiry(&label, &auth, global.verbosity());
     let client = SunoClient::new(auth, TokioClock);
