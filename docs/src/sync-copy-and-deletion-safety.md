@@ -293,8 +293,8 @@ plus one visible index file:
 | `.suno.lock` | Present only while a run is active. |
 | `suno-index.json` | A visible, machine-readable catalogue of the mirror for scripting; written best-effort on a fully-enumerated run. |
 
-On Unix, the dot-prefixed engine state files are written with private
-permissions (`0600`); the visible `suno-index.json` is not.
+These engine state files are written in plaintext with the platform's default
+permissions.
 
 The audit and failure logs are not written during a `--dry-run` or `check`, and
 neither is `suno-index.json`.

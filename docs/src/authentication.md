@@ -165,9 +165,10 @@ token_command = "bws secret get <secret-id>"          # Bitwarden Secrets Manage
 # token_command = "pass show suno/client"             # pass
 ```
 
-If you must store the token in the config file instead, restrict its
-permissions (for example `chmod 600`), and note that `suno config show` already
-prints `[redacted]` in place of every token.
+If you must store the token in the config file instead, restrict its permissions
+yourself (for example `chmod 600` on Unix), since `rs-suno` writes the file in
+plaintext with the platform's default permissions. Note that `suno config show`
+already prints `[redacted]` in place of every token.
 
 ## Check and refresh a token
 

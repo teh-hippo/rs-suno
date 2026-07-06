@@ -97,9 +97,11 @@ playlists = "copy"
 "1a2b3c4d-0000-0000-0000-000000000000" = "Greatest Hits"
 ```
 
-On Unix, `rs-suno` writes this config file with private permissions (`0600`), and
-creates its parent config directory with private permissions (`0700`) when
-needed. These modes are not applied on non-Unix platforms.
+`rs-suno` writes this config file in plaintext with the platform's default
+permissions; it does not restrict the file further. The config can hold a token,
+so prefer keeping secrets out of it with a `token_command` backed by a secret
+manager (see [authentication](authentication.md)), or restrict the file yourself
+(for example `chmod 600` on Unix).
 
 ### Account settings
 

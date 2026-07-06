@@ -67,6 +67,7 @@ Ports and adapters. `suno-core` is runtime-agnostic and performs no direct IO; i
 ### Should
 
 - Prefer root-cause refactoring over band-aids; treat code as living.
+- Prefer OS-agnostic code: reach for the standard library or a well-maintained cross-platform crate before hand-rolling `#[cfg(os)]` branches. Where a platform difference is genuine, justify it case by case and isolate it behind a single documented helper (still justifying any new dependency).
 - Prove a new capability against a real library before locking logic, then lock it with unit tests (preferred over integration); run dry-run integration routinely.
 - Keep comments minimal and purposeful.
 - Aim for about 80% coverage on `suno-core`.
