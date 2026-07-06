@@ -37,6 +37,7 @@ use crate::cli::desired::{
     mass_delete_abort, resolve_playlist, resolve_selection, run_exit_code, worse,
 };
 use crate::cli::failure;
+use crate::cli::last_run;
 use crate::cli::logs;
 use crate::cli::output;
 use crate::cli::task_output;
@@ -53,7 +54,6 @@ const WAV_POLL_ATTEMPTS: u32 = 24;
 const WAV_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How many deletion paths the confirmation prompt lists before summarising.
 const PROMPT_PATH_LIMIT: usize = 3;
-const LAST_RUN_NAME: &str = ".suno-last-run";
 /// Maximum number of accounts processed concurrently when `--all` targets
 /// multiple accounts. Accounts share no mutable state (separate clients,
 /// tokens, destination roots, manifests, and lineage files), so per-account
@@ -688,7 +688,7 @@ async fn run_one(
         since: if truncate { since } else { None },
         min_newest: settings.min_newest as usize,
         now: wallclock::now_secs(),
-        last_run: read_last_run(dest),
+        last_run: last_run::read_last_run(dest),
     };
     let selected = select(&clips, &params);
     let contexts: HashMap<String, LineageContext> = selected
@@ -1098,7 +1098,7 @@ async fn execute_plan(
         .map(|d| (d.path.as_str(), d.clip.id.as_str()))
         .collect();
     logs::append_audit(dest, &plan, &failed, &rename_owner)?;
-    write_last_run(dest);
+    last_run::write_last_run(dest);
 
     if verbosity >= 1 {
         for line in output::action_lines(&plan, &failed, verbosity) {
@@ -1807,18 +1807,6 @@ fn set_pin(
     *pending_pin = Some(PendingPin { action, notice });
 }
 
-fn read_last_run(dest: &Path) -> Option<u64> {
-    std::fs::read_to_string(dest.join(LAST_RUN_NAME))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-}
-
-fn write_last_run(dest: &Path) {
-    let _ = std::fs::write(dest.join(LAST_RUN_NAME), wallclock::now_secs().to_string());
-}
-
 /// Resolve when a SIGINT (Ctrl-C) or, on Unix, a SIGTERM arrives.
 ///
 /// `ctrl_c` is cross-platform; the extra `SIGTERM` arm is Unix-only because
@@ -1850,19 +1838,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use suno_core::area_enumerated;
-
-    #[test]
-    fn last_run_marker_round_trips() {
-        let dir = Path::new("target").join(format!(
-            "run-last-run-{}-{}",
-            std::process::id(),
-            wallclock::now_secs()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        write_last_run(&dir);
-        assert!(read_last_run(&dir).is_some());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[tokio::test]
     async fn reconcile_run_reads_a_missing_destination_as_empty() {
