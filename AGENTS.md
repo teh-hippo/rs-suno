@@ -37,6 +37,7 @@ crates/
     src/area.rs        # multi-area sync planner: authority/enumeration predicates
     src/config.rs      # layered settings resolved from one shared `Settings` shape
     src/graph.rs       # lineage node/edge graph + the `LineageStore` on-disk container
+    src/roots.rs       # async lineage-root resolver (the IO surface lifted out of lineage)
     src/identity.rs    # account-identity / adoption gate (trust-on-first-use pin)
     src/album_art.rs   # album/playlist art state
     src/consts.rs      # endpoints and tunables
