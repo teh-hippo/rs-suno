@@ -151,7 +151,8 @@ fn fs_new() -> MemFs {
 mod actions;
 mod album_art;
 mod artifacts;
-mod audio;
+mod audio_cover;
+mod audio_format;
 mod concurrency;
 mod failures;
 mod stems;
