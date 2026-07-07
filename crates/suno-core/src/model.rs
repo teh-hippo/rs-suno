@@ -12,9 +12,8 @@ pub struct Clip {
     pub title: String,
     pub audio_url: String,
     /// Every audio asset Suno lists for the clip (an `mp3` plus, usually, an
-    /// `m4a-opus`). Empty when the API omits `media_urls`, so a clip with no
-    /// listed assets falls back to `audio_url` (then synthesis) exactly as
-    /// before. The `mp3` entry is the authoritative, non-expiring source.
+    /// `m4a-opus`); empty when the API omits `media_urls`. The `mp3` entry is
+    /// the authoritative, non-expiring source.
     pub media_urls: Vec<MediaUrl>,
     pub image_url: String,
     pub image_large_url: String,
@@ -135,10 +134,6 @@ impl Clip {
     /// The MP3 source URL, in priority order: the API-listed `media_urls` `mp3`
     /// asset (authoritative and non-expiring), then the clip's `audio_url`, then
     /// the deterministic CDN URL synthesised from the id.
-    ///
-    /// When `media_urls` is absent the behaviour is unchanged: a present
-    /// `audio_url` is returned verbatim, and an empty one synthesises the CDN
-    /// URL.
     pub fn mp3_url(&self) -> String {
         if let Some(mp3) = self
             .media_urls
@@ -158,10 +153,8 @@ impl Clip {
     /// image), dropping any that are empty.
     ///
     /// The `video_cover_url` preview is deliberately excluded: it is an MP4, not
-    /// an embeddable still image, so embedding it as a JPEG/WebP picture would
-    /// corrupt the artwork. A clip with only a video preview therefore yields no
-    /// embeddable cover (the animated cover is handled separately, by embedding a
-    /// transcoded WebP).
+    /// an embeddable still, so a clip with only a video preview yields no cover
+    /// (the animated cover is embedded separately as a transcoded WebP).
     pub fn cover_candidates(&self) -> Vec<&str> {
         [self.image_large_url.as_str(), self.image_url.as_str()]
             .into_iter()
@@ -379,7 +372,7 @@ mod tests {
         };
         assert_eq!(clip.mp3_url(), "https://cdn1.suno.ai/z.mp3");
 
-        // Absent media_urls falls back to audio_url unchanged (today's behaviour).
+        // Absent media_urls falls back to audio_url unchanged.
         let no_media = Clip {
             id: "z".to_owned(),
             audio_url: "https://x/real.mp3".to_owned(),

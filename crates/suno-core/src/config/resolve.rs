@@ -162,12 +162,10 @@ impl Config {
             None,
             "VIDEO_COVER_RETENTION",
         )?;
-        // `video_cover_retention`, when set, is the unified control for the
-        // album video-cover artifacts: `webp`/`both` keep the transcoded
-        // `cover.webp` (and the per-song `.webp`), `mp4`/`both` keep the raw
-        // `cover.mp4` (`video_cover_url` verbatim). The standalone music video
-        // (`video_url`) is a different asset and stays on its own `video_mp4`
-        // toggle, untouched here.
+        // `video_cover_retention` is the unified control for the album
+        // video-cover artifacts: `webp`/`both` keep the transcoded `cover.webp`,
+        // `mp4`/`both` the raw `cover.mp4`. The standalone music video
+        // (`video_url`) keeps its own `video_mp4` toggle, untouched here.
         let (animated_covers, raw_animated_cover) = match video_cover_retention {
             Some(retention) => (retention.keeps_webp(), retention.keeps_mp4()),
             None => (animated_covers, false),
@@ -478,19 +476,10 @@ mod tests {
 
     /// Guards that every [`Settings`] field is threaded through
     /// [`Config::resolve`]. The `sentinel` literal has no `..Default::default()`,
-    /// so adding a `Settings` field is a compile error here until it is given a
-    /// distinct, non-compiled-default value — forcing the author to this test.
-    /// Resolving with empty account/source/flags then asserts each
-    /// [`EffectiveSettings`] scalar reflects the sentinel.
-    ///
-    /// The per-field `assert_eq!`s below are maintained by hand: this test proves
-    /// a new field is *named* in the sentinel, not that it is *asserted*.
-    /// `EffectiveSettings` deriving no `Default` compile-forces `resolve` to
-    /// populate every output field, so the residual gap is only a field that is
-    /// resolved and constructed but left unasserted here.
-    /// `animated_covers`/`video_cover_retention` are coupled (retention, when
-    /// set, drives both `animated_covers` and `raw_animated_cover`); their
-    /// precedence is proven by the dedicated tests.
+    /// so adding a field is a compile error until it is given a distinct,
+    /// non-default value here, then asserted against the resolved output. The
+    /// per-field `assert_eq!`s are maintained by hand, so this proves a new field
+    /// is *named* in the sentinel, not necessarily *asserted*.
     #[test]
     fn resolve_reflects_every_settings_field() {
         let sentinel = Settings {

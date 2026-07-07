@@ -156,9 +156,7 @@ fn creator_change_renames_and_retags() {
     let (plan, outcome) = run_clean(std::slice::from_ref(&renamed), &fs, &mut manifest);
 
     // The creator feeds both the path (artist folder) and the embedded artist
-    // tag, so a change both moves the file and refreshes its tags (#135). The
-    // old sentinel omitted the creator, so it renamed without retagging and
-    // left a stale artist tag behind.
+    // tag, so a change both moves the file and refreshes its tags (#135).
     assert_eq!(plan.renames(), 1);
     assert_eq!(
         plan.retags(),

@@ -1,7 +1,5 @@
 use super::*;
 
-// ── preserve marker (SYNC-8) ────────────────────────────────────
-
 #[test]
 fn preserve_is_set_for_copy_held_and_private_clips() {
     let mut mirror = desired(clip("m1"), AudioFormat::Mp3);
@@ -56,8 +54,6 @@ fn preserve_is_set_for_copy_held_and_private_clips() {
     assert!(manifest.get("m2").unwrap().preserve);
     assert!(manifest.get("m3").unwrap().preserve);
 }
-
-// ── Reformat / Retag / Rename / Delete / Skip ───────────────────
 
 #[test]
 fn reformat_writes_new_format_and_removes_old_file() {
@@ -294,8 +290,6 @@ fn skip_is_a_noop() {
     assert_eq!(outcome.failed(), 0);
 }
 
-// ── Pure helpers ────────────────────────────────────────────────
-
 #[test]
 fn header_helpers_parse_or_ignore() {
     let resp = HttpResponse {
@@ -324,8 +318,6 @@ fn preserve_rule_covers_copy_and_private() {
     private.private = true;
     assert!(preserve_for(&private));
 }
-
-// ── Skip refreshes the preserve marker (SYNC-8 cross-run) ────────
 
 #[test]
 fn skip_sets_preserve_when_a_clip_becomes_copy_held() {

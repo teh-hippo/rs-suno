@@ -279,8 +279,8 @@ mod tests {
         assert_eq!(billing.features.len(), 2);
     }
 
-    /// The anonymised full 43-field `GET /api/billing/info/` body from issue
-    /// #223, used as a real-shape parse fixture.
+    /// The anonymised full 43-field `GET /api/billing/info/` body, used as a
+    /// real-shape parse fixture.
     const BILLING_FULL: &str = r#"{
   "subscription_platform": "stripe",
   "is_active": true,

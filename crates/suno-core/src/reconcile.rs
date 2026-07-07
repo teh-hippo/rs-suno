@@ -1308,8 +1308,6 @@ fn meta_or_art_changed(d: &Desired, entry: &ManifestEntry) -> bool {
     d.meta_hash != entry.meta_hash || d.art_hash != entry.art_hash
 }
 
-// ── Folder art (album-scoped) ───────────────────────────────────────────────
-
 /// Derive the desired folder art for every album in `desired`, grouped by the
 /// stable root id (HARDENING H2).
 ///

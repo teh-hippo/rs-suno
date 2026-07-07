@@ -15,9 +15,8 @@ pub enum Method {
 
 /// A request the engine wants an adapter to perform.
 ///
-/// `body` is empty for GET and for bodyless POSTs (the Clerk token mint). An
-/// adapter sends it only when non-empty, so a bodyless request stays on the
-/// wire exactly as before.
+/// `body` is empty for GET and for bodyless POSTs (the Clerk token mint); an
+/// adapter sends it only when non-empty.
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
     pub method: Method,

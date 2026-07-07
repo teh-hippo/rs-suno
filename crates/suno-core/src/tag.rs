@@ -100,11 +100,8 @@ impl TrackMetadata {
     /// creation year (the clip's own year when the root's is unavailable), so an
     /// album whose tracks cross a calendar boundary groups under one year. The
     /// `album`, `parent`, `root`, and `lineage` tags come from the resolved
-    /// context, not from the clip's own `edited_clip_id` pointer or the removed
-    /// `album_title`/`root_ancestor_id` feed fields. The `lyrics` tag carries the
-    /// clip's real
-    /// lyrics, and the generation `prompt` is preserved in its own `SUNO_PROMPT`
-    /// tag.
+    /// context, not the clip's own `edited_clip_id` pointer, and the generation
+    /// `prompt` is preserved in its own `SUNO_PROMPT` tag.
     pub fn from_clip(clip: &Clip, lineage: &LineageContext) -> TrackMetadata {
         let artist = non_empty(&clip.display_name).unwrap_or("Suno").to_owned();
         let album = lineage.album(&clip.title);
@@ -384,8 +381,7 @@ fn model_label(clip: &Clip) -> String {
 
 /// The compact, typed lineage summary embedded as `SUNO_LINEAGE`.
 ///
-/// Derived purely from the resolved [`LineageContext`], never the defunct feed
-/// fields. Emits up to two lines:
+/// Derived purely from the resolved [`LineageContext`]. Emits up to two lines:
 ///
 /// - when the clip has a parent: `"<edge label> <parent8>"` (the edge's
 ///   [`EdgeType::label`], or `"Derived from"` when the edge is unknown);

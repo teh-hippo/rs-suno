@@ -27,8 +27,8 @@ pub(crate) const API_MAX_RETRIES: u32 = 3;
 
 /// The library feed endpoint: a cursor-paginated `POST` taking
 /// `{limit, cursor, filters}` and returning `{clips, has_more, next_cursor}`.
-/// The `filters` carry `trashed: "False"` so the listing excludes trashed clips
-/// exactly as the old v2 feed did; the `--liked` scope adds `liked: "True"`.
+/// The `filters` carry `trashed: "False"` so the listing excludes trashed clips;
+/// the `--liked` scope adds `liked: "True"`.
 pub(crate) const FEED_V3_PATH: &str = "/api/feed/v3";
 /// The dedicated parent-lookup endpoint: one hop up a clip's lineage.
 pub(crate) const CLIP_PARENT_PATH: &str = "/api/clips/parent";

@@ -59,8 +59,6 @@ fn folder_art_present_on_disk_no_churn() {
     );
 }
 
-// ── Phase 8: folder art (album-scoped) ──────────────────────────
-
 fn album_clip(id: &str, play_count: u64, created_at: &str, image: &str, video: &str) -> Clip {
     Clip {
         id: id.to_string(),

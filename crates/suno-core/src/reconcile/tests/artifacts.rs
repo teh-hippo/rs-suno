@@ -1,7 +1,5 @@
 use super::*;
 
-// ── Phase 6: artifact reconcile ─────────────────────────────────
-
 fn cover(path: &str, hash: &str) -> ArtifactState {
     ArtifactState {
         path: path.to_string(),
@@ -142,7 +140,6 @@ fn removed_kind_cover_is_kept_not_deleted() {
     // The clip is kept but no longer desires a cover.jpg (an empty/transient
     // art URL this run). Covers opt out of removed-kind deletion, so the
     // existing sidecar is KEPT: no DeleteArtifact, no write, just a Skip.
-    // This is the empty-art-URL keep the P6 review deferred to P7.
     let mut manifest = Manifest::new();
     manifest.insert("a", entry_with_cover_jpg("a", "a/cover.jpg", "h1"));
     let d = vec![desired_arts("a", vec![])];
@@ -296,8 +293,6 @@ fn co_delete_trashed_suppressed_when_preserved() {
     assert_eq!(plan.deletes(), 0);
     assert_eq!(plan.artifact_deletes(), 0);
 }
-
-// ── Issue #15: per-song text sidecars ───────────────────────────
 
 #[test]
 fn details_sidecar_written_with_inline_content_when_slot_absent() {
@@ -937,8 +932,6 @@ fn adding_artifacts_leaves_the_audio_plan_unchanged() {
     assert_eq!(with.artifact_writes(), 0);
 }
 
-// ── Phase 6 review fixes: protection, path-drift, kind guard ─────
-
 #[test]
 fn removed_kind_sidecar_kept_when_clip_is_protected_this_run() {
     // Covers opt out of removed-kind deletion, so a kept clip keeps its cover
@@ -1083,8 +1076,6 @@ fn per_clip_reconcile_emits_nothing_for_album_only_artifacts() {
     assert_eq!(plan.artifact_writes(), 0);
     assert_eq!(plan.artifact_deletes(), 0);
 }
-
-// ── Self-heal: missing-on-disk sidecar / folder-art / playlist ──
 
 /// A local probe map that marks `path` as missing (exists=false).
 fn local_with_missing(audio_id: &str, missing_path: &str) -> HashMap<String, LocalFile> {

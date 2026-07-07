@@ -28,31 +28,26 @@ fn digest(bytes: &[u8]) -> String {
 /// A stable sentinel over an arbitrary generated text artefact.
 ///
 /// Used for playlists, whose `.m3u8` body is generated rather than fetched: the
-/// hash is taken over the **full rendered text**, so the playlist name, the
-/// member order, and every member's relative path, title, and duration all feed
-/// it (HARDENING B1: a change to anything that ends up in the file changes the
-/// hash and so triggers a rewrite). Because the render is deterministic, the
-/// hash is stable across runs and platforms.
+/// hash is taken over the full rendered text, so the playlist name, the member
+/// order, and every member's relative path, title, and duration all feed it, and
+/// any change that reaches the file triggers a rewrite. The render is
+/// deterministic, so the hash is stable across runs and platforms.
 pub fn content_hash(text: &str) -> String {
     digest(text.as_bytes())
 }
 
 /// A sentinel for the clip's embedded tag set.
 ///
-/// Hashes the resolved [`TrackMetadata`] that is actually written into the file
-/// (title, artist, album, date/year, lyrics, prompt, model, handle, and the
-/// resolved lineage tags), so a change to any embedded tag — including the
-/// artist (`display_name`) and model label, which the old hand-listed field set
-/// omitted — is detected as a needed retag, while a change to a field that is
-/// *not* embedded in the audio (e.g. the animated-cover URL) is not. Taking
-/// [`TrackMetadata`] directly keeps this in lock-step with the tag writer
-/// (HARDENING B1: if a value is embedded, it is in the change hash), so a
-/// retitle, artist rename, re-point, album move, or year correction all trigger
-/// a retag. Chosen art is tracked separately by [`art_hash`].
+/// Hashes the resolved [`TrackMetadata`] actually written into the file (title,
+/// artist, album, date/year, lyrics, prompt, model, handle, and the resolved
+/// lineage tags), so a change to any embedded tag triggers a retag while a
+/// change to a non-embedded field (e.g. the animated-cover URL) does not. Taking
+/// [`TrackMetadata`] directly keeps it in lock-step with the tag writer: if a
+/// value is embedded, it is in this hash. Chosen art is tracked separately by
+/// [`art_hash`].
 ///
-/// A pure path change (e.g. one driven only by a field that renames but does
-/// not embed) is still handled as a rename, by comparing the rendered path with
-/// the stored one, not by this hash.
+/// A pure path change is handled as a rename, by comparing the rendered path
+/// with the stored one, not by this hash.
 pub fn meta_hash(clip: &Clip, lineage: &LineageContext) -> String {
     let mut hasher = fnv::FnvHasher::default();
     TrackMetadata::from_clip(clip, lineage).hash(&mut hasher);
@@ -141,28 +136,19 @@ pub fn art_hash(clip: &Clip) -> String {
 
 /// The embedded-cover sentinel that accounts for the animated-WebP embed.
 ///
-/// When `embed_animated` is set and the clip has a `video_cover_url`, the audio
-/// file embeds a bounded animated WebP derived from that source, so its identity
-/// is the source URL, the encode `settings`, AND the static image URL. The
-/// static URL is folded in because the WebP falls back to that static JPEG when
-/// it will not fit the container, so a later change to the static art must still
-/// re-tag a fallen-back file. This hashes the embed *intent*, not the runtime
-/// fit outcome: `build_desired` and dry-run are pure and cannot know the encoded
-/// size, so a fit fallback must not churn — the stored and desired hashes still
-/// match on the next run, while a settings or source change re-embeds.
+/// When `embed_animated` is set and the clip has a `video_cover_url`, the file
+/// embeds a bounded animated WebP, so its identity is the source URL, the encode
+/// `settings`, and the static image URL (folded in because the WebP falls back
+/// to that static JPEG when it will not fit, and a later static-art change must
+/// still re-tag a fallen-back file). It hashes the embed intent, not the runtime
+/// fit outcome, so a pure dry-run cannot know the encoded size and a fit fallback
+/// does not churn. Otherwise (feature off, no preview, or an ALAC target, which
+/// cannot embed WebP) it is the plain static [`art_hash`].
 ///
-/// Otherwise (feature off, no video preview, or an ALAC target, which cannot
-/// embed WebP) it is the plain static [`art_hash`], so a non-animated clip is
-/// unaffected by this feature.
-///
-/// Gating the WebP-intent branch on `video_cover_url` presence is deliberate: it
-/// scopes an enable-time re-tag to exactly the clips that have a preview, rather
-/// than rewriting the whole library (a toggle-only hash would). The trade-off is
-/// that if the feed were to omit a clip's `video_cover_url` for a run, the hash
-/// would fall back to static and re-tag, then re-tag again when it reappears. In
-/// practice a preview is an immutable generated asset and the v3 feed returns
-/// complete clips, so this does not flap; and it is bounded churn (a tag
-/// rewrite), never data loss, since the audio stream is preserved.
+/// Gating on `video_cover_url` presence scopes an enable-time re-tag to clips
+/// that have a preview rather than the whole library. A preview is an immutable
+/// asset the v3 feed returns intact, so this does not flap, and a stale-preview
+/// fallback is bounded tag churn, never data loss.
 pub fn embedded_art_hash(
     clip: &Clip,
     embed_animated: bool,
@@ -285,8 +271,7 @@ mod tests {
         let lineage = sample_lineage();
         let base = meta_hash(&sample(), &lineage);
         // The artist (`display_name`) and model label are embedded tags, so an
-        // upstream change to either must retag (#135) -- the old hand-listed
-        // hash omitted both, leaving stale tags on re-sync.
+        // upstream change to either must retag.
         let mut artist = sample();
         artist.display_name = "Someone Else".to_owned();
         assert_ne!(meta_hash(&artist, &lineage), base);
@@ -294,7 +279,7 @@ mod tests {
         model.model_name = "chirp-v9".to_owned();
         assert_ne!(meta_hash(&model, &lineage), base);
         // The animated-cover URL is a sidecar source, not an audio tag: it has
-        // its own hash and must not force a needless audio retag (#136).
+        // its own hash and must not force a needless audio retag.
         let mut cover = sample();
         cover.video_cover_url = "https://cdn1.suno.ai/new_cover.mp4".to_owned();
         assert_eq!(meta_hash(&cover, &lineage), base);

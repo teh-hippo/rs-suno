@@ -104,11 +104,10 @@ pub fn render_clip_names(
         .map(|(request, album)| render_with_album(*request, config, album))
         .collect::<Vec<_>>();
 
-    // Two passes to keep distinct clips from landing on one path.  The first
-    // pass keys on the exact rendered string; the second on the filesystem-
-    // canonical form (NFC + lowercase) so that paths differing only by case or
-    // Unicode normalisation (NFD vs NFC) are caught too — they would collide on
-    // case-insensitive or NFC-normalising filesystems (Windows, macOS default).
+    // Two passes so distinct clips never land on one path: the first keys on the
+    // exact rendered string, the second on the filesystem-canonical form (NFC +
+    // lowercase), catching paths that differ only by case or NFD/NFC and would
+    // collide on case-insensitive or NFC-normalising filesystems (Windows, macOS).
     for apply_canonical in [false, true] {
         let mut collisions = BTreeMap::<String, Vec<usize>>::new();
         for (index, name) in rendered.iter().enumerate() {
@@ -138,13 +137,12 @@ pub fn render_clip_names(
 /// The album path component for every request, with a clip whose root title
 /// collides across distinct roots disambiguated by `[{root_id8}]`.
 ///
-/// Distinct roots must never share an album folder (two different upload roots
-/// titled "Break Through" exist). `colliding_albums` is the authoritative set
-/// of such shared root titles, computed once from the whole lineage store, so
-/// the decision is stable across runs and independent of which clips appear in
-/// this batch. A clip whose resolved album is in that set always gets its
-/// root's short id appended; every other clip keeps the bare album and groups
-/// with its same-root siblings.
+/// Distinct roots must never share an album folder. `colliding_albums` is the
+/// authoritative set of such shared root titles, computed once from the whole
+/// lineage store, so the decision is stable across runs and independent of the
+/// batch. A clip whose resolved album is in that set gets its root's short id
+/// appended; every other clip keeps the bare album and groups with its
+/// same-root siblings.
 fn disambiguated_albums(
     requests: &[NamingRequest<'_>],
     config: &NamingConfig,
@@ -427,14 +425,13 @@ pub fn stems_folder(base: &str) -> String {
 
 /// The relative path of one stem file inside a song's [`stems_folder`].
 ///
-/// Named base+label+disambiguation rather than label-only, because Auto Split
-/// can mislabel stems and Advanced Split yields ~100 instruments, so blank or
+/// Base+label+disambiguation rather than label-only, because Auto Split can
+/// mislabel stems and Advanced Split yields ~100 instruments, so blank or
 /// duplicate labels are expected. The file is
-/// `{song file name} - {label} [{stem id8}].{ext}`; the ` - {label}` piece is
-/// dropped when the label sanitises to empty, and the `[{stem id8}]`
-/// disambiguator (the first 8 characters of the stable stem id) keeps blank or
-/// duplicate labels collision-free. Every component is run through the same
-/// [`sanitise_component`] filter as the rest of the library, honouring
+/// `{song file name} - {label} [{stem id8}].{ext}`; ` - {label}` is dropped when
+/// the label sanitises to empty, and the `[{stem id8}]` disambiguator (first 8
+/// of the stable stem id) keeps blank or duplicate labels collision-free. Every
+/// component runs through the same [`sanitise_component`] filter, honouring
 /// `character_set`.
 pub fn stem_file_path(
     base: &str,
@@ -495,10 +492,8 @@ fn sanitise_component(
     character_set: CharacterSet,
     max_component_len: usize,
 ) -> String {
-    // Single pass: map each char to its charset-safe form while collapsing runs
-    // of whitespace to one space and dropping leading/trailing whitespace. This
-    // fuses the old filter / split_whitespace / collect / join steps, which
-    // allocated several intermediate strings and a vector, into one buffer.
+    // Single pass: map each char to its charset-safe form, collapsing runs of
+    // whitespace to one space and dropping leading/trailing whitespace.
     let mut collapsed = String::with_capacity(value.len());
     let mut pending_space = false;
     let push = |out: char, buf: &mut String, pending: &mut bool| {
@@ -533,8 +528,7 @@ fn sanitise_component(
     }
 
     // Keep at most `max` characters, then trim any space or dot the cut exposed.
-    // Slicing at the char boundary avoids the extra String the old
-    // truncate-then-trim-then-to_string sequence built.
+    // Slice at a char boundary rather than truncating a copy.
     let max = max_component_len.max(1);
     let end = trimmed
         .char_indices()

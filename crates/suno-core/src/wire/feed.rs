@@ -9,10 +9,10 @@ use crate::model::Clip;
 
 /// Build the JSON body for a `POST /api/feed/v3` page.
 ///
-/// `filters.trashed` is the string `"False"` so the feed excludes trashed clips
-/// exactly as the old v2 listing did; a `liked` walk adds `filters.liked =
-/// "True"` (v3 ignores an `is_liked` key). The `cursor` is omitted on the first
-/// page and set to the previous page's `next_cursor` thereafter.
+/// `filters.trashed` is the string `"False"` so the feed excludes trashed clips;
+/// a `liked` walk adds `filters.liked = "True"` (v3 ignores an `is_liked` key).
+/// The `cursor` is omitted on the first page and set to the previous page's
+/// `next_cursor` thereafter.
 pub(crate) fn feed_v3_body(liked: bool, cursor: Option<&str>) -> Vec<u8> {
     let mut filters = serde_json::Map::new();
     filters.insert("trashed".to_string(), Value::String("False".to_string()));
@@ -35,7 +35,7 @@ pub(crate) fn feed_v3_body(liked: bool, cursor: Option<&str>) -> Vec<u8> {
 /// `next_cursor` string maps to [`None`] so it is never re-sent as a cursor.
 /// `any_filtered` is `true` when the raw `clips[]` array held more entries than
 /// survived the downloadable and non-empty-id filters, so the caller can disarm
-/// deletion authority for a listing that may have hidden a tracked clip (#248).
+/// deletion authority for a listing that may have hidden a tracked clip.
 pub(crate) struct FeedPage {
     pub(crate) clips: Vec<Clip>,
     pub(crate) has_more: Option<bool>,
@@ -71,7 +71,7 @@ pub(crate) fn parse_feed_v3(body: &[u8]) -> Result<FeedPage> {
     // (empty) id; dropping it silently here would make a tracked clip look
     // absent and delete its master. Surface any such loss so the caller can
     // refuse deletion authority for this listing, matching the playlist path's
-    // empty-id and filter guards (#248, sibling of #148).
+    // empty-id and filter guards.
     let any_filtered = clips.len() < raw_len;
     let has_more = object.get("has_more").and_then(Value::as_bool);
     let next_cursor = object
@@ -111,9 +111,9 @@ mod tests {
         .to_string()
     }
 
-    /// One real anonymised `POST /api/feed/v3` page (issue #219): a single
-    /// downloadable clip carrying `media_urls`, `user_id`, `batch_index`, cdn2
-    /// artwork, and a pagination envelope with `has_more`/`next_cursor`.
+    /// One real anonymised `POST /api/feed/v3` page: a single downloadable clip
+    /// carrying `media_urls`, `user_id`, `batch_index`, cdn2 artwork, and a
+    /// pagination envelope with `has_more`/`next_cursor`.
     const FEED_V3_PAGE: &str = r#"{
       "clips": [
         {
@@ -192,7 +192,7 @@ mod tests {
     fn parse_feed_v3_flags_a_dropped_clip_as_filtered() {
         // feed_body() lists four clips but only one survives is_downloadable, so
         // a tracked clip that flipped off `complete` would be hidden here; the
-        // flag warns the caller to disarm deletion (#248).
+        // flag warns the caller to disarm deletion.
         let page = parse_feed_v3(feed_body().as_bytes()).unwrap();
         assert_eq!(page.clips.len(), 1);
         assert!(page.any_filtered);

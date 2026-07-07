@@ -1,7 +1,5 @@
 use super::*;
 
-// ── Per-clip classification ─────────────────────────────────────
-
 #[test]
 fn not_in_manifest_downloads() {
     let manifest = Manifest::new();
@@ -368,8 +366,6 @@ fn format_change_takes_precedence_over_rename_and_retag() {
     assert_eq!(plan.retags(), 0);
 }
 
-// ── SYNC-10: zero-length / missing local file ───────────────────
-
 #[test]
 fn zero_length_file_downloads_even_when_hashes_match() {
     let mut manifest = Manifest::new();
@@ -458,8 +454,6 @@ fn duplicate_desired_unions_modes() {
     assert_eq!(plan.deletes(), 0);
 }
 
-// ── Item 6: private is deletion-exempt only ─────────────────────
-
 #[test]
 fn private_new_clip_downloads() {
     // Private no longer short-circuits to Skip: a missing private clip is
@@ -500,8 +494,6 @@ fn private_meta_change_retags() {
     assert_eq!(plan.retags(), 1);
     assert_eq!(plan.deletes(), 0);
 }
-
-// ── Determinism and robustness ──────────────────────────────────
 
 #[test]
 fn output_is_deterministic_regardless_of_input_order() {

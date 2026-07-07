@@ -10,10 +10,6 @@
 //! The maths is pure and clock-free: [`pace`](AdaptiveLimiter::pace) only returns
 //! the delay, which the caller waits out through the [`Clock`](crate::Clock)
 //! port, so the engine still sleeps nowhere itself.
-//!
-//! Adapts the reference `AdaptiveLimiter` from `mvanhorn/printing-press-library`,
-//! whose proactive pacing suited many small requests; a cursor walk makes few,
-//! large requests, so pacing is deferred until Suno actually pushes back.
 
 use std::time::{Duration, Instant};
 

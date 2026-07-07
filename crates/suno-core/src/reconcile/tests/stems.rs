@@ -34,8 +34,6 @@ fn stem_path_drift_emits_move() {
     }));
 }
 
-// ── Keyed stem reconcile ────────────────────────────────────────
-
 fn dstem(key: &str, path: &str, hash: &str) -> DesiredStem {
     DesiredStem {
         key: key.to_string(),
