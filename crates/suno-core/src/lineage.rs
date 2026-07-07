@@ -182,6 +182,14 @@ pub struct LineageContext {
     pub edge_type: Option<EdgeType>,
     /// How root resolution terminated.
     pub status: ResolveStatus,
+    /// This clip's 1-based position within its lineage album, or `0` when
+    /// unnumbered. Assigned album-wide by
+    /// [`assign_track_numbers`](crate::assign_track_numbers); every constructor
+    /// here leaves it `0`, so a lone or fallback context is never numbered.
+    pub track: u32,
+    /// The album's track count paired with [`track`](Self::track), or `0` when
+    /// unnumbered.
+    pub track_total: u32,
 }
 
 impl LineageContext {
@@ -209,6 +217,8 @@ impl LineageContext {
             parent_id,
             edge_type,
             status,
+            track: 0,
+            track_total: 0,
         }
     }
 
@@ -224,6 +234,8 @@ impl LineageContext {
             parent_id: String::new(),
             edge_type: None,
             status: ResolveStatus::Resolved,
+            track: 0,
+            track_total: 0,
         }
     }
 

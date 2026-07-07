@@ -37,6 +37,7 @@ pub mod select;
 mod synced;
 mod tag;
 mod tag_alac;
+mod tracks;
 mod vocab;
 mod wire;
 
@@ -102,6 +103,7 @@ pub use synced::{
 };
 pub use tag::{Cover, TrackMetadata, flac_picture_data_budget, tag_flac, tag_mp3};
 pub use tag_alac::tag_alac;
+pub use tracks::{LeadResolution, TrackAssignment, assign_track_numbers, resolve_lead_ids};
 pub use vocab::{
     ArtifactKind, AudioFormat, SourceMode, StemFormat, VideoCoverRetention, WebpEncodeSettings,
 };

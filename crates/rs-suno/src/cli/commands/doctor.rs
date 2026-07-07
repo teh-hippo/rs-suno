@@ -400,6 +400,8 @@ mod tests {
             character_set: CharacterSet::Ascii,
             areas: None,
             album_overrides: std::collections::BTreeMap::new(),
+            lead_tracks: Vec::new(),
+            number_singletons: true,
         }
     }
 

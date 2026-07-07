@@ -319,6 +319,8 @@ fn colliding_node_less_overrides_keep_album_art_paths_distinct() {
         parent_id: String::new(),
         edge_type: None,
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     };
     let clip_a = clip_of("clipaaaa-1111");
     let clip_b = clip_of("clipbbbb-2222");

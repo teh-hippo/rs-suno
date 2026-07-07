@@ -15,14 +15,17 @@ use crate::pathkey::canonical_path_key;
 /// The default relative path template.
 ///
 /// Supported placeholders are `{creator}`, `{handle}`, `{album}`, `{title}`,
-/// `{id}`, `{id8}` (first 8 characters of the clip id), and `{root_id8}`
-/// (first 8 of the resolved lineage root id). Empty path segments are dropped
-/// after rendering.
+/// `{id}`, `{id8}` (first 8 characters of the clip id), `{root_id8}` (first 8 of
+/// the resolved lineage root id), `{track}` (the album track number, e.g. `7`),
+/// and `{track2}` (that number zero-padded to two digits, e.g. `07`). An empty
+/// placeholder swallows the separator run that follows it, so an unnumbered
+/// `{track2}` leaves no orphan ` - `. Empty path segments are dropped after
+/// rendering.
 ///
-/// The default embeds `[{id8}]` in the file name so same-title clips never
-/// collide, and folders under `{album}`, which resolves to the lineage root's
-/// title (else the clip's own title).
-pub const DEFAULT_TEMPLATE: &str = "{creator}/{album}/{creator}-{title} [{id8}]";
+/// The default prefixes the file name with the two-digit track number, embeds
+/// `[{id8}]` so same-title clips never collide, and folders under `{album}`,
+/// which resolves to the lineage root's title (else the clip's own title).
+pub const DEFAULT_TEMPLATE: &str = "{creator}/{album}/{track2} - {creator}-{title} [{id8}]";
 const DEFAULT_MAX_COMPONENT_LEN: usize = 80;
 
 const MIN_BASE_CHARS_WITH_SUFFIX: usize = 1;
@@ -211,6 +214,17 @@ fn render_with_album(
         CharacterSet::Ascii,
         config.max_component_len,
     );
+    let track = request.lineage.track;
+    let track_raw = if track > 0 {
+        track.to_string()
+    } else {
+        String::new()
+    };
+    let track_pad = if track > 0 {
+        format!("{track:02}")
+    } else {
+        String::new()
+    };
     let substitutions = SegmentSubstitutions {
         creator: &creator,
         handle: &handle,
@@ -219,6 +233,8 @@ fn render_with_album(
         root_id8: &root_id8,
         id8: &id8,
         id: &id,
+        track: &track_raw,
+        track2: &track_pad,
     };
     let mut components = config
         .template
@@ -274,6 +290,8 @@ struct SegmentSubstitutions<'a> {
     root_id8: &'a str,
     id8: &'a str,
     id: &'a str,
+    track: &'a str,
+    track2: &'a str,
 }
 
 fn substitute_segment(segment: &str, substitutions: SegmentSubstitutions<'_>) -> String {
@@ -285,6 +303,12 @@ fn substitute_segment(segment: &str, substitutions: SegmentSubstitutions<'_>) ->
         if let Some((token_len, value)) = placeholder_match(remainder, substitutions) {
             rendered.push_str(value);
             remainder = &remainder[token_len..];
+            // An empty placeholder swallows the separator run that follows it, so
+            // an optional token (e.g. an unnumbered `{track2}`) leaves no orphan
+            // separator like a leading " - ".
+            if value.is_empty() {
+                remainder = remainder.trim_start_matches([' ', '-', '_', '.']);
+            }
         } else {
             rendered.push('{');
             remainder = &remainder[1..];
@@ -312,6 +336,10 @@ fn placeholder_match<'a>(
         Some(("{id8}".len(), substitutions.id8))
     } else if segment.starts_with("{id}") {
         Some(("{id}".len(), substitutions.id))
+    } else if segment.starts_with("{track2}") {
+        Some(("{track2}".len(), substitutions.track2))
+    } else if segment.starts_with("{track}") {
+        Some(("{track}".len(), substitutions.track))
     } else {
         None
     }

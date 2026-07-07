@@ -14,6 +14,7 @@ use id3::frame::{
     SynchronisedLyricsType, TimestampFormat,
 };
 
+use crate::consts::SUNO_SONG_BASE_URL;
 use crate::error::{Error, Result};
 use crate::lineage::{EdgeType, LineageContext};
 use crate::lyrics::AlignedLyrics;
@@ -89,6 +90,17 @@ pub struct TrackMetadata {
     pub parent: String,
     pub root: String,
     pub lineage: String,
+    /// The clip's own Suno id, embedded as `SUNO_ID`.
+    pub id: String,
+    /// The canonical `https://suno.com/song/<id>` page URL, embedded as
+    /// `SUNO_URL`. Empty when the clip has no id.
+    pub url: String,
+    /// This track's 1-based position within its lineage album, or `0` when
+    /// unnumbered. Written as `TRACKNUMBER`/`TRCK`/`trkn`.
+    pub track: u32,
+    /// The album's track count paired with [`track`](Self::track), or `0` when
+    /// unnumbered.
+    pub track_total: u32,
 }
 
 impl TrackMetadata {
@@ -122,6 +134,10 @@ impl TrackMetadata {
             parent: lineage.parent_id.clone(),
             root: lineage.root_id.clone(),
             lineage: lineage_summary(clip, lineage),
+            id: clip.id.clone(),
+            url: song_url(&clip.id),
+            track: lineage.track,
+            track_total: lineage.track_total,
         }
     }
 
@@ -144,7 +160,7 @@ impl TrackMetadata {
     }
 
     /// The Suno-specific fields, paired with their tag description/key.
-    pub(crate) fn suno_fields(&self) -> [(&'static str, &str); 8] {
+    pub(crate) fn suno_fields(&self) -> [(&'static str, &str); 10] {
         [
             ("SUNO_PROMPT", &self.prompt),
             ("SUNO_STYLE", &self.style),
@@ -154,6 +170,8 @@ impl TrackMetadata {
             ("SUNO_PARENT", &self.parent),
             ("SUNO_ROOT", &self.root),
             ("SUNO_LINEAGE", &self.lineage),
+            ("SUNO_ID", &self.id),
+            ("SUNO_URL", &self.url),
         ]
     }
 }
@@ -233,6 +251,12 @@ pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) ->
     if meta.lyrics.is_empty() && !existing_lyrics.is_empty() {
         tag.set_vorbis("LYRICS", existing_lyrics);
     }
+    if meta.track > 0 {
+        tag.set_vorbis("TRACKNUMBER", vec![meta.track.to_string()]);
+        if meta.track_total > 0 {
+            tag.set_vorbis("TRACKTOTAL", vec![meta.track_total.to_string()]);
+        }
+    }
     if let Some(cover) = cover {
         let budget = flac_picture_data_budget(cover.mime);
         if cover.bytes.len() > budget {
@@ -311,6 +335,12 @@ fn tag_id3(
     }
     if !meta.year.is_empty() {
         tag.set_text("TDRL", meta.year.as_str());
+    }
+    if meta.track > 0 {
+        tag.set_track(meta.track);
+        if meta.track_total > 0 {
+            tag.set_total_tracks(meta.track_total);
+        }
     }
     if !meta.comment.is_empty() {
         tag.add_frame(Comment {
@@ -405,6 +435,15 @@ fn lineage_summary(clip: &Clip, lineage: &LineageContext) -> String {
         ));
     }
     parts.join("\n")
+}
+
+/// The canonical Suno page URL for a clip id, or empty when the id is empty.
+fn song_url(id: &str) -> String {
+    if id.is_empty() {
+        String::new()
+    } else {
+        format!("{SUNO_SONG_BASE_URL}/{id}")
+    }
 }
 
 /// `Some(s)` when `s` is non-empty, else `None`.

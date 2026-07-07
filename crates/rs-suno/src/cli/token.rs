@@ -125,6 +125,8 @@ mod tests {
             character_set: suno_core::CharacterSet::Unicode,
             areas: None,
             album_overrides: std::collections::BTreeMap::new(),
+            lead_tracks: Vec::new(),
+            number_singletons: true,
         }
     }
 

@@ -47,6 +47,8 @@ fn compiled_defaults_when_nothing_set() {
             character_set: CharacterSet::Unicode,
             areas: None,
             album_overrides: BTreeMap::new(),
+            lead_tracks: Vec::new(),
+            number_singletons: true,
         }
     );
 }
@@ -81,6 +83,7 @@ fn resolve_reflects_every_settings_field() {
         stem_format: Some(StemFormat::Mp3),
         naming_template: Some("SENTINEL/{id}".into()),
         character_set: Some(CharacterSet::Ascii),
+        number_singletons: Some(false),
     };
     let cfg = Config {
         defaults: Defaults { settings: sentinel },
@@ -111,6 +114,7 @@ fn resolve_reflects_every_settings_field() {
     assert_eq!(eff.stem_format, StemFormat::Mp3);
     assert_eq!(eff.naming_template, "SENTINEL/{id}");
     assert_eq!(eff.character_set, CharacterSet::Ascii);
+    assert!(!eff.number_singletons);
 }
 
 #[test]
@@ -504,4 +508,36 @@ fn album_overrides_absent_by_default() {
     let cfg = Config::from_toml("[accounts.alice]\ntoken = \"t\"\n").unwrap();
     let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
     assert!(eff.album_overrides.is_empty());
+}
+
+#[test]
+fn lead_tracks_parse_trim_and_dedupe() {
+    let toml = r#"
+        [accounts.alice]
+        token = "t"
+        lead_tracks = ["  b320f4cf  ", "c6f6a1a5", "b320f4cf", "   "]
+    "#;
+    let cfg = Config::from_toml(toml).unwrap();
+    let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+    // Trimmed, de-duplicated, blank dropped, deterministically ordered.
+    assert_eq!(eff.lead_tracks, vec!["b320f4cf", "c6f6a1a5"]);
+}
+
+#[test]
+fn lead_tracks_absent_by_default() {
+    let cfg = Config::from_toml("[accounts.alice]\ntoken = \"t\"\n").unwrap();
+    let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+    assert!(eff.lead_tracks.is_empty());
+}
+
+#[test]
+fn number_singletons_defaults_true_and_can_be_disabled() {
+    let cfg = Config::from_toml("[accounts.alice]\ntoken = \"t\"\n").unwrap();
+    let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+    assert!(eff.number_singletons, "defaults to true");
+
+    let off =
+        Config::from_toml("[accounts.alice]\ntoken = \"t\"\nnumber_singletons = false\n").unwrap();
+    let eff = off.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+    assert!(!eff.number_singletons);
 }

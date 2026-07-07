@@ -42,6 +42,22 @@ fn render_all_own(
     render_clip_names(&requests, config, colliding)
 }
 
+/// Render `clip` as its own root but numbered `track` of `total`.
+fn render_with_track(clip: &Clip, track: u32, total: u32, config: &NamingConfig) -> RenderedName {
+    let lineage = LineageContext {
+        track,
+        track_total: total,
+        ..LineageContext::own_root(clip)
+    };
+    render_clip_name(
+        NamingRequest {
+            clip,
+            lineage: &lineage,
+        },
+        config,
+    )
+}
+
 #[test]
 fn unicode_names_are_preserved_and_ascii_falls_back() {
     let clip = test_clip("abc12345", "Beyoncé/東京");
@@ -114,6 +130,48 @@ fn default_template_always_embeds_id8() {
 }
 
 #[test]
+fn default_template_prefixes_the_two_digit_track_number() {
+    let clip = test_clip("abc12345", "Any Title");
+    let rendered = render_with_track(&clip, 7, 10, &NamingConfig::default());
+    assert_eq!(
+        rendered.relative_path,
+        Path::new("München/Any Title/07 - München-Any Title [abc12345]")
+    );
+}
+
+#[test]
+fn unnumbered_track_leaves_no_orphan_prefix() {
+    // track 0 (unnumbered): the "{track2} - " prefix must vanish cleanly, so the
+    // name matches the pre-numbering layout with no leading separator.
+    let clip = test_clip("abc12345", "Any Title");
+    let rendered = render_with_track(&clip, 0, 0, &NamingConfig::default());
+    assert_eq!(rendered.base_name, "München-Any Title [abc12345]");
+    assert!(!rendered.base_name.starts_with(['-', ' ']));
+}
+
+#[test]
+fn track_placeholders_render_raw_and_padded() {
+    let clip = test_clip("abc12345", "Any Title");
+    let config = NamingConfig {
+        template: "{track}-{track2}-{title}".to_string(),
+        ..NamingConfig::default()
+    };
+    let rendered = render_with_track(&clip, 7, 10, &config);
+    assert_eq!(rendered.base_name, "7-07-Any Title");
+}
+
+#[test]
+fn two_digit_pad_grows_past_ninety_nine() {
+    let clip = test_clip("abc12345", "Any Title");
+    let config = NamingConfig {
+        template: "{track2}".to_string(),
+        ..NamingConfig::default()
+    };
+    assert_eq!(render_with_track(&clip, 100, 100, &config).base_name, "100");
+    assert_eq!(render_with_track(&clip, 5, 120, &config).base_name, "05");
+}
+
+#[test]
 fn custom_template_replaces_all_known_placeholders_once() {
     let clip = Clip {
         id: "abcdef12-full".to_string(),
@@ -129,6 +187,8 @@ fn custom_template_replaces_all_known_placeholders_once() {
         parent_id: "rootxyz9-extra".to_string(),
         edge_type: Some(EdgeType::Cover),
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     };
     let config = NamingConfig {
         template: "{creator}-{handle}-{album}-{title}-{root_id8}-{id8}-{id}-{unknown}".to_string(),
@@ -219,6 +279,8 @@ fn long_titled_siblings_stay_distinct_with_balanced_brackets() {
         parent_id: "root-42".to_string(),
         edge_type: Some(EdgeType::Cover),
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     };
     let title = "z".repeat(200);
     let first = test_clip("aaaa1111-x", &title);
@@ -303,6 +365,8 @@ fn same_title_siblings_stay_distinct_via_id8() {
         parent_id: "root-9".to_string(),
         edge_type: Some(EdgeType::Cover),
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     };
     let first = test_clip("11111111-alpha", "Shared");
     let second = test_clip("22222222-beta", "Shared");
@@ -381,6 +445,8 @@ fn album_is_root_title_for_a_remix() {
         parent_id: "root-1".to_string(),
         edge_type: Some(EdgeType::Cover),
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     };
 
     let rendered = render_clip_name(
