@@ -1,7 +1,9 @@
-//! The [`Clip`] domain model and its accessors; the JSON decode that builds a
-//! [`Clip`] from the Suno API shape lives in [`wire`](crate::wire).
+//! The domain models the engine works in: the [`Clip`] track and its accessors,
+//! plus the [`Playlist`], [`Stem`], and [`BillingInfo`] account types. The JSON
+//! decode that builds these from the Suno API shape lives in [`wire`](crate::wire).
 
 use crate::consts::CDN_BASE_URL;
+use std::collections::BTreeSet;
 
 /// One finished Suno track, flattened from the API's nested response shape.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -199,6 +201,135 @@ pub(crate) fn cdn_audio_url(url: &str, id: &str) -> String {
     }
 }
 
+/// One of the account's own playlists, as listed by `/api/playlist/me`.
+///
+/// Carries only what playlist reconciliation needs: the stable id (the state
+/// key), the display name (drives the `.m3u8` file name and `#PLAYLIST` line),
+/// and the member count for reporting. The ordered members are fetched
+/// separately with [`SunoClient::get_playlist_clips`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Playlist {
+    /// The playlist's stable Suno id.
+    pub id: String,
+    /// The playlist's display name.
+    pub name: String,
+    /// The number of clips Suno reports in the playlist.
+    pub num_clips: u64,
+}
+
+/// The authenticated account's billing snapshot: credits, quota, account
+/// status, plan identity, and entitlements.
+///
+/// Every field is optional so a drifting payload never fails the parse; an
+/// absent field reads as "unknown", not zero. Numbers are signed because the
+/// API returns negatives (e.g. the `-1` sentinel), and `features` is a plain
+/// string set rather than an enum so new entitlement flags surface without a
+/// code change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingInfo {
+    /// Credits remaining in the current billing state.
+    pub total_credits_left: Option<i64>,
+    /// Monthly credit allotment (the quota denominator).
+    pub monthly_limit: Option<i64>,
+    /// Credits consumed this period (the quota numerator).
+    pub monthly_usage: Option<i64>,
+    /// Add-on, non-monthly credit balance.
+    pub credits: Option<i64>,
+    /// Billing period unit, e.g. `"month"`.
+    pub period: Option<String>,
+    /// Current period end (ISO8601), when usage resets.
+    pub period_end: Option<String>,
+    /// Next renewal (ISO8601).
+    pub renews_on: Option<String>,
+    /// Whether the subscription is active.
+    pub is_active: Option<bool>,
+    /// Whether the subscription is paused (paused subs stop refreshing credits).
+    pub is_paused: Option<bool>,
+    /// Whether payment is failing (credits may stop refreshing).
+    pub is_past_due: Option<bool>,
+    /// Whether the subscription is gifted.
+    pub is_gifted: Option<bool>,
+    /// Subscription platform, e.g. `"stripe"`.
+    pub subscription_platform: Option<String>,
+    /// Stable machine key for the plan tier, e.g. `"pro"`.
+    pub plan_key: Option<String>,
+    /// Human plan label, e.g. `"Pro Plan"`.
+    pub plan_name: Option<String>,
+    /// Plan tier rank (free 0, pro 10, premier 30).
+    pub plan_level: Option<i64>,
+    /// Entitlement flags, the union of `accessible_features[].name` and
+    /// `plan.usage_plan_features[].name`.
+    pub features: BTreeSet<String>,
+}
+
+impl BillingInfo {
+    /// Whether the account is entitled to the named feature.
+    pub fn has_feature(&self, name: &str) -> bool {
+        self.features.contains(name)
+    }
+
+    /// Whether the account may separate stems.
+    pub fn can_get_stems(&self) -> bool {
+        self.has_feature("get_stems")
+    }
+
+    /// Whether the account may convert audio to lossless.
+    pub fn can_convert_audio(&self) -> bool {
+        self.has_feature("convert_audio")
+    }
+}
+
+/// One separated stem of a clip, as listed by the free, read-only stems
+/// endpoint.
+///
+/// A stem is itself a full clip object: the listing returns the same shape as
+/// the library feed, so each stem carries its own clip `id`, a `title` whose
+/// trailing parenthetical is the stem label (e.g. `"My Song (Vocals)"`), a
+/// `status`, and a public `audio_url` on `cdn1.suno.ai` that downloads free and
+/// unauthenticated. Listing and downloading stems never spends credits or
+/// triggers separation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stem {
+    /// The stem's own server clip id. Used both as the stable per-stem key and
+    /// to render the stem's lossless WAV through the free `convert_wav` flow.
+    pub id: String,
+    /// The stem label, preferring the structured `metadata.stem_type_group_name`
+    /// (normalised, e.g. `Backing_Vocals` -> `Backing Vocals`) and falling back
+    /// to the trailing parenthetical of the stem clip's title. May be blank when
+    /// neither is present, so it is never used alone as a key or name.
+    pub label: String,
+    /// The public CDN MP3 URL the stem downloads from (a plain GET; free).
+    pub url: String,
+}
+
+/// The stem's label, preferring the structured `metadata.stem_type_group_name`
+/// (normalised from its underscore form, `Backing_Vocals` -> `Backing Vocals`)
+/// over the fragile trailing title parenthetical, and empty when neither is
+/// present so the caller falls back to the stem id for naming.
+pub(crate) fn stem_label(clip: &Clip) -> String {
+    let group = clip.stem_type_group_name.replace('_', " ");
+    let group = group.trim();
+    if !group.is_empty() {
+        return group.to_string();
+    }
+    stem_label_from_title(&clip.title)
+}
+
+/// The stem label carried in a stem clip's title: the text inside its trailing
+/// parenthetical (`"My Song (Backing Vocals)"` -> `Backing Vocals`). Returns an
+/// empty string when the title has no closing parenthetical, so the caller falls
+/// back to the stem id for naming.
+fn stem_label_from_title(title: &str) -> String {
+    let trimmed = title.trim_end();
+    let Some(before_close) = trimmed.strip_suffix(')') else {
+        return String::new();
+    };
+    match before_close.rfind('(') {
+        Some(open) => before_close[open + 1..].trim().to_string(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +445,48 @@ mod tests {
         // A video-only clip has no still image to embed or write as a `.jpg`.
         assert_eq!(art_clip("", "", "V").selected_image_url(), None);
         assert_eq!(art_clip("", "", "").selected_image_url(), None);
+    }
+    #[test]
+    fn stem_label_prefers_the_normalised_group_over_the_title() {
+        // The structured group name wins and its underscore form is normalised.
+        let grouped = Clip {
+            title: "Track 30".to_owned(),
+            stem_type_group_name: "Backing_Vocals".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(stem_label(&grouped), "Backing Vocals");
+        // It still wins over a present title parenthetical (strictly more
+        // reliable and language-stable than title scraping).
+        let both = Clip {
+            title: "My Song (Guitar)".to_owned(),
+            stem_type_group_name: "Vocals".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(stem_label(&both), "Vocals");
+        // No group name: fall back to the title parenthetical.
+        let titled = Clip {
+            title: "My Song (Drums)".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(stem_label(&titled), "Drums");
+        // Neither present: empty, so the caller falls back to the stem id.
+        let bare = Clip {
+            title: "Track 31".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(stem_label(&bare), "");
+    }
+
+    #[test]
+    fn stem_label_from_title_extracts_trailing_parenthetical() {
+        assert_eq!(stem_label_from_title("My Song (Vocals)"), "Vocals");
+        assert_eq!(
+            stem_label_from_title("A (b) Song (Backing Vocals)"),
+            "Backing Vocals"
+        );
+        assert_eq!(stem_label_from_title("My Song (Drums) "), "Drums");
+        // No parenthetical: empty, so the caller falls back to the stem id.
+        assert_eq!(stem_label_from_title("My Song"), "");
+        assert_eq!(stem_label_from_title(""), "");
     }
 }

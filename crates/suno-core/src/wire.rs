@@ -11,10 +11,10 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::client::{BillingInfo, Playlist, Stem, stem_label};
 use crate::consts::FEED_PAGE_SIZE;
 use crate::error::{Error, Result};
 use crate::is_downloadable;
+use crate::model::{BillingInfo, Playlist, Stem, stem_label};
 use crate::model::{Clip, ClipRoot, HistoryEntry, MediaUrl, cdn_audio_url};
 
 /// Build the JSON body for a `POST /api/feed/v3` page.

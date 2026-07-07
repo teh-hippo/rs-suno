@@ -3,13 +3,13 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path};
 
-use crate::client::Stem;
 use crate::extras::{M3u8Entry, render_clip_details, render_clip_lyrics, render_m3u8};
 use crate::hash::{
     art_hash, art_url_hash, content_hash, embedded_art_hash, meta_hash, synced_lrc_source_hash,
 };
 use crate::lineage::LineageContext;
 use crate::model::Clip;
+use crate::model::Stem;
 use crate::naming::{
     CharacterSet, NamingConfig, NamingRequest, render_clip_names, sanitise_name, stem_file_path,
 };
