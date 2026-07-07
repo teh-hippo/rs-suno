@@ -92,6 +92,14 @@ pub fn webp_art_hash(url: &str, settings: &WebpEncodeSettings) -> String {
     let mut hasher = fnv::FnvHasher::default();
     hasher.write(url.as_bytes());
     hasher.write_u8(0);
+    write_webp_settings(&mut hasher, settings);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Fold the WebP encode `settings` into `hasher` in a fixed field order. Shared
+/// by [`webp_art_hash`] and [`embedded_art_hash`] so the settings contribution
+/// to both sentinels stays bit-identical.
+fn write_webp_settings(hasher: &mut fnv::FnvHasher, settings: &WebpEncodeSettings) {
     hasher.write_u8(settings.quality);
     hasher.write_u8(u8::from(settings.lossless));
     hasher.write_u8(settings.compression_level);
@@ -103,7 +111,6 @@ pub fn webp_art_hash(url: &str, settings: &WebpEncodeSettings) -> String {
         }
         None => hasher.write_u8(0),
     }
-    format!("{:016x}", hasher.finish())
 }
 
 /// The change-detection version for the synced `.lrc` body. Bump this when the
@@ -168,17 +175,7 @@ pub fn embedded_art_hash(
         hasher.write_u8(0);
         hasher.write(clip.selected_image_url().unwrap_or("").as_bytes());
         hasher.write_u8(0);
-        hasher.write_u8(settings.quality);
-        hasher.write_u8(u8::from(settings.lossless));
-        hasher.write_u8(settings.compression_level);
-        hasher.write_u32(settings.max_fps);
-        match settings.max_width {
-            Some(width) => {
-                hasher.write_u8(1);
-                hasher.write_u32(width);
-            }
-            None => hasher.write_u8(0),
-        }
+        write_webp_settings(&mut hasher, settings);
         format!("{:016x}", hasher.finish())
     } else {
         art_hash(clip)
