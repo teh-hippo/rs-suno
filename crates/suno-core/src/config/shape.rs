@@ -45,6 +45,10 @@ pub struct Settings {
     pub stem_format: Option<StemFormat>,
     pub naming_template: Option<String>,
     pub character_set: Option<CharacterSet>,
+    /// Whether a single-track (lone) lineage album is given a track number. When
+    /// unset it defaults to `true`; `false` leaves singletons unnumbered so a
+    /// `{track2}` prefix does not decorate a standalone song.
+    pub number_singletons: Option<bool>,
 }
 
 /// Global default settings applied when no account or source override applies.
@@ -83,6 +87,12 @@ pub struct AccountConfig {
     /// ignored, so a stray key cannot blank an album.
     #[serde(default)]
     pub albums: HashMap<String, String>,
+    /// Clip ids (or unique id prefixes, e.g. the 8-char code from a filename)
+    /// flagged as their lineage album's lead: each is promoted to track 1,
+    /// shifting the rest down. Account-wide; a clip's album is inferred from its
+    /// resolved root, so the album is never named here.
+    #[serde(default)]
+    pub lead_tracks: Vec<String>,
 }
 
 /// How a single area treats deletion, including the library-only `off` value.

@@ -199,6 +199,8 @@ mod tests {
             parent_id: "parent-1".to_owned(),
             edge_type: Some(EdgeType::Extend),
             status: ResolveStatus::Resolved,
+            track: 0,
+            track_total: 0,
         }
     }
 
@@ -207,7 +209,7 @@ mod tests {
         // Golden value: a change here means the sentinel encoding changed and
         // every existing manifest would see a spurious retag. Change with care.
         let h = meta_hash(&sample(), &sample_lineage());
-        assert_eq!(h, "c247d31f60378b86");
+        assert_eq!(h, "d355c0c463e1f96c");
         assert_eq!(h.len(), 16);
         assert_eq!(h, meta_hash(&sample(), &sample_lineage()));
     }

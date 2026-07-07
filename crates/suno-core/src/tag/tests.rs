@@ -30,6 +30,8 @@ fn full_lineage() -> LineageContext {
         parent_id: "parentid1234".to_owned(),
         edge_type: Some(EdgeType::Extend),
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     }
 }
 
@@ -84,6 +86,8 @@ fn album_uses_root_title() {
         parent_id: "root-01".to_owned(),
         edge_type: Some(EdgeType::Cover),
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     };
     let meta = TrackMetadata::from_clip(&clip, &lineage);
     assert_eq!(meta.album, "The Album");
@@ -141,6 +145,8 @@ fn lineage_defaults_to_derived_from_when_edge_unknown() {
         parent_id: "parent-9999".to_owned(),
         edge_type: None,
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     };
     let meta = TrackMetadata::from_clip(&clip, &lineage);
     assert_eq!(
@@ -403,6 +409,101 @@ fn flac_round_trips_core_tags_and_preserves_audio() {
     // The audio frames after the metadata survive untouched.
     let frames = metaflac::Tag::skip_metadata(&mut Cursor::new(&tagged));
     assert_eq!(frames, FLAC_AUDIO_FRAMES);
+}
+
+#[test]
+fn from_clip_carries_id_url_and_track() {
+    let lineage = LineageContext {
+        track: 3,
+        track_total: 10,
+        ..full_lineage()
+    };
+    let meta = TrackMetadata::from_clip(&full_clip(), &lineage);
+    assert_eq!(meta.id, "clip-1234abcd");
+    assert_eq!(meta.url, "https://suno.com/song/clip-1234abcd");
+    assert_eq!(meta.track, 3);
+    assert_eq!(meta.track_total, 10);
+}
+
+#[test]
+fn from_clip_leaves_url_empty_without_an_id() {
+    let clip = Clip {
+        title: "No Id".to_owned(),
+        ..Clip::default()
+    };
+    let meta = TrackMetadata::from_clip(&clip, &LineageContext::own_root(&clip));
+    assert_eq!(meta.id, "");
+    assert_eq!(meta.url, "");
+}
+
+#[test]
+fn flac_writes_track_number_total_and_identity() {
+    let audio = minimal_flac();
+    let lineage = LineageContext {
+        track: 3,
+        track_total: 10,
+        ..full_lineage()
+    };
+    let meta = TrackMetadata::from_clip(&full_clip(), &lineage);
+    let tagged = tag_flac(&audio, &meta, None).unwrap();
+
+    let tag = metaflac::Tag::read_from(&mut Cursor::new(&tagged)).unwrap();
+    let vorbis = tag.vorbis_comments().unwrap();
+    assert_eq!(vorbis.get("TRACKNUMBER").unwrap(), &["3"]);
+    assert_eq!(vorbis.get("TRACKTOTAL").unwrap(), &["10"]);
+    assert_eq!(vorbis.get("SUNO_ID").unwrap(), &["clip-1234abcd"]);
+    assert_eq!(
+        vorbis.get("SUNO_URL").unwrap(),
+        &["https://suno.com/song/clip-1234abcd"]
+    );
+}
+
+#[test]
+fn flac_omits_track_when_unnumbered() {
+    let audio = minimal_flac();
+    // full_lineage() has track 0 (unnumbered).
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let tagged = tag_flac(&audio, &meta, None).unwrap();
+
+    let tag = metaflac::Tag::read_from(&mut Cursor::new(&tagged)).unwrap();
+    let vorbis = tag.vorbis_comments().unwrap();
+    assert!(vorbis.get("TRACKNUMBER").is_none());
+    assert!(vorbis.get("TRACKTOTAL").is_none());
+}
+
+#[test]
+fn mp3_writes_track_number_total_and_identity() {
+    let lineage = LineageContext {
+        track: 3,
+        track_total: 10,
+        ..full_lineage()
+    };
+    let meta = TrackMetadata::from_clip(&full_clip(), &lineage);
+    let tagged = tag_mp3(b"", &meta, None, None).unwrap();
+
+    let tag = id3::Tag::read_from2(Cursor::new(tagged)).unwrap();
+    assert_eq!(tag.track(), Some(3));
+    assert_eq!(tag.total_tracks(), Some(10));
+    let extended = |desc: &str| {
+        tag.extended_texts()
+            .find(|frame| frame.description == desc)
+            .map(|frame| frame.value.clone())
+    };
+    assert_eq!(extended("SUNO_ID").as_deref(), Some("clip-1234abcd"));
+    assert_eq!(
+        extended("SUNO_URL").as_deref(),
+        Some("https://suno.com/song/clip-1234abcd")
+    );
+}
+
+#[test]
+fn mp3_omits_track_when_unnumbered() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let tagged = tag_mp3(b"", &meta, None, None).unwrap();
+
+    let tag = id3::Tag::read_from2(Cursor::new(tagged)).unwrap();
+    assert_eq!(tag.track(), None);
+    assert_eq!(tag.total_tracks(), None);
 }
 
 #[test]

@@ -50,6 +50,12 @@ pub fn tag_alac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) ->
     if !meta.year.is_empty() {
         tag.set_year(meta.year.clone());
     }
+    if meta.track > 0 {
+        tag.set_track_number(meta.track as u16);
+        if meta.track_total > 0 {
+            tag.set_total_tracks(meta.track_total as u16);
+        }
+    }
     if !meta.comment.is_empty() {
         tag.set_comment(meta.comment.clone());
     }

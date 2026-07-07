@@ -660,6 +660,8 @@ fn album_falls_back_to_own_title_when_root_title_is_empty() {
         parent_id: "outside".into(),
         edge_type: Some(EdgeType::Cover),
         status: ResolveStatus::External,
+        track: 0,
+        track_total: 0,
     };
     assert_eq!(ctx.album("My Title"), "My Title");
 }
@@ -688,6 +690,8 @@ fn year_prefers_the_root_year_over_the_clips_own() {
         parent_id: "root-1".into(),
         edge_type: Some(EdgeType::Extend),
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     };
     assert_eq!(ctx.year("2024-01-02T08:00:00Z"), "2023");
 }
@@ -701,6 +705,8 @@ fn year_falls_back_to_own_when_the_root_date_is_unavailable() {
         parent_id: "outside".into(),
         edge_type: Some(EdgeType::Cover),
         status: ResolveStatus::External,
+        track: 0,
+        track_total: 0,
     };
     assert_eq!(ctx.year("2024-07-01T00:00:00Z"), "2024");
 }

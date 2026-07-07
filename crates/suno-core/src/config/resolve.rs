@@ -2,7 +2,7 @@
 //! env > per-source file > per-account file > global defaults > compiled)
 //! into [`EffectiveSettings`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 
 use crate::error::{Error, Result};
@@ -240,6 +240,16 @@ impl Config {
         )?
         .unwrap_or(CharacterSet::Unicode);
 
+        let number_singletons = resolve_parsed(
+            flags.settings.number_singletons,
+            env_val("NUMBER_SINGLETONS"),
+            src.and_then(|s| s.settings.number_singletons),
+            acc.settings.number_singletons,
+            self.defaults.settings.number_singletons,
+            true,
+            "NUMBER_SINGLETONS",
+        )?;
+
         let token = flags
             .token
             .clone()
@@ -293,6 +303,16 @@ impl Config {
                 .filter(|(_, name)| !name.trim().is_empty())
                 .map(|(root_id, name)| (root_id.clone(), name.trim().to_owned()))
                 .collect(),
+            lead_tracks: acc
+                .lead_tracks
+                .iter()
+                .map(|entry| entry.trim())
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .collect::<BTreeSet<String>>()
+                .into_iter()
+                .collect(),
+            number_singletons,
         })
     }
 }

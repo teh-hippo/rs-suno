@@ -61,6 +61,8 @@ fn build_desired_uses_supplied_lineage_context() {
         parent_id: "root-1".to_owned(),
         edge_type: None,
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     };
     let contexts: HashMap<String, LineageContext> =
         [(a.id.clone(), lineage.clone())].into_iter().collect();

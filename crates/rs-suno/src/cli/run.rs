@@ -17,9 +17,9 @@ use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
     AlbumArt, ArtifactToggles, ClerkAuth, Config, FlagOverrides, LineageContext, NamingConfig,
     OwnerGate, PlaylistState, ResolveOpts, SourceMode, SunoClient, adopt_decision,
-    adoption_enumerated, album_desired, build_desired, build_modes_by_id,
+    adoption_enumerated, album_desired, assign_track_numbers, build_desired, build_modes_by_id,
     build_scoped_playlist_desired, clip_stems, deletion_allowed, library_authoritative,
-    narrows_downloads, owner_gate, resolve_roots, source_statuses, union_clips,
+    narrows_downloads, owner_gate, resolve_lead_ids, resolve_roots, source_statuses, union_clips,
 };
 
 use crate::cli::account;
@@ -689,10 +689,35 @@ async fn assemble(
         last_run: last_run::read_last_run(ctx.dest),
     };
     let selected = select(clips, &params);
-    let contexts: HashMap<String, LineageContext> = selected
+    let mut contexts: HashMap<String, LineageContext> = selected
         .iter()
         .map(|clip| (clip.id.clone(), store.context_for(clip)))
         .collect();
+    // Number each lineage album's tracks by creation order, promoting any
+    // configured lead to track 1, and fold the result into the contexts so it
+    // flows into the tag, change hash, and filename prefix.
+    let leads = resolve_lead_ids(&selected, &settings.lead_tracks);
+    if verbosity >= -1 {
+        for entry in &leads.unmatched {
+            eprint_t!("warning: lead_tracks entry '{entry}' matched no selected clip; ignoring");
+        }
+        for entry in &leads.ambiguous {
+            eprint_t!(
+                "warning: lead_tracks entry '{entry}' matched more than one clip; use a longer id"
+            );
+        }
+    }
+    for (id, assignment) in assign_track_numbers(
+        &selected,
+        &contexts,
+        &leads.resolved,
+        settings.number_singletons,
+    ) {
+        if let Some(context) = contexts.get_mut(&id) {
+            context.track = assignment.track;
+            context.track_total = assignment.total;
+        }
+    }
     let mut desired = build_desired(
         &selected,
         settings.format,

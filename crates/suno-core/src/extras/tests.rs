@@ -29,6 +29,8 @@ fn full_lineage() -> LineageContext {
         parent_id: "parentid1234".to_owned(),
         edge_type: Some(EdgeType::Extend),
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     }
 }
 
@@ -116,6 +118,8 @@ fn details_use_resolved_lineage_not_feed_fields() {
         parent_id: "root-01".to_owned(),
         edge_type: Some(EdgeType::Cover),
         status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
     };
     let rendered = render_clip_details(&clip, &lineage);
     // The album is the resolved root title, never the clip's own title.

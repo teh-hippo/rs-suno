@@ -258,6 +258,8 @@ impl LineageStore {
             parent_id,
             edge_type,
             status,
+            track: 0,
+            track_total: 0,
         }
     }
 
@@ -293,6 +295,8 @@ impl LineageStore {
             parent_id: String::new(),
             edge_type: None,
             status: ResolveStatus::Resolved,
+            track: 0,
+            track_total: 0,
         };
         context.album(&own_title)
     }

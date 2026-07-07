@@ -54,6 +54,14 @@ pub struct EffectiveSettings {
     /// account's `[accounts.<label>.albums]` table. Deterministically ordered
     /// (a [`BTreeMap`]) and pre-trimmed of empty values by [`Config::resolve`].
     pub album_overrides: BTreeMap<String, String>,
+    /// Lead-track flags from `[accounts.<label>].lead_tracks`: clip ids (or
+    /// unique prefixes) each promoted to track 1 of their lineage album.
+    /// Trimmed, de-duplicated, and deterministically ordered by
+    /// [`Config::resolve`].
+    pub lead_tracks: Vec<String>,
+    /// Whether a lone-track album is numbered (defaults to `true`). `false`
+    /// leaves singletons unnumbered.
+    pub number_singletons: bool,
 }
 
 impl EffectiveSettings {
