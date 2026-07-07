@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/teh-hippo/rs-suno/compare/v0.34.0...v0.35.0) (2026-07-07)
+
+
+### Features
+
+* number album tracks with lead overrides and identity tags ([5641ad1](https://github.com/teh-hippo/rs-suno/commit/5641ad12dcabc034157f79094717e75038ca0d52))
+
 ## [0.34.0](https://github.com/teh-hippo/rs-suno/compare/v0.33.4...v0.34.0) (2026-07-06)
 
 
