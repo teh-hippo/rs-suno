@@ -15,6 +15,9 @@ and FLAC uses Vorbis comments.
 - Artist and album artist (your creator name, falling back to `Suno`)
 - Album (the lineage album title; see
   [Lineage and albums](lineage-and-albums.md))
+- Track number and total, numbering the album by creation order (see
+  [track numbers](lineage-and-albums.md#track-numbers)): `TRACKNUMBER`/
+  `TRACKTOTAL` in FLAC, `TRCK` in MP3 and WAV, `trkn` in ALAC
 - Date (the clip's creation date)
 
 **Suno tags**
@@ -24,6 +27,8 @@ and FLAC uses Vorbis comments.
 - Model (name and version, for example `chirp-v4`)
 - Creator handle
 - Parent clip, root clip, and a compact lineage summary
+- The clip's own id and canonical page URL (`SUNO_ID` and `SUNO_URL`,
+  `https://suno.com/song/<id>`), so a track can be traced back to Suno
 
 **Lyrics**
 

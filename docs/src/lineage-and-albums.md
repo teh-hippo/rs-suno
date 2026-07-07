@@ -36,23 +36,59 @@ name replaces the derived one everywhere the album appears: the folder path, the
 folder is moved to the new name and the emptied old directory pruned, with no
 re-download and deletion safety intact.
 
+## Track numbers
+
+Within an album, tracks are numbered by when each version was made: the earliest
+`created_at` is track 1, the next track 2, and so on. The number is written to
+the audio tags (`TRACKNUMBER` and `TRACKTOTAL` for FLAC, the equivalent
+`TRCK`/`trkn` for MP3, WAV, and ALAC), so a player lists the album in creation
+order, and it also prefixes the file name (`07 - …`) via the default template's
+`{track2}` placeholder.
+
+`TRACKTOTAL` is the number of that album's downloaded tracks. A single-track
+album is numbered `1` of `1` by default; set `number_singletons = false` to
+leave lone songs unnumbered (and unprefixed).
+
+### Setting a lead track
+
+Sometimes the version you think of as "song 1" was not made first, for example
+when you edited the main version after generating a batch of remixes. Flag it as
+the album's lead and it is promoted to track 1, with the rest shifting down while
+keeping their relative order:
+
+```toml
+[accounts.me]
+lead_tracks = [
+  "b320f4cf",   # the 8-char code from a file name, or the full clip id
+]
+```
+
+Each entry is a clip id or a unique prefix of one (such as the `[b320f4cf]` code
+in a file name); the album is found from that clip's lineage, so you never name
+the album here. There is one lead per album, and an entry that matches no
+downloaded clip, or more than one, is reported and ignored.
+
 ## File and folder layout
 
 Files are named deterministically from the clip and its lineage:
 
 ```text
-{creator}/{album}/{creator}-{title} [{id8}]
+{creator}/{album}/{track2} - {creator}-{title} [{id8}]
 ```
 
 - `{creator}` is your display name (falling back to your handle).
 - `{album}` is the lineage album title described above.
+- `{track}` is the album track number (for example `7`); `{track2}` is the same
+  number zero-padded to two digits (`07`). An unnumbered track renders neither,
+  and its trailing separator is dropped so no orphan ` - ` is left behind.
 - `{title}` is the clip's title.
-- `{id8}` is the first eight characters of the clip id.
+- `{id8}` is the first eight characters of the clip id (`{id}` is the full id,
+  `{root_id8}` the first eight of the lineage root, `{handle}` your handle).
 
 For example, a FLAC download might land at:
 
 ```text
-alice/Neon Horizon/alice-Neon Horizon (Remix) [8d9e0f1a].flac
+alice/Neon Horizon/03 - alice-Neon Horizon (Remix) [8d9e0f1a].flac
 ```
 
 Names are made safe for the filesystem. Unicode is preserved where it is valid

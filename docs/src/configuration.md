@@ -67,8 +67,9 @@ lrc_sidecar = false
 video_mp4 = false
 download_stems = false
 stem_format = "wav"
-naming_template = "{creator}/{album}/{creator}-{title} [{id8}]"
+naming_template = "{creator}/{album}/{track2} - {creator}-{title} [{id8}]"
 character_set = "unicode"
+number_singletons = true
 
 [accounts.me]
 token = "__client=<your-token>"
@@ -128,15 +129,17 @@ manager (see [authentication](authentication.md)), or restrict the file yourself
 | `video_mp4` | bool | `false` | Also download the standalone `<song>.mp4` music video beside each audio file, when Suno provides one. A song with no video gets no file. Turning this off leaves existing videos in place; a video is only removed alongside its own audio. |
 | `download_stems` | bool | `false` | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder beside it. Download-only: it lists and downloads existing stems and **never** triggers separation or spends credits. A song with no stems gets no folder. Each stem is stored RAW (see `stem_format`), never transcoded to FLAC. Turning this off leaves existing stems in place; individual stems are only removed when Suno's authoritative listing no longer contains them, or alongside their own song. |
 | `stem_format` | string | `wav` | Container for downloaded stems: `wav` (lossless, fetched through the same free WAV render the FLAC pipeline uses) or `mp3` (the public CDN file). Stems are stored RAW in whichever container and are never re-encoded to FLAC, even when the song's own `format` is FLAC. |
-| `naming_template` | string | `{creator}/{album}/{creator}-{title} [{id8}]` | Relative path template. Supported placeholders are `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, and `{root_id8}`. Empty path segments are dropped. |
+| `naming_template` | string | `{creator}/{album}/{track2} - {creator}-{title} [{id8}]` | Relative path template. Supported placeholders are `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, `{root_id8}`, `{track}` (album track number, e.g. `7`), and `{track2}` (zero-padded to two digits, e.g. `07`). An empty placeholder drops the separator run that follows it, and empty path segments are dropped. |
 | `character_set` | `unicode` \| `ascii` | `unicode` | Character set for filename sanitisation. Unicode preserves valid path characters; ASCII folds names to portable ASCII. |
-| `sources` | table | | Optional per-source overrides under `[accounts.<label>.sources.<name>]`. A source table may set any account key in this table except `token`, `root`, `account_id`, `sources`, `areas`, and `albums`. |
+| `number_singletons` | bool | `true` | Whether a single-track (lone) lineage album is given a track number. `false` leaves singletons unnumbered, so the `{track2}` prefix does not decorate a standalone song. |
+| `sources` | table | | Optional per-source overrides under `[accounts.<label>.sources.<name>]`. A source table may set any account key in this table except `token`, `root`, `account_id`, `sources`, `areas`, `albums`, and `lead_tracks`. |
 | `areas` | table | | Optional per-area mirror/copy selection. See [Per-area sync/copy modes](#per-area-synccopy-modes). |
 | `albums` | table | | Optional album-name overrides keyed by lineage root id. See [Album name overrides](#album-name-overrides). |
+| `lead_tracks` | array | | Optional clip ids (or unique id prefixes) each promoted to track 1 of their lineage album. See [Lead tracks](#lead-tracks). |
 
 Any per-run account key may also be set under `[defaults]` to apply to every
 account. Account-only tables and identity fields (`token`, `root`, `account_id`,
-`sources`, `areas`, and `albums`) cannot be set in `[defaults]`.
+`sources`, `areas`, `albums`, and `lead_tracks`) cannot be set in `[defaults]`.
 
 `token_command` and the other per-run settings also work in
 `[accounts.<label>.sources.<name>]`, so one source can override an account or
@@ -213,6 +216,33 @@ the local file; it does not re-download the audio. Deletion safety holds
 throughout: the rename is a move, never a delete-then-redownload, and nothing is
 deleted on an empty, failed, or partial listing.
 
+### Lead tracks
+
+Within an album, tracks are numbered by when each version was made (see
+[track numbers](lineage-and-albums.md#track-numbers)). To pin a specific version
+as track 1 — for example a main version you edited *after* generating its
+remixes, so it was made later — list it under `lead_tracks`:
+
+```toml
+[accounts.me]
+lead_tracks = [
+  "b320f4cf",                              # the 8-char code from a file name
+  "c6f6a1a5-7c6a-4424-9249-3fa847dc0a3a",  # or the full clip id
+]
+```
+
+- Each entry is a **clip id**, or a unique **prefix** of one such as the
+  `[b320f4cf]` code shown in every file name. The album is inferred from the
+  clip's lineage root, so you never name the album here.
+- The flagged clip becomes track 1; the remaining tracks keep their creation
+  order and shift down.
+- It is **account-wide**, set on the account and never per-source.
+- One lead per album. An entry that matches no downloaded clip, or matches more
+  than one, is reported on the run and ignored.
+
+Set `number_singletons = false` if you would rather leave lone (single-track)
+albums unnumbered.
+
 ### Multiple accounts
 
 Each account has its own token and its own `root`. Account roots must not nest
@@ -271,7 +301,7 @@ account token:
 | `SUNO_VIDEO_MP4` | `--video-mp4` | `true` or `false`. |
 | `SUNO_DOWNLOAD_STEMS` | `--download-stems` | `true` or `false`. |
 | `SUNO_STEM_FORMAT` | `--stem-format` | `wav` or `mp3`. |
-| `SUNO_NAMING_TEMPLATE` | `--naming-template` | Supported placeholders: `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, `{root_id8}`. |
+| `SUNO_NAMING_TEMPLATE` | `--naming-template` | Supported placeholders: `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, `{root_id8}`, `{track}`, `{track2}`. |
 | `SUNO_CHARACTER_SET` | `--character-set` | `unicode` or `ascii`. |
 
 Per-account variants use the account label upper-cased with hyphens turned into
