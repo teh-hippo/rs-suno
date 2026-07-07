@@ -1,7 +1,5 @@
 use super::*;
 
-// ── Atomic write and size verification (SYNC-13/14) ─────────────
-
 #[test]
 fn failed_write_leaves_the_prior_file_intact() {
     let c = clip("f");
@@ -69,8 +67,6 @@ fn size_mismatch_after_write_is_a_failure() {
     assert!(outcome.failures[0].reason.contains("expected"));
     assert!(manifest.get("g").is_none());
 }
-
-// ── Reliability policy (SYNC-16/17) ─────────────────────────────
 
 #[test]
 fn transient_failure_is_retried_then_skipped() {
@@ -234,8 +230,6 @@ fn auth_failure_aborts_the_run() {
     assert_eq!(outcome.failures[0].clip_id, "k1");
     assert_eq!(outcome.downloaded, 0);
 }
-
-// ── Disk-full aborts the run (issue #17) ────────────────────────
 
 #[test]
 fn disk_full_primary_write_aborts_the_run() {

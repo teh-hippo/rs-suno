@@ -33,41 +33,35 @@ pub struct LineageStore {
     /// The last resolved (or last-known) root per clip, keyed by clip id.
     pub(crate) resolution_cache: BTreeMap<String, CacheEntry>,
     /// The reconciled folder-art state per album, keyed by the album's stable
-    /// root id (HARDENING H2). Additive: absent in older stores, defaults empty.
-    /// Stays `pub`: the CLI executor and reconcile inputs borrow this map across
-    /// the crate boundary (`&mut store.albums`).
+    /// root id (HARDENING H2). Additive: absent in older stores. `pub` so the
+    /// CLI executor and reconcile can borrow it across the crate boundary.
     pub albums: BTreeMap<String, AlbumArt>,
     /// The reconciled `.m3u8` state per playlist, keyed by the playlist's Suno
     /// id (the synthetic `"liked"` id for the liked feed). Additive: absent in
-    /// older stores, defaults empty.
-    /// Stays `pub`: the CLI executor and reconcile inputs borrow this map across
-    /// the crate boundary (`&mut store.playlists`).
+    /// older stores. `pub` for the same cross-crate borrow as `albums`.
     pub playlists: BTreeMap<String, PlaylistState>,
     /// The Suno account this library is pinned to (trust-on-first-use). Absent
     /// in older stores and in a fresh library until the first run adopts it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) owner: Option<Owner>,
-    /// Manual album-name overrides, keyed by lineage root id, layered over the
-    /// store each run from config (see [`set_album_overrides`]). Runtime-only:
-    /// it is never serialised, so it can never persist into the durable graph or
-    /// silently outlive its config entry.
+    /// Manual album-name overrides, keyed by lineage root id, layered from
+    /// config each run (see [`set_album_overrides`]). Runtime-only (never
+    /// serialised), so it can never persist into the durable graph or outlive
+    /// its config entry.
     ///
     /// [`set_album_overrides`]: LineageStore::set_album_overrides
     #[serde(skip)]
     pub(crate) album_overrides: BTreeMap<String, String>,
-    /// The set of root ids eligible for an album name (an override or a
-    /// collision suffix): every non-empty `root_id` that appears as a *value* in
-    /// [`resolution_cache`](Self::resolution_cache). This is the single source
-    /// both override-application ([`effective_root_title`]) and collision
-    /// detection ([`colliding_root_titles`]) draw from, so they can never
-    /// disagree about which roots exist. Runtime-only and derived from the cache
-    /// via [`refresh_eligible_roots`]; kept in sync by [`update`] and refreshed
-    /// after a load.
+    /// Root ids eligible for an album name (override or collision suffix): every
+    /// non-empty `root_id` appearing as a *value* in
+    /// [`resolution_cache`](Self::resolution_cache). Both override-application
+    /// ([`effective_root_title`]) and collision detection
+    /// ([`colliding_root_titles`]) draw from this one set, so they can never
+    /// disagree. Runtime-only, refreshed by [`refresh_eligible_roots`].
     ///
     /// [`effective_root_title`]: LineageStore::effective_root_title
     /// [`colliding_root_titles`]: LineageStore::colliding_root_titles
     /// [`refresh_eligible_roots`]: LineageStore::refresh_eligible_roots
-    /// [`update`]: LineageStore::update
     #[serde(skip)]
     eligible_root_ids: HashSet<String>,
     /// Runtime index from edge identity to its row in `edges`, rebuilt from the
@@ -153,12 +147,11 @@ impl LineageStore {
 
     /// Layer this run's manual album-name overrides onto the store.
     ///
-    /// Keyed by lineage root id, sourced from the account's config each run and
-    /// never persisted (the field is `#[serde(skip)]`). Applied wherever the
-    /// album title is resolved ([`context_for`], [`album_for_id`],
-    /// [`colliding_root_titles`]), so a single call makes the folder path, the
-    /// `ALBUM` tag, the change hash, the on-disk index, and disambiguation all
-    /// reflect the preferred name from one source of truth.
+    /// Keyed by lineage root id, from config each run and never persisted
+    /// (`#[serde(skip)]`). Applied wherever the album title is resolved
+    /// ([`context_for`], [`album_for_id`], [`colliding_root_titles`]), so one
+    /// call makes the path, `ALBUM` tag, change hash, index, and disambiguation
+    /// all reflect the preferred name from one source.
     ///
     /// [`context_for`]: LineageStore::context_for
     /// [`album_for_id`]: LineageStore::album_for_id
@@ -167,26 +160,18 @@ impl LineageStore {
         self.album_overrides = overrides;
     }
 
-    /// The effective album title for a lineage root: the manual override when
-    /// one is configured for `root_id` AND that root is eligible (see
-    /// [`eligible_root_ids`]), otherwise the derived `root_title`.
+    /// The effective album title for a lineage root: the manual override when one
+    /// is configured for `root_id` AND that root is eligible (see
+    /// [`eligible_root_ids`]), otherwise the derived `root_title`. The single
+    /// point where an override supplants the derived name.
     ///
-    /// This is the single point at which a manual override supplants the derived
-    /// name, so every consumer that resolves an album title routes through it.
-    ///
-    /// The override is applied only when `root_id` is in the eligible set —
-    /// exactly the roots [`colliding_root_titles`] groups over. Tying
-    /// override-application and collision-detection to one set means an override
-    /// is never applied to a root that collision detection cannot suffix, which
-    /// would otherwise let two distinct roots share one album folder. The set is
-    /// the non-empty `root_id`s appearing as cache *values*, so it covers normal
-    /// resolved roots and gap-filled/archived ancestor roots (a value for their
-    /// children, never a key) alike. A truly uncached fallback self-root on a
-    /// resolution-failed run appears nowhere in the cache and is NOT overridden;
-    /// it folders under its own derived title this run and converges to the
-    /// override on a later run once the root resolves. This is intended, safe
-    /// degraded behaviour: a transient resolution miss can never collapse two
-    /// albums onto one path.
+    /// Gating on the eligible set — exactly the roots [`colliding_root_titles`]
+    /// groups over — means an override is never applied to a root that collision
+    /// detection cannot suffix, which would otherwise let two distinct roots
+    /// share one album folder. An uncached fallback self-root on a
+    /// resolution-failed run is not overridden; it folders under its own derived
+    /// title and converges once the root resolves. Safe degraded behaviour: a
+    /// transient miss can never collapse two albums onto one path.
     ///
     /// [`eligible_root_ids`]: Self::eligible_root_ids
     /// [`colliding_root_titles`]: LineageStore::colliding_root_titles
@@ -202,10 +187,9 @@ impl LineageStore {
 
     /// Recompute the eligible-root set from the resolution cache.
     ///
-    /// The set is the non-empty `root_id`s across the cache's values (the roots
-    /// every clip resolves to), which is exactly what [`colliding_root_titles`]
-    /// groups over. Called at the end of [`update`] and after a load (the field
-    /// is not serialised), so the set always reflects the populated cache.
+    /// The non-empty `root_id`s across the cache's values — exactly what
+    /// [`colliding_root_titles`] groups over. Called at the end of [`update`] and
+    /// after a load (the field is not serialised).
     ///
     /// [`colliding_root_titles`]: LineageStore::colliding_root_titles
     /// [`update`]: LineageStore::update
@@ -238,14 +222,13 @@ impl LineageStore {
 
     /// Build a [`LineageContext`] for `clip` from the durable store.
     ///
-    /// This is the source of truth for every file-affecting lineage decision
-    /// (album folder, embedded tags, the change hash), so a dropped resolution
-    /// call never rewrites the library (HARDENING H3). The root comes from the
-    /// monotonic resolution cache (the clip's own id when the store has no
-    /// better answer) and the root title and date from that root's archived
-    /// node, so a transient miss keeps the last-known-good album (even for a
-    /// since-purged ancestor) and the Year tag anchors on the root's year. The
-    /// parent edge is read structurally from the clip itself.
+    /// The source of truth for every file-affecting lineage decision (album
+    /// folder, embedded tags, change hash), so a dropped resolution call never
+    /// rewrites the library (HARDENING H3). The root comes from the monotonic
+    /// cache (the clip's own id when the store has no better answer), its title
+    /// and date from that root's archived node, so a transient miss keeps the
+    /// last-known-good album (even a since-purged ancestor) and the Year tag
+    /// anchors on the root's year. The parent edge is read structurally.
     pub fn context_for(&self, clip: &Clip) -> LineageContext {
         let cached = self.get_root(&clip.id);
         let root_id = cached
@@ -280,12 +263,11 @@ impl LineageStore {
 
     /// The canonical logical album title for a clip identified only by `id`.
     ///
-    /// The store-side counterpart of `context_for(clip).album(clip.title)` for a
-    /// clip that is not part of the current run (so no live [`Clip`] is on hand).
-    /// The clip's own title and its root come from the archived nodes and the
-    /// monotonic resolution cache, then the same [`LineageContext::album`] rule
-    /// decides whether the clip folders under its root's album or its own title.
-    /// A clip absent from the store folds to a self-root with an empty title.
+    /// The store-side counterpart of `context_for(clip).album(clip.title)` when
+    /// no live [`Clip`] is on hand. Title and root come from the archived nodes
+    /// and the monotonic cache, then the [`LineageContext::album`] rule decides
+    /// whether the clip folders under its root's album or its own title. A clip
+    /// absent from the store folds to a self-root with an empty title.
     pub fn album_for_id(&self, id: &str) -> String {
         let own = self.node(id);
         let own_title = own.map(|node| node.title.clone()).unwrap_or_default();
@@ -315,31 +297,20 @@ impl LineageStore {
         context.album(&own_title)
     }
 
-    /// The set of *effective* album titles shared by more than one distinct
-    /// root.
+    /// The set of *effective* album titles shared by more than one distinct root.
     ///
-    /// Two distinct roots must never share an album folder (two different
-    /// uploads titled "Break Through" exist), so naming appends the short root
-    /// id to the album of any clip whose album is in this set. It is computed
-    /// from the whole archive — every eligible root (see
-    /// [`eligible_root_ids`](Self::eligible_root_ids)) paired with its effective
-    /// title (a manual override when configured, else the node title) — so the
+    /// Two distinct roots must never share an album folder, so naming appends the
+    /// short root id to the album of any clip whose album is in this set.
+    /// Computed from the whole archive — every eligible root paired with its
+    /// effective title (override when configured, else the node title) — so the
     /// decision is stable across runs and independent of the current batch: a
-    /// `--since`/`--limit` slice that shows only one of two same-titled roots
-    /// still disambiguates, instead of oscillating between a bare and a suffixed
-    /// folder. Because it folds overrides in first, a rename that collides two
-    /// albums (or one that resolves a collision) is honoured consistently with
-    /// the path, tag, and hash.
+    /// `--since`/`--limit` slice showing only one of two same-titled roots still
+    /// disambiguates rather than oscillating.
     ///
-    /// This iterates the exact same eligible-root set that
+    /// It iterates the same eligible-root set that
     /// [`effective_root_title`](Self::effective_root_title) gates overrides on,
-    /// so an override affects a root's album name if and only if that root is
-    /// grouped here — the two can never disagree. The set is the non-empty
-    /// `root_id`s appearing as cache values, so it includes gap-filled/archived
-    /// ancestor roots (a value for their children, never a key) and node-less
-    /// cached roots. A root with no node and no override has an empty effective
-    /// title and is skipped. An uncached fallback self-root on a
-    /// resolution-failed run is in neither set.
+    /// so the two can never disagree. A root with no node and no override has an
+    /// empty effective title and is skipped.
     pub fn colliding_root_titles(&self) -> BTreeSet<String> {
         let mut roots_by_title: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for root_id in &self.eligible_root_ids {
@@ -399,12 +370,10 @@ impl LineageStore {
             self.upsert_node(clip, now);
         }
 
-        // Persist edges for the input clips AND the gap-filled ancestors. A
-        // gap-filled ancestor carries its own parent pointer, so recording its
-        // `lineage_edges` keeps the stored graph connected (an intermediate
-        // remix is no longer a disconnected root) and lets a later run resolve
-        // through it from the store, without re-fetching, even after Suno purges
-        // it. Parent-endpoint bridges have no clip of their own, so they are
+        // Persist edges for the input clips AND the gap-filled ancestors: an
+        // ancestor's own parent pointer keeps the stored graph connected and
+        // lets a later run resolve through it without re-fetching, even after
+        // Suno purges it. Parent-endpoint bridges have no clip, so they are
         // persisted directly below to keep that hop durable too.
         for clip in clips.iter().chain(resolution.gap_filled.iter()) {
             for edge in lineage_edges(clip) {
@@ -422,9 +391,9 @@ impl LineageStore {
             self.upsert_edge(child_id, &edge, now);
         }
         // Attribution edges from `clip_roots` are additive and informational,
-        // never structural: they carry the open attribution slug directly and
-        // are role Secondary, so `archived_parents` (Primary, ordinal 0) never
-        // reads them and root resolution stays untouched.
+        // never structural: role Secondary with the open slug, so
+        // `archived_parents` (Primary, ordinal 0) never reads them and root
+        // resolution stays untouched.
         for clip in clips.iter().chain(resolution.gap_filled.iter()) {
             for edge in attribution_edges(clip) {
                 self.upsert_attribution_edge(&clip.id, &edge, now);

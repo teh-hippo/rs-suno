@@ -20,9 +20,9 @@ use crate::vocab::ArtifactKind;
 /// Folder art is album-scoped, not per-clip, so it lives here rather than on a
 /// [`ManifestEntry`](crate::manifest::ManifestEntry). Each slot records the
 /// sidecar's path and the content hash of the art it was rendered from, so a
-/// later reconcile rewrites only on a genuine content change (HARDENING H1: a
-/// most-played flip that yields the same art hash is a no-op). Kept relational
-/// (two explicit slots) so it migrates cleanly to a SQLite `album_art` table.
+/// later reconcile rewrites only on a genuine content change (a most-played flip
+/// that yields the same art hash is a no-op). Kept relational so it migrates
+/// cleanly to a SQLite `album_art` table.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AlbumArt {
@@ -85,12 +85,12 @@ impl AlbumArt {
 
 /// The reconciled `.m3u8` state for one playlist.
 ///
-/// A playlist's body is *generated*, not fetched, so unlike per-clip artifacts
-/// its change detection is a single content hash over the full rendered text
-/// (HARDENING B1: name, order, and every member's path/title/duration feed it).
-/// The `path` is the sidecar's library-relative location, tracked so a rename
-/// (a playlist renamed on Suno) is detected and the old file removed. Kept as a
-/// flat row so it migrates cleanly to a SQLite `playlists` table.
+/// A playlist's body is generated, not fetched, so its change detection is a
+/// single content hash over the full rendered text (name, order, and every
+/// member's path/title/duration feed it). The `path` is the sidecar's
+/// library-relative location, tracked so a rename (a playlist renamed on Suno)
+/// is detected and the old file removed. Kept as a flat row so it migrates
+/// cleanly to a SQLite `playlists` table.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlaylistState {

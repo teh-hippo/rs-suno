@@ -144,22 +144,21 @@ pub struct Resolution {
 /// The resolved lineage of a single clip, threaded into naming, tagging, and
 /// change detection.
 ///
-/// This is the bridge between the pure resolver ([`Resolution`]) and the parts
-/// of the engine that turn a clip into files: it carries exactly the resolved
-/// values that get embedded in a path or a tag (the root the clip folders
-/// under, the immediate parent and how it derives from it), so those consumers
-/// never re-read the removed `root_ancestor_id`/`album_title` feed fields.
+/// The bridge between the pure resolver ([`Resolution`]) and the parts of the
+/// engine that turn a clip into files: it carries exactly the resolved values
+/// embedded in a path or tag (the folder root, the immediate parent and its
+/// edge), so those consumers never re-read raw feed fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageContext {
     /// The resolved root ancestor id (the clip's own id when it is a root).
     pub root_id: String,
     /// The root ancestor's title (empty when the root is outside the index).
     ///
-    /// When built via the lineage store ([`context_for`]/[`album_for_id`]) this
-    /// carries the *effective* album title: a manual override supplants the
-    /// derived title here, so the folder path, `ALBUM` tag, and change hash all
-    /// reflect it from one source. Contexts built without the store (e.g.
-    /// [`own_root`]) carry the raw title.
+    /// Built via the lineage store ([`context_for`]/[`album_for_id`]), this
+    /// carries the *effective* album title, so a manual override supplants the
+    /// derived title here and the path, `ALBUM` tag, and change hash all reflect
+    /// it from one source. Store-less contexts ([`own_root`]) carry the raw
+    /// title.
     ///
     /// [`context_for`]: crate::LineageStore::context_for
     /// [`album_for_id`]: crate::LineageStore::album_for_id
@@ -168,11 +167,10 @@ pub struct LineageContext {
     /// The root ancestor's creation timestamp (its raw `created_at`), or empty
     /// when the root is outside the index.
     ///
-    /// Surfaced so the Year tag can group an album under its lineage root's
-    /// year: a later revision that crosses a calendar boundary still carries the
-    /// root's year. Contexts built without the store ([`own_root`]/[`for_clip`])
-    /// carry the clip's own `created_at`, so [`year`] falls back to the clip's
-    /// own year when the root's date is unavailable.
+    /// Surfaced so the Year tag groups an album under its lineage root's year: a
+    /// later revision crossing a calendar boundary still carries the root's year.
+    /// Store-less contexts ([`own_root`]/[`for_clip`]) carry the clip's own
+    /// `created_at`, so [`year`] then falls back to the clip's own year.
     ///
     /// [`own_root`]: LineageContext::own_root
     /// [`for_clip`]: LineageContext::for_clip

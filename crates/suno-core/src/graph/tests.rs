@@ -157,7 +157,7 @@ fn update_persists_edges_for_gap_filled_ancestors() {
     let mut store = LineageStore::new();
     store.update(std::slice::from_ref(&child), &resolution, "now");
 
-    // The gap-filled ancestor's own edge is persisted (pre-fix it was not).
+    // The gap-filled ancestor's own edge is persisted.
     let mid_edge = edge(&store, "mid", "root");
     assert_eq!(mid_edge.role, EdgeRole::Primary);
     assert_eq!(mid_edge.ordinal, 0);
@@ -1405,7 +1405,7 @@ fn serde_roundtrip_is_byte_identical() {
 #[test]
 fn existing_string_form_json_deserialises_correctly() {
     // Existing on-disk stores use the plain slug strings; the typed enums
-    // must still parse them correctly after this refactor.
+    // must still parse them correctly.
     let json = r#"{
         "nodes": {"a": {"title": "Root", "status": "observed"}},
         "edges": [{"child_id": "b", "parent_id": "a", "role": "primary", "status": "active", "edge_type": "cover"}],

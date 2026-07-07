@@ -33,8 +33,6 @@ fn playlist_present_on_disk_no_churn() {
     );
 }
 
-// ── Phase 9: playlist artifacts ─────────────────────────────────
-
 fn pl_desired(id: &str, name: &str, path: &str, hash: &str) -> PlaylistDesired {
     PlaylistDesired {
         id: id.to_owned(),

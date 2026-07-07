@@ -1,7 +1,5 @@
 use super::*;
 
-// ── Phase 6: artifact actions ───────────────────────────────────
-
 #[test]
 fn write_artifact_fetches_writes_and_updates_manifest() {
     // The owning entry exists (its audio was kept this run); WriteArtifact

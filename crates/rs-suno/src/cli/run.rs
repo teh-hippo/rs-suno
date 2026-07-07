@@ -138,7 +138,7 @@ async fn run(
 
     let mut worst = ExitCode::Ok;
     if targets.len() <= 1 {
-        // Single account: sequential with streaming output (unchanged behaviour).
+        // Single account: sequential with streaming output.
         let flags = config_load::flag_overrides(global, args);
         for target in targets {
             let code = run_one(
@@ -160,12 +160,9 @@ async fn run(
     } else {
         // Multiple accounts: bounded concurrency via OS threads (one per
         // account, each with its own current-thread tokio runtime), with
-        // per-account buffered output flushed atomically on completion.
-        // Accounts share no mutable state (separate clients, tokens,
-        // destination roots, manifests, and lineage files), so per-account
-        // isolation is what makes this data-safe — each account's serial
-        // commit and deletion-safety logic is entirely unaffected by the
-        // concurrency between accounts.
+        // per-account buffered output flushed atomically on completion. The
+        // per-account isolation that makes this data-safe is documented on
+        // ACCOUNT_CONCURRENCY.
         use std::sync::Arc;
         let global = Arc::new(global.clone());
         let args = Arc::new(args.clone());

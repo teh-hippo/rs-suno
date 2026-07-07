@@ -3,10 +3,10 @@
 //! [`AlignedLyrics`] is the parsed shape of `GET /api/gen/{id}/aligned_lyrics/v2/`
 //! ([`SunoClient::aligned_lyrics`](crate::SunoClient::aligned_lyrics)): a flat
 //! word-level list plus a line-level list carrying section labels and nested
-//! per-word timing. Everything here is pure and free of direct IO: the client
-//! and renders the synced artefacts (the line-synced `.lrc` body, a word-level
-//! ID3 `SYLT` table, and a plain-text fallback), so the mapping and formatting
-//! are unit tested without a network.
+//! per-word timing. Everything here is pure and free of direct IO — it renders
+//! the synced artefacts (the line-synced `.lrc` body, a word-level ID3 `SYLT`
+//! table, and a plain-text fallback), so the mapping and formatting are unit
+//! tested without a network.
 //!
 //! Instrumentals (and any clip Suno could not force-align) return `200` with
 //! empty arrays, so [`AlignedLyrics::is_empty`] is the signal to write no synced

@@ -1,7 +1,5 @@
 use super::*;
 
-// ── Phase 8: folder art routes to the album store ───────────────
-
 #[test]
 fn folder_jpg_write_records_album_state_and_skips_manifest() {
     // Folder art is owned by the album root id, not a manifest clip: it
@@ -238,8 +236,6 @@ fn folder_art_delete_clears_album_state() {
     assert!(!albums.contains_key("root"));
 }
 
-// ── Phase 9: playlist artifacts ─────────────────────────────────
-
 #[test]
 fn playlist_write_uses_inline_content_and_records_state() {
     // A playlist body is generated, carried inline. With an empty manifest
@@ -330,8 +326,6 @@ fn playlist_delete_removes_file_and_clears_state() {
         "the playlist row is cleared on delete"
     );
 }
-
-// ── Phase 10: old-sidecar cleanup on move + empty-dir prune ──────
 
 #[test]
 fn rename_move_relocates_cover_and_prunes_old_album() {

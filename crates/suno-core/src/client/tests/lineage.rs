@@ -54,8 +54,8 @@ fn get_clip_parent_is_none_for_a_200_no_id_root() {
 #[test]
 fn get_clip_parent_reads_the_reduced_user_prefixed_shape() {
     // The parent endpoint returns a reduced shape with user_-prefixed
-    // identity keys; after the dual-identity mapper fix the parent Clip
-    // carries a non-empty display_name/handle (regression pin for #220).
+    // identity keys; the dual-identity mapper must yield a non-empty
+    // display_name/handle (regression pin for #220).
     let parent = serde_json::json!({
         "id": "00000000-0000-4000-8000-000000000020",
         "title": "Track 2",

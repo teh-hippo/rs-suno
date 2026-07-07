@@ -10,10 +10,9 @@ use super::shape::{AreasConfig, Settings};
 /// CLI flag overrides passed to [`Config::resolve`]. `None` means the flag
 /// was not provided.
 ///
-/// The shared [`Settings`] block is nested rather than mirrored; only `token`
-/// is carried top-level, because it is the one identity field with a global
-/// `--token` flag. Note there is no `--token-command` flag, so
-/// `settings.token_command` is never populated from the CLI (see [`Settings`]).
+/// Only `token` is carried top-level (the one field with a global `--token`
+/// flag); the rest nest in [`Settings`]. There is no `--token-command` flag, so
+/// `settings.token_command` is never populated from the CLI.
 #[derive(Debug, Default)]
 pub struct FlagOverrides {
     pub token: Option<String>,
@@ -60,11 +59,9 @@ pub struct EffectiveSettings {
 impl EffectiveSettings {
     /// Returns `true` when these settings require ffmpeg to be on `PATH`.
     ///
-    /// Lossless output (FLAC or ALAC) transcodes from the WAV render, and an
-    /// animated WebP cover transcodes MP4→WebP, so either needs ffmpeg. Keeping
-    /// the raw MP4 alongside the WebP (the `both` retention) still produces the
-    /// WebP, so `animated_covers` alone decides it; a raw-MP4-only run, or a
-    /// plain MP3/WAV run with no animated covers, needs no ffmpeg.
+    /// Lossless output (FLAC or ALAC) transcodes from the WAV render and an
+    /// animated WebP cover transcodes MP4→WebP, so either needs ffmpeg. A raw
+    /// MP4 alone, or MP3/WAV with no animated covers, does not.
     pub fn requires_ffmpeg(&self) -> bool {
         matches!(self.format, AudioFormat::Flac | AudioFormat::Alac) || self.animated_covers
     }
@@ -127,8 +124,6 @@ mod tests {
         assert!(!eff.requires_ffmpeg(), "mp3 + no covers = no ffmpeg");
         eff.animated_covers = true;
         assert!(eff.requires_ffmpeg(), "mp3 + animated webp = needs ffmpeg");
-        // `both` retention keeps the raw mp4 AND the transcoded webp, so ffmpeg
-        // is still required to produce the webp.
         eff.raw_animated_cover = true;
         assert!(
             eff.requires_ffmpeg(),

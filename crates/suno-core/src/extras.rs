@@ -1,9 +1,8 @@
 //! Pure "media extras" generators: M3U8 playlists, per-song text sidecars, and
 //! the library index.
 //!
-//! Every function here is pure. It takes clip data plus relative paths and
-//! returns the text the CLI writes to disk later, with no IO, no clock, and no
-//! network, so the logic stays deterministic and is unit-tested in isolation.
+//! Every function is pure: clip data and relative paths in, the text the CLI
+//! writes to disk out, with no IO, clock, or network.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -25,16 +24,12 @@ use crate::vocab::AudioFormat;
 /// fields may be added, never renamed or repurposed.
 pub const INDEX_SCHEMA_VERSION: u32 = 1;
 
-/// One ordered entry in an extended-M3U8 playlist.
+/// One ordered entry in an extended-M3U8 playlist. Order is significant and
+/// preserved exactly as given.
 ///
-/// Order is significant: the liked and playlist ordering is preserved exactly
-/// as given.
-///
-/// An **empty `relative_path` marks a member absent from the local library**
-/// (Liked from another creator, or filtered out by `--limit`/`--since`). Such an
-/// entry renders as a `# (not in library) <title>` comment line rather than an
-/// `#EXTINF` + path pair, so the playlist never carries a dangling path
-/// (HARDENING L1). A present member always has a non-empty relative path.
+/// An empty `relative_path` marks a member absent from the local library, which
+/// renders as a `# (not in library) <title>` comment rather than an `#EXTINF` +
+/// path pair, so the playlist never carries a dangling path (HARDENING L1).
 #[derive(Debug, Clone, Copy)]
 pub struct M3u8Entry<'a> {
     pub title: &'a str,
@@ -45,21 +40,17 @@ pub struct M3u8Entry<'a> {
 /// Render an extended-M3U8 playlist named `name` from `entries`, preserving
 /// their order.
 ///
-/// The output opens with the `#EXTM3U` header and a `#PLAYLIST:<name>` line,
-/// then per entry emits either an `#EXTINF:<seconds>,<title>` line followed by
-/// the relative path line (a member present in the library), or a
-/// `# (not in library) <title>` comment line (an [`M3u8Entry`] with an empty
-/// relative path — HARDENING L1). Seconds are rounded to the nearest whole
-/// number. Carriage returns and line feeds in the name, title, and path are
-/// folded to spaces so a single field can never break the line structure.
+/// Opens with `#EXTM3U` and `#PLAYLIST:<name>`, then per entry emits either an
+/// `#EXTINF:<seconds>,<title>` line plus the path, or a `# (not in library)`
+/// comment for an empty relative path (HARDENING L1). CR/LF in any field is
+/// folded to spaces so one field can never break the line structure.
 pub fn render_m3u8(name: &str, entries: &[M3u8Entry<'_>]) -> String {
     let mut out = String::from("#EXTM3U\n");
     let _ = writeln!(out, "#PLAYLIST:{}", to_single_line(name));
     for entry in entries {
         let title = to_single_line(entry.title);
         if entry.relative_path.is_empty() {
-            // L1: a member absent from the local library — a comment, never a
-            // dangling path line.
+            // L1: an absent member renders as a comment, never a dangling path.
             let _ = writeln!(out, "# (not in library) {title}");
             continue;
         }
@@ -100,14 +91,12 @@ struct LibraryIndex {
 
 /// Render the whole-library index as a stable, pretty-printed JSON document.
 ///
-/// One row per `manifest` entry, in clip-id order (the manifest is a `BTreeMap`,
-/// so the order is deterministic), and only clips whose file exists on disk are
-/// listed, so the index never advertises a missing file. Durable fields come
-/// from the manifest and the archived [`LineageStore`]; live-only fields (artist,
-/// handle, duration, tags) come from `live` when the clip was seen this run and
-/// are `null` otherwise. The `album` is the raw logical album title, which
-/// legitimately differs from the sanitised, truncated album segment inside
-/// `path`. The renderer takes no clock, so the output is fully deterministic.
+/// One row per `manifest` entry in clip-id order, listing only clips whose file
+/// exists on disk so the index never advertises a missing file. Durable fields
+/// come from the manifest and the archived [`LineageStore`]; live-only fields
+/// (artist, handle, duration, tags) come from `live` when the clip was seen this
+/// run and are `null` otherwise. `album` is the raw logical title, which
+/// legitimately differs from the sanitised segment inside `path`.
 pub fn render_library_index(
     manifest: &Manifest,
     store: &LineageStore,
@@ -186,16 +175,13 @@ fn to_single_line(text: &str) -> String {
 
 /// Render the plain-text per-song details sidecar for `clip`.
 ///
-/// The body is a fixed-order block of `Label: value` lines, built from the same
-/// [`TrackMetadata`] that drives the embedded tags (so the dump matches the file
-/// tags), plus the clip id, its duration as `mm:ss`, and the canonical
-/// `https://suno.com/song/<id>` page URL. A field whose value is empty is
-/// omitted, so the output is deterministic and never carries blank labels. The
-/// generation prompt is labelled `Prompt:` (never `Lyrics:` — the lyrics live in
-/// their own sidecar). Because [`TrackMetadata`] carries no URLs, signed CDN
-/// links are excluded automatically, and play-count/liked/trashed/status are not
-/// mapped. Every value is folded to a single line so one field can never break
-/// the block structure.
+/// A fixed-order block of `Label: value` lines from the same [`TrackMetadata`]
+/// that drives the embedded tags, plus the clip id, `mm:ss` duration, and the
+/// canonical `https://suno.com/song/<id>` page URL. Empty fields are omitted.
+/// The generation prompt is labelled `Prompt:`, never `Lyrics:`.
+/// [`TrackMetadata`] carries no URLs, so signed CDN links are excluded
+/// automatically. Every value is folded to one line so a field can never break
+/// the block.
 pub fn render_clip_details(clip: &Clip, lineage: &LineageContext) -> String {
     let meta = TrackMetadata::from_clip(clip, lineage);
     let url = if clip.id.is_empty() {
@@ -234,10 +220,9 @@ pub fn render_clip_details(clip: &Clip, lineage: &LineageContext) -> String {
 
 /// Render the plain-text lyrics sidecar for `clip`, or `None` when it has none.
 ///
-/// The clip's own `lyrics` are emitted verbatim, normalised to exactly one
-/// trailing newline. When the lyrics are empty or whitespace-only, `None` is
-/// returned so no empty `.lyrics.txt` is ever written. The generation prompt is
-/// deliberately not used here (that lives in the details sidecar).
+/// The clip's own `lyrics`, verbatim, normalised to one trailing newline. Empty
+/// or whitespace-only lyrics return `None` so no empty `.lyrics.txt` is written.
+/// The generation prompt is not used here (it lives in the details sidecar).
 pub fn render_clip_lyrics(clip: &Clip) -> Option<String> {
     if clip.lyrics.trim().is_empty() {
         return None;
@@ -247,14 +232,10 @@ pub fn render_clip_lyrics(clip: &Clip) -> Option<String> {
 
 /// Render an untimed `.lrc` sidecar for `clip`, or `None` when it has no lyrics.
 ///
-/// The body carries plain lyric lines with no timestamps. The header block emits
-/// `[ti:]`, `[ar:]`, `[al:]`, and `[length:]` tags, each omitted when its value
-/// is empty or unknown, plus a constant `[re:rs-suno]` tool tag. When the lyrics
-/// are empty or whitespace-only, `None` is returned so no empty `.lrc` is
-/// written.
-///
-/// This is the fallback for a clip with no aligned lyrics; when Suno's alignment
-/// is available the synced [`render_synced_lrc`] supersedes it at the same path.
+/// Plain lyric lines with no timestamps, under the shared `.lrc` header. Empty
+/// or whitespace-only lyrics return `None` so no empty `.lrc` is written. This is
+/// the fallback when Suno has no alignment; the synced [`render_synced_lrc`]
+/// supersedes it at the same path when available.
 pub fn render_clip_lrc(clip: &Clip, lineage: &LineageContext) -> Option<String> {
     if clip.lyrics.trim().is_empty() {
         return None;
@@ -269,12 +250,10 @@ pub fn render_clip_lrc(clip: &Clip, lineage: &LineageContext) -> Option<String> 
 /// Render a synced (timed) `.lrc` sidecar for `clip` from Suno's `aligned`
 /// lyrics, or `None` when there is nothing to time (an instrumental).
 ///
-/// The header block is identical to the untimed [`render_clip_lrc`]; the body is
-/// the line-level form from [`AlignedLyrics::lrc_body`]: one `[mm:ss.xx]` stamp
-/// per aligned line, followed by the line text. This is the universally
-/// supported LRC form, so every player syncs it cleanly (word-level timing is
-/// carried in the MP3 `SYLT` frame, not inline in the `.lrc`). Returns `None`
-/// when `aligned` yields no timed lines, so an instrumental writes no `.lrc`.
+/// Same header as [`render_clip_lrc`]; the body is the line-level form from
+/// [`AlignedLyrics::lrc_body`], one `[mm:ss.xx]` stamp per line. Word-level
+/// timing rides the MP3 `SYLT` frame, not the `.lrc`. Returns `None` when there
+/// are no timed lines.
 pub fn render_synced_lrc(
     clip: &Clip,
     lineage: &LineageContext,

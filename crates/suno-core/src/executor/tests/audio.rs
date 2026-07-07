@@ -1,7 +1,5 @@
 use super::*;
 
-// ── Download: MP3 ───────────────────────────────────────────────
-
 #[test]
 fn download_mp3_writes_tagged_file_and_records_manifest() {
     let c = art_clip("a");
@@ -195,8 +193,6 @@ fn download_mp3_uses_cdn_fallback_when_audio_url_empty() {
     assert_eq!(http.count("cdn1.suno.ai/a.mp3"), 1);
 }
 
-// ── Download: FLAC render + transcode ───────────────────────────
-
 #[test]
 fn download_flac_renders_transcodes_and_records() {
     let c = clip("b");
@@ -361,8 +357,6 @@ fn flac_transcode_failure_is_recorded_and_skipped() {
     assert!(manifest.get("t").is_none());
 }
 
-// ── Cover fallback ──────────────────────────────────────────────
-
 #[test]
 fn cover_falls_back_when_large_image_is_missing() {
     let c = art_clip("e");
@@ -405,8 +399,6 @@ fn cover_falls_back_when_large_image_is_missing() {
         .unwrap();
     assert!(large < small, "large art tried before small");
 }
-
-// ── Cover reuse: embed + sidecar share one fetch (#89) ──────────
 
 #[test]
 fn download_reuses_the_embedded_cover_for_the_jpg_sidecar() {

@@ -124,10 +124,7 @@ pub(crate) async fn execute_plan(
         return Ok(ExitCode::DiskFull);
     }
 
-    // Record the synced-lyrics resolution markers now the writes have landed:
-    // an instrumental is marked so it is not re-fetched every run, and a written
-    // clip is marked only once its `.lrc` slot reflects the body (so an
-    // interrupted or failed write is re-resolved next run rather than skipped).
+    // Record the synced-lyrics resolution markers now the writes have landed.
     synced_lyrics::record_synced_lyrics_checks(&mut manifest, &pending_checks);
 
     logs::save_manifest(dest, &manifest)?;

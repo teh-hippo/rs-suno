@@ -39,11 +39,11 @@ pub enum SourceMode {
 pub enum ArtifactKind {
     /// The per-song external cover, sourced from `image_large_url`.
     CoverJpg,
-    /// Retired: the per-song animated cover is now embedded in the audio file's
-    /// front-cover picture, not written as a `<track>.webp` sidecar. The kind is
-    /// kept so a `.webp` written by an older version stays tracked and is cleaned
-    /// up (it is delete-eligible; see `removed_kind_delete_eligible` in
-    /// `reconcile`); it is never emitted into a new desired set.
+    /// Retired: the per-song animated cover is now embedded in the audio, not
+    /// written as a `<track>.webp` sidecar. The kind is kept only so a `.webp`
+    /// from an older version stays tracked and is cleaned up (delete-eligible;
+    /// see `removed_kind_delete_eligible` in `reconcile`); it is never emitted
+    /// into a new desired set.
     CoverWebp,
     /// The per-song plain-text details dump (generated, inline content).
     DetailsTxt,
@@ -223,16 +223,13 @@ impl fmt::Display for VideoCoverRetention {
 /// Encoder settings for the animated WebP cover derived from a clip's MP4
 /// preview.
 ///
-/// The animated WebP is embedded as the audio file's front-cover picture. A
-/// FLAC PICTURE block is length-prefixed with a 24-bit field, so a single
-/// picture cannot exceed ~16 MiB; a real 5 s Suno cover at quality 95 with no
-/// width cap is ~31 MiB and would never fit. The [`Default`] is therefore a
-/// bounded lossy profile that reliably fits that ceiling: quality 90 at effort
-/// (`compression_level`) 4, scaled to at most 640 px wide (owner measurement:
-/// ~11 MiB, ~30% headroom under the cap; 800 px is ~14.5 MiB with far thinner
-/// margin). Effort is capped at 4 because effort 6 only matches its size for
-/// 7-13x the encode time. Lossless is opt-in and far larger (a 5 s cover is
-/// ~145 MB), so it fits only the larger MP3/ALAC containers, never FLAC.
+/// The animated WebP is embedded as the audio file's front-cover picture, and a
+/// FLAC PICTURE block cannot exceed ~16 MiB (its length is a 24-bit field). The
+/// [`Default`] is therefore a bounded lossy profile that reliably fits: quality
+/// 90 at effort (`compression_level`) 4, scaled to at most 640 px wide. Effort
+/// is capped at 4 because 6 only matches its size for many times the encode
+/// time, and lossless is opt-in and far larger, so it fits only the roomier
+/// MP3/ALAC containers, never FLAC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebpEncodeSettings {
     /// Lossy encoder quality, 0-100 (higher is better and larger). Ignored when

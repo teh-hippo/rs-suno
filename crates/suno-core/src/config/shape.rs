@@ -16,11 +16,9 @@ use super::label_to_env;
 
 /// The overridable settings block, shared verbatim by every precedence tier.
 ///
-/// One declaration is the whole point: a new knob is added here once and every
-/// tier that flattens it (global [`Defaults`], per-account [`AccountConfig`],
-/// per-source [`SourceConfig`], and the CLI [`FlagOverrides`]) gains it, instead
-/// of being mirrored across the structs where forgetting one silently drops the
-/// setting from a tier.
+/// A new knob is added here once and every tier that flattens it ([`Defaults`],
+/// [`AccountConfig`], [`SourceConfig`], and the CLI [`FlagOverrides`]) gains it,
+/// rather than being mirrored where forgetting one would silently drop it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Settings {
     pub format: Option<AudioFormat>,
@@ -28,11 +26,9 @@ pub struct Settings {
     pub retries: Option<u32>,
     pub min_newest: Option<u32>,
     /// The command whose stdout mints a token. Resolved from the
-    /// `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the per-source, per-account,
-    /// and global `token_command` config keys. There is deliberately no
-    /// `--token-command` flag, so setting this on [`FlagOverrides::settings`] is
-    /// intentionally never read by [`Config::resolve`]; configure it in
-    /// `[defaults]`/`[accounts.<label>]`/`[sources.<name>]` or the environment.
+    /// `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is
+    /// deliberately no `--token-command` flag, so it is never read from
+    /// [`FlagOverrides`]; set it in config or the environment.
     pub token_command: Option<String>,
     pub animated_covers: Option<bool>,
     pub video_cover_retention: Option<VideoCoverRetention>,
@@ -82,10 +78,9 @@ pub struct AccountConfig {
     /// liked feed, and playlists. Absent means the classic single-verb run.
     pub areas: Option<AreasConfig>,
     /// Manual album-name overrides, keyed by the album's stable lineage root id
-    /// (`<root_id> = "Preferred Name"`). Album identity is the lineage root, so
-    /// the override is account-wide (like lineage), never per-source: the
-    /// derived title is unstable and is exactly what this replaces. An empty or
-    /// whitespace-only value is ignored, so a stray key cannot blank an album.
+    /// (`<root_id> = "Preferred Name"`). Account-wide, never per-source, since
+    /// album identity is the lineage root. An empty or whitespace-only value is
+    /// ignored, so a stray key cannot blank an album.
     #[serde(default)]
     pub albums: HashMap<String, String>,
 }
@@ -124,11 +119,10 @@ impl<'de> Deserialize<'de> for AreaMode {
 /// Per-area mode selection for an account.
 ///
 /// `library` accepts `off`/`copy`/`mirror`; `liked` and `playlists` accept
-/// `copy`/`mirror`; `playlist` overrides individual playlists by canonical Suno
-/// id. `deny_unknown_fields` turns a mistyped key (e.g. `libary`) into a parse
-/// error rather than a silent no-op. The `playlist` map cannot carry
-/// `deny_unknown_fields` (its keys are dynamic playlist ids), but every value is
-/// a closed [`SourceMode`], so a bad mode string still errors at parse time.
+/// `copy`/`mirror`; `playlist` overrides individual playlists by Suno id.
+/// `deny_unknown_fields` turns a mistyped key into a parse error rather than a
+/// silent no-op; the `playlist` map's dynamic ids can't use it, but its closed
+/// [`SourceMode`] values still reject a bad mode at parse time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AreasConfig {

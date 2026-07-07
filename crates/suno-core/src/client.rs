@@ -26,12 +26,10 @@ use crate::wire::{
 
 /// A client for the Suno library API, owning the account's [`ClerkAuth`].
 ///
-/// The [`Clock`] is held so [`api_request`](Self::api_request) can back off
-/// through the port on a `429` or transient failure — the engine still sleeps
-/// nowhere itself. The [`AdaptiveLimiter`] paces reactively: an unthrottled
-/// listing waits nowhere, and only after a `429` does it space requests out,
-/// halving the rate and ramping it back after a run of clean successes so pacing
-/// tracks Suno's real limit rather than a fixed constant.
+/// Holds the [`Clock`] so [`api_request`](Self::api_request) can back off on a
+/// `429` or transient failure, and an [`AdaptiveLimiter`] that paces reactively:
+/// it waits nowhere until a `429`, then halves the rate and ramps it back on
+/// sustained success.
 pub struct SunoClient<C> {
     auth: ClerkAuth,
     clock: C,
@@ -53,9 +51,7 @@ impl<C: Clock> SunoClient<C> {
         &self.auth
     }
 
-    /// The adaptive limiter's current requests-per-second rate, for tests that
-    /// assert the limiter still records success and `429` correctly (including
-    /// under concurrent WAV-render calls serialised through the executor).
+    /// The adaptive limiter's current requests-per-second rate, for tests.
     #[cfg(test)]
     pub(crate) fn limiter_rate(&self) -> f64 {
         self.limiter.lock().unwrap().rate()
@@ -63,24 +59,16 @@ impl<C: Clock> SunoClient<C> {
 
     /// List clips across the whole library, or only liked clips.
     ///
-    /// Walks the cursor-paginated `POST /api/feed/v3` feed, following
-    /// `next_cursor` until the server reports the end. Once `limit` clips have
-    /// been collected it stops at the next page boundary and truncates to
-    /// `limit`. Paging is hard-capped at [`MAX_PAGES`] so a runaway
-    /// `has_more` can never loop forever. When `liked` is set the feed filter
-    /// scopes to liked clips (`liked: "True"`).
+    /// Walks the cursor-paginated `POST /api/feed/v3` feed, hard-capped at
+    /// [`MAX_PAGES`], truncating to `limit` when set.
     ///
-    /// Returns the clips paired with a `complete` flag that is `true` only when
-    /// paging ended because the server reported `has_more == false` (the feed
-    /// fully drained). A missing `has_more`, a `has_more == true` page with no
-    /// usable `next_cursor`, a `limit` stop, exhausting [`MAX_PAGES`], or any
-    /// transport error all yield `false` (or propagate) so the caller can refuse
-    /// to treat a truncated listing as authoritative for deletion.
-    ///
-    /// A third `any_filtered` flag is `true` when any listed clip was dropped by
-    /// the downloadable filter on any page, so the caller can refuse deletion
-    /// authority for a listing that may have hidden a manifest-tracked clip
-    /// (#248), exactly as the playlist path already does.
+    /// The `complete` flag is `true` only when paging ended on a server-reported
+    /// `has_more == false`; any other stop (missing `has_more`, no usable cursor,
+    /// `limit`, [`MAX_PAGES`], transport error) yields `false` so the caller
+    /// never treats a truncated listing as authoritative for deletion.
+    /// `any_filtered` is `true` when the downloadable filter dropped any clip,
+    /// which likewise denies deletion authority since it may have hidden a
+    /// manifest-tracked clip.
     pub async fn list_clips(
         &self,
         http: &impl Http,
@@ -141,11 +129,8 @@ impl<C: Clock> SunoClient<C> {
 
     /// Read the rendered WAV URL for a clip, or `None` while it is not ready.
     ///
-    /// A `404` maps to `None` (the render is absent, not yet requested, or the
-    /// endpoint has moved), symmetric with [`aligned_lyrics`](Self::aligned_lyrics)
-    /// so an unrendered clip is "no WAV yet" rather than a run-aborting error.
-    /// Like [`request_wav`](Self::request_wav) it skips the shared retry: the
-    /// caller's poll loop owns that budget.
+    /// A `404` maps to `None` (not yet rendered), and it skips the shared retry
+    /// so the caller's poll loop owns that budget.
     pub async fn wav_url(&self, http: &impl Http, id: &str) -> Result<Option<String>> {
         let path = format!("/api/gen/{id}/wav_file/");
         let body = match self.api_get(http, &path).await {
@@ -158,18 +143,10 @@ impl<C: Clock> SunoClient<C> {
 
     /// Fetch a clip's word- and line-level aligned (synced) lyrics.
     ///
-    /// `GET /api/gen/{id}/aligned_lyrics/v2/` (the trailing slash is required) on
-    /// the studio-api host, authenticated with the same JWT as every other
-    /// library read. The `v2` shape carries both a flat word-level list and a
-    /// line-level list with section labels and nested per-word timing (see
-    /// [`AlignedLyrics`]).
-    ///
-    /// An instrumental or un-alignable clip returns `200` with empty arrays,
-    /// which maps to an empty [`AlignedLyrics`]; a `404` (no alignment for the
-    /// clip) is treated the same way, so an absent endpoint is "no synced
-    /// lyrics" rather than a run failure — the caller then writes no synced
-    /// artefact, exactly as an empty cover URL writes no cover. Rides the
-    /// adaptive rate limiter like the other reads.
+    /// The trailing slash on `.../aligned_lyrics/v2/` is required. An
+    /// instrumental or un-alignable clip returns `200` with empty arrays, and a
+    /// `404` is treated the same way, so an absent alignment is "no synced
+    /// lyrics" rather than a run failure.
     pub async fn aligned_lyrics(&self, http: &impl Http, id: &str) -> Result<AlignedLyrics> {
         let path = format!("/api/gen/{id}/aligned_lyrics/v2/");
         match self.api_get_retrying(http, &path).await {
@@ -181,25 +158,17 @@ impl<C: Clock> SunoClient<C> {
 
     /// Fetch specific clips by id, batch-first with a per-id fallback.
     ///
-    /// Used by lineage resolution to gap-fill ancestors that are absent from a
-    /// normal listing, including trashed ones. Ids are fetched in a single
-    /// batch via [`get_songs_by_ids`](Self::get_songs_by_ids)
-    /// (`GET /api/clips/get_songs_by_ids`), which cuts the round-trips and `429`s
-    /// of one request per id. Any ids the batch does not return (individually
-    /// trashed or absent, exactly as a `/api/clip/{id}` `404` today, or in a
-    /// chunk the batch endpoint could not serve) then fall back to one
-    /// `GET /api/clip/{id}` each, with bounded `concurrency`, attempted exactly
-    /// once, and a `404` there is skipped so the caller can fall back to the
-    /// parent endpoint. A `429` while batching propagates rather than fanning
-    /// out into per-id requests.
+    /// Used by lineage resolution to gap-fill ancestors absent from a normal
+    /// listing, including trashed ones. Ids are fetched in one batch via
+    /// [`get_songs_by_ids`](Self::get_songs_by_ids); any the batch omits fall
+    /// back to one `GET /api/clip/{id}` each, bounded by `concurrency`, attempted
+    /// once, with a `404` skipped. A `429` while batching propagates rather than
+    /// fanning out into per-id requests.
     ///
-    /// Unlike [`list_clips`](Self::list_clips), no downloadability filter is
-    /// applied: an ancestor may itself be an infill or context-window artefact
-    /// that the lineage walk must still traverse. Clips returned here are
-    /// ancestors for resolution only and must never be treated as download
-    /// candidates. Ids are deduplicated in order and the result preserves that
-    /// de-duplicated input order, matched by id (never by response position).
-    /// The signature is unchanged so [`gap_fill`](crate::lineage) is unaffected.
+    /// No downloadability filter is applied: an ancestor may be an infill or
+    /// context artefact the walk must still traverse, so these clips are for
+    /// resolution only and must never be treated as download candidates. Ids are
+    /// deduplicated in order and the result preserves that order, matched by id.
     pub async fn get_clips_by_ids(
         &self,
         http: &impl Http,
@@ -238,24 +207,15 @@ impl<C: Clock> SunoClient<C> {
 
     /// Batch-fetch clips by id via `GET /api/clips/get_songs_by_ids?ids=…&ids=…`.
     ///
-    /// This is the pure batch primitive: the deduplicated ids are split into
-    /// chunks of [`GET_SONGS_CHUNK`], each requested with repeated `ids=` params,
-    /// and the `{"clips":[…]}` body is parsed defensively and matched back to the
-    /// requested ids by id, so the result preserves the de-duplicated input order
-    /// regardless of the server's ordering and drops any clip that was not asked
-    /// for. Ids the batch does not return (trashed, absent, or in a chunk the
-    /// endpoint could not serve) are simply left out; filling them is the
-    /// caller's job (see [`get_clips_by_ids`](Self::get_clips_by_ids)).
+    /// The pure batch primitive: deduplicated ids are split into
+    /// [`GET_SONGS_CHUNK`] chunks and matched back by id, preserving input order.
+    /// Ids the batch does not return are left for the caller to fill.
     ///
-    /// The batch endpoint is undocumented and may be unavailable. A chunk that
-    /// the endpoint cannot serve (a `404`, a `400`, a `5xx`, a transport failure,
-    /// or a body that is not `{"clips":[…]}`) yields nothing for that chunk
-    /// rather than erroring, so an outage or reshape degrades rather than breaks
-    /// (the decoupling rule) and the caller's per-id fallback recovers those ids
-    /// exactly once. A `429`, by contrast, rides the retry inside
-    /// [`api_get_retrying`](Self::api_get_retrying) and, once exhausted,
-    /// propagates rather than letting a burst of per-id requests deepen the
-    /// throttling; an auth failure likewise propagates rather than being masked.
+    /// The endpoint is undocumented and may be unavailable: a chunk it cannot
+    /// serve (any `4xx`/`5xx`, transport failure, or unexpected body) yields
+    /// nothing for that chunk rather than erroring, so an outage degrades rather
+    /// than breaks. A `429` rides the retry and then propagates rather than
+    /// fanning out into per-id requests; an auth failure likewise propagates.
     pub async fn get_songs_by_ids(&self, http: &impl Http, ids: &[&str]) -> Result<Vec<Clip>> {
         let ordered = dedup_nonempty(ids);
         let mut found: HashMap<&str, Clip> = HashMap::new();
@@ -280,14 +240,10 @@ impl<C: Clock> SunoClient<C> {
         Ok(ordered.iter().filter_map(|id| found.remove(id)).collect())
     }
 
-    /// Fetch clips one `GET /api/clip/{id}` per id, with bounded concurrency.
-    ///
-    /// The per-id fallback used by [`get_clips_by_ids`](Self::get_clips_by_ids)
-    /// for any ids the batch did not return, whether individually omitted or in a
-    /// whole chunk the batch endpoint could not serve. `/api/clip/{id}` returns
-    /// any clip, trashed or artefact, with the full field set and no
-    /// downloadability filter. An id that `404`s is skipped; the input order is
-    /// preserved.
+    /// The per-id `GET /api/clip/{id}` fallback for
+    /// [`get_clips_by_ids`](Self::get_clips_by_ids), with bounded concurrency.
+    /// Returns any clip (trashed or artefact) unfiltered; a `404` is skipped and
+    /// input order is preserved.
     async fn fetch_clips_individually(
         &self,
         http: &impl Http,
@@ -316,20 +272,15 @@ impl<C: Clock> SunoClient<C> {
         Ok(clips)
     }
 
-    /// Fetch a clip's immediate parent via the dedicated parent endpoint.
+    /// Fetch a clip's immediate parent, or `None` when the clip is a root.
     ///
-    /// Returns the parent clip, or `None` when the clip is a root. A root's
-    /// parent is reported as HTTP `200` with a bodiless clip that carries no
-    /// `id` (e.g. `{"is_public": false}`), not a `404`: [`parse_clip`] requires
-    /// a non-empty id, so that root shape maps to `Ok(None)` here. The `404`
-    /// arm is kept as a belt-and-braces fallback for the alternative "no parent"
-    /// encoding. Any other failure, including a transient `5xx`, propagates as
-    /// an error rather than being mistaken for a root.
+    /// A root's parent comes back as `200` with a bodiless, id-less clip (not a
+    /// `404`); [`parse_clip`] gates on a non-empty id so that maps to `Ok(None)`.
+    /// The `404` arm is a fallback for the alternative encoding. Any other
+    /// failure propagates rather than being mistaken for a root.
     pub async fn get_clip_parent(&self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
         let path = format!("{CLIP_PARENT_PATH}?clip_id={id}");
         match self.api_get_retrying(http, &path).await {
-            // A root replies 200 with no id; parse_clip gates on a non-empty id
-            // and yields None, so a root never looks like a fetched parent.
             Ok(body) => Ok(parse_clip(&body)),
             Err(Error::NotFound(_)) => Ok(None),
             Err(err) => Err(err),
@@ -338,15 +289,12 @@ impl<C: Clock> SunoClient<C> {
 
     /// List the account's own playlists, paging `/api/playlist/me`.
     ///
-    /// Trashed and share-list playlists are excluded by query, so the result is
-    /// the account's authoritative own set. Paging stops on the first empty page
-    /// and is hard-capped at [`MAX_PAGES`] so a server that ignores the page
-    /// parameter cannot loop forever. Only entries with a non-empty id are kept,
-    /// and accumulated entries are de-duplicated by id so a server that ignores
-    /// the page parameter and repeats a body cannot inflate the set.
+    /// Trashed and share-list playlists are excluded by query. Paging stops on
+    /// the first empty page, is hard-capped at [`MAX_PAGES`], and de-duplicates
+    /// by id so a server that ignores the page parameter cannot loop or inflate
+    /// the set.
     ///
-    /// A hard failure propagates as an error; the caller treats that as "the
-    /// playlist listing did not fully enumerate" and refuses every playlist
+    /// A hard failure propagates: the caller then refuses every playlist
     /// deletion this run, so a dropped fetch can never remove a `.m3u8`.
     pub async fn get_playlists(&self, http: &impl Http) -> Result<Vec<Playlist>> {
         let mut playlists = Vec::new();
@@ -370,20 +318,15 @@ impl<C: Clock> SunoClient<C> {
 
     /// Fetch one playlist's clips in Suno order via `/api/playlist/{id}/`.
     ///
-    /// The response's `playlist_clips[]` is already ordered and trashed members
-    /// are excluded by Suno, so the order is preserved exactly and no
-    /// downloadability filter is applied: a playlist may legitimately contain any
-    /// clip. Each entry's `clip` object is mapped (falling back to the entry
-    /// itself), and only clips with a non-empty id are kept.
+    /// `playlist_clips[]` is already ordered with trashed members excluded, so
+    /// order is preserved and no downloadability filter is applied. Only clips
+    /// with a non-empty id are kept.
     ///
-    /// The returned `bool` is a completeness signal for deletion authority: the
-    /// endpoint reports `num_total_results` (the playlist's full member count)
-    /// alongside `playlist_clips[]`, so `true` means every member came back on
-    /// this single page intact (`num_total_results` present, equal to the raw
-    /// count, and no member dropped for a missing/empty id). A short page, or one
-    /// missing a member's id, returns `false`, so a Mirror playlist area under
-    /// `library = "off"` is never treated as authoritative unless its whole
-    /// member set was seen (D5).
+    /// The returned `bool` is a completeness signal for deletion authority:
+    /// `true` only when `num_total_results` is present, equals the raw count, and
+    /// no member was dropped for a missing id. A short or id-missing page returns
+    /// `false`, so a Mirror playlist under `library = "off"` is never
+    /// authoritative unless its whole member set was seen.
     pub async fn get_playlist_clips(
         &self,
         http: &impl Http,
@@ -402,63 +345,46 @@ impl<C: Clock> SunoClient<C> {
 
     /// List a clip's already-separated stems (free, read-only).
     ///
-    /// Uses the live stems shape: first `GET /api/clip/{id}/stems/pages` for the
-    /// page count (`{"pages": N}`), then `GET /api/clip/{id}/stems?page=P` for
-    /// each `P` in `0..N` (the pages are 0-indexed), whose body is
-    /// `{"stems": [<clip>, ...]}` where each stem is a full clip object. Every
-    /// request rides the shared limiter and retry. This endpoint only reads: it
-    /// never spends credits and never triggers separation, so it is safe on the
-    /// bulk mirror path. The caller must only invoke it when the clip's
+    /// Pages `GET /api/clip/{id}/stems/pages` then `.../stems?page=P` (0-indexed).
+    /// This endpoint only reads: it never spends credits or triggers separation,
+    /// so it is safe on the bulk mirror path. Call only when the clip's
     /// `has_stem` is true.
     ///
-    /// Returns the collected stems paired with a `complete` flag that is `true`
-    /// only when the listing was fully and authoritatively enumerated: the page
-    /// count came back and every one of its pages drained, AFTER at least one
-    /// stem was seen. This encodes the deletion-safety invariant: an empty
-    /// listing (`pages == 0`, or a `400`/`404` on the page-count endpoint, which
-    /// Suno returns for a clip with zero stems), a transport failure, or a
-    /// partial drain (a page error mid-enumeration surfaces as `Err`) all yield a
-    /// non-authoritative result, so the caller KEEPS any existing local stems and
-    /// never reads the absence as "no stems". A clip that declares more than
-    /// [`MAX_PAGES`] pages is likewise a truncated listing and never authoritative.
-    /// A stem is only ever removed from an authoritative (`complete`) listing that
-    /// omits it, or when its owning clip's audio is deleted.
+    /// The `complete` flag is `true` only when the page count came back and every
+    /// page drained after at least one stem was seen. An empty listing
+    /// (`pages == 0` or a `400`/`404` on the page-count endpoint), a transport
+    /// failure, a partial drain, or a count above [`MAX_PAGES`] all yield
+    /// `false`, so the caller KEEPS existing local stems rather than reading the
+    /// absence as "no stems".
     pub async fn list_stems(&self, http: &impl Http, clip_id: &str) -> Result<(Vec<Stem>, bool)> {
         let declared = self.stem_page_count(http, clip_id).await?;
-        // Zero pages (or no page count) is Suno's "this clip has no stems"
-        // answer: indeterminate for deletion, never an authoritative empty.
+        // Zero pages is Suno's "no stems" answer: indeterminate, never an
+        // authoritative empty.
         if declared == 0 {
             return Ok((Vec::new(), false));
         }
         let pages = declared.min(MAX_PAGES);
         let mut stems: Vec<Stem> = Vec::new();
         for page in 0..pages {
-            // Pages are 0-indexed (0..N-1); note the path has no trailing slash
-            // before the query, distinguishing it from `.../stems/pages`.
+            // Pages are 0-indexed; no trailing slash before the query (unlike
+            // `.../stems/pages`).
             let path = format!("/api/clip/{clip_id}/stems?page={page}");
-            // A page error mid-enumeration is indeterminate, not a clean end:
-            // surface it so the caller keeps existing stems rather than reading a
-            // partial drain as authoritative and removing stems.
+            // A page error mid-enumeration is indeterminate: surface it so the
+            // caller keeps existing stems rather than reading a partial drain as
+            // authoritative.
             let body = self.api_get_retrying(http, &path).await?;
             stems.extend(parse_stems_page(&body));
         }
         dedupe_stems(&mut stems);
-        // Authoritative only when the whole declared page set actually drained
-        // and it held stems: an all-empty listing is never "no stems", and a
-        // clip declaring more than the `MAX_PAGES` cap is a truncated listing,
-        // never authoritative, so its un-fetched stems are kept (mirroring the
-        // feed's `list_clips` cap handling).
         let complete = !stems.is_empty() && declared <= MAX_PAGES;
         Ok((stems, complete))
     }
 
-    /// Read the stems page count for a clip from `GET /api/clip/{id}/stems/pages`
-    /// (`{"pages": N}`).
+    /// Read the stems page count from `GET /api/clip/{id}/stems/pages`.
     ///
-    /// A clip with no stems answers `400`/`404` here; both mean "no stems" and
-    /// map to `0` (indeterminate, never an authoritative empty set), while any
-    /// other error (a transient `5xx`, a transport failure) propagates so the
-    /// caller treats the stems as unknown and keeps them.
+    /// A clip with no stems answers `400`/`404`; both map to `0` (indeterminate,
+    /// never an authoritative empty). Any other error propagates so the caller
+    /// keeps the stems as unknown.
     async fn stem_page_count(&self, http: &impl Http, clip_id: &str) -> Result<u32> {
         let path = format!("/api/clip/{clip_id}/stems/pages");
         match self.api_get_retrying(http, &path).await {
@@ -500,25 +426,15 @@ impl<C: Clock> SunoClient<C> {
             .await
     }
 
-    /// Like [`api_request`](Self::api_request) but rides through Suno's rate
-    /// limiter, pacing each request to the adaptive rate and backing off through
-    /// the [`Clock`] on a `429` (honouring `Retry-After` when present, defaulting
-    /// to 5s and capped at 60s) or a transient connection failure, up to
-    /// [`API_MAX_RETRIES`] times. Each attempt reconstructs the full request
-    /// (method, path, and body), so a throttled feed page re-POSTs the same
-    /// cursor rather than skipping ahead.
+    /// Like [`api_request`](Self::api_request) but paces through the adaptive
+    /// rate limiter and backs off via the [`Clock`] on a `429` or transient
+    /// failure, up to [`API_MAX_RETRIES`] times. Each attempt reconstructs the
+    /// request, so a throttled feed page re-POSTs the same cursor rather than
+    /// skipping ahead.
     ///
-    /// Pacing lives here, at the single per-request layer, rather than in any
-    /// paged walk, so it composes with whatever listing calls it: a page or a
-    /// cursor walk pace identically. The [`AdaptiveLimiter`] paces reactively:
-    /// an unthrottled walk waits nowhere, and only after the first `429` does it
-    /// reserve shared request slots so concurrent callers are spaced in aggregate
-    /// at `1/rate`, widening that spacing as the rate is halved again.
-    ///
-    /// The WAV render flow deliberately keeps to the plain [`api_get`](Self::api_get):
-    /// the executor owns that retry so its budget and poll interval stay in one
-    /// place. Library, playlist, and lineage reads use this so a full-library
-    /// walk is not aborted by a single throttled page.
+    /// Pacing lives at this single per-request layer so it composes with any
+    /// paged walk. The WAV render flow instead uses the plain
+    /// [`api_get`](Self::api_get) so the executor owns that retry budget.
     async fn api_send_retrying(
         &self,
         http: &impl Http,
@@ -558,11 +474,9 @@ impl<C: Clock> SunoClient<C> {
         path: &str,
         body: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        // Crate-wide POST allow-list. Every mutating Suno API request funnels
-        // through here, so refusing any POST to a path outside the known-safe
-        // set means a destructive or credit-spending endpoint can never be sent,
-        // even by a future edit that forgets the invariant. GETs are free and
-        // unrestricted; only POSTs are gated.
+        // Crate-wide POST allow-list: every mutating request funnels through
+        // here, so a destructive or credit-spending endpoint can never be sent.
+        // GETs are free and unrestricted.
         if method == Method::Post && !post_path_allowed(path) {
             return Err(Error::Refused(format!(
                 "POST to {path} is not on the allow-list"
@@ -629,19 +543,14 @@ impl<C: Clock> SunoClient<C> {
 }
 
 /// Whether a Suno API path may be the target of a POST (the crate-wide POST
-/// allow-list). Membership is deliberately narrow so a mutating request is only
-/// ever sent to a vetted endpoint:
-///
-/// - [`FEED_V3_PATH`] — the cursor-paginated library listing (a POST by design).
-/// - `…/convert_wav/` — the per-clip server-side lossless WAV render.
-///
-/// A GET is never gated (reads are free and non-mutating). Any credit-spending
-/// generation endpoint is deliberately absent here.
+/// allow-list), deliberately narrow so a mutating request only ever reaches a
+/// vetted endpoint: the library feed ([`FEED_V3_PATH`]) and the per-clip WAV
+/// render (`…/convert_wav/`). Any credit-spending endpoint is deliberately
+/// absent; GETs are never gated.
 fn post_path_allowed(path: &str) -> bool {
     if path == FEED_V3_PATH {
         return true;
     }
-    // The per-clip WAV render: /api/gen/{id}/convert_wav/ with a single id.
     if let Some(rest) = path.strip_prefix("/api/gen/")
         && let Some(id) = rest.strip_suffix("/convert_wav/")
     {
@@ -660,10 +569,9 @@ fn is_single_id_segment(segment: &str) -> bool {
         && !segment.contains("..")
 }
 
-/// Whether an error is Suno's "this clip has no stems" answer on the stems
-/// page-count endpoint: a `400` (it returns `400 "Invalid page number"` for a
-/// clip with zero stems). Distinguished from a transient `5xx` (also
-/// [`Error::Api`]) so a server error is never mistaken for "no stems".
+/// Whether an error is Suno's "no stems" answer (a `400`) on the page-count
+/// endpoint, distinguished from a transient `5xx` so a server error is never
+/// mistaken for "no stems".
 fn is_invalid_page_error(err: &Error) -> bool {
     matches!(err, Error::BadRequest(_))
 }
