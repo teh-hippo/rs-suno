@@ -38,6 +38,7 @@ mod synced;
 mod tag;
 mod tag_alac;
 mod vocab;
+mod wire;
 
 #[cfg(test)]
 mod testutil;
