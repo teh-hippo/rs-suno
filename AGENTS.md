@@ -32,6 +32,7 @@ crates/
     src/auth.rs        # Clerk cookie -> JWT, lifecycle
     src/client.rs      # SunoClient: feed listing, filter, retry
     src/model.rs       # Clip, mapped from the API JSON shape
+    src/wire.rs        # the single JSON decode home (feed/clip/playlist/stem/billing)
     src/http.rs        # the Http port (trait) plus request/response types
     src/reconcile.rs   # desired-vs-local plan and the deletion-safety gates
     src/area.rs        # multi-area sync planner: authority/enumeration predicates
