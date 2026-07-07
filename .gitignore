@@ -2,3 +2,4 @@
 /downloads
 /docs/book
 /target-copilot
+*.local.sh
