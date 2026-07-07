@@ -35,6 +35,9 @@ crates/
     src/wire.rs        # the single JSON decode home (feed/clip/playlist/stem/billing)
     src/http.rs        # the Http port (trait) plus request/response types
     src/reconcile.rs   # desired-vs-local plan and the deletion-safety gates
+    src/executor/      # applies the plan to disk via ports; mod.rs owns execute() +
+                       #   the serial commit loop + deletion-safety guards, with one
+                       #   file per lifecycle (audio/cover/stem/artifact/tag)
     src/area.rs        # multi-area sync planner: authority/enumeration predicates
     src/config.rs      # layered settings resolved from one shared `Settings` shape
     src/graph.rs       # lineage node/edge graph + the `LineageStore` on-disk container
