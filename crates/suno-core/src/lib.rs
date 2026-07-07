@@ -32,6 +32,7 @@ mod naming;
 mod orphans;
 mod pathkey;
 pub mod reconcile;
+mod roots;
 pub mod select;
 mod synced;
 mod tag;
@@ -77,9 +78,8 @@ pub use hash::{
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use identity::{AdoptDecision, Owner, OwnerGate, adopt_decision, owner_gate};
 pub use lineage::{
-    AttributionEdge, Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveOpts,
-    ResolveStatus, RootInfo, attribution_edges, edge_type, immediate_parent, lineage_edges,
-    resolve_roots,
+    AttributionEdge, Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveStatus, RootInfo,
+    attribution_edges, edge_type, immediate_parent, lineage_edges,
 };
 pub use lyrics::{AlignedLine, AlignedLineWord, AlignedLyrics, AlignedWord};
 pub use manifest::{ArtifactState, Manifest, ManifestEntry, SyncedLyricsCheck};
@@ -94,6 +94,7 @@ pub use reconcile::{
     SourceStatus, album_desired, area_authoritative, area_fully_enumerated, deletion_allowed,
     narrows_downloads, plan_album_artifacts, plan_playlist_artifacts, reconcile,
 };
+pub use roots::{ResolveOpts, resolve_roots};
 pub use synced::{
     PendingCheck, SYNCED_LRC_RECHECK_SECS, apply_synced_lrc, preview_synced_lrc,
     synced_lyrics_targets,
