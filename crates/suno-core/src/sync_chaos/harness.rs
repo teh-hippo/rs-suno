@@ -13,16 +13,16 @@ use std::time::Duration;
 
 use crate::auth::ClerkAuth;
 use crate::client::SunoClient;
-use crate::config::AudioFormat;
 use crate::executor::{ExecOptions, ExecOutcome, Ports, execute};
-use crate::ffmpeg::WebpEncodeSettings;
 use crate::fs::Filesystem;
 use crate::hash::{art_hash, meta_hash};
 use crate::lineage::LineageContext;
 use crate::manifest::Manifest;
 use crate::model::Clip;
-use crate::reconcile::{Action, Desired, LocalFile, Plan, SourceMode, SourceStatus, reconcile};
+use crate::reconcile::{Action, Desired, LocalFile, Plan, SourceStatus, reconcile};
 use crate::testutil::{ChaosHttp, MemFs, Outcome, RecordingClock, StubFfmpeg};
+use crate::vocab::WebpEncodeSettings;
+use crate::vocab::{AudioFormat, SourceMode};
 
 /// A test author's description of one remote clip.
 ///

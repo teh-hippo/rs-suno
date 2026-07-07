@@ -10,7 +10,6 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use crate::config::AudioFormat;
 use crate::consts::SUNO_SONG_BASE_URL;
 use crate::graph::LineageStore;
 use crate::lineage::LineageContext;
@@ -18,6 +17,7 @@ use crate::lyrics::AlignedLyrics;
 use crate::manifest::Manifest;
 use crate::model::Clip;
 use crate::tag::{TrackMetadata, non_empty};
+use crate::vocab::AudioFormat;
 
 /// The schema version of the library index document.
 ///

@@ -14,10 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::clock::Clock;
-use crate::config::AudioFormat;
-use crate::ffmpeg::{Ffmpeg, FfmpegError, WebpEncodeSettings};
+use crate::ffmpeg::{Ffmpeg, FfmpegError};
 use crate::fs::{FileStat, Filesystem, FsError};
 use crate::http::{Http, HttpRequest, HttpResponse, TransportError};
+use crate::vocab::{AudioFormat, WebpEncodeSettings};
 
 /// A canned reply for any request whose URL contains `url_contains`.
 pub(crate) struct Rule {

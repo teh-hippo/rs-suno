@@ -36,6 +36,7 @@ pub mod select;
 mod synced;
 mod tag;
 mod tag_alac;
+mod vocab;
 
 #[cfg(test)]
 mod testutil;
@@ -53,8 +54,8 @@ pub use auth::{ClerkAuth, TOKEN_EXPIRY_WARN_DAYS, TokenExpiry, classify_token_ex
 pub use client::{BillingInfo, Playlist, Stem, SunoClient};
 pub use clock::Clock;
 pub use config::{
-    AccountConfig, AreaMode, AreasConfig, AudioFormat, Config, Defaults, EffectiveSettings,
-    FlagOverrides, Settings, SourceConfig, StemFormat, VideoCoverRetention,
+    AccountConfig, AreaMode, AreasConfig, Config, Defaults, EffectiveSettings, FlagOverrides,
+    Settings, SourceConfig,
 };
 pub use desired::{
     ArtifactToggles, LIKED_PLAYLIST_ID, PlaylistInput, build_desired, build_playlist_desired,
@@ -67,7 +68,7 @@ pub use extras::{
     INDEX_SCHEMA_VERSION, M3u8Entry, render_clip_details, render_clip_lrc, render_clip_lyrics,
     render_library_index, render_m3u8, render_synced_lrc,
 };
-pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind, WebpEncodeSettings};
+pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind};
 pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
 pub use graph::{CacheEntry, LineageStore, Node, StoredEdge};
 pub use hash::{
@@ -89,10 +90,9 @@ pub use naming::{
 };
 pub use orphans::untracked_audio;
 pub use reconcile::{
-    Action, AlbumDesired, ArtifactKind, Desired, DesiredArtifact, DesiredStem, LocalFile, Plan,
-    PlaylistDesired, SourceMode, SourceStatus, album_desired, area_authoritative,
-    area_fully_enumerated, deletion_allowed, narrows_downloads, plan_album_artifacts,
-    plan_playlist_artifacts, reconcile,
+    Action, AlbumDesired, Desired, DesiredArtifact, DesiredStem, LocalFile, Plan, PlaylistDesired,
+    SourceStatus, album_desired, area_authoritative, area_fully_enumerated, deletion_allowed,
+    narrows_downloads, plan_album_artifacts, plan_playlist_artifacts, reconcile,
 };
 pub use synced::{
     PendingCheck, SYNCED_LRC_RECHECK_SECS, apply_synced_lrc, preview_synced_lrc,
@@ -100,3 +100,6 @@ pub use synced::{
 };
 pub use tag::{Cover, TrackMetadata, flac_picture_data_budget, tag_flac, tag_mp3};
 pub use tag_alac::tag_alac;
+pub use vocab::{
+    ArtifactKind, AudioFormat, SourceMode, StemFormat, VideoCoverRetention, WebpEncodeSettings,
+};

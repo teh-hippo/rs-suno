@@ -4,9 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path};
 
 use crate::client::Stem;
-use crate::config::{AudioFormat, StemFormat};
 use crate::extras::{M3u8Entry, render_clip_details, render_clip_lyrics, render_m3u8};
-use crate::ffmpeg::WebpEncodeSettings;
 use crate::hash::{
     art_hash, art_url_hash, content_hash, embedded_art_hash, meta_hash, synced_lrc_source_hash,
 };
@@ -15,9 +13,8 @@ use crate::model::Clip;
 use crate::naming::{
     CharacterSet, NamingConfig, NamingRequest, render_clip_names, sanitise_name, stem_file_path,
 };
-use crate::reconcile::{
-    ArtifactKind, Desired, DesiredArtifact, DesiredStem, PlaylistDesired, SourceMode,
-};
+use crate::reconcile::{Desired, DesiredArtifact, DesiredStem, PlaylistDesired};
+use crate::vocab::{ArtifactKind, AudioFormat, SourceMode, StemFormat, WebpEncodeSettings};
 
 /// The synthetic playlist id for the liked feed, rendered as "Liked Songs".
 ///
@@ -397,11 +394,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::AudioFormat;
     use crate::hash::{art_hash, art_url_hash, content_hash, synced_lrc_source_hash};
     use crate::lineage::LineageContext;
     use crate::naming::NamingConfig;
-    use crate::reconcile::{ArtifactKind, SourceMode};
+    use crate::vocab::{ArtifactKind, AudioFormat, SourceMode};
 
     fn clip(id: &str, title: &str, handle: &str) -> Clip {
         Clip {

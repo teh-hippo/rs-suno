@@ -1769,7 +1769,7 @@ mod tests {
                 format: crate::AudioFormat::Flac,
                 meta_hash: String::new(),
                 art_hash: String::new(),
-                modes: vec![crate::reconcile::SourceMode::Mirror],
+                modes: vec![crate::vocab::SourceMode::Mirror],
                 trashed: false,
                 private: false,
                 artifacts: Vec::new(),
@@ -1785,7 +1785,7 @@ mod tests {
             &desired,
             false,
             false,
-            crate::ffmpeg::WebpEncodeSettings::default(),
+            crate::vocab::WebpEncodeSettings::default(),
         );
         assert_eq!(albums.len(), 2, "each distinct root is its own album");
         let jpg_paths: Vec<String> = albums
@@ -1890,7 +1890,7 @@ mod tests {
                 format: crate::AudioFormat::Flac,
                 meta_hash: String::new(),
                 art_hash: String::new(),
-                modes: vec![crate::reconcile::SourceMode::Mirror],
+                modes: vec![crate::vocab::SourceMode::Mirror],
                 trashed: false,
                 private: false,
                 artifacts: Vec::new(),
@@ -1905,7 +1905,7 @@ mod tests {
             &desired,
             false,
             false,
-            crate::ffmpeg::WebpEncodeSettings::default(),
+            crate::vocab::WebpEncodeSettings::default(),
         );
         let jpg_paths: Vec<String> = albums
             .iter()

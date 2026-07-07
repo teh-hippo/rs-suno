@@ -21,7 +21,8 @@ use crate::extras::{render_clip_lrc, render_synced_lrc};
 use crate::hash::{SYNCED_LRC_VERSION, content_hash, synced_lrc_source_hash};
 use crate::lyrics::AlignedLyrics;
 use crate::manifest::{Manifest, ManifestEntry};
-use crate::reconcile::{ArtifactKind, Desired};
+use crate::reconcile::Desired;
+use crate::vocab::ArtifactKind;
 
 /// How long a clip that resolved to no lyrics (instrumental) or to an untimed
 /// plain-text fallback is trusted before its alignment is re-checked (14 days).
@@ -229,11 +230,11 @@ pub fn preview_synced_lrc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AudioFormat;
     use crate::lineage::LineageContext;
     use crate::manifest::{ArtifactState, SyncedLyricsCheck};
     use crate::model::Clip;
     use crate::reconcile::DesiredArtifact;
+    use crate::vocab::AudioFormat;
 
     fn clip(id: &str, lyrics: &str) -> Clip {
         Clip {
@@ -263,7 +264,7 @@ mod tests {
             format: AudioFormat::Flac,
             meta_hash: "m".to_string(),
             art_hash: "a".to_string(),
-            modes: vec![crate::reconcile::SourceMode::Mirror],
+            modes: vec![crate::vocab::SourceMode::Mirror],
             trashed: false,
             private: false,
             artifacts: vec![lrc_artifact(id)],

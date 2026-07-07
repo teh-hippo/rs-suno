@@ -13,10 +13,10 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::ffmpeg::WebpEncodeSettings;
 use crate::lineage::LineageContext;
 use crate::model::Clip;
 use crate::tag::TrackMetadata;
+use crate::vocab::WebpEncodeSettings;
 
 /// A short, stable hex digest of `bytes` (FNV-1a, 64-bit).
 fn digest(bytes: &[u8]) -> String {
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn webp_art_hash_tracks_url_and_every_encode_setting() {
-        use crate::ffmpeg::WebpEncodeSettings;
+        use crate::vocab::WebpEncodeSettings;
         let url = "https://cdn1.suno.ai/video_cover.mp4";
         let base = WebpEncodeSettings::default();
         let h = webp_art_hash(url, &base);
