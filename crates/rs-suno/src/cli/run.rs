@@ -15,11 +15,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
-    ArtifactToggles, ClerkAuth, Config, FlagOverrides, LineageContext, NamingConfig, OwnerGate,
-    PlaylistState, ResolveOpts, SourceMode, SunoClient, adopt_decision, adoption_enumerated,
-    album_desired, build_desired, build_modes_by_id, build_scoped_playlist_desired, clip_stems,
-    deletion_allowed, library_authoritative, narrows_downloads, owner_gate, resolve_roots,
-    source_statuses, union_clips,
+    AlbumArt, ArtifactToggles, ClerkAuth, Config, FlagOverrides, LineageContext, NamingConfig,
+    OwnerGate, PlaylistState, ResolveOpts, SourceMode, SunoClient, adopt_decision,
+    adoption_enumerated, album_desired, build_desired, build_modes_by_id,
+    build_scoped_playlist_desired, clip_stems, deletion_allowed, library_authoritative,
+    narrows_downloads, owner_gate, resolve_roots, source_statuses, union_clips,
 };
 
 use crate::cli::account;
@@ -496,6 +496,30 @@ struct Assembled {
     graph_changed: bool,
 }
 
+impl Assembled {
+    /// Borrow this run's reconcile inputs, pairing the assembled desired state
+    /// with the per-run manifest, destination, and album art.
+    fn reconcile_inputs<'a>(
+        &'a self,
+        manifest: &'a suno_core::Manifest,
+        dest: &'a Path,
+        albums: &'a BTreeMap<String, AlbumArt>,
+    ) -> execute::ReconcileInputs<'a> {
+        execute::ReconcileInputs {
+            manifest,
+            dest,
+            desired: &self.desired,
+            albums_desired: &self.albums_desired,
+            albums,
+            playlist_desired: &self.playlist_desired,
+            playlists: &self.stored_playlists,
+            sources: &self.sources,
+            library_authoritative: self.library_authoritative,
+            playlists_enumerated: self.playlists_enumerated,
+        }
+    }
+}
+
 /// Resolve settings, mint an authenticated client, and load the durable store,
 /// before any feed request. Returns the ready context, or an [`ExitCode`] for
 /// every preflight refusal (bad config, missing token or ffmpeg, an auth
@@ -792,19 +816,9 @@ async fn dry_run_report(
         wallclock::now_secs(),
         ctx.settings.lrc_sidecar,
     );
-    let plan = execute::reconcile_run(&execute::ReconcileInputs {
-        manifest: &manifest,
-        dest: ctx.dest,
-        desired: &assembled.desired,
-        albums_desired: &assembled.albums_desired,
-        albums: &store.albums,
-        playlist_desired: &assembled.playlist_desired,
-        playlists: &assembled.stored_playlists,
-        sources: &assembled.sources,
-        library_authoritative: assembled.library_authoritative,
-        playlists_enumerated: assembled.playlists_enumerated,
-    })
-    .await;
+    let plan =
+        execute::reconcile_run(&assembled.reconcile_inputs(&manifest, ctx.dest, &store.albums))
+            .await;
     if ctx.verbosity >= 1 {
         let no_failures = HashSet::new();
         for line in output::action_lines(&plan, &no_failures, ctx.verbosity) {
@@ -862,19 +876,8 @@ async fn execute_run(
         settings.concurrency,
     )
     .await;
-    let plan = execute::reconcile_run(&execute::ReconcileInputs {
-        manifest: &manifest,
-        dest,
-        desired: &assembled.desired,
-        albums_desired: &assembled.albums_desired,
-        albums: &store.albums,
-        playlist_desired: &assembled.playlist_desired,
-        playlists: &assembled.stored_playlists,
-        sources: &assembled.sources,
-        library_authoritative: assembled.library_authoritative,
-        playlists_enumerated: assembled.playlists_enumerated,
-    })
-    .await;
+    let plan =
+        execute::reconcile_run(&assembled.reconcile_inputs(&manifest, dest, &store.albums)).await;
 
     // Persist the lineage graph *before* execute (durability H4), under the same
     // lock as the manifest. This run refreshed it when it folded in a fresh
