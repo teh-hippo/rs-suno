@@ -36,65 +36,12 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::album_art::{AlbumArt, PlaylistState};
-use crate::config::{AudioFormat, StemFormat};
-use crate::ffmpeg::WebpEncodeSettings;
 use crate::hash::{art_hash, art_url_hash, webp_art_hash};
 use crate::lineage::LineageContext;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
 use crate::pathkey::{canonical_path_key, same_fs_path};
-
-/// The class of an external sidecar artifact a clip (or album/library) owns.
-///
-/// The reconcile engine keeps a single pair of artifact actions
-/// ([`Action::WriteArtifact`] / [`Action::DeleteArtifact`]) rather than one
-/// variant per class; the `kind` distinguishes them so the executor and the
-/// manifest can route each to the right slot. Per-clip classes
-/// ([`CoverJpg`](ArtifactKind::CoverJpg), [`CoverWebp`](ArtifactKind::CoverWebp),
-/// [`DetailsTxt`](ArtifactKind::DetailsTxt), [`LyricsTxt`](ArtifactKind::LyricsTxt),
-/// [`Lrc`](ArtifactKind::Lrc), and [`VideoMp4`](ArtifactKind::VideoMp4)) map to
-/// a manifest entry field; the album/library classes are reconciled by later
-/// phases and have no per-clip manifest slot yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ArtifactKind {
-    /// The per-song external cover, sourced from `image_large_url`.
-    CoverJpg,
-    /// Retired: the per-song animated cover is now embedded in the audio file's
-    /// front-cover picture, not written as a `<track>.webp` sidecar. The kind is
-    /// kept so a `.webp` written by an older version stays tracked and is cleaned
-    /// up (it is delete-eligible; see [`removed_kind_delete_eligible`]); it is
-    /// never emitted into a new desired set.
-    CoverWebp,
-    /// The per-song plain-text details dump (generated, inline content).
-    DetailsTxt,
-    /// The per-song plain-text lyrics file (generated, inline content).
-    LyricsTxt,
-    /// The per-song untimed `.lrc` lyrics file (generated, inline content).
-    Lrc,
-    /// The per-song standalone music video, fetched from `video_url` (off by
-    /// default). A large binary, removed only alongside its own audio.
-    VideoMp4,
-    /// The album folder's static cover (album-scoped, later phase).
-    FolderJpg,
-    /// The album folder's animated cover (album-scoped, later phase).
-    FolderWebp,
-    /// The album folder's raw animated cover: the same `video_cover_url` as
-    /// [`FolderWebp`](ArtifactKind::FolderWebp), kept verbatim with no transcode
-    /// (album-scoped, later phase).
-    FolderMp4,
-    /// A library-root `.m3u8` playlist (library-scoped, later phase).
-    Playlist,
-}
-
-/// How a selected source treats its clips: mirror with deletion, or additive copy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SourceMode {
-    /// Mirror the source, deleting local files that leave it (rclone `sync`).
-    Mirror,
-    /// Copy additively; never delete (rclone `copy`).
-    Copy,
-}
+use crate::vocab::{ArtifactKind, AudioFormat, SourceMode, StemFormat, WebpEncodeSettings};
 
 /// One desired clip in the current selection.
 ///

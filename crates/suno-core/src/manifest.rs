@@ -12,7 +12,7 @@ use std::collections::btree_map::Iter;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::AudioFormat;
+use crate::vocab::AudioFormat;
 
 /// The prior known state of one external sidecar artifact for a clip.
 ///

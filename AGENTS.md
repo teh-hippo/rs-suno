@@ -41,6 +41,7 @@ crates/
     src/album_art.rs   # album/playlist art state
     src/consts.rs      # endpoints and tunables
     src/error.rs       # Error and Result
+    src/vocab.rs       # shared vocabulary enums (formats, source mode, artifact kind); leaf
     src/testutil.rs    # in-memory Http double (test only)
   rs-suno/     # thin binary `suno`
     src/main.rs        # entry point

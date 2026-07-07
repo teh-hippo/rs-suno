@@ -9,11 +9,11 @@ use super::harness::{
     ClipSpec, clean_mirror, desired_set, fast_opts, mutating_actions, path_of, probe_local,
     run_clean, run_sync, world,
 };
-use crate::config::AudioFormat;
 use crate::fs::Filesystem;
 use crate::manifest::Manifest;
-use crate::reconcile::{SourceMode, SourceStatus, reconcile};
+use crate::reconcile::{SourceStatus, reconcile};
 use crate::testutil::MemFs;
+use crate::vocab::{AudioFormat, SourceMode};
 
 /// Assert the on-disk path set equals the given specs' paths, exactly.
 fn assert_disk_is(fs: &MemFs, specs: &[ClipSpec]) {

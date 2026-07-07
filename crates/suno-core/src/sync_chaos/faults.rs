@@ -17,11 +17,11 @@ use super::harness::{
 };
 use crate::auth::ClerkAuth;
 use crate::client::SunoClient;
-use crate::config::AudioFormat;
 use crate::executor::{ExecOptions, ExecOutcome, Ports, RunStatus, execute};
 use crate::manifest::Manifest;
 use crate::reconcile::{Desired, Plan, reconcile};
 use crate::testutil::{ChaosHttp, MemFs, Outcome, RecordingClock, StubFfmpeg};
+use crate::vocab::AudioFormat;
 
 /// An MP3 origin that serves `spec`'s cover art cleanly but runs `audio` as the
 /// programmed outcome sequence for the audio GET, so the only injected fault is

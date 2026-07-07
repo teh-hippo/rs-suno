@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::ArtifactState;
-use crate::reconcile::ArtifactKind;
+use crate::vocab::ArtifactKind;
 
 /// The reconciled folder-art state for one album (one stable root id).
 ///

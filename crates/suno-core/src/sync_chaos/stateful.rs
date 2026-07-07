@@ -39,11 +39,11 @@ use proptest::test_runner::TestCaseError;
 use super::harness::{
     ClipSpec, desired_set, fast_opts, mutating_actions, probe_local, run_sync, sources_for, world,
 };
-use crate::config::AudioFormat;
 use crate::fs::Filesystem;
 use crate::manifest::Manifest;
-use crate::reconcile::{SourceMode, SourceStatus, reconcile};
+use crate::reconcile::{SourceStatus, reconcile};
 use crate::testutil::MemFs;
+use crate::vocab::{AudioFormat, SourceMode};
 
 /// The shared id space; small, so adds and removes overlap and every action gets
 /// exercised. Fixed-width ids never substring-collide in the origin's routes.

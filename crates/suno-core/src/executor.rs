@@ -43,20 +43,18 @@ use crate::album_art::{AlbumArt, PlaylistState, set_album_artifact, set_playlist
 use crate::backoff::{backoff_delay, retry_after};
 use crate::client::SunoClient;
 use crate::clock::Clock;
-use crate::config::{AudioFormat, StemFormat};
 use crate::error::Error;
-use crate::ffmpeg::{Ffmpeg, WebpEncodeSettings};
+use crate::ffmpeg::Ffmpeg;
 use crate::fs::Filesystem;
 use crate::http::{Http, HttpRequest};
 use crate::lineage::LineageContext;
 use crate::lyrics::AlignedLyrics;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
-use crate::reconcile::{
-    Action, ArtifactKind, Desired, Plan, SourceMode, set_manifest_artifact, set_manifest_stem,
-};
+use crate::reconcile::{Action, Desired, Plan, set_manifest_artifact, set_manifest_stem};
 use crate::tag::{Cover, TrackMetadata, flac_picture_data_budget, tag_flac, tag_mp3, tag_wav};
 use crate::tag_alac::tag_alac;
+use crate::vocab::{ArtifactKind, AudioFormat, SourceMode, StemFormat, WebpEncodeSettings};
 
 /// The shared Suno client behind an async mutex, so concurrent audio work can
 /// serialise its order-sensitive API calls (JWT refresh, adaptive limiter)
