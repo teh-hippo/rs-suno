@@ -128,6 +128,24 @@ impl TrackMetadata {
         }
     }
 
+    /// The standard metadata fields, paired with their Vorbis comment key.
+    ///
+    /// The FLAC path writes these (chained with [`suno_fields`](Self::suno_fields))
+    /// as Vorbis comments; the ID3 and MP4 paths map the same values through
+    /// their own typed setters.
+    pub(crate) fn standard_fields(&self) -> [(&'static str, &str); 8] {
+        [
+            ("TITLE", &self.title),
+            ("ARTIST", &self.artist),
+            ("ALBUM", &self.album),
+            ("ALBUMARTIST", &self.album_artist),
+            ("DATE", &self.date),
+            ("YEAR", &self.year),
+            ("LYRICS", &self.lyrics),
+            ("DESCRIPTION", &self.comment),
+        ]
+    }
+
     /// The Suno-specific fields, paired with their tag description/key.
     pub(crate) fn suno_fields(&self) -> [(&'static str, &str); 8] {
         [
@@ -160,6 +178,126 @@ pub fn tag_mp3(
     meta: &TrackMetadata,
     cover: Option<Cover<'_>>,
     synced: Option<&AlignedLyrics>,
+) -> Result<Vec<u8>> {
+    tag_id3(audio, meta, cover, synced, "ID3 tag")
+}
+
+/// Build a word-level `SYLT` frame from `aligned`, or `None` when there is
+/// nothing to time (an instrumental with empty arrays).
+///
+/// Timestamps are absolute milliseconds ([`TimestampFormat::Ms`]); the content
+/// is the word-level segments from [`AlignedLyrics::sylt_entries`], with a
+/// leading newline on each line's first word so a player renders line breaks.
+fn build_sylt(aligned: &AlignedLyrics) -> Option<SynchronisedLyrics> {
+    let content = aligned.sylt_entries();
+    if content.is_empty() {
+        return None;
+    }
+    Some(SynchronisedLyrics {
+        lang: LANG.to_owned(),
+        timestamp_format: TimestampFormat::Ms,
+        content_type: SynchronisedLyricsType::Lyrics,
+        description: String::new(),
+        content,
+    })
+}
+
+/// Tag `audio` (a FLAC byte stream) with `meta`, returning the tagged bytes.
+///
+/// Replaces the Vorbis comments, embeds `cover` as the sole front-cover
+/// `PICTURE` block, and preserves the original `STREAMINFO` and audio frames.
+/// Works in memory: the existing metadata blocks are rewritten and the audio
+/// frames are appended unchanged.
+///
+/// A FLAC PICTURE block is bounded by a 24-bit length field, and `metaflac`
+/// silently truncates that length on overflow (corrupting the file), so a cover
+/// whose bytes exceed [`flac_picture_data_budget`] is rejected with an error
+/// rather than embedded. The executor sizes the animated WebP to fit and falls
+/// back to a static JPEG before reaching this guard, which is a backstop.
+///
+/// When `meta` carries no lyrics text (a plain retag), any existing `LYRICS`
+/// comment is preserved rather than dropped, so a retag never loses embedded
+/// lyrics.
+pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) -> Result<Vec<u8>> {
+    let mut tag = metaflac::Tag::read_from(&mut Cursor::new(audio))
+        .map_err(|err| Error::Tag(format!("could not read FLAC metadata: {err}")))?;
+
+    let existing_lyrics: Vec<String> = tag
+        .get_vorbis("LYRICS")
+        .map(|values| values.map(str::to_owned).collect())
+        .unwrap_or_default();
+
+    tag.remove_blocks(metaflac::BlockType::VorbisComment);
+    for (key, value) in meta.standard_fields().into_iter().chain(meta.suno_fields()) {
+        if !value.is_empty() {
+            tag.set_vorbis(key, vec![value.to_owned()]);
+        }
+    }
+    if meta.lyrics.is_empty() && !existing_lyrics.is_empty() {
+        tag.set_vorbis("LYRICS", existing_lyrics);
+    }
+    if let Some(cover) = cover {
+        let budget = flac_picture_data_budget(cover.mime);
+        if cover.bytes.len() > budget {
+            return Err(Error::Tag(format!(
+                "cover image is {} bytes, over the {}-byte FLAC picture limit",
+                cover.bytes.len(),
+                budget
+            )));
+        }
+        // Exactly one front cover: drop any existing picture before adding ours
+        // (metaflac's add_picture already replaces the same type; this is
+        // explicit so a stale picture of any type cannot linger).
+        tag.remove_blocks(metaflac::BlockType::Picture);
+        tag.add_picture(
+            cover.mime,
+            metaflac::block::PictureType::CoverFront,
+            cover.bytes.to_vec(),
+        );
+    }
+
+    let audio_frames = metaflac::Tag::skip_metadata(&mut Cursor::new(audio));
+    let mut out = Vec::with_capacity(audio.len());
+    tag.write_to(&mut out)
+        .map_err(|err| Error::Tag(format!("could not write FLAC metadata: {err}")))?;
+    out.extend_from_slice(&audio_frames);
+    Ok(out)
+}
+
+/// Tag `audio` (a WAV byte stream) with `meta`, returning the tagged bytes.
+///
+/// Writes an ID3v2.4 tag into the RIFF `id3 ` chunk, replacing any existing
+/// ID3 tag, and embeds `cover` as a front-cover `APIC` frame when provided.
+/// When `synced` carries aligned lyrics, a word-level `SYLT` frame is added
+/// alongside the plain `USLT` frame.
+///
+/// Existing `SYLT` frames are preserved when `synced` is `None`, and existing
+/// `USLT` frames are preserved when `meta` carries no lyrics text, so a retag
+/// never loses previously embedded lyrics.
+pub fn tag_wav(
+    audio: &[u8],
+    meta: &TrackMetadata,
+    cover: Option<Cover<'_>>,
+    synced: Option<&AlignedLyrics>,
+) -> Result<Vec<u8>> {
+    tag_id3(audio, meta, cover, synced, "WAV ID3 tag")
+}
+
+/// The shared ID3v2.4 tagging skeleton behind [`tag_mp3`] and [`tag_wav`], which
+/// differ only in the `err_context` used to label a write failure.
+///
+/// Reads any existing tag, rebuilds the frame set from `meta` (title, artist,
+/// album, recording/release dates, comment, lyrics, and the Suno `TXXX` fields),
+/// embeds `cover` as a front-cover `APIC`, and writes a word-level `SYLT` from
+/// `synced`. Because the tag is rebuilt, existing `USLT` lyrics are preserved
+/// when `meta` carries no lyrics text and existing `SYLT` frames are preserved
+/// when `synced` is `None`, so a plain retag never downgrades a timed file.
+fn tag_id3(
+    audio: &[u8],
+    meta: &TrackMetadata,
+    cover: Option<Cover<'_>>,
+    synced: Option<&AlignedLyrics>,
+    err_context: &str,
 ) -> Result<Vec<u8>> {
     let existing = id3::Tag::read_from2(Cursor::new(audio)).ok();
     let mut tag = id3::Tag::new();
@@ -229,197 +367,8 @@ pub fn tag_mp3(
 
     let mut cursor = Cursor::new(audio.to_vec());
     tag.write_to_file(&mut cursor, id3::Version::Id3v24)
-        .map_err(|err| Error::Tag(format!("could not write ID3 tag: {err}")))?;
+        .map_err(|err| Error::Tag(format!("could not write {err_context}: {err}")))?;
     Ok(cursor.into_inner())
-}
-
-/// Build a word-level `SYLT` frame from `aligned`, or `None` when there is
-/// nothing to time (an instrumental with empty arrays).
-///
-/// Timestamps are absolute milliseconds ([`TimestampFormat::Ms`]); the content
-/// is the word-level segments from [`AlignedLyrics::sylt_entries`], with a
-/// leading newline on each line's first word so a player renders line breaks.
-fn build_sylt(aligned: &AlignedLyrics) -> Option<SynchronisedLyrics> {
-    let content = aligned.sylt_entries();
-    if content.is_empty() {
-        return None;
-    }
-    Some(SynchronisedLyrics {
-        lang: LANG.to_owned(),
-        timestamp_format: TimestampFormat::Ms,
-        content_type: SynchronisedLyricsType::Lyrics,
-        description: String::new(),
-        content,
-    })
-}
-
-/// Tag `audio` (a FLAC byte stream) with `meta`, returning the tagged bytes.
-///
-/// Replaces the Vorbis comments, embeds `cover` as the sole front-cover
-/// `PICTURE` block, and preserves the original `STREAMINFO` and audio frames.
-/// Works in memory: the existing metadata blocks are rewritten and the audio
-/// frames are appended unchanged.
-///
-/// A FLAC PICTURE block is bounded by a 24-bit length field, and `metaflac`
-/// silently truncates that length on overflow (corrupting the file), so a cover
-/// whose bytes exceed [`flac_picture_data_budget`] is rejected with an error
-/// rather than embedded. The executor sizes the animated WebP to fit and falls
-/// back to a static JPEG before reaching this guard, which is a backstop.
-///
-/// When `meta` carries no lyrics text (a plain retag), any existing `LYRICS`
-/// comment is preserved rather than dropped, so a retag never loses embedded
-/// lyrics.
-pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) -> Result<Vec<u8>> {
-    let mut tag = metaflac::Tag::read_from(&mut Cursor::new(audio))
-        .map_err(|err| Error::Tag(format!("could not read FLAC metadata: {err}")))?;
-
-    let existing_lyrics: Vec<String> = tag
-        .get_vorbis("LYRICS")
-        .map(|values| values.map(str::to_owned).collect())
-        .unwrap_or_default();
-
-    tag.remove_blocks(metaflac::BlockType::VorbisComment);
-    for (key, value) in flac_fields(meta) {
-        if !value.is_empty() {
-            tag.set_vorbis(key, vec![value.to_owned()]);
-        }
-    }
-    if meta.lyrics.is_empty() && !existing_lyrics.is_empty() {
-        tag.set_vorbis("LYRICS", existing_lyrics);
-    }
-    if let Some(cover) = cover {
-        let budget = flac_picture_data_budget(cover.mime);
-        if cover.bytes.len() > budget {
-            return Err(Error::Tag(format!(
-                "cover image is {} bytes, over the {}-byte FLAC picture limit",
-                cover.bytes.len(),
-                budget
-            )));
-        }
-        // Exactly one front cover: drop any existing picture before adding ours
-        // (metaflac's add_picture already replaces the same type; this is
-        // explicit so a stale picture of any type cannot linger).
-        tag.remove_blocks(metaflac::BlockType::Picture);
-        tag.add_picture(
-            cover.mime,
-            metaflac::block::PictureType::CoverFront,
-            cover.bytes.to_vec(),
-        );
-    }
-
-    let audio_frames = metaflac::Tag::skip_metadata(&mut Cursor::new(audio));
-    let mut out = Vec::with_capacity(audio.len());
-    tag.write_to(&mut out)
-        .map_err(|err| Error::Tag(format!("could not write FLAC metadata: {err}")))?;
-    out.extend_from_slice(&audio_frames);
-    Ok(out)
-}
-
-/// Tag `audio` (a WAV byte stream) with `meta`, returning the tagged bytes.
-///
-/// Writes an ID3v2.4 tag into the RIFF `id3 ` chunk, replacing any existing
-/// ID3 tag, and embeds `cover` as a front-cover `APIC` frame when provided.
-/// When `synced` carries aligned lyrics, a word-level `SYLT` frame is added
-/// alongside the plain `USLT` frame.
-///
-/// Existing `SYLT` frames are preserved when `synced` is `None`, and existing
-/// `USLT` frames are preserved when `meta` carries no lyrics text, so a retag
-/// never loses previously embedded lyrics.
-pub fn tag_wav(
-    audio: &[u8],
-    meta: &TrackMetadata,
-    cover: Option<Cover<'_>>,
-    synced: Option<&AlignedLyrics>,
-) -> Result<Vec<u8>> {
-    let existing = id3::Tag::read_from2(Cursor::new(audio)).ok();
-    let mut tag = id3::Tag::new();
-    tag.set_title(meta.title.clone());
-    tag.set_artist(meta.artist.clone());
-    if !meta.album.is_empty() {
-        tag.set_album(meta.album.clone());
-    }
-    if !meta.album_artist.is_empty() {
-        tag.set_album_artist(meta.album_artist.clone());
-    }
-    if !meta.date.is_empty() {
-        tag.set_text("TDRC", meta.date.as_str());
-    }
-    if !meta.year.is_empty() {
-        tag.set_text("TDRL", meta.year.as_str());
-    }
-    if !meta.comment.is_empty() {
-        tag.add_frame(Comment {
-            lang: LANG.to_owned(),
-            description: String::new(),
-            text: meta.comment.clone(),
-        });
-    }
-    if !meta.lyrics.is_empty() {
-        tag.add_frame(Lyrics {
-            lang: LANG.to_owned(),
-            description: String::new(),
-            text: meta.lyrics.clone(),
-        });
-    } else if let Some(existing) = &existing {
-        for lyrics in existing.lyrics() {
-            tag.add_frame(lyrics.clone());
-        }
-    }
-    for (desc, value) in meta.suno_fields() {
-        if !value.is_empty() {
-            tag.add_frame(ExtendedText {
-                description: desc.to_owned(),
-                value: value.to_owned(),
-            });
-        }
-    }
-    if let Some(cover) = cover {
-        tag.add_frame(Picture {
-            mime_type: cover.mime.to_owned(),
-            picture_type: PictureType::CoverFront,
-            description: String::new(),
-            data: cover.bytes.to_vec(),
-        });
-    }
-    match synced.and_then(build_sylt) {
-        Some(sylt) => {
-            tag.add_frame(sylt);
-        }
-        None => {
-            if let Some(existing) = &existing {
-                for sylt in existing.synchronised_lyrics() {
-                    tag.add_frame(sylt.clone());
-                }
-            }
-        }
-    }
-
-    let mut cursor = Cursor::new(audio.to_vec());
-    tag.write_to_file(&mut cursor, id3::Version::Id3v24)
-        .map_err(|err| Error::Tag(format!("could not write WAV ID3 tag: {err}")))?;
-    Ok(cursor.into_inner())
-}
-
-/// The Vorbis comment fields, in `(KEY, value)` order.
-fn flac_fields(meta: &TrackMetadata) -> [(&'static str, &str); 16] {
-    [
-        ("TITLE", &meta.title),
-        ("ARTIST", &meta.artist),
-        ("ALBUM", &meta.album),
-        ("ALBUMARTIST", &meta.album_artist),
-        ("DATE", &meta.date),
-        ("YEAR", &meta.year),
-        ("LYRICS", &meta.lyrics),
-        ("DESCRIPTION", &meta.comment),
-        ("SUNO_PROMPT", &meta.prompt),
-        ("SUNO_STYLE", &meta.style),
-        ("SUNO_STYLE_SUMMARY", &meta.style_summary),
-        ("SUNO_MODEL", &meta.model),
-        ("SUNO_HANDLE", &meta.handle),
-        ("SUNO_PARENT", &meta.parent),
-        ("SUNO_ROOT", &meta.root),
-        ("SUNO_LINEAGE", &meta.lineage),
-    ]
 }
 
 /// Combined `"name (version)"` model label, or just the name when no version.
