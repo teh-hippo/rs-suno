@@ -53,7 +53,7 @@ pub use area::{
     union_clips,
 };
 pub use auth::{ClerkAuth, TOKEN_EXPIRY_WARN_DAYS, TokenExpiry, classify_token_expiry};
-pub use client::{BillingInfo, Playlist, Stem, SunoClient};
+pub use client::SunoClient;
 pub use clock::Clock;
 pub use config::{
     AccountConfig, AreaMode, AreasConfig, Config, Defaults, EffectiveSettings, FlagOverrides,
@@ -84,7 +84,7 @@ pub use lineage::{
 };
 pub use lyrics::{AlignedLine, AlignedLineWord, AlignedLyrics, AlignedWord};
 pub use manifest::{ArtifactState, Manifest, ManifestEntry, SyncedLyricsCheck};
-pub use model::{Clip, ClipRoot, HistoryEntry, MediaUrl};
+pub use model::{BillingInfo, Clip, ClipRoot, HistoryEntry, MediaUrl, Playlist, Stem};
 pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,
     render_clip_names, sanitise_name, stem_file_path, stems_folder,
