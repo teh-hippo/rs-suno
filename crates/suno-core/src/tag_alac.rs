@@ -51,9 +51,9 @@ pub fn tag_alac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) ->
         tag.set_year(meta.year.clone());
     }
     if meta.track > 0 {
-        tag.set_track_number(meta.track as u16);
+        tag.set_track_number(track_atom_value(meta.track));
         if meta.track_total > 0 {
-            tag.set_total_tracks(meta.track_total as u16);
+            tag.set_total_tracks(track_atom_value(meta.track_total));
         }
     }
     if !meta.comment.is_empty() {
@@ -77,6 +77,13 @@ pub fn tag_alac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) ->
     Ok(file.into_inner())
 }
 
+/// Clamp a `u32` lineage album index to the `u16` an MP4 track atom holds,
+/// saturating at [`u16::MAX`] so an index above 65535 clamps rather than
+/// wrapping (a plain `as u16` cast would silently truncate it).
+fn track_atom_value(index: u32) -> u16 {
+    u16::try_from(index).unwrap_or(u16::MAX)
+}
+
 /// Set a freeform `com.apple.iTunes` text atom, skipping an empty value.
 fn set_freeform(tag: &mut Tag, name: &'static str, value: &str) {
     if !value.is_empty() {
@@ -98,6 +105,20 @@ mod tests {
         let err = tag_alac(b"this is not an mp4 file", &TrackMetadata::default(), None)
             .expect_err("garbage input must not tag");
         assert!(matches!(err, Error::Tag(_)));
+    }
+
+    #[test]
+    fn track_atom_value_clamps_above_u16_max() {
+        // A lineage album index beyond u16 must clamp to u16::MAX, never wrap:
+        // the old `meta.track as u16` cast truncated 70000 to 4464, corrupting
+        // the track number written into the MP4 atom.
+        assert_eq!(track_atom_value(70_000), u16::MAX);
+        assert_eq!(track_atom_value(u32::from(u16::MAX) + 1), u16::MAX);
+        assert_eq!(track_atom_value(u32::MAX), u16::MAX);
+        // In-range indices pass through unchanged.
+        assert_eq!(track_atom_value(0), 0);
+        assert_eq!(track_atom_value(7), 7);
+        assert_eq!(track_atom_value(u32::from(u16::MAX)), u16::MAX);
     }
 
     /// Proves the real pipeline: an ffmpeg-produced ALAC `.m4a` round-trips its
