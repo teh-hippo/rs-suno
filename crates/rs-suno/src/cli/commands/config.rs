@@ -44,7 +44,7 @@ fn init(global: &GlobalArgs) -> Result<ExitCode> {
     }
     let root = prompt("Library root (optional, blank to set later)")?;
 
-    let body = account_block(&label, &token, opt(&root));
+    let body = with_schema_directive(&account_block(&label, &token, opt(&root)));
     write_config(&path, &body)?;
     eprintln!("Wrote config to {}", path.display());
     Ok(ExitCode::Ok)
@@ -127,6 +127,7 @@ fn show(global: &GlobalArgs) -> Result<ExitCode> {
         Err(code) => return Ok(code),
     };
 
+    println!("{CONFIG_SCHEMA_DIRECTIVE}");
     if let Some(path) = &path {
         println!("# {}", path.display());
     }
@@ -437,6 +438,18 @@ fn push_redacted(out: &mut String, key: &str, value: Option<&str>) {
     }
 }
 
+/// The published JSON Schema, referenced by a Taplo `#:schema` header directive
+/// so editors (the Even Better TOML extension) validate and autocomplete the
+/// config. See `docs/src/config.schema.json`, published to GitHub Pages.
+const CONFIG_SCHEMA_DIRECTIVE: &str =
+    "#:schema https://teh-hippo.github.io/rs-suno/config.schema.json";
+
+/// Prefix freshly generated config text with the schema header directive. The
+/// directive is a TOML comment, so the file still parses unchanged.
+fn with_schema_directive(body: &str) -> String {
+    format!("{CONFIG_SCHEMA_DIRECTIVE}\n\n{body}")
+}
+
 /// Build a `[accounts.<label>]` TOML block.
 fn account_block(label: &str, token: &str, root: Option<&str>) -> String {
     let mut block = format!("[accounts.{label}]\ntoken = \"{}\"\n", toml_escape(token));
@@ -519,6 +532,16 @@ mod tests {
         let acc = &config.accounts["my-lib"];
         assert_eq!(acc.token.as_deref(), Some("secret"));
         assert_eq!(acc.root.as_deref(), Some("/m"));
+    }
+
+    #[test]
+    fn init_body_carries_schema_directive_and_still_parses() {
+        let body = with_schema_directive(&account_block("alice", "t", Some("/m")));
+        assert!(body.starts_with("#:schema https://"));
+        assert!(body.contains("config.schema.json"));
+        // The directive is a TOML comment, so the generated file still parses.
+        let config = Config::from_toml(&body).unwrap();
+        assert_eq!(config.accounts["alice"].token.as_deref(), Some("t"));
     }
 
     #[test]

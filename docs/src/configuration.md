@@ -43,6 +43,29 @@ Print the current config with every token redacted:
 suno config show
 ```
 
+## Editor validation and autocompletion
+
+`rs-suno` publishes a JSON Schema for the config file, so an editor can
+autocomplete keys, complete enum values (like `flac` or `mirror`), show each
+setting's documentation on hover, and flag type errors and unknown keys as you
+type. The schema is generated from the same types the parser uses, so it never
+drifts from the real format.
+
+In [Visual Studio Code](https://code.visualstudio.com), install the
+[Even Better TOML](https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml)
+extension. Configs written by `suno config init` already carry a schema
+directive on their first line:
+
+```toml
+#:schema https://teh-hippo.github.io/rs-suno/config.schema.json
+```
+
+For a hand-written or older config, add that line yourself as the first line of
+the file. The directive is a TOML comment, so it is ignored by `rs-suno` and by
+any tool that does not understand it. The schema is served from
+`https://teh-hippo.github.io/rs-suno/config.schema.json`, and its source lives in
+the repository at `docs/src/config.schema.json`.
+
 ## File format
 
 The config is TOML with an optional `[defaults]` table and one

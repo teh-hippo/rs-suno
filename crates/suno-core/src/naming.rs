@@ -31,6 +31,7 @@ const DEFAULT_MAX_COMPONENT_LEN: usize = 80;
 const MIN_BASE_CHARS_WITH_SUFFIX: usize = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum CharacterSet {
     #[default]
