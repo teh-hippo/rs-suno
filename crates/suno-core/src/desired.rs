@@ -1,11 +1,12 @@
 //! Pure desired-state construction: clip target entries and playlist manifests.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path};
 
 use crate::extras::{M3u8Entry, render_clip_details, render_clip_lyrics, render_m3u8};
 use crate::hash::{
     art_hash, art_url_hash, content_hash, embedded_art_hash, meta_hash, synced_lrc_source_hash,
+    webp_art_hash,
 };
 use crate::lineage::LineageContext;
 use crate::model::Clip;
@@ -13,7 +14,7 @@ use crate::model::Stem;
 use crate::naming::{
     CharacterSet, NamingConfig, NamingRequest, render_clip_names, sanitise_name, stem_file_path,
 };
-use crate::reconcile::{Desired, DesiredArtifact, DesiredStem, PlaylistDesired};
+use crate::reconcile::{AlbumDesired, Desired, DesiredArtifact, DesiredStem, PlaylistDesired};
 use crate::vocab::{ArtifactKind, AudioFormat, SourceMode, StemFormat, WebpEncodeSettings};
 
 /// The synthetic playlist id for the liked feed, rendered as "Liked Songs".
@@ -334,6 +335,155 @@ pub(crate) fn rel_to_string(path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Derive the desired folder art for every album in `desired`, grouped by the
+/// stable root id (HARDENING H2).
+///
+/// This is pure: it groups the selected clips by their resolved `root_id`, then
+/// per album chooses the folder-art sources deterministically:
+///
+/// - `folder.jpg` comes from the MOST-PLAYED art-bearing variant; ties break to
+///   the EARLIEST `created_at`, then the lexicographically smallest id. Its hash
+///   is the chosen art's content hash ([`art_hash`]), so a most-played flip to a
+///   variant sharing the same art is a no-op downstream (H1).
+/// - `cover.webp` (only when `animated_covers` is set) comes from the
+///   EARLIEST-created variant with a non-empty `video_cover_url`; ties break to
+///   the smallest id. Its hash folds in the `webp` encode settings, so changing
+///   quality/lossless/effort re-transcodes it. `None` when no variant has an
+///   animated source.
+/// - `cover.mp4` (only when `raw_cover` is set) is that same variant's
+///   `video_cover_url` kept verbatim (no transcode), so `both` yields the raw
+///   source beside its WebP re-encode. `None` when no variant has an animated
+///   source.
+///
+/// The album folder is the common parent of the album's clips' audio paths (they
+/// share `{creator}/{album}/`); `folder.jpg` lands at `{album_dir}/folder.jpg`
+/// and the animated covers at `{album_dir}/cover.webp` / `{album_dir}/cover.mp4`.
+pub fn album_desired(
+    desired: &[Desired],
+    animated_covers: bool,
+    raw_cover: bool,
+    webp: WebpEncodeSettings,
+) -> Vec<AlbumDesired> {
+    let mut groups: BTreeMap<&str, Vec<&Desired>> = BTreeMap::new();
+    for d in desired {
+        groups
+            .entry(d.lineage.root_id.as_str())
+            .or_default()
+            .push(d);
+    }
+
+    groups
+        .into_iter()
+        .map(|(root_id, members)| {
+            let album_dir = album_dir_of(&members);
+            let folder_jpg = folder_jpg_source(&members).map(|source| DesiredArtifact {
+                kind: ArtifactKind::FolderJpg,
+                path: album_child(&album_dir, "folder.jpg"),
+                source_url: source.clip.selected_image_url().unwrap_or("").to_owned(),
+                hash: art_hash(&source.clip),
+                content: None,
+            });
+            let folder_webp = animated_covers
+                .then(|| folder_webp_source(&members))
+                .flatten()
+                .map(|source| DesiredArtifact {
+                    kind: ArtifactKind::FolderWebp,
+                    path: album_child(&album_dir, "cover.webp"),
+                    source_url: source.clip.video_cover_url.clone(),
+                    hash: webp_art_hash(&source.clip.video_cover_url, &webp),
+                    content: None,
+                });
+            let folder_mp4 = raw_cover
+                .then(|| folder_webp_source(&members))
+                .flatten()
+                .map(|source| DesiredArtifact {
+                    kind: ArtifactKind::FolderMp4,
+                    path: album_child(&album_dir, "cover.mp4"),
+                    source_url: source.clip.video_cover_url.clone(),
+                    hash: art_url_hash(&source.clip.video_cover_url),
+                    content: None,
+                });
+            AlbumDesired {
+                root_id: root_id.to_owned(),
+                folder_jpg,
+                folder_webp,
+                folder_mp4,
+            }
+        })
+        .collect()
+}
+
+/// The album folder: the common parent of the members' audio paths.
+///
+/// The album's clips share `{creator}/{album}/`, so any member's parent is the
+/// album dir; the smallest is taken so a stray differing path stays deterministic.
+fn album_dir_of(members: &[&Desired]) -> String {
+    members
+        .iter()
+        .map(|d| parent_dir(&d.path))
+        .min()
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// The most-played art-bearing variant: the `folder.jpg` source.
+///
+/// Filtered to variants that carry selectable art, then the winner MAXIMISES
+/// `play_count`, breaking ties to the EARLIEST `created_at` and then the
+/// lexicographically smallest id, so selection is fully deterministic.
+fn folder_jpg_source<'a>(members: &[&'a Desired]) -> Option<&'a Desired> {
+    members
+        .iter()
+        .copied()
+        .filter(|d| {
+            d.clip
+                .selected_image_url()
+                .is_some_and(|url| !url.is_empty())
+        })
+        .min_by(|a, b| {
+            b.clip
+                .play_count
+                .cmp(&a.clip.play_count)
+                .then_with(|| a.clip.created_at.cmp(&b.clip.created_at))
+                .then_with(|| a.clip.id.cmp(&b.clip.id))
+        })
+}
+
+/// The first-created animated variant: the `cover.webp` source.
+///
+/// Filtered to variants with a non-empty `video_cover_url`, then the winner is
+/// the EARLIEST `created_at`, tie-broken by the smallest id for determinism.
+fn folder_webp_source<'a>(members: &[&'a Desired]) -> Option<&'a Desired> {
+    members
+        .iter()
+        .copied()
+        .filter(|d| !d.clip.video_cover_url.is_empty())
+        .min_by(|a, b| {
+            a.clip
+                .created_at
+                .cmp(&b.clip.created_at)
+                .then_with(|| a.clip.id.cmp(&b.clip.id))
+        })
+}
+
+/// The parent directory of a forward-slash relative path, or `""` at the root.
+fn parent_dir(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some((dir, _)) => dir,
+        None => "",
+    }
+}
+
+/// Join an album dir and a file name with a forward slash, tolerating an empty
+/// dir (a path at the account root).
+fn album_child(album_dir: &str, name: &str) -> String {
+    if album_dir.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{album_dir}/{name}")
+    }
 }
 
 #[cfg(test)]

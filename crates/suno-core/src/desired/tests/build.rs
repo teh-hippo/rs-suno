@@ -264,7 +264,7 @@ fn cover_album_and_stem_paths_use_forward_slashes() {
     );
 
     let albums =
-        crate::reconcile::album_desired(&desired, false, false, WebpEncodeSettings::default());
+        crate::desired::album_desired(&desired, false, false, WebpEncodeSettings::default());
     let folder_jpg = albums[0]
         .folder_jpg
         .as_ref()

@@ -63,8 +63,8 @@ pub use config::{
     Settings, SourceConfig,
 };
 pub use desired::{
-    ArtifactToggles, LIKED_PLAYLIST_ID, PlaylistInput, build_desired, build_playlist_desired,
-    clip_stems,
+    ArtifactToggles, LIKED_PLAYLIST_ID, PlaylistInput, album_desired, build_desired,
+    build_playlist_desired, clip_stems,
 };
 pub use downloadable::is_downloadable;
 pub use error::{Error, Result};
@@ -95,8 +95,8 @@ pub use naming::{
 pub use orphans::untracked_audio;
 pub use reconcile::{
     Action, AlbumDesired, Desired, DesiredArtifact, DesiredStem, LocalFile, Plan, PlaylistDesired,
-    SourceStatus, album_desired, area_authoritative, area_fully_enumerated, deletion_allowed,
-    narrows_downloads, plan_album_artifacts, plan_playlist_artifacts, reconcile,
+    SourceStatus, area_authoritative, area_fully_enumerated, deletion_allowed, narrows_downloads,
+    plan_album_artifacts, plan_playlist_artifacts, reconcile,
 };
 pub use roots::{ResolveOpts, resolve_roots};
 pub use synced::{

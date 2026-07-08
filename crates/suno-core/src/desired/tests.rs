@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::*;
-use crate::hash::{art_hash, art_url_hash, content_hash, synced_lrc_source_hash};
+use crate::hash::{art_hash, art_url_hash, content_hash, synced_lrc_source_hash, webp_art_hash};
 use crate::lineage::LineageContext;
 use crate::naming::NamingConfig;
-use crate::vocab::{ArtifactKind, AudioFormat, SourceMode};
+use crate::vocab::{ArtifactKind, AudioFormat, SourceMode, WebpEncodeSettings};
 
 fn clip(id: &str, title: &str, handle: &str) -> Clip {
     Clip {
@@ -49,6 +49,7 @@ fn path_of<'a>(desired: &'a [Desired], id: &str) -> &'a str {
         .expect("clip in desired set")
 }
 
+mod album;
 mod build;
 mod playlist;
 mod sidecars;
