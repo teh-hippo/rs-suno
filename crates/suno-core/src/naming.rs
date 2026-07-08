@@ -42,8 +42,10 @@ pub enum CharacterSet {
 impl FromStr for CharacterSet {
     type Err = Error;
 
+    // Case-sensitive to match serde (TOML) and the JSON schema, which accept
+    // lowercase only; the env tier (`SUNO_CHARACTER_SET`) parses through here.
     fn from_str(s: &str) -> Result<Self> {
-        match s.to_ascii_lowercase().as_str() {
+        match s {
             "unicode" => Ok(Self::Unicode),
             "ascii" => Ok(Self::Ascii),
             other => Err(Error::Config(format!(

@@ -216,8 +216,10 @@ fn stem_format_rejects_flac_and_unknown() {
     // so a config or flag can never ask for a FLAC stem.
     assert!("flac".parse::<StemFormat>().is_err());
     assert!("aac".parse::<StemFormat>().is_err());
-    assert_eq!("WAV".parse::<StemFormat>().unwrap(), StemFormat::Wav);
-    assert_eq!("Mp3".parse::<StemFormat>().unwrap(), StemFormat::Mp3);
+    assert_eq!("wav".parse::<StemFormat>().unwrap(), StemFormat::Wav);
+    assert_eq!("mp3".parse::<StemFormat>().unwrap(), StemFormat::Mp3);
+    // Case-sensitive to match serde (TOML) and the JSON schema.
+    assert!("WAV".parse::<StemFormat>().is_err());
     // A FLAC stem_format in config is a config error, not a silent fallback.
     assert!(Config::from_toml("[defaults]\nstem_format = \"flac\"\n").is_err());
 }
@@ -317,13 +319,13 @@ fn animated_cover_webp_knobs_follow_precedence_and_validate_ranges() {
 
 #[test]
 fn video_cover_retention_parses_formats_and_reports_kept_artifacts() {
-    // FromStr is case-insensitive across every variant.
+    // FromStr is case-sensitive (lowercase only) to match serde and the schema.
     assert_eq!(
-        "NEITHER".parse::<VideoCoverRetention>().unwrap(),
+        "neither".parse::<VideoCoverRetention>().unwrap(),
         VideoCoverRetention::Neither
     );
     assert_eq!(
-        "WebP".parse::<VideoCoverRetention>().unwrap(),
+        "webp".parse::<VideoCoverRetention>().unwrap(),
         VideoCoverRetention::Webp
     );
     assert_eq!(
@@ -331,11 +333,13 @@ fn video_cover_retention_parses_formats_and_reports_kept_artifacts() {
         VideoCoverRetention::Mp4
     );
     assert_eq!(
-        "Both".parse::<VideoCoverRetention>().unwrap(),
+        "both".parse::<VideoCoverRetention>().unwrap(),
         VideoCoverRetention::Both
     );
     // An unknown mode is a config error, not a silent fallback.
     assert!("mkv".parse::<VideoCoverRetention>().is_err());
+    // A non-lowercase spelling is rejected, consistent with the file/schema.
+    assert!("WebP".parse::<VideoCoverRetention>().is_err());
 
     // Display round-trips back to a token FromStr accepts.
     for mode in [
