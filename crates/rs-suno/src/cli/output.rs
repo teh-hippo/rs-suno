@@ -267,6 +267,62 @@ pub(crate) fn short_id(id: &str) -> String {
 
 /// The per-run summary printed after a `sync` or `copy` finishes.
 ///
+/// The per-run action counts grouped into the buckets both the live and
+/// dry-run summaries print, so the two views cannot drift on what counts where.
+///
+/// Every counted action lands in exactly one bucket, so [`SummaryBuckets::total`]
+/// matches the plan's `applying N action(s)` figure on a completed run.
+struct SummaryBuckets {
+    downloaded: usize,
+    tagged: usize,
+    renamed: usize,
+    deleted: usize,
+    sidecars: usize,
+    skipped: usize,
+    failed: usize,
+}
+
+impl SummaryBuckets {
+    /// The live buckets from an executed run.
+    fn from_outcome(outcome: &ExecOutcome) -> Self {
+        Self {
+            downloaded: outcome.downloaded + outcome.reformatted,
+            tagged: outcome.retagged,
+            renamed: outcome.renamed,
+            deleted: outcome.deleted + outcome.artifacts_deleted,
+            sidecars: outcome.artifacts_written,
+            skipped: outcome.skipped,
+            failed: outcome.failed(),
+        }
+    }
+
+    /// The pending buckets from a plan. A completed move commits as a rename, so
+    /// artifact and stem relocations fold into `renamed`; a dry run never fails a
+    /// clip, so `failed` is zero.
+    fn from_plan(plan: &Plan) -> Self {
+        Self {
+            downloaded: plan.downloads() + plan.reformats(),
+            tagged: plan.retags(),
+            renamed: plan.renames() + plan.artifact_moves() + plan.stem_moves(),
+            deleted: plan.deletes() + plan.artifact_deletes() + plan.stem_deletes(),
+            sidecars: plan.artifact_writes() + plan.stem_writes(),
+            skipped: plan.skips(),
+            failed: 0,
+        }
+    }
+
+    /// The sum across every bucket.
+    fn total(&self) -> usize {
+        self.downloaded
+            + self.tagged
+            + self.renamed
+            + self.deleted
+            + self.sidecars
+            + self.skipped
+            + self.failed
+    }
+}
+
 /// A clean or per-clip-failed run reads "{verb} complete"; a run the engine
 /// aborted (a full disk or a bad token) reads "{verb} aborted" and names why,
 /// so the counters are never mistaken for a finished mirror.
@@ -281,14 +337,7 @@ pub(crate) fn short_id(id: &str) -> String {
 /// footprint. Every counted action lands in exactly one bucket, so on a completed
 /// run `total` equals the plan's `applying N action(s)` figure.
 pub fn run_summary(verb_label: &str, account: &str, outcome: &ExecOutcome, secs: f64) -> String {
-    let downloaded = outcome.downloaded + outcome.reformatted;
-    let tagged = outcome.retagged;
-    let renamed = outcome.renamed;
-    let deleted = outcome.deleted + outcome.artifacts_deleted;
-    let sidecars = outcome.artifacts_written;
-    let skipped = outcome.skipped;
-    let failed = outcome.failed();
-    let total = downloaded + tagged + renamed + deleted + sidecars + skipped + failed;
+    let b = SummaryBuckets::from_outcome(outcome);
     let header = match outcome.status {
         RunStatus::Completed => format!("{verb_label} complete: {account}"),
         RunStatus::DiskFull => {
@@ -299,29 +348,35 @@ pub fn run_summary(verb_label: &str, account: &str, outcome: &ExecOutcome, secs:
         }
     };
     format!(
-        "{header}\n  downloaded  {downloaded:>4}\n  tagged      {tagged:>4}\n  renamed     {renamed:>4}\n  deleted     {deleted:>4}\n  sidecars    {sidecars:>4}\n  skipped     {skipped:>4}\n  failed      {failed:>4}\n  total       {total:>4}\nDuration: {secs:.1}s"
+        "{header}\n  downloaded  {:>4}\n  tagged      {:>4}\n  renamed     {:>4}\n  deleted     {:>4}\n  sidecars    {:>4}\n  skipped     {:>4}\n  failed      {:>4}\n  total       {:>4}\nDuration: {secs:.1}s",
+        b.downloaded,
+        b.tagged,
+        b.renamed,
+        b.deleted,
+        b.sidecars,
+        b.skipped,
+        b.failed,
+        b.total()
     )
 }
 
 /// The dry-run / check summary derived from the plan, making no changes.
 ///
 /// Mirrors [`run_summary`]'s buckets so a dry run previews exactly what a real
-/// run reports: `sidecars` counts pending artifact writes ([`Plan::artifact_writes`])
-/// and `to delete` folds in artifact deletes ([`Plan::artifact_deletes`]). Every
-/// action variant maps to one bucket, so `total` equals [`Plan::len`] (the
-/// `applying N action(s)` figure a real run would print).
+/// run reports: `sidecars` counts pending artifact writes and `to delete` folds
+/// in artifact deletes. Every action variant maps to one bucket, so `total`
+/// equals [`Plan::len`] (the `applying N action(s)` figure a real run prints).
 pub fn dry_summary(account: &str, plan: &Plan) -> String {
-    let to_download = plan.downloads() + plan.reformats();
-    let to_tag = plan.retags();
-    // A completed move commits as a rename (`Effect::Renamed`), so fold both the
-    // sidecar and stem relocations into the rename bucket to match a real run.
-    let to_rename = plan.renames() + plan.artifact_moves() + plan.stem_moves();
-    let to_delete = plan.deletes() + plan.artifact_deletes() + plan.stem_deletes();
-    let sidecars = plan.artifact_writes() + plan.stem_writes();
-    let up_to_date = plan.skips();
-    let total = to_download + to_tag + to_rename + to_delete + sidecars + up_to_date;
+    let b = SummaryBuckets::from_plan(plan);
     format!(
-        "Dry run: {account} (no changes made)\n  to download {to_download:>4}\n  to tag      {to_tag:>4}\n  to rename   {to_rename:>4}\n  to delete   {to_delete:>4}\n  sidecars    {sidecars:>4}\n  up to date  {up_to_date:>4}\n  total       {total:>4}"
+        "Dry run: {account} (no changes made)\n  to download {:>4}\n  to tag      {:>4}\n  to rename   {:>4}\n  to delete   {:>4}\n  sidecars    {:>4}\n  up to date  {:>4}\n  total       {:>4}",
+        b.downloaded,
+        b.tagged,
+        b.renamed,
+        b.deleted,
+        b.sidecars,
+        b.skipped,
+        b.total()
     )
 }
 
