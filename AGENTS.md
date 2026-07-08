@@ -35,9 +35,9 @@ crates/
     src/wire.rs        # the single JSON decode home (feed/clip/playlist/stem/billing)
     src/http.rs        # the Http port (trait) plus request/response types
     src/reconcile.rs   # desired-vs-local plan and the deletion-safety gates
-    src/executor/      # applies the plan to disk via ports; mod.rs owns execute() +
-                       #   the serial commit loop + deletion-safety guards, with one
-                       #   file per lifecycle (audio/cover/stem/artifact/tag)
+    src/executor.rs    # applies the plan to disk via ports; owns execute() + the
+                       #   serial commit loop + deletion-safety guards, with one file
+                       #   per lifecycle in executor/ (audio/cover/stem/artifact/tag)
     src/area.rs        # multi-area sync planner: authority/enumeration predicates
     src/config.rs      # layered settings resolved from one shared `Settings` shape
     src/graph.rs       # lineage node/edge graph + the `LineageStore` on-disk container
@@ -51,7 +51,8 @@ crates/
   rs-suno/     # thin binary `suno`
     src/main.rs        # entry point
     src/http.rs        # reqwest adapter implementing Http
-    src/cli/run.rs     # thin sync/copy/check entry plus the run_one orchestrator
+    src/cli/run.rs     # sync/copy/check entry + the run_one orchestrator spine; the
+                       #   per-phase IO lives in run/ (preflight, assemble, tail)
     src/cli/*.rs       # one focused concern each: token, account, config_load,
                        # execute, areas, prompt, last_run, signal, ... (see #252)
 ```
