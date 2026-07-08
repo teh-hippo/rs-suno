@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.36.4](https://github.com/teh-hippo/rs-suno/compare/v0.36.3...v0.36.4) (2026-07-08)
+
+
+### Bug Fixes
+
+* **auth:** saturate token-expiry subtraction to avoid overflow panic ([86d41bc](https://github.com/teh-hippo/rs-suno/commit/86d41bc01cdb2f29264cc0e493613cbcee0aa0fd))
+* **executor:** treat a disk-full unlink as systemic, aborting the run ([5e9f3b9](https://github.com/teh-hippo/rs-suno/commit/5e9f3b97f5f2e51ec4cd3fdd6426da9697d28ae2))
+* **reconcile:** never let a rename or write clobber a kept clip's file ([7612bb6](https://github.com/teh-hippo/rs-suno/commit/7612bb6d33d519b903cb51a7997d751189380345))
+* **roots:** resolve in-index lineage chains fully instead of hop-capping to a wrong root ([d33d11b](https://github.com/teh-hippo/rs-suno/commit/d33d11b6d731596d5a7ffc45745a8752f68e789a))
+* **tag:** clamp ALAC track index above u16 instead of wrapping ([7bf7df5](https://github.com/teh-hippo/rs-suno/commit/7bf7df5fae4171703a1957158b604a602a056c72))
+* **tag:** guard tag_flac against metaflac panics on malformed FLAC ([c1ae8a0](https://github.com/teh-hippo/rs-suno/commit/c1ae8a0618a7b8ca93f44d577ba628c21867f1b3))
+
 ## [0.36.3](https://github.com/teh-hippo/rs-suno/compare/v0.36.2...v0.36.3) (2026-07-08)
 
 
