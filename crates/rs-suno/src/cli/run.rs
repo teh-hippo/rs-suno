@@ -976,22 +976,22 @@ async fn execute_run(
         );
     }
 
-    execute::execute_plan(
-        ctx.verb.summary_label(),
+    execute::execute_plan(execute::ExecutePlan {
+        summary_label: ctx.verb.summary_label(),
         plan,
-        &assembled.desired,
+        desired: &assembled.desired,
         manifest,
         synced,
         pending_checks,
         store,
-        ctx.client,
-        ctx.http,
+        client: ctx.client,
+        http: ctx.http,
         dest,
         settings,
-        ctx.account,
+        account: ctx.account,
         verbosity,
-        assembled.library_authoritative,
-    )
+        library_authoritative: assembled.library_authoritative,
+    })
     .await
 }
 

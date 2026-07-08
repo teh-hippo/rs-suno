@@ -33,23 +33,46 @@ use crate::http::ReqwestHttp;
 const WAV_POLL_ATTEMPTS: u32 = 24;
 const WAV_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn execute_plan(
-    summary_label: &'static str,
-    plan: suno_core::Plan,
-    desired: &[suno_core::Desired],
-    mut manifest: suno_core::Manifest,
-    synced: HashMap<String, AlignedLyrics>,
-    pending_checks: Vec<suno_core::PendingCheck>,
-    store: &mut suno_core::LineageStore,
-    client: &SunoClient<TokioClock>,
-    http: &ReqwestHttp,
-    dest: &Path,
-    settings: &suno_core::EffectiveSettings,
-    account: &str,
-    verbosity: i8,
-    library_authoritative: bool,
-) -> Result<ExitCode> {
+/// The inputs to [`execute_plan`]: the reconciled plan plus the owned run state
+/// it commits (the manifest, this run's synced lyrics, and the pending
+/// synced-lyric checks) alongside the mutable lineage store and the shared
+/// ports, destination, settings, and account the run writes against.
+pub(crate) struct ExecutePlan<'a> {
+    pub summary_label: &'static str,
+    pub plan: suno_core::Plan,
+    pub desired: &'a [suno_core::Desired],
+    pub manifest: suno_core::Manifest,
+    pub synced: HashMap<String, AlignedLyrics>,
+    pub pending_checks: Vec<suno_core::PendingCheck>,
+    pub store: &'a mut suno_core::LineageStore,
+    pub client: &'a SunoClient<TokioClock>,
+    pub http: &'a ReqwestHttp,
+    pub dest: &'a Path,
+    pub settings: &'a suno_core::EffectiveSettings,
+    pub account: &'a str,
+    pub verbosity: i8,
+    pub library_authoritative: bool,
+}
+
+/// Run the reconciled plan, then persist the manifest, graph, logs, and
+/// last-run marker; see [`ExecutePlan`] for the bundled inputs.
+pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
+    let ExecutePlan {
+        summary_label,
+        plan,
+        desired,
+        mut manifest,
+        synced,
+        pending_checks,
+        store,
+        client,
+        http,
+        dest,
+        settings,
+        account,
+        verbosity,
+        library_authoritative,
+    } = inputs;
     cleanup_stale_parts(dest);
     let fs = FsAdapter::new(dest);
     let ffmpeg = FfmpegAdapter::new(dest);
