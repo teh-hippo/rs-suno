@@ -1,6 +1,8 @@
 //! The `suno` command line tool: a thin binary that parses arguments and drives
 //! the IO-free `suno-core` engine through the adapters in this crate.
 
+#![forbid(unsafe_code)]
+
 mod cli;
 mod clock;
 mod diskspace;
