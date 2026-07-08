@@ -1,0 +1,5 @@
+# Normalise all text to LF on every platform so checked-in generated
+# artefacts (the config JSON schema) and any content-comparison tests stay
+# byte-identical on the Windows CI leg, where autocrlf would otherwise inject
+# CRLF and break the schema drift check.
+* text=auto eol=lf
