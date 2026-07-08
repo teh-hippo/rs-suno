@@ -365,7 +365,7 @@ fn colliding_node_less_overrides_keep_album_art_paths_distinct() {
         desired_of(&clip_b, &ctx_b, &names[1]),
     ];
 
-    let albums = crate::reconcile::album_desired(
+    let albums = crate::desired::album_desired(
         &desired,
         false,
         false,
@@ -485,7 +485,7 @@ fn override_on_uncached_selected_root_is_ignored_and_keeps_albums_distinct() {
         desired_of(&real_clip, &real_ctx, &names[0]),
         desired_of(&new_clip, &new_ctx, &names[1]),
     ];
-    let albums = crate::reconcile::album_desired(
+    let albums = crate::desired::album_desired(
         &desired,
         false,
         false,
