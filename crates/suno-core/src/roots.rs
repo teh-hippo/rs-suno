@@ -22,10 +22,10 @@ use crate::model::Clip;
 /// Tunables bounding how hard [`resolve_roots`] works per call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolveOpts {
-    /// Maximum number of missing ancestor ids to fetch from the network.
+    /// Maximum number of missing ancestor ids to fetch from the network. This
+    /// is the only budget: in-index walking is unbounded (a cycle guard, not a
+    /// hop cap, guarantees termination), so a deep chain resolves in full.
     pub max_gap_fills: u32,
-    /// Maximum hops to walk up a single chain before giving up.
-    pub hop_cap: u32,
     /// Maximum concurrent by-id clip fetches during one gap-fill batch.
     pub concurrency: u32,
 }
@@ -34,7 +34,6 @@ impl Default for ResolveOpts {
     fn default() -> Self {
         Self {
             max_gap_fills: 200,
-            hop_cap: 64,
             concurrency: 4,
         }
     }
@@ -55,9 +54,13 @@ impl Default for ResolveOpts {
 ///
 /// Bounded by [`ResolveOpts`]: at most `max_gap_fills` ancestor ids are fetched
 /// (exhaustion yields [`ResolveStatus::External`] at the last reachable
-/// ancestor), and each chain walks at most `hop_cap` hops. A cycle yields
-/// [`ResolveStatus::Cycle`]. The returned [`Resolution`] has a root entry for
-/// every input clip, plus the gap-filled ancestor clips it fetched.
+/// ancestor). In-index chains are not hop-capped: a chain that stays within the
+/// index (or persisted archive) is walked in full to its true parentless root,
+/// however deep, terminating via a `visited` cycle guard. A cycle yields
+/// [`ResolveStatus::Cycle`] rooted at the cycle's canonical (lexicographically
+/// smallest) member, so cyclic data resolves order-independently. The returned
+/// [`Resolution`] has a root entry for every input clip, plus the gap-filled
+/// ancestor clips it fetched.
 pub async fn resolve_roots(
     clips: &[Clip],
     archived_parents: &HashMap<String, String>,
@@ -102,7 +105,6 @@ struct Resolver<'a> {
     memo: HashMap<String, RootInfo>,
     targets: Vec<String>,
     budget: u32,
-    hop_cap: u32,
     concurrency: u32,
 }
 
@@ -127,7 +129,6 @@ impl<'a> Resolver<'a> {
             memo: HashMap::new(),
             targets,
             budget: opts.max_gap_fills,
-            hop_cap: opts.hop_cap,
             concurrency: opts.concurrency,
         }
     }
@@ -174,7 +175,6 @@ impl<'a> Resolver<'a> {
         let mut chain: Vec<String> = Vec::new();
         let mut visited: HashSet<String> = HashSet::new();
         let mut current = start.to_string();
-        let mut hops = 0u32;
 
         loop {
             if let Some(info) = self.memo.get(&current).cloned() {
@@ -182,13 +182,18 @@ impl<'a> Resolver<'a> {
                 return Walk::Resolved;
             }
             if visited.contains(&current) {
-                let info = self.terminal(&current, ResolveStatus::Cycle);
-                self.assign(&chain, &info);
-                self.memo.insert(current, info);
-                return Walk::Resolved;
-            }
-            if hops >= self.hop_cap {
-                let info = self.terminal(&current, ResolveStatus::Unresolved);
+                // A cycle. Root it at its canonical (lexicographically smallest)
+                // member so the same cyclic data resolves the same root whatever
+                // order its clips were listed in. The members are the nodes from
+                // `current`'s first occurrence in the chain onward; any non-cycle
+                // lead-in walked before that point is excluded.
+                let cycle_start = chain.iter().position(|id| *id == current).unwrap_or(0);
+                let root = chain[cycle_start..]
+                    .iter()
+                    .min()
+                    .cloned()
+                    .unwrap_or_else(|| current.clone());
+                let info = self.terminal(&root, ResolveStatus::Cycle);
                 self.assign(&chain, &info);
                 self.memo.insert(current, info);
                 return Walk::Resolved;
@@ -236,7 +241,6 @@ impl<'a> Resolver<'a> {
             } else {
                 return Walk::Blocked(parent_id);
             }
-            hops += 1;
         }
     }
 
