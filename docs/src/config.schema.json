@@ -50,7 +50,7 @@
             "null"
           ],
           "format": "uint8",
-          "maximum": 255,
+          "maximum": 4,
           "minimum": 0
         },
         "animated_cover_lossless": {
@@ -65,6 +65,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "animated_cover_max_width": {
@@ -73,6 +74,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "animated_cover_quality": {
@@ -81,7 +83,7 @@
             "null"
           ],
           "format": "uint8",
-          "maximum": 255,
+          "maximum": 100,
           "minimum": 0
         },
         "animated_covers": {
@@ -117,6 +119,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "details_sidecar": {
@@ -157,6 +160,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "naming_template": {
@@ -178,6 +182,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "root": {
@@ -323,7 +328,7 @@
             "null"
           ],
           "format": "uint8",
-          "maximum": 255,
+          "maximum": 4,
           "minimum": 0
         },
         "animated_cover_lossless": {
@@ -338,6 +343,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "animated_cover_max_width": {
@@ -346,6 +352,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "animated_cover_quality": {
@@ -354,7 +361,7 @@
             "null"
           ],
           "format": "uint8",
-          "maximum": 255,
+          "maximum": 100,
           "minimum": 0
         },
         "animated_covers": {
@@ -379,6 +386,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "details_sidecar": {
@@ -411,6 +419,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "naming_template": {
@@ -432,6 +441,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "stem_format": {
@@ -489,7 +499,7 @@
             "null"
           ],
           "format": "uint8",
-          "maximum": 255,
+          "maximum": 4,
           "minimum": 0
         },
         "animated_cover_lossless": {
@@ -504,6 +514,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "animated_cover_max_width": {
@@ -512,6 +523,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "animated_cover_quality": {
@@ -520,7 +532,7 @@
             "null"
           ],
           "format": "uint8",
-          "maximum": 255,
+          "maximum": 100,
           "minimum": 0
         },
         "animated_covers": {
@@ -545,6 +557,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "details_sidecar": {
@@ -577,6 +590,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "naming_template": {
@@ -598,6 +612,7 @@
             "null"
           ],
           "format": "uint32",
+          "maximum": 4294967295,
           "minimum": 0
         },
         "stem_format": {

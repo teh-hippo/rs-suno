@@ -43,4 +43,35 @@ mod tests {
              `UPDATE_SCHEMA=1 cargo test -p suno-core --features schema checked_in_schema_is_current`"
         );
     }
+
+    #[test]
+    fn schema_numeric_ranges_match_the_resolver() {
+        // cfg-1 / cfg-2: the schema must not advertise values the resolver
+        // rejects. `animated_cover_quality` resolves to 0..=100 and
+        // `animated_cover_compression_level` to 0..=4, and every `u32` knob is
+        // capped at `u32::MAX` (matching the from_toml overflow boundary). The
+        // three flattened tiers must all agree.
+        let schema: serde_json::Value = serde_json::from_str(&config_schema_json()).unwrap();
+        for tier in ["Defaults", "AccountConfig", "SourceConfig"] {
+            let props = &schema["$defs"][tier]["properties"];
+            assert_eq!(props["animated_cover_quality"]["maximum"], 100, "{tier}");
+            assert_eq!(
+                props["animated_cover_compression_level"]["maximum"], 4,
+                "{tier}"
+            );
+            for u32_knob in [
+                "concurrency",
+                "retries",
+                "min_newest",
+                "animated_cover_max_fps",
+                "animated_cover_max_width",
+            ] {
+                assert_eq!(
+                    props[u32_knob]["maximum"],
+                    u64::from(u32::MAX),
+                    "{tier}.{u32_knob}"
+                );
+            }
+        }
+    }
 }
