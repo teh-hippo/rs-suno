@@ -1,6 +1,6 @@
 //! JSON Schema generation for the config file (feature `schema`).
 //!
-//! Emits a JSON Schema (schemars 0.9, draft 2020-12, which Taplo/Even Better
+//! Emits a JSON Schema (schemars 1, draft 2020-12, which Taplo/Even Better
 //! TOML validates) for [`Config`], published to GitHub Pages and referenced by
 //! the `#:schema` header directive so editors validate and autocomplete
 //! `config.toml`. Kept behind the optional `schema` feature so the shipped

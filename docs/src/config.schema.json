@@ -19,25 +19,15 @@
       "description": "Configuration for a single named account.",
       "type": "object",
       "properties": {
-        "format": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/AudioFormat"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "account_id": {
-          "description": "Optional Suno user id to assert this account authenticates as, refusing\n to run on a mismatch (a belt-and-braces check alongside the on-disk\n owner pin in the lineage store).",
+          "description": "Optional Suno user id to assert this account authenticates as, refusing\nto run on a mismatch (a belt-and-braces check alongside the on-disk\nowner pin in the lineage store).",
           "type": [
             "string",
             "null"
           ]
         },
         "albums": {
-          "description": "Manual album-name overrides, keyed by the album's stable lineage root id\n (`<root_id> = \"Preferred Name\"`). Account-wide, never per-source, since\n album identity is the lineage root. An empty or whitespace-only value is\n ignored, so a stray key cannot blank an album.",
+          "description": "Manual album-name overrides, keyed by the album's stable lineage root id\n(`<root_id> = \"Preferred Name\"`). Account-wide, never per-source, since\nalbum identity is the lineage root. An empty or whitespace-only value is\nignored, so a stray key cannot blank an album.",
           "type": "object",
           "additionalProperties": {
             "type": "string"
@@ -93,7 +83,7 @@
           ]
         },
         "areas": {
-          "description": "Per-area mode selection (`sync` vs `copy`) for this account's library,\n liked feed, and playlists. Absent means the classic single-verb run.",
+          "description": "Per-area mode selection (`sync` vs `copy`) for this account's library,\nliked feed, and playlists. Absent means the classic single-verb run.",
           "anyOf": [
             {
               "$ref": "#/$defs/AreasConfig"
@@ -134,8 +124,18 @@
             "null"
           ]
         },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "lead_tracks": {
-          "description": "Clip ids (or unique id prefixes, e.g. the 8-char code from a filename)\n flagged as their lineage album's lead: each is promoted to track 1,\n shifting the rest down. Account-wide; a clip's album is inferred from its\n resolved root, so the album is never named here.",
+          "description": "Clip ids (or unique id prefixes, e.g. the 8-char code from a filename)\nflagged as their lineage album's lead: each is promoted to track 1,\nshifting the rest down. Account-wide; a clip's album is inferred from its\nresolved root, so the album is never named here.",
           "type": "array",
           "default": [],
           "items": {
@@ -170,7 +170,7 @@
           ]
         },
         "number_singletons": {
-          "description": "Whether a single-track (lone) lineage album is given a track number. When\n unset it defaults to `true`; `false` leaves singletons unnumbered so a\n `{track2}` prefix does not decorate a standalone song.",
+          "description": "Whether a single-track (lone) lineage album is given a track number. When\nunset it defaults to `true`; `false` leaves singletons unnumbered so a\n`{track2}` prefix does not decorate a standalone song.",
           "type": [
             "boolean",
             "null"
@@ -214,7 +214,7 @@
           ]
         },
         "token_command": {
-          "description": "The command whose stdout mints a token. Resolved from the\n `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\n deliberately no `--token-command` flag, so it is never read from\n [`FlagOverrides`]; set it in config or the environment.",
+          "description": "The command whose stdout mints a token. Resolved from the\n`SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\ndeliberately no `--token-command` flag, so it is never read from\n[`FlagOverrides`]; set it in config or the environment.",
           "type": [
             "string",
             "null"
@@ -248,7 +248,7 @@
       ]
     },
     "AreasConfig": {
-      "description": "Per-area mode selection for an account.\n\n `library` accepts `off`/`copy`/`mirror`; `liked` and `playlists` accept\n `copy`/`mirror`; `playlist` overrides individual playlists by Suno id.\n `deny_unknown_fields` turns a mistyped key into a parse error rather than a\n silent no-op; the `playlist` map's dynamic ids can't use it, but its closed\n [`SourceMode`] values still reject a bad mode at parse time.",
+      "description": "Per-area mode selection for an account.\n\n`library` accepts `off`/`copy`/`mirror`; `liked` and `playlists` accept\n`copy`/`mirror`; `playlist` overrides individual playlists by Suno id.\n`deny_unknown_fields` turns a mistyped key into a parse error rather than a\nsilent no-op; the `playlist` map's dynamic ids can't use it, but its closed\n[`SourceMode`] values still reject a bad mode at parse time.",
       "type": "object",
       "properties": {
         "library": {
@@ -312,16 +312,6 @@
       "description": "Global default settings applied when no account or source override applies.",
       "type": "object",
       "properties": {
-        "format": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/AudioFormat"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "animated_cover_compression_level": {
           "type": [
             "integer",
@@ -401,6 +391,16 @@
             "null"
           ]
         },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "lrc_sidecar": {
           "type": [
             "boolean",
@@ -429,7 +429,7 @@
           ]
         },
         "number_singletons": {
-          "description": "Whether a single-track (lone) lineage album is given a track number. When\n unset it defaults to `true`; `false` leaves singletons unnumbered so a\n `{track2}` prefix does not decorate a standalone song.",
+          "description": "Whether a single-track (lone) lineage album is given a track number. When\nunset it defaults to `true`; `false` leaves singletons unnumbered so a\n`{track2}` prefix does not decorate a standalone song.",
           "type": [
             "boolean",
             "null"
@@ -455,7 +455,7 @@
           ]
         },
         "token_command": {
-          "description": "The command whose stdout mints a token. Resolved from the\n `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\n deliberately no `--token-command` flag, so it is never read from\n [`FlagOverrides`]; set it in config or the environment.",
+          "description": "The command whose stdout mints a token. Resolved from the\n`SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\ndeliberately no `--token-command` flag, so it is never read from\n[`FlagOverrides`]; set it in config or the environment.",
           "type": [
             "string",
             "null"
@@ -483,16 +483,6 @@
       "description": "Per-source overridable settings within an account.",
       "type": "object",
       "properties": {
-        "format": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/AudioFormat"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "animated_cover_compression_level": {
           "type": [
             "integer",
@@ -572,6 +562,16 @@
             "null"
           ]
         },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "lrc_sidecar": {
           "type": [
             "boolean",
@@ -600,7 +600,7 @@
           ]
         },
         "number_singletons": {
-          "description": "Whether a single-track (lone) lineage album is given a track number. When\n unset it defaults to `true`; `false` leaves singletons unnumbered so a\n `{track2}` prefix does not decorate a standalone song.",
+          "description": "Whether a single-track (lone) lineage album is given a track number. When\nunset it defaults to `true`; `false` leaves singletons unnumbered so a\n`{track2}` prefix does not decorate a standalone song.",
           "type": [
             "boolean",
             "null"
@@ -626,7 +626,7 @@
           ]
         },
         "token_command": {
-          "description": "The command whose stdout mints a token. Resolved from the\n `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\n deliberately no `--token-command` flag, so it is never read from\n [`FlagOverrides`]; set it in config or the environment.",
+          "description": "The command whose stdout mints a token. Resolved from the\n`SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\ndeliberately no `--token-command` flag, so it is never read from\n[`FlagOverrides`]; set it in config or the environment.",
           "type": [
             "string",
             "null"
@@ -666,7 +666,7 @@
       ]
     },
     "StemFormat": {
-      "description": "Container format for a downloaded stem.\n\n Stems are stored RAW in their native container and are never transcoded, so\n unlike [`AudioFormat`] there is no lossless-from-lossy render: WAV comes\n straight from Suno's free `convert_wav` endpoint and MP3 straight from the\n public CDN. FLAC is deliberately unrepresentable — a stem is never\n re-encoded to FLAC, even when the song's own format is FLAC.",
+      "description": "Container format for a downloaded stem.\n\nStems are stored RAW in their native container and are never transcoded, so\nunlike [`AudioFormat`] there is no lossless-from-lossy render: WAV comes\nstraight from Suno's free `convert_wav` endpoint and MP3 straight from the\npublic CDN. FLAC is deliberately unrepresentable — a stem is never\nre-encoded to FLAC, even when the song's own format is FLAC.",
       "oneOf": [
         {
           "description": "Lossless WAV via the free `convert_wav` render, stored as delivered.",
