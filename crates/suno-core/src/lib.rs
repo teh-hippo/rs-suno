@@ -4,6 +4,8 @@
 //! [`Http`] port, which a CLI adapter implements, so the engine stays testable
 //! in isolation.
 
+#![forbid(unsafe_code)]
+
 mod album_art;
 mod area;
 mod auth;
