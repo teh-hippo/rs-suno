@@ -17,7 +17,7 @@ mod stem;
 mod wav;
 
 pub(crate) use billing::parse_billing_info;
-pub(crate) use clip::{parse_clip, parse_songs_batch};
+pub(crate) use clip::{map_clip, parse_clip, parse_songs_batch};
 pub(crate) use feed::{feed_v3_body, parse_feed_v3};
 pub(crate) use lyrics::parse_aligned_lyrics;
 pub(crate) use playlist::{parse_playlist_clips, parse_playlists};

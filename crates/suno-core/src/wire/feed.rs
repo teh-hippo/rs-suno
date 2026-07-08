@@ -7,6 +7,8 @@ use crate::error::{Error, Result};
 use crate::is_downloadable;
 use crate::model::Clip;
 
+use super::map_clip;
+
 /// Build the JSON body for a `POST /api/feed/v3` page.
 ///
 /// `filters.trashed` is the string `"False"` so the feed excludes trashed clips;
@@ -60,7 +62,7 @@ pub(crate) fn parse_feed_v3(body: &[u8]) -> Result<FeedPage> {
     let clips: Vec<Clip> = raw
         .map(|raw| {
             raw.iter()
-                .map(Clip::from_json)
+                .map(map_clip)
                 .filter(is_downloadable)
                 .filter(|clip| !clip.id.is_empty())
                 .collect()

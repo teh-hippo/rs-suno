@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::model::{Clip, Playlist};
 
 use super::clip::unwrap_clip;
+use super::map_clip;
 
 /// Parse a `/api/playlist/me` page into playlists, dropping entries with no id.
 pub(crate) fn parse_playlists(body: &[u8]) -> Result<Vec<Playlist>> {
@@ -68,7 +69,7 @@ pub(crate) fn parse_playlist_clips(body: &[u8]) -> Result<(Vec<Clip>, bool)> {
     let clips: Vec<Clip> = raw
         .map(|raw| {
             raw.iter()
-                .map(|entry| Clip::from_json(unwrap_clip(entry)))
+                .map(|entry| map_clip(unwrap_clip(entry)))
                 .filter(|clip| !clip.id.is_empty())
                 .collect()
         })
