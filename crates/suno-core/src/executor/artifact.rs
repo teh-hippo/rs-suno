@@ -346,9 +346,13 @@ where
         path: &str,
         owner_id: &str,
     ) -> Result<Effect, Fail> {
-        self.fs
-            .remove(path)
-            .map_err(|err| permanent_fail(owner_id, format!("artifact delete failed: {err}")))?;
+        self.fs.remove(path).map_err(|err| {
+            if err.is_out_of_space() {
+                disk_fail(owner_id, "disk full: no space left to remove artifact")
+            } else {
+                permanent_fail(owner_id, format!("artifact delete failed: {err}"))
+            }
+        })?;
         if is_album_kind(kind) {
             set_album_artifact(albums, owner_id, kind, None);
         } else if is_playlist_kind(kind) {

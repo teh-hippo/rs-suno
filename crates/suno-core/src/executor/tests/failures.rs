@@ -413,6 +413,68 @@ fn disk_full_leaves_the_failed_clips_manifest_entry_unchanged() {
 }
 
 #[test]
+fn disk_full_unlink_aborts_the_run_before_a_later_delete() {
+    // A full disk striking an *unlink* is systemic, exactly like a full-disk
+    // write or transcode: removing the superseded old file during a reformat
+    // fails with out-of-space, so the run aborts (DiskFull) rather than
+    // skipping this one clip and proceeding to delete later ones. Ordering the
+    // reformat before the orphan delete proves the abort stops the loop: the
+    // orphan's file and manifest entry must survive untouched.
+    let r = clip("r");
+    let d = desired(r.clone(), AudioFormat::Mp3);
+    let plan = Plan {
+        actions: vec![
+            Action::Reformat {
+                clip: r.clone(),
+                path: "r.mp3".to_owned(),
+                from_path: "r.flac".to_owned(),
+                from: AudioFormat::Flac,
+                to: AudioFormat::Mp3,
+            },
+            Action::Delete {
+                path: "z.mp3".to_owned(),
+                clip_id: "z".to_owned(),
+            },
+        ],
+    };
+    let http = ScriptedHttp::new().route("r.mp3", Reply::ok(b"reformatted".to_vec()));
+    // The reformat's new file writes fine; only the old-file unlink is full.
+    let fs = MemFs::new()
+        .with_file("r.flac", b"OLD-FLAC".to_vec())
+        .with_file("z.mp3", b"ORPHAN".to_vec())
+        .fail_remove_out_of_space("r.flac");
+    let mut manifest = Manifest::new();
+    let r_before = entry("r.flac", AudioFormat::Flac);
+    manifest.insert("r", r_before.clone());
+    manifest.insert("z", entry("z.mp3", AudioFormat::Mp3));
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d],
+        &http,
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &ExecOptions::default(),
+    );
+
+    assert_eq!(outcome.status, RunStatus::DiskFull);
+    assert_eq!(outcome.reformatted, 0);
+    assert_eq!(outcome.deleted, 0);
+    assert_eq!(outcome.failed(), 1);
+    assert_eq!(outcome.failures[0].clip_id, "r");
+    assert!(outcome.failures[0].reason.contains("disk full"));
+    // The failing action's old file stays and its manifest entry is unmutated:
+    // the unlink precedes the manifest insert, so nothing was recorded.
+    assert!(fs.exists("r.flac"));
+    assert_eq!(manifest.get("r"), Some(&r_before));
+    // The later orphan delete never ran: the run aborted at the unlink.
+    assert!(fs.exists("z.mp3"));
+    assert!(manifest.get("z").is_some());
+}
+
+#[test]
 fn cdn_download_rejection_skips_the_clip_without_aborting() {
     let c1 = clip("k1");
     let c2 = clip("k2");

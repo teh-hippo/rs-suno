@@ -254,6 +254,7 @@ pub(crate) struct MemFs {
     fail_renames_oos: Mutex<HashSet<String>>,
     corrupt_writes: Mutex<HashSet<String>>,
     fail_removes: Mutex<HashSet<String>>,
+    fail_removes_oos: Mutex<HashSet<String>>,
 }
 
 impl MemFs {
@@ -266,6 +267,7 @@ impl MemFs {
             fail_renames_oos: Mutex::new(HashSet::new()),
             corrupt_writes: Mutex::new(HashSet::new()),
             fail_removes: Mutex::new(HashSet::new()),
+            fail_removes_oos: Mutex::new(HashSet::new()),
         }
     }
 
@@ -316,6 +318,17 @@ impl MemFs {
     /// Make `remove` of `path` fail.
     pub(crate) fn fail_remove(self, path: &str) -> Self {
         self.fail_removes.lock().unwrap().insert(path.to_owned());
+        self
+    }
+
+    /// Make `remove` of `path` fail with an out-of-space [`FsError`], so the
+    /// executor classifies the unlink as a disk-full run abort (not a per-clip
+    /// skip). Models ENOSPC striking a delete/supersede rather than a write.
+    pub(crate) fn fail_remove_out_of_space(self, path: &str) -> Self {
+        self.fail_removes_oos
+            .lock()
+            .unwrap()
+            .insert(path.to_owned());
         self
     }
 
@@ -418,6 +431,11 @@ impl Filesystem for MemFs {
     }
 
     fn remove(&self, path: &str) -> Result<(), FsError> {
+        if self.fail_removes_oos.lock().unwrap().contains(path) {
+            return Err(FsError::out_of_space(format!(
+                "simulated out-of-space remove: {path}"
+            )));
+        }
         if self.fail_removes.lock().unwrap().contains(path) {
             return Err(FsError::new(format!("simulated remove failure: {path}")));
         }

@@ -880,9 +880,16 @@ where
 
     /// Remove the file and drop the manifest entry.
     fn delete(&self, manifest: &mut Manifest, path: &str, clip_id: &str) -> Result<Effect, Fail> {
-        self.fs
-            .remove(path)
-            .map_err(|err| permanent_fail(clip_id, format!("delete failed: {err}")))?;
+        self.fs.remove(path).map_err(|err| {
+            if err.is_out_of_space() {
+                disk_fail(
+                    clip_id,
+                    format!("disk full: no space left to remove {path}"),
+                )
+            } else {
+                permanent_fail(clip_id, format!("delete failed: {err}"))
+            }
+        })?;
         manifest.remove(clip_id);
         Ok(Effect::Deleted)
     }
