@@ -8,6 +8,7 @@ mod album_art;
 mod area;
 mod auth;
 mod backoff;
+mod civil;
 mod client;
 mod clock;
 pub mod config;
@@ -54,6 +55,7 @@ pub use area::{
     union_clips,
 };
 pub use auth::{ClerkAuth, TOKEN_EXPIRY_WARN_DAYS, TokenExpiry, classify_token_expiry};
+pub use civil::days_to_civil;
 pub use client::SunoClient;
 pub use clock::Clock;
 pub use config::{

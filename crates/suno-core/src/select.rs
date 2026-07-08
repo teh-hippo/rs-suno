@@ -158,22 +158,8 @@ fn parse_timestamp(s: &str) -> Option<u64> {
     let hour: u64 = tp.next()?.parse().ok()?;
     let minute: u64 = tp.next()?.parse().ok()?;
     let second: u64 = tp.next()?.parse().ok()?;
-    let days = civil_to_days(year, month, day)?;
+    let days = crate::civil::civil_to_days(year, month, day)?;
     Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
-}
-
-/// Convert a Gregorian calendar date to days since the Unix epoch (1970-01-01).
-///
-/// Uses Howard Hinnant's civil-to-days algorithm.
-fn civil_to_days(y: u32, m: u32, d: u32) -> Option<u64> {
-    let (y, m, d) = (y as i64, m as i64, d as i64);
-    let ya = if m <= 2 { y - 1 } else { y };
-    let era = ya.div_euclid(400);
-    let yoe = ya - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    u64::try_from(days).ok()
 }
 
 #[cfg(test)]
