@@ -1,0 +1,681 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Config",
+  "description": "Top-level configuration parsed from a TOML file.",
+  "type": "object",
+  "properties": {
+    "accounts": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/AccountConfig"
+      }
+    },
+    "defaults": {
+      "$ref": "#/definitions/Defaults"
+    }
+  },
+  "definitions": {
+    "AccountConfig": {
+      "description": "Configuration for a single named account.",
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "description": "Optional Suno user id to assert this account authenticates as, refusing to run on a mismatch (a belt-and-braces check alongside the on-disk owner pin in the lineage store).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "albums": {
+          "description": "Manual album-name overrides, keyed by the album's stable lineage root id (`<root_id> = \"Preferred Name\"`). Account-wide, never per-source, since album identity is the lineage root. An empty or whitespace-only value is ignored, so a stray key cannot blank an album.",
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "animated_cover_compression_level": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "animated_cover_lossless": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "animated_cover_max_fps": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "animated_cover_max_width": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "animated_cover_quality": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "animated_covers": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "areas": {
+          "description": "Per-area mode selection (`sync` vs `copy`) for this account's library, liked feed, and playlists. Absent means the classic single-verb run.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AreasConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "character_set": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CharacterSet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "details_sidecar": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "download_stems": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AudioFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lead_tracks": {
+          "description": "Clip ids (or unique id prefixes, e.g. the 8-char code from a filename) flagged as their lineage album's lead: each is promoted to track 1, shifting the rest down. Account-wide; a clip's album is inferred from its resolved root, so the album is never named here.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "lrc_sidecar": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "lyrics_sidecar": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "min_newest": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "naming_template": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "number_singletons": {
+          "description": "Whether a single-track (lone) lineage album is given a track number. When unset it defaults to `true`; `false` leaves singletons unnumbered so a `{track2}` prefix does not decorate a standalone song.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sources": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/SourceConfig"
+          }
+        },
+        "stem_format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StemFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_command": {
+          "description": "The command whose stdout mints a token. Resolved from the `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is deliberately no `--token-command` flag, so it is never read from [`FlagOverrides`]; set it in config or the environment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "video_cover_retention": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/VideoCoverRetention"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "video_mp4": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "AreaMode": {
+      "description": "Deletion mode for the library area: 'off' arms deletion of library-exclusive files, 'copy' is additive, 'mirror' deletes.",
+      "type": "string",
+      "enum": [
+        "off",
+        "copy",
+        "mirror"
+      ]
+    },
+    "AreasConfig": {
+      "description": "Per-area mode selection for an account.\n\n`library` accepts `off`/`copy`/`mirror`; `liked` and `playlists` accept `copy`/`mirror`; `playlist` overrides individual playlists by Suno id. `deny_unknown_fields` turns a mistyped key into a parse error rather than a silent no-op; the `playlist` map's dynamic ids can't use it, but its closed [`SourceMode`] values still reject a bad mode at parse time.",
+      "type": "object",
+      "properties": {
+        "library": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AreaMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "liked": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SourceMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "playlist": {
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/SourceMode"
+          }
+        },
+        "playlists": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SourceMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "AudioFormat": {
+      "description": "Audio format for downloaded clips.",
+      "type": "string",
+      "enum": [
+        "mp3",
+        "flac",
+        "wav",
+        "alac"
+      ]
+    },
+    "CharacterSet": {
+      "type": "string",
+      "enum": [
+        "unicode",
+        "ascii"
+      ]
+    },
+    "Defaults": {
+      "description": "Global default settings applied when no account or source override applies.",
+      "type": "object",
+      "properties": {
+        "animated_cover_compression_level": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "animated_cover_lossless": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "animated_cover_max_fps": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "animated_cover_max_width": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "animated_cover_quality": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "animated_covers": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "character_set": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CharacterSet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "details_sidecar": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "download_stems": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AudioFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lrc_sidecar": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "lyrics_sidecar": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "min_newest": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "naming_template": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "number_singletons": {
+          "description": "Whether a single-track (lone) lineage album is given a track number. When unset it defaults to `true`; `false` leaves singletons unnumbered so a `{track2}` prefix does not decorate a standalone song.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "stem_format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StemFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "token_command": {
+          "description": "The command whose stdout mints a token. Resolved from the `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is deliberately no `--token-command` flag, so it is never read from [`FlagOverrides`]; set it in config or the environment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "video_cover_retention": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/VideoCoverRetention"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "video_mp4": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "SourceConfig": {
+      "description": "Per-source overridable settings within an account.",
+      "type": "object",
+      "properties": {
+        "animated_cover_compression_level": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "animated_cover_lossless": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "animated_cover_max_fps": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "animated_cover_max_width": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "animated_cover_quality": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "animated_covers": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "character_set": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CharacterSet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "details_sidecar": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "download_stems": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AudioFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lrc_sidecar": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "lyrics_sidecar": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "min_newest": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "naming_template": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "number_singletons": {
+          "description": "Whether a single-track (lone) lineage album is given a track number. When unset it defaults to `true`; `false` leaves singletons unnumbered so a `{track2}` prefix does not decorate a standalone song.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "retries": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "stem_format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StemFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "token_command": {
+          "description": "The command whose stdout mints a token. Resolved from the `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is deliberately no `--token-command` flag, so it is never read from [`FlagOverrides`]; set it in config or the environment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "video_cover_retention": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/VideoCoverRetention"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "video_mp4": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "SourceMode": {
+      "description": "How a selected source treats its clips: mirror with deletion, or additive copy.",
+      "oneOf": [
+        {
+          "description": "Mirror the source, deleting local files that leave it (rclone `sync`).",
+          "type": "string",
+          "enum": [
+            "mirror"
+          ]
+        },
+        {
+          "description": "Copy additively; never delete (rclone `copy`).",
+          "type": "string",
+          "enum": [
+            "copy"
+          ]
+        }
+      ]
+    },
+    "StemFormat": {
+      "description": "Container format for a downloaded stem.\n\nStems are stored RAW in their native container and are never transcoded, so unlike [`AudioFormat`] there is no lossless-from-lossy render: WAV comes straight from Suno's free `convert_wav` endpoint and MP3 straight from the public CDN. FLAC is deliberately unrepresentable — a stem is never re-encoded to FLAC, even when the song's own format is FLAC.",
+      "oneOf": [
+        {
+          "description": "Lossless WAV via the free `convert_wav` render, stored as delivered.",
+          "type": "string",
+          "enum": [
+            "wav"
+          ]
+        },
+        {
+          "description": "The public CDN MP3, stored as delivered.",
+          "type": "string",
+          "enum": [
+            "mp3"
+          ]
+        }
+      ]
+    },
+    "VideoCoverRetention": {
+      "description": "Which video-cover artifacts to retain.",
+      "type": "string",
+      "enum": [
+        "neither",
+        "webp",
+        "mp4",
+        "both"
+      ]
+    }
+  }
+}

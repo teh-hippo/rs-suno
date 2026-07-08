@@ -20,6 +20,7 @@ use super::label_to_env;
 /// [`AccountConfig`], [`SourceConfig`], and the CLI [`FlagOverrides`]) gains it,
 /// rather than being mirrored where forgetting one would silently drop it.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Settings {
     pub format: Option<AudioFormat>,
     pub concurrency: Option<u32>,
@@ -53,6 +54,7 @@ pub struct Settings {
 
 /// Global default settings applied when no account or source override applies.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Defaults {
     #[serde(flatten)]
     pub settings: Settings,
@@ -60,6 +62,7 @@ pub struct Defaults {
 
 /// Per-source overridable settings within an account.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SourceConfig {
     #[serde(flatten)]
     pub settings: Settings,
@@ -67,6 +70,7 @@ pub struct SourceConfig {
 
 /// Configuration for a single named account.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AccountConfig {
     pub token: Option<String>,
     pub root: Option<String>,
@@ -126,6 +130,34 @@ impl<'de> Deserialize<'de> for AreaMode {
     }
 }
 
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for AreaMode {
+    fn schema_name() -> String {
+        "AreaMode".to_owned()
+    }
+
+    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        let values = ["off", "copy", "mirror"]
+            .into_iter()
+            .map(|s| serde_json::Value::String(s.to_owned()))
+            .collect();
+        schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            enum_values: Some(values),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "Deletion mode for the library area: 'off' arms deletion of \
+                     library-exclusive files, 'copy' is additive, 'mirror' deletes."
+                        .to_owned(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .into()
+    }
+}
+
 /// Per-area mode selection for an account.
 ///
 /// `library` accepts `off`/`copy`/`mirror`; `liked` and `playlists` accept
@@ -134,6 +166,7 @@ impl<'de> Deserialize<'de> for AreaMode {
 /// silent no-op; the `playlist` map's dynamic ids can't use it, but its closed
 /// [`SourceMode`] values still reject a bad mode at parse time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AreasConfig {
     pub library: Option<AreaMode>,
@@ -145,6 +178,7 @@ pub struct AreasConfig {
 
 /// Top-level configuration parsed from a TOML file.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,

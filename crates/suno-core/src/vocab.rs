@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 
 /// How a selected source treats its clips: mirror with deletion, or additive copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum SourceMode {
     /// Mirror the source, deleting local files that leave it (rclone `sync`).
@@ -68,6 +69,7 @@ pub enum ArtifactKind {
 
 /// Audio format for downloaded clips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum AudioFormat {
     Mp3,
@@ -132,6 +134,7 @@ impl fmt::Display for AudioFormat {
 /// public CDN. FLAC is deliberately unrepresentable — a stem is never
 /// re-encoded to FLAC, even when the song's own format is FLAC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum StemFormat {
     /// Lossless WAV via the free `convert_wav` render, stored as delivered.
@@ -174,6 +177,7 @@ impl fmt::Display for StemFormat {
 
 /// Which video-cover artifacts to retain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum VideoCoverRetention {
     #[default]

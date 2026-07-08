@@ -12,10 +12,15 @@ mod effective;
 mod resolve;
 mod shape;
 
+#[cfg(feature = "schema")]
+mod schema;
+
 #[cfg(test)]
 mod fixtures;
 
 pub use effective::{EffectiveSettings, FlagOverrides};
+#[cfg(feature = "schema")]
+pub use schema::config_schema_json;
 pub use shape::{AccountConfig, AreaMode, AreasConfig, Config, Defaults, Settings, SourceConfig};
 
 /// Convert an account label to its environment variable prefix, mirroring the
