@@ -1,4 +1,5 @@
 use super::*;
+use crate::lyrics::{AlignedLine, AlignedLineWord};
 
 #[test]
 fn download_mp3_writes_tagged_file_and_records_manifest() {
@@ -72,16 +73,27 @@ fn download_mp3_embeds_sylt_and_lyrics_from_synced_map() {
     let mut synced = HashMap::new();
     synced.insert(
         "a".to_string(),
-        AlignedLyrics::from_json(&serde_json::json!({
-            "aligned_words": [],
-            "aligned_lyrics": [
-                {"text": "hi there", "start_s": 0.5, "end_s": 1.2, "section": "Verse 1",
-                 "words": [
-                     {"text": "hi", "start_s": 0.5, "end_s": 0.8},
-                     {"text": "there", "start_s": 0.9, "end_s": 1.2}
-                 ]}
-            ]
-        })),
+        AlignedLyrics {
+            lines: vec![AlignedLine {
+                text: "hi there".to_owned(),
+                start_s: 0.5,
+                end_s: 1.2,
+                section: "Verse 1".to_owned(),
+                words: vec![
+                    AlignedLineWord {
+                        text: "hi".to_owned(),
+                        start_s: 0.5,
+                        end_s: 0.8,
+                    },
+                    AlignedLineWord {
+                        text: "there".to_owned(),
+                        start_s: 0.9,
+                        end_s: 1.2,
+                    },
+                ],
+            }],
+            ..Default::default()
+        },
     );
     let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
     let outcome = pollster::block_on(execute(

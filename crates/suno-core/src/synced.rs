@@ -231,6 +231,7 @@ pub fn preview_synced_lrc(
 mod tests {
     use super::*;
     use crate::lineage::LineageContext;
+    use crate::lyrics::{AlignedLine, AlignedLineWord};
     use crate::manifest::{ArtifactState, SyncedLyricsCheck};
     use crate::model::Clip;
     use crate::reconcile::DesiredArtifact;
@@ -274,16 +275,27 @@ mod tests {
     }
 
     fn one_line_alignment() -> AlignedLyrics {
-        AlignedLyrics::from_json(&serde_json::json!({
-            "aligned_words": [],
-            "aligned_lyrics": [
-                {"text": "hi there", "start_s": 0.5, "end_s": 1.2, "section": "Verse 1",
-                 "words": [
-                     {"text": "hi", "start_s": 0.5, "end_s": 0.8},
-                     {"text": "there", "start_s": 0.9, "end_s": 1.2}
-                 ]}
-            ]
-        }))
+        AlignedLyrics {
+            lines: vec![AlignedLine {
+                text: "hi there".to_owned(),
+                start_s: 0.5,
+                end_s: 1.2,
+                section: "Verse 1".to_owned(),
+                words: vec![
+                    AlignedLineWord {
+                        text: "hi".to_owned(),
+                        start_s: 0.5,
+                        end_s: 0.8,
+                    },
+                    AlignedLineWord {
+                        text: "there".to_owned(),
+                        start_s: 0.9,
+                        end_s: 1.2,
+                    },
+                ],
+            }],
+            ..Default::default()
+        }
     }
 
     fn entry(lrc: Option<ArtifactState>, check: Option<SyncedLyricsCheck>) -> ManifestEntry {
