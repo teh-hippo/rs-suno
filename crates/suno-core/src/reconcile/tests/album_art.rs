@@ -1,6 +1,7 @@
 use super::*;
 use crate::desired::album_desired;
 use crate::hash::{art_url_hash, webp_art_hash};
+use crate::reconcile::album::delete_album_artifact_action;
 use crate::vocab::WebpEncodeSettings;
 
 #[test]
