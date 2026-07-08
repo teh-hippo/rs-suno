@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.36.5](https://github.com/teh-hippo/rs-suno/compare/v0.36.4...v0.36.5) (2026-07-08)
+
+
+### Bug Fixes
+
+* **config:** make env enum parsing case-sensitive to match the schema ([4b17c75](https://github.com/teh-hippo/rs-suno/commit/4b17c758f28016dd8f2c5161db936600a4ac985c))
+* **config:** normalise account roots before the nesting check ([df42cdf](https://github.com/teh-hippo/rs-suno/commit/df42cdfde09c871af45f2381a0ecea5343892648))
+* **config:** reject an empty naming template ([678636f](https://github.com/teh-hippo/rs-suno/commit/678636f6b166ee6861974e6f52c4cff9e0dd75af))
+* **config:** reject unknown settings keys ([8fe3f4e](https://github.com/teh-hippo/rs-suno/commit/8fe3f4ef7646122cbd3b0f2b005f935eca7749c1))
+* **config:** tighten generated schema ranges to the resolver ([6a1a72b](https://github.com/teh-hippo/rs-suno/commit/6a1a72beb949816143a496fdcdecfeb74c43cada))
+
 ## [0.36.4](https://github.com/teh-hippo/rs-suno/compare/v0.36.3...v0.36.4) (2026-07-08)
 
 
