@@ -1,4 +1,5 @@
 use super::*;
+use crate::reconcile::playlist::delete_playlist_artifact_action;
 
 #[test]
 fn playlist_missing_on_disk_forces_rewrite() {
