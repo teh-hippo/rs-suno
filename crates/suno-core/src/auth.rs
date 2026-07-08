@@ -72,7 +72,7 @@ pub fn classify_token_expiry(exp: i64, now_unix: i64, window_secs: i64) -> Token
     if exp <= now_unix {
         return TokenExpiry::Expired;
     }
-    let remaining = exp - now_unix;
+    let remaining = exp.saturating_sub(now_unix);
     if remaining < window_secs {
         const DAY_SECS: i64 = 86_400;
         return TokenExpiry::Expiring {
@@ -390,6 +390,21 @@ mod tests {
         assert_eq!(
             classify_token_expiry(now + 43_200, now, window),
             TokenExpiry::Expiring { days: 1 }
+        );
+    }
+
+    #[test]
+    fn classify_saturates_on_extreme_bounds_without_panicking() {
+        // `exp - now_unix` would overflow i64 (a debug panic) for these bounds;
+        // the saturating subtraction must keep this public fn total. Unreachable
+        // via the real positive clock, but the fn is public API.
+        assert_eq!(
+            classify_token_expiry(i64::MAX, i64::MIN, i64::MAX),
+            TokenExpiry::Fresh
+        );
+        assert_eq!(
+            classify_token_expiry(i64::MAX, -1, i64::MAX),
+            TokenExpiry::Fresh
         );
     }
 
