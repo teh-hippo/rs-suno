@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.3](https://github.com/teh-hippo/rs-suno/compare/v0.36.2...v0.36.3) (2026-07-08)
+
+
+### Bug Fixes
+
+* pin line endings to LF to keep the Windows CI leg green ([3181d26](https://github.com/teh-hippo/rs-suno/commit/3181d268f660fb2bb0ae2de6e099644c75cfd720))
+
 ## [0.36.2](https://github.com/teh-hippo/rs-suno/compare/v0.36.1...v0.36.2) (2026-07-08)
 
 
