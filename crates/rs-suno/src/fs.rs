@@ -57,10 +57,10 @@ impl FsAdapter {
     /// [`resolve`](Self::resolve) bars `..`, absolute, and prefix components
     /// lexically, but `std::fs` follows directory symlinks, so on a shared
     /// library a planted link (`ln -s /elsewhere "<root>/Artist"`) could still
-    /// redirect a write, rename, or remove outside the root. The deepest
+    /// redirect a read, write, rename, or remove outside the root. The deepest
     /// existing ancestor of the target is canonicalised (resolving every
-    /// symlink) and must stay within the canonical root before any mutating
-    /// operation runs.
+    /// symlink) and must stay within the canonical root before any read, write,
+    /// rename, or remove runs.
     ///
     /// The root is anchored on its own deepest existing ancestor rather than
     /// required to exist, so a first write into a not-yet-created library still
@@ -151,16 +151,18 @@ impl Filesystem for FsAdapter {
     }
 
     fn read(&self, path: &str) -> Result<Vec<u8>, FsError> {
-        std::fs::read(self.resolve(path)?).map_err(|err| FsError::new(err.to_string()))
+        let full = self.resolve(path)?;
+        self.verify_contained(&full)?;
+        std::fs::read(full).map_err(|err| FsError::new(err.to_string()))
     }
 
     fn metadata(&self, path: &str) -> Option<FileStat> {
-        std::fs::metadata(self.resolve(path).ok()?)
-            .ok()
-            .map(|meta| FileStat {
-                exists: true,
-                size: meta.len(),
-            })
+        let full = self.resolve(path).ok()?;
+        self.verify_contained(&full).ok()?;
+        std::fs::metadata(full).ok().map(|meta| FileStat {
+            exists: true,
+            size: meta.len(),
+        })
     }
 }
 
@@ -397,6 +399,30 @@ mod tests {
 
         assert!(adapter.rename("from.flac", "Artist/to.flac").is_err());
         assert!(!outside.join("to.flac").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn rejects_read_and_metadata_through_a_symlinked_parent() {
+        let root = temp_root();
+        let outside = temp_root();
+        std::fs::create_dir_all(&outside).unwrap();
+        // A secret outside the root that a planted link must never disclose.
+        std::fs::write(outside.join("secret"), b"topsecret").unwrap();
+        let adapter = FsAdapter::new(root.clone());
+        if !try_symlink_dir(
+            &std::fs::canonicalize(&outside).unwrap(),
+            &root.join("Artist"),
+        ) {
+            return;
+        }
+
+        // Neither read nor metadata may follow the link out of the root: read
+        // errors instead of leaking the bytes, and metadata reports absent.
+        assert!(adapter.read("Artist/secret").is_err());
+        assert!(adapter.metadata("Artist/secret").is_none());
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
