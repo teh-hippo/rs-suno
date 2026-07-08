@@ -4,7 +4,7 @@
 //! and [`Config::from_toml`] parses and validates it (no IO).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -249,9 +249,12 @@ impl Config {
 
         for (i, (label_a, root_a)) in roots.iter().enumerate() {
             for (label_b, root_b) in roots.iter().skip(i + 1) {
-                let a = Path::new(root_a);
-                let b = Path::new(root_b);
-                if a.starts_with(b) || b.starts_with(a) {
+                // Compare lexically normalised roots so `./music` and `music`
+                // (the same directory) are not treated as disjoint, which would
+                // punch a cross-account deletion-overlap hole through the guard.
+                let a = normalise_root(root_a);
+                let b = normalise_root(root_b);
+                if a.starts_with(&b) || b.starts_with(&a) {
                     return Err(Error::Config(format!(
                         "account roots nest: '{label_a}' ({root_a}) and '{label_b}' ({root_b})"
                     )));
@@ -350,6 +353,33 @@ fn check_known_keys(
         }
     }
     Ok(())
+}
+
+/// Lexically normalise a configured root for the nesting comparison: strip a
+/// leading `./`, collapse repeated separators, drop a trailing separator, and
+/// resolve `.`/`..` segments purely textually. This never touches the
+/// filesystem (suno-core is IO-free), so it neither follows symlinks nor folds
+/// case. Case-insensitive-filesystem folding (Windows, macOS), where `Music`
+/// and `music` are the same directory, is a genuine FS concern and is
+/// deliberately left as a follow-up.
+fn normalise_root(root: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in Path::new(root).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // Cannot ascend above a root or drive prefix; drop the `..`.
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                // A leading `..` on a relative path is preserved verbatim.
+                _ => out.push(component.as_os_str()),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -661,5 +691,36 @@ mod tests {
             schema_keys, known,
             "SETTINGS_KEYS is out of sync with Settings"
         );
+    }
+
+    // --- cfg-path: roots are lexically normalised before the nesting check. ---
+
+    #[test]
+    fn nested_roots_with_dot_prefix_and_bare_are_rejected() {
+        // `./music` and `music` are the same directory; the raw `starts_with`
+        // guard missed this, leaving a cross-account deletion-overlap hole.
+        let toml = "[accounts.alice]\nroot = \"./music\"\n\n[accounts.bob]\nroot = \"music\"\n";
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn nested_roots_with_trailing_slash_are_rejected() {
+        let toml =
+            "[accounts.alice]\nroot = \"/music/\"\n\n[accounts.bob]\nroot = \"/music/alice\"\n";
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn nested_roots_via_parent_segments_are_rejected() {
+        // `sub/../shared` resolves lexically to `shared`, nesting with `shared`.
+        let toml =
+            "[accounts.alice]\nroot = \"sub/../shared\"\n\n[accounts.bob]\nroot = \"shared\"\n";
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn disjoint_relative_roots_are_accepted() {
+        let toml = "[accounts.alice]\nroot = \"./alice\"\n\n[accounts.bob]\nroot = \"bob\"\n";
+        assert!(Config::from_toml(toml).is_ok());
     }
 }
