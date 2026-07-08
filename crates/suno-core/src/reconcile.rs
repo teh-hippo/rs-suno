@@ -27,8 +27,11 @@
 //! Every `Delete`, whether for a trashed clip or an absent orphan, flows through
 //! one guard ([`delete_action`]): a manifest entry must exist with a non-empty,
 //! non-preserved path, deletion must be allowed for the run, and the clip must
-//! not be copy-held or private in the current selection. A final pass suppresses
-//! any `Delete` whose path collides with a file another action writes this run.
+//! not be copy-held or private in the current selection. Two final passes guard
+//! path collisions: one suppresses any `Delete` whose path a write also targets
+//! this run, and one ([`suppress_target_clobber`]) suppresses any write, rename,
+//! or move that would land on a path another clip's file still holds, so a
+//! rename can never delete a protected file by overwriting it.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -130,6 +133,7 @@ pub fn reconcile(
         }
     }
 
+    suppress_target_clobber(&mut actions, manifest);
     suppress_path_aliasing(&mut actions);
     Plan { actions }
 }
@@ -829,6 +833,100 @@ fn suppress_path_aliasing(actions: &mut [Action]) {
             _ => unreachable!("only delete actions are collected as aliased"),
         };
     }
+}
+
+/// Refuse any write, rename, or move whose destination is a path a *different*
+/// clip's file currently holds, so a run can never destroy a file the deletion
+/// gate protects.
+///
+/// [`plan_desired`] emits a `Rename`/`Download`/`Reformat` (and the artifact and
+/// stem planners a `Move`/`Write`) at each clip's freshly rendered path without
+/// checking that another clip does not already occupy it. A naming collision, a
+/// narrowed-out twin still on disk, or two clips swapping names can therefore
+/// point a replacing write at a kept clip's file, destroying it with no `Delete`
+/// in the plan at all: a delete via the write vector, bypassing every deletion
+/// guard. This final pass downgrades such an action to a `Skip`. Losing a move
+/// is recoverable and self-heals once the occupant moves away on a later run,
+/// whereas overwriting the file is not; a genuine two-clip name swap stays
+/// safely unmoved rather than clobbering.
+///
+/// Two occupants are *not* clobbers. A clip writing onto its own tracked path (a
+/// re-download, a retag, or a case- or normalisation-only self-rename) is fine,
+/// so the guard keys on the owning clip id, not the bare path. And a path whose
+/// occupant is being deleted this run is a safe hand-off: the delete is atomic-
+/// replaced by the write, or suppressed alongside it by
+/// [`suppress_path_aliasing`], so this pass runs first, while the deletes are
+/// still visible. A rename-*away* does not count, because plan order cannot
+/// guarantee the source moves before the destination is filled.
+fn suppress_target_clobber(actions: &mut [Action], manifest: &Manifest) {
+    // The clip that currently owns each on-disk path, by filesystem-canonical
+    // key (NFC + lowercase), across audio and every sidecar and stem.
+    let mut owner: HashMap<String, String> = HashMap::new();
+    for (clip_id, entry) in manifest.iter() {
+        owner
+            .entry(canonical_path_key(&entry.path))
+            .or_insert_with(|| clip_id.clone());
+        for path in entry.artifact_paths() {
+            owner
+                .entry(canonical_path_key(path))
+                .or_insert_with(|| clip_id.clone());
+        }
+    }
+
+    // Paths a delete frees this run: a write there is a safe hand-off, not a
+    // clobber. Only deletes count, never a rename source, whose move plan order
+    // cannot guarantee lands before the destination is filled.
+    let vacated: HashSet<String> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Delete { path, .. }
+            | Action::DeleteArtifact { path, .. }
+            | Action::DeleteStem { path, .. } => Some(canonical_path_key(path)),
+            _ => None,
+        })
+        .collect();
+
+    for action in actions.iter_mut() {
+        let Some((target_key, acting)) = clobber_probe(action, &owner) else {
+            continue;
+        };
+        if vacated.contains(&target_key) {
+            continue;
+        }
+        let occupant = owner.get(&target_key);
+        let clobbers = match (occupant, acting.as_deref()) {
+            (Some(held_by), Some(actor)) => held_by != actor,
+            // The destination is held but the actor is unknown: refuse it too.
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if clobbers {
+            let clip_id = acting.or_else(|| occupant.cloned()).unwrap_or_default();
+            *action = Action::Skip { clip_id };
+        }
+    }
+}
+
+/// The canonical destination path key and the acting clip id for a write-class
+/// action, or `None` for an action that occupies no new path (a delete, a skip,
+/// or an in-place retag). A `Rename` carries no clip id, so its actor is whoever
+/// owns the `from` path in the manifest-derived `owner` map.
+fn clobber_probe(
+    action: &Action,
+    owner: &HashMap<String, String>,
+) -> Option<(String, Option<String>)> {
+    let (target, acting): (&str, Option<String>) = match action {
+        Action::Download { clip, path, .. } | Action::Reformat { clip, path, .. } => {
+            (path, Some(clip.id.clone()))
+        }
+        Action::WriteArtifact { path, owner_id, .. } => (path, Some(owner_id.clone())),
+        Action::WriteStem { path, clip_id, .. } => (path, Some(clip_id.clone())),
+        Action::MoveArtifact { to, owner_id, .. } => (to, Some(owner_id.clone())),
+        Action::MoveStem { to, clip_id, .. } => (to, Some(clip_id.clone())),
+        Action::Rename { from, to } => (to, owner.get(&canonical_path_key(from)).cloned()),
+        _ => return None,
+    };
+    Some((canonical_path_key(target), acting))
 }
 
 /// Append the action(s) for one desired clip.
