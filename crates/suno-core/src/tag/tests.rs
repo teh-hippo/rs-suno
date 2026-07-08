@@ -495,6 +495,53 @@ fn flac_omits_track_when_unnumbered() {
 }
 
 #[test]
+fn flac_zero_length_streaminfo_errors_not_panics() {
+    // A STREAMINFO header that declares a zero-length body: metaflac 0.2.8
+    // slices the empty buffer for the mandatory 34-byte STREAMINFO and panics.
+    // tag_flac must contain that panic and return an error, per the rule that
+    // library code never panics on untrusted input.
+    let err = tag_flac(b"fLaC\x00\x00\x00\x00", &TrackMetadata::default(), None)
+        .expect_err("malformed FLAC must not tag");
+    assert!(matches!(err, Error::Tag(_)));
+}
+
+#[test]
+fn flac_truncated_vorbis_comment_errors_not_panics() {
+    // A valid STREAMINFO followed by a VORBIS_COMMENT block whose 24-bit length
+    // over-runs the supplied bytes. This drives the read/write path past the
+    // STREAMINFO parse and must still return an error rather than panic.
+    let mut streaminfo = vec![0u8; 34];
+    streaminfo[0..2].copy_from_slice(&4096u16.to_be_bytes());
+    streaminfo[2..4].copy_from_slice(&4096u16.to_be_bytes());
+    let packed: u64 = (44_100u64 << 44) | (1u64 << 41) | (15u64 << 36) | 44_100u64;
+    streaminfo[10..18].copy_from_slice(&packed.to_be_bytes());
+
+    let mut audio = Vec::new();
+    audio.extend_from_slice(b"fLaC");
+    // STREAMINFO: not last, type 0, length 34.
+    audio.push(0x00);
+    audio.extend_from_slice(&[0x00, 0x00, 0x22]);
+    audio.extend_from_slice(&streaminfo);
+    // VORBIS_COMMENT: last block, type 4, declares 64 bytes but supplies 4.
+    audio.push(0x84);
+    audio.extend_from_slice(&[0x00, 0x00, 0x40]);
+    audio.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+
+    let err = tag_flac(&audio, &TrackMetadata::default(), None)
+        .expect_err("truncated VORBIS_COMMENT must not tag");
+    assert!(matches!(err, Error::Tag(_)));
+}
+
+#[test]
+fn flac_wellformed_still_tags_under_panic_guard() {
+    // Control: the panic guard must not disturb the happy path, so a well-formed
+    // minimal FLAC still tags and round-trips.
+    let audio = minimal_flac();
+    let tagged = tag_flac(&audio, &TrackMetadata::default(), None).expect("well-formed FLAC tags");
+    assert!(metaflac::Tag::read_from(&mut Cursor::new(&tagged)).is_ok());
+}
+
+#[test]
 fn mp3_writes_track_number_total_and_identity() {
     let lineage = LineageContext {
         track: 3,

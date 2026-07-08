@@ -234,6 +234,21 @@ fn build_sylt(aligned: &AlignedLyrics) -> Option<SynchronisedLyrics> {
 /// comment is preserved rather than dropped, so a retag never loses embedded
 /// lyrics.
 pub fn tag_flac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) -> Result<Vec<u8>> {
+    // metaflac 0.2.8 slices unchecked while parsing metadata blocks, so a
+    // truncated or malformed FLAC panics inside the crate and unwinds straight
+    // past the `.map_err` calls in `tag_flac_inner`. Contain that third-party
+    // panic here so a corrupt on-disk `.flac` read during a retag returns an
+    // error instead of crashing the whole run. This relies on the crate not
+    // being built with panic = "abort" (no profile sets it). AssertUnwindSafe is
+    // sound: the closure borrows only a `&[u8]` and a `&TrackMetadata`, neither
+    // of which an unwind can leave observably broken.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tag_flac_inner(audio, meta, cover)
+    }))
+    .unwrap_or_else(|_| Err(Error::Tag("could not read FLAC metadata".to_owned())))
+}
+
+fn tag_flac_inner(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) -> Result<Vec<u8>> {
     let mut tag = metaflac::Tag::read_from(&mut Cursor::new(audio))
         .map_err(|err| Error::Tag(format!("could not read FLAC metadata: {err}")))?;
 
