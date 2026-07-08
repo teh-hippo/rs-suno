@@ -50,7 +50,14 @@ where
                 .unwrap_or(false);
             if !still_referenced && !committed.contains(old) {
                 self.fs.remove(old).map_err(|err| {
-                    permanent_fail(&clip_id, format!("could not remove old stem {old}: {err}"))
+                    if err.is_out_of_space() {
+                        disk_fail(
+                            &clip_id,
+                            format!("disk full: no space left to remove old stem {old}"),
+                        )
+                    } else {
+                        permanent_fail(&clip_id, format!("could not remove old stem {old}: {err}"))
+                    }
                 })?;
             }
         }
@@ -187,9 +194,13 @@ where
         key: &str,
         path: &str,
     ) -> Result<Effect, Fail> {
-        self.fs
-            .remove(path)
-            .map_err(|err| permanent_fail(clip_id, format!("stem delete failed: {err}")))?;
+        self.fs.remove(path).map_err(|err| {
+            if err.is_out_of_space() {
+                disk_fail(clip_id, "disk full: no space left to remove stem")
+            } else {
+                permanent_fail(clip_id, format!("stem delete failed: {err}"))
+            }
+        })?;
         if let Some(entry) = manifest.entries.get_mut(clip_id) {
             set_manifest_stem(entry, key, None);
         }

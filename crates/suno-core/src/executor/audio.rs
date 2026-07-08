@@ -93,7 +93,11 @@ where
         if let Some(from) = from_path {
             // The new file is safely in place; only now drop the old rendering.
             self.fs.remove(&from).map_err(|err| {
-                permanent_fail(&clip_id, format!("could not remove old file: {err}"))
+                if err.is_out_of_space() {
+                    disk_fail(&clip_id, "disk full: no space left to remove old file")
+                } else {
+                    permanent_fail(&clip_id, format!("could not remove old file: {err}"))
+                }
             })?;
         }
         manifest.insert(clip_id.clone(), self.entry(&clip_id, &path, format, size));
