@@ -16,6 +16,7 @@ use crate::lyrics::AlignedLyrics;
 use crate::manifest::Manifest;
 use crate::model::Clip;
 use crate::tag::{TrackMetadata, non_empty};
+use crate::textfmt::{format_duration, to_single_line};
 use crate::vocab::AudioFormat;
 
 /// The schema version of the library index document.
@@ -167,12 +168,6 @@ fn extinf_seconds(duration_secs: f64) -> i64 {
         0
     }
 }
-/// Fold carriage returns and line feeds to spaces, keeping the value on one line
-/// so it cannot break the surrounding text format.
-fn to_single_line(text: &str) -> String {
-    text.replace('\r', "").replace('\n', " ")
-}
-
 /// Render the plain-text per-song details sidecar for `clip`.
 ///
 /// A fixed-order block of `Label: value` lines from the same [`TrackMetadata`]
@@ -288,16 +283,6 @@ fn lrc_headers(clip: &Clip, lineage: &LineageContext) -> String {
         let _ = writeln!(out, "[{tag}:{}]", to_single_line(value));
     }
     out
-}
-
-/// Format a duration in seconds as `mm:ss`, or the empty string when it is
-/// non-finite or non-positive (so an unknown duration is omitted, not `00:00`).
-fn format_duration(secs: f64) -> String {
-    if !secs.is_finite() || secs <= 0.0 {
-        return String::new();
-    }
-    let total = secs.round() as i64;
-    format!("{}:{:02}", total / 60, total % 60)
 }
 
 #[cfg(test)]
