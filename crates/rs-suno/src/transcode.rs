@@ -9,15 +9,14 @@
 //! handled separately by the pure core tagger; these steps only re-encode media.
 
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use suno_core::{AudioFormat, WebpEncodeSettings};
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+use crate::scratch::{Scratch, unique_stamp};
 
 /// Hard cap on a single ffmpeg transcode before we kill it.
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(120);
@@ -35,7 +34,7 @@ pub fn wav_to_lossless(wav: &[u8], format: AudioFormat, scratch_dir: &Path) -> R
     let stamp = unique_stamp();
     let wav_path = scratch_dir.join(format!(".{stamp}.wav"));
     let out_path = scratch_dir.join(format!(".{stamp}.{}", format.ext()));
-    let _scratch = Scratch(vec![wav_path.clone(), out_path.clone()]);
+    let _scratch = Scratch::all(vec![wav_path.clone(), out_path.clone()]);
 
     std::fs::write(&wav_path, wav)
         .with_context(|| format!("could not stage WAV at {}", wav_path.display()))?;
@@ -245,27 +244,6 @@ fn scratch_out_of_space(dir: &Path) -> Option<std::io::Error> {
         Ok(()) => None,
         Err(err) if crate::diskspace::is_out_of_space(&err) => Some(err),
         Err(_) => None,
-    }
-}
-
-/// A process- and call-unique stamp for temporary file names.
-fn unique_stamp() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("suno-{}-{nanos}-{seq}", std::process::id())
-}
-
-/// Removes its temporary paths when dropped, even on the error path.
-struct Scratch(Vec<PathBuf>);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        for path in &self.0 {
-            let _ = std::fs::remove_file(path);
-        }
     }
 }
 

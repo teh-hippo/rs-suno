@@ -8,6 +8,7 @@ mod download;
 mod ffmpeg;
 mod fs;
 mod http;
+mod scratch;
 mod transcode;
 
 use clap::Parser;
