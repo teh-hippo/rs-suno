@@ -70,6 +70,7 @@ fn mirror_ok() -> Vec<SourceStatus> {
 
 mod album_art;
 mod artifacts;
+mod clobber;
 mod deletion;
 mod plan;
 mod playlist;
