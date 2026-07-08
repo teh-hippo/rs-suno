@@ -596,7 +596,7 @@ fn delete_action(clip_id: &str, manifest: &Manifest, can_delete: bool) -> Option
     })
 }
 
-/// The single gate every `DeleteArtifact` passes through.
+/// The gate every per-clip-sidecar `DeleteArtifact` passes through.
 ///
 /// This is the artifact analogue of [`delete_action`] and deliberately shares
 /// the audio deletion safety: it returns a [`Action::DeleteArtifact`] only when
@@ -621,6 +621,53 @@ fn delete_artifact_action(
     }
     Some(Action::DeleteArtifact {
         kind,
+        path: path.to_string(),
+        owner_id: owner_id.to_string(),
+    })
+}
+
+/// The gate every album folder-art `DeleteArtifact` passes through.
+///
+/// The album analogue of [`delete_artifact_action`]. Folder art is owned by the
+/// lineage root rather than a manifest clip and has no preserve concept, so the
+/// gate is the shared [`deletion_allowed`] verdict (`can_delete`) plus a
+/// non-empty `path` (an empty path can never delete the account root). A `None`
+/// result means the caller must keep the folder-art file.
+fn delete_album_artifact_action(
+    owner_id: &str,
+    kind: ArtifactKind,
+    path: &str,
+    can_delete: bool,
+) -> Option<Action> {
+    if !can_delete || path.is_empty() {
+        return None;
+    }
+    Some(Action::DeleteArtifact {
+        kind,
+        path: path.to_string(),
+        owner_id: owner_id.to_string(),
+    })
+}
+
+/// The gate every playlist `.m3u8` `DeleteArtifact` passes through.
+///
+/// The playlist analogue of [`delete_artifact_action`]. A playlist is owned by
+/// its Suno UUID rather than a manifest clip and carries no preserve mark, so
+/// the gate is the shared [`deletion_allowed`] verdict (`can_delete`) AND the
+/// stricter playlist valve `list_fully_enumerated` (HARDENING B2 — a failed or
+/// partial `/api/playlist/me` listing must remove nothing), plus a non-empty
+/// `path`. A `None` result means the caller must keep the `.m3u8`.
+fn delete_playlist_artifact_action(
+    owner_id: &str,
+    path: &str,
+    can_delete: bool,
+    list_fully_enumerated: bool,
+) -> Option<Action> {
+    if !can_delete || !list_fully_enumerated || path.is_empty() {
+        return None;
+    }
+    Some(Action::DeleteArtifact {
+        kind: ArtifactKind::Playlist,
         path: path.to_string(),
         owner_id: owner_id.to_string(),
     })
@@ -1521,20 +1568,18 @@ pub fn plan_album_artifacts(
         }
     }
 
-    // Deletes are fully gated: nothing is removed on an unreliable listing.
-    if can_delete {
-        for (root_id, art) in albums {
-            for (kind, state) in album_artifacts(art) {
-                let desired_here = by_root
-                    .get(root_id.as_str())
-                    .is_some_and(|d| album_desires_kind(d, kind));
-                if !desired_here && !state.path.is_empty() {
-                    actions.push(Action::DeleteArtifact {
-                        kind,
-                        path: state.path.clone(),
-                        owner_id: root_id.clone(),
-                    });
-                }
+    // Deletes route through the album gate: nothing is removed unless the shared
+    // deletion verdict holds and the stored path is non-empty.
+    for (root_id, art) in albums {
+        for (kind, state) in album_artifacts(art) {
+            let desired_here = by_root
+                .get(root_id.as_str())
+                .is_some_and(|d| album_desires_kind(d, kind));
+            if !desired_here
+                && let Some(action) =
+                    delete_album_artifact_action(root_id, kind, &state.path, can_delete)
+            {
+                actions.push(action);
             }
         }
     }
@@ -1630,9 +1675,6 @@ pub fn plan_playlist_artifacts(
 ) -> Vec<Action> {
     let mut actions: Vec<Action> = Vec::new();
     let desired_ids: BTreeSet<&str> = desired.iter().map(|d| d.id.as_str()).collect();
-    // Deletes (stale removals and rename cleanups) are gated on BOTH the shared
-    // deletion verdict and a fully-enumerated playlist listing (B2).
-    let deletes_allowed = can_delete && list_fully_enumerated;
 
     for d in desired {
         let stored_here = stored.get(&d.id);
@@ -1652,31 +1694,28 @@ pub fn plan_playlist_artifacts(
                 content: Some(d.content.clone()),
             });
         }
-        // A rename changed the path: remove the old file, under the delete gate.
-        if deletes_allowed
-            && let Some(state) = stored_here
-            && !state.path.is_empty()
+        // A rename changed the path: remove the old file, under the playlist gate.
+        if let Some(state) = stored_here
             && state.path != d.path
+            && let Some(action) = delete_playlist_artifact_action(
+                &d.id,
+                &state.path,
+                can_delete,
+                list_fully_enumerated,
+            )
         {
-            actions.push(Action::DeleteArtifact {
-                kind: ArtifactKind::Playlist,
-                path: state.path.clone(),
-                owner_id: d.id.clone(),
-            });
+            actions.push(action);
         }
     }
 
-    // Stale playlists (removed on Suno) are deleted only under the full gate, so
-    // a failed or partial listing never removes an existing `.m3u8` (B2).
-    if deletes_allowed {
-        for (id, state) in stored {
-            if !desired_ids.contains(id.as_str()) && !state.path.is_empty() {
-                actions.push(Action::DeleteArtifact {
-                    kind: ArtifactKind::Playlist,
-                    path: state.path.clone(),
-                    owner_id: id.clone(),
-                });
-            }
+    // Stale playlists (removed on Suno) are deleted only under the full playlist
+    // gate, so a failed or partial listing never removes an existing `.m3u8` (B2).
+    for (id, state) in stored {
+        if !desired_ids.contains(id.as_str())
+            && let Some(action) =
+                delete_playlist_artifact_action(id, &state.path, can_delete, list_fully_enumerated)
+        {
+            actions.push(action);
         }
     }
 

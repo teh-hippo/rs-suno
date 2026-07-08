@@ -264,3 +264,29 @@ fn playlist_rename_collision_downgrades_the_delete() {
         }
     }
 }
+
+#[test]
+fn delete_playlist_artifact_gate_needs_both_gates_and_a_path() {
+    // Both the shared verdict and the B2 valve armed, with a non-empty path.
+    assert_eq!(
+        delete_playlist_artifact_action("pl1", "Mix.m3u8", true, true),
+        Some(Action::DeleteArtifact {
+            kind: ArtifactKind::Playlist,
+            path: "Mix.m3u8".to_owned(),
+            owner_id: "pl1".to_owned(),
+        })
+    );
+    // The shared deletion verdict is required.
+    assert_eq!(
+        delete_playlist_artifact_action("pl1", "Mix.m3u8", false, true),
+        None
+    );
+    // The playlist B2 valve is required: a failed or partial listing removes
+    // nothing, even when the shared verdict holds.
+    assert_eq!(
+        delete_playlist_artifact_action("pl1", "Mix.m3u8", true, false),
+        None
+    );
+    // An empty path can never delete the account root.
+    assert_eq!(delete_playlist_artifact_action("pl1", "", true, true), None);
+}

@@ -629,3 +629,26 @@ fn plan_album_artifacts_is_deterministically_ordered() {
         ]
     );
 }
+
+#[test]
+fn delete_album_artifact_gate_needs_the_verdict_and_a_path() {
+    // The shared deletion verdict and a non-empty path yield a folder-art delete.
+    assert_eq!(
+        delete_album_artifact_action("r1", ArtifactKind::FolderJpg, "r1/folder.jpg", true),
+        Some(Action::DeleteArtifact {
+            kind: ArtifactKind::FolderJpg,
+            path: "r1/folder.jpg".to_owned(),
+            owner_id: "r1".to_owned(),
+        })
+    );
+    // The shared deletion verdict is required (no album-specific override).
+    assert_eq!(
+        delete_album_artifact_action("r1", ArtifactKind::FolderJpg, "r1/folder.jpg", false),
+        None
+    );
+    // An empty path can never delete the account root.
+    assert_eq!(
+        delete_album_artifact_action("r1", ArtifactKind::FolderJpg, "", true),
+        None
+    );
+}
