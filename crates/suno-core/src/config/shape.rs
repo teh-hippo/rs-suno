@@ -262,6 +262,26 @@ impl Config {
             }
         }
 
+        // Reject an empty or whitespace-only naming template at any tier:
+        // resolution would otherwise carry the empty string through rather than
+        // falling back to the default, yielding blank path components. A numeric
+        // zero (e.g. `min_newest = 0`) stays legal; this guards only the string
+        // template.
+        let templates = std::iter::once(&self.defaults.settings).chain(
+            self.accounts.values().flat_map(|acc| {
+                std::iter::once(&acc.settings).chain(acc.sources.values().map(|s| &s.settings))
+            }),
+        );
+        for settings in templates {
+            if let Some(template) = settings.naming_template.as_deref()
+                && template.trim().is_empty()
+            {
+                return Err(Error::Config(
+                    "naming_template must not be empty or whitespace-only".into(),
+                ));
+            }
+        }
+
         let mut prefix_seen: HashMap<String, &str> = HashMap::new();
         for label in self.accounts.keys() {
             let prefix = label_to_env(label);
@@ -577,7 +597,10 @@ mod tests {
         let err = Config::from_toml("[defaults]\nmin_newst = 50\n")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("min_newst"), "error should name the key: {err}");
+        assert!(
+            err.contains("min_newst"),
+            "error should name the key: {err}"
+        );
         assert!(
             err.contains("[defaults]"),
             "error should name the tier: {err}"
@@ -722,5 +745,42 @@ mod tests {
     fn disjoint_relative_roots_are_accepted() {
         let toml = "[accounts.alice]\nroot = \"./alice\"\n\n[accounts.bob]\nroot = \"bob\"\n";
         assert!(Config::from_toml(toml).is_ok());
+    }
+
+    // --- cfg-7: an empty naming template is rejected; numeric zeros stay legal. ---
+
+    #[test]
+    fn empty_naming_template_is_rejected() {
+        assert!(Config::from_toml("[defaults]\nnaming_template = \"\"\n").is_err());
+    }
+
+    #[test]
+    fn whitespace_only_naming_template_is_rejected() {
+        assert!(Config::from_toml("[defaults]\nnaming_template = \"   \"\n").is_err());
+    }
+
+    #[test]
+    fn empty_naming_template_in_account_is_rejected() {
+        assert!(Config::from_toml("[accounts.alice]\nnaming_template = \"\"\n").is_err());
+    }
+
+    #[test]
+    fn empty_naming_template_in_source_is_rejected() {
+        let toml = "[accounts.alice.sources.liked]\nnaming_template = \"\"\n";
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn non_empty_naming_template_is_accepted() {
+        let toml = "[defaults]\nnaming_template = \"{creator}/{title}\"\n";
+        assert!(Config::from_toml(toml).is_ok());
+    }
+
+    #[test]
+    fn min_newest_zero_stays_legal() {
+        // A deletion floor of 0 is a valid explicit opt-out for additive/copy
+        // runs; the empty-template guard must never reject a numeric zero.
+        let cfg = Config::from_toml("[defaults]\nmin_newest = 0\n").unwrap();
+        assert_eq!(cfg.defaults.settings.min_newest, Some(0));
     }
 }
