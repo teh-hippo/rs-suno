@@ -14,7 +14,7 @@ pub(crate) fn parse_clip(body: &[u8]) -> Option<Clip> {
         .get("id")
         .and_then(Value::as_str)
         .is_some_and(|id| !id.is_empty());
-    has_id.then(|| Clip::from_json(raw))
+    has_id.then(|| map_clip(raw))
 }
 
 /// Parse a `get_songs_by_ids` `{"clips":[…]}` body into clips with a non-empty
@@ -27,7 +27,7 @@ pub(crate) fn parse_songs_batch(body: &[u8]) -> Option<Vec<Clip>> {
     Some(
         clips
             .iter()
-            .map(Clip::from_json)
+            .map(map_clip)
             .filter(|clip| !clip.id.is_empty())
             .collect(),
     )
@@ -42,80 +42,78 @@ pub(super) fn unwrap_clip(value: &Value) -> &Value {
         .unwrap_or(value)
 }
 
-impl Clip {
-    /// Build a [`Clip`] from one raw API clip object.
-    ///
-    /// Clip-level fields and lineage live at the top level; content fields like
-    /// tags and duration live under `metadata`. Temporary `audiopipe` audio URLs
-    /// expire, so they are rewritten to the permanent CDN URL.
-    pub fn from_json(raw: &Value) -> Clip {
-        let metadata = raw.get("metadata").cloned().unwrap_or(Value::Null);
-        let id = string(raw, "id");
+/// Build a [`Clip`] from one raw API clip object.
+///
+/// Clip-level fields and lineage live at the top level; content fields like
+/// tags and duration live under `metadata`. Temporary `audiopipe` audio URLs
+/// expire, so they are rewritten to the permanent CDN URL.
+pub(crate) fn map_clip(raw: &Value) -> Clip {
+    let metadata = raw.get("metadata").cloned().unwrap_or(Value::Null);
+    let id = string(raw, "id");
 
-        let audio_url = cdn_audio_url(&string(raw, "audio_url"), &id);
+    let audio_url = cdn_audio_url(&string(raw, "audio_url"), &id);
 
-        let title = match raw.get("title") {
-            Some(Value::String(title)) => title.clone(),
-            _ => "Untitled".to_string(),
-        };
+    let title = match raw.get("title") {
+        Some(Value::String(title)) => title.clone(),
+        _ => "Untitled".to_string(),
+    };
 
-        Clip {
-            id,
-            title,
-            audio_url,
-            media_urls: parse_media_urls(raw),
-            image_url: cdn(raw, "image_url"),
-            image_large_url: cdn(raw, "image_large_url"),
-            video_url: cdn(raw, "video_url"),
-            video_cover_url: cdn(raw, "video_cover_url"),
-            tags: string(&metadata, "tags"),
-            duration: metadata
-                .get("duration")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0),
-            play_count: raw.get("play_count").and_then(Value::as_u64).unwrap_or(0),
-            status: raw
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
-            created_at: string(raw, "created_at"),
-            display_name: string_or(raw, "display_name", "user_display_name"),
-            handle: string_or(raw, "handle", "user_handle"),
-            user_id: string(raw, "user_id"),
-            batch_index: raw.get("batch_index").and_then(Value::as_i64),
-            avatar_image_url: string_or(raw, "avatar_image_url", "user_avatar_image_url"),
-            is_liked: bool_field(raw, "is_liked"),
-            is_trashed: bool_field(raw, "is_trashed"),
-            has_vocal: bool_field(&metadata, "has_vocal"),
-            has_stem: bool_field(&metadata, "has_stem"),
-            stem_from_id: string(&metadata, "stem_from_id"),
-            stem_task: string(&metadata, "stem_task"),
-            stem_type_id: int_tolerant(&metadata, "stem_type_id"),
-            stem_type_group_name: string(&metadata, "stem_type_group_name"),
-            clip_type: string(&metadata, "type"),
-            prompt: string(&metadata, "prompt"),
-            gpt_description_prompt: string(&metadata, "gpt_description_prompt"),
-            lyrics: string(raw, "lyrics"),
-            model_name: string(raw, "model_name"),
-            major_model_version: string(raw, "major_model_version"),
-            edited_clip_id: string(&metadata, "edited_clip_id"),
-            task: string(&metadata, "task"),
-            is_remix: bool_field(&metadata, "is_remix"),
-            cover_clip_id: string(&metadata, "cover_clip_id"),
-            upsample_clip_id: string(&metadata, "upsample_clip_id"),
-            remaster_clip_id: string(&metadata, "remaster_clip_id"),
-            speed_clip_id: string(&metadata, "speed_clip_id"),
-            override_history_clip_id: string(&metadata, "override_history_clip_id"),
-            override_future_clip_id: string(&metadata, "override_future_clip_id"),
-            history: history_entries(&metadata, "history"),
-            concat_history: history_entries(&metadata, "concat_history"),
-            clip_roots: parse_clip_roots(raw),
-            clip_attribution_type: raw
-                .get("clip_roots")
-                .map(|roots| string(roots, "clip_attribution_type"))
-                .unwrap_or_default(),
-        }
+    Clip {
+        id,
+        title,
+        audio_url,
+        media_urls: parse_media_urls(raw),
+        image_url: cdn(raw, "image_url"),
+        image_large_url: cdn(raw, "image_large_url"),
+        video_url: cdn(raw, "video_url"),
+        video_cover_url: cdn(raw, "video_cover_url"),
+        tags: string(&metadata, "tags"),
+        duration: metadata
+            .get("duration")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        play_count: raw.get("play_count").and_then(Value::as_u64).unwrap_or(0),
+        status: raw
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        created_at: string(raw, "created_at"),
+        display_name: string_or(raw, "display_name", "user_display_name"),
+        handle: string_or(raw, "handle", "user_handle"),
+        user_id: string(raw, "user_id"),
+        batch_index: raw.get("batch_index").and_then(Value::as_i64),
+        avatar_image_url: string_or(raw, "avatar_image_url", "user_avatar_image_url"),
+        is_liked: bool_field(raw, "is_liked"),
+        is_trashed: bool_field(raw, "is_trashed"),
+        has_vocal: bool_field(&metadata, "has_vocal"),
+        has_stem: bool_field(&metadata, "has_stem"),
+        stem_from_id: string(&metadata, "stem_from_id"),
+        stem_task: string(&metadata, "stem_task"),
+        stem_type_id: int_tolerant(&metadata, "stem_type_id"),
+        stem_type_group_name: string(&metadata, "stem_type_group_name"),
+        clip_type: string(&metadata, "type"),
+        prompt: string(&metadata, "prompt"),
+        gpt_description_prompt: string(&metadata, "gpt_description_prompt"),
+        lyrics: string(raw, "lyrics"),
+        model_name: string(raw, "model_name"),
+        major_model_version: string(raw, "major_model_version"),
+        edited_clip_id: string(&metadata, "edited_clip_id"),
+        task: string(&metadata, "task"),
+        is_remix: bool_field(&metadata, "is_remix"),
+        cover_clip_id: string(&metadata, "cover_clip_id"),
+        upsample_clip_id: string(&metadata, "upsample_clip_id"),
+        remaster_clip_id: string(&metadata, "remaster_clip_id"),
+        speed_clip_id: string(&metadata, "speed_clip_id"),
+        override_history_clip_id: string(&metadata, "override_history_clip_id"),
+        override_future_clip_id: string(&metadata, "override_future_clip_id"),
+        history: history_entries(&metadata, "history"),
+        concat_history: history_entries(&metadata, "concat_history"),
+        clip_roots: parse_clip_roots(raw),
+        clip_attribution_type: raw
+            .get("clip_roots")
+            .map(|roots| string(roots, "clip_attribution_type"))
+            .unwrap_or_default(),
     }
 }
 
@@ -247,10 +245,7 @@ mod tests {
     fn audiopipe_url_is_rewritten_to_cdn() {
         let raw =
             serde_json::json!({"id": "x", "audio_url": "https://audiopipe.suno.ai/?item_id=x"});
-        assert_eq!(
-            Clip::from_json(&raw).audio_url,
-            "https://cdn1.suno.ai/x.mp3"
-        );
+        assert_eq!(map_clip(&raw).audio_url, "https://cdn1.suno.ai/x.mp3");
     }
 
     #[test]
@@ -286,7 +281,7 @@ mod tests {
             ]
         });
 
-        let clip = Clip::from_json(&raw);
+        let clip = map_clip(&raw);
 
         assert_eq!(clip.user_id, "owner-9");
         assert_eq!(clip.batch_index, Some(23));
@@ -301,12 +296,12 @@ mod tests {
 
     #[test]
     fn from_json_defaults_media_urls_user_id_and_batch_index_when_absent() {
-        let clip = Clip::from_json(&serde_json::json!({"id": "clip-1"}));
+        let clip = map_clip(&serde_json::json!({"id": "clip-1"}));
         assert!(clip.media_urls.is_empty());
         assert_eq!(clip.user_id, "");
         assert_eq!(clip.batch_index, None);
         // A non-array media_urls degrades to empty, never a panic.
-        let odd = Clip::from_json(&serde_json::json!({"id": "x", "media_urls": "nope"}));
+        let odd = map_clip(&serde_json::json!({"id": "x", "media_urls": "nope"}));
         assert!(odd.media_urls.is_empty());
     }
 
@@ -338,7 +333,7 @@ mod tests {
                 "clip_attribution_type": "remix"
             }
         });
-        let clip = Clip::from_json(&raw);
+        let clip = map_clip(&raw);
 
         assert_eq!(clip.display_name, "Example Artist 4");
         assert_eq!(clip.handle, "example-artist-1");
@@ -371,7 +366,7 @@ mod tests {
             "user_handle": "example-artist-1",
             "user_avatar_image_url": "https://cdn1.suno.ai/avatar.jpg"
         });
-        let clip = Clip::from_json(&raw);
+        let clip = map_clip(&raw);
         assert_eq!(clip.display_name, "Example Artist 4");
         assert_eq!(clip.handle, "example-artist-1");
         assert_eq!(clip.avatar_image_url, "https://cdn1.suno.ai/avatar.jpg");
@@ -387,7 +382,7 @@ mod tests {
             "handle": "bare-handle",
             "user_handle": "prefixed-handle"
         });
-        let clip = Clip::from_json(&raw);
+        let clip = map_clip(&raw);
         assert_eq!(clip.display_name, "Bare Name");
         assert_eq!(clip.handle, "bare-handle");
     }
@@ -395,26 +390,26 @@ mod tests {
     #[test]
     fn from_json_defaults_clip_roots_when_absent_or_malformed() {
         // Absent clip_roots -> empty, attribution type empty.
-        let none = Clip::from_json(&serde_json::json!({"id": "x"}));
+        let none = map_clip(&serde_json::json!({"id": "x"}));
         assert!(none.clip_roots.is_empty());
         assert_eq!(none.clip_attribution_type, "");
 
         // clip_roots present but `clips` missing or non-array -> empty, no panic.
-        let no_clips = Clip::from_json(&serde_json::json!({
+        let no_clips = map_clip(&serde_json::json!({
             "id": "x",
             "clip_roots": {"clip_attribution_type": "remix"}
         }));
         assert!(no_clips.clip_roots.is_empty());
         assert_eq!(no_clips.clip_attribution_type, "remix");
 
-        let odd = Clip::from_json(&serde_json::json!({
+        let odd = map_clip(&serde_json::json!({
             "id": "x",
             "clip_roots": {"clips": "nope"}
         }));
         assert!(odd.clip_roots.is_empty());
 
         // A top-level (non-object) clip_roots is ignored, never a panic.
-        let array_shape = Clip::from_json(&serde_json::json!({
+        let array_shape = map_clip(&serde_json::json!({
             "id": "x",
             "clip_roots": [{"id": "r"}]
         }));
@@ -434,7 +429,7 @@ mod tests {
                 "clip_attribution_type": "remix"
             }
         });
-        let clip = Clip::from_json(&raw);
+        let clip = map_clip(&raw);
         assert_eq!(clip.clip_roots.len(), 2);
         assert_eq!(clip.clip_roots[0].id, "root-a");
         assert_eq!(clip.clip_roots[1].id, "root-b");
@@ -480,7 +475,7 @@ mod tests {
             }
         });
 
-        let clip = Clip::from_json(&raw);
+        let clip = map_clip(&raw);
 
         assert_eq!(clip.task, "extend");
         assert!(clip.is_remix);
@@ -535,7 +530,7 @@ mod tests {
             "metadata": {"history": ["m_bare-id-verbatim"]}
         });
 
-        let clip = Clip::from_json(&raw);
+        let clip = map_clip(&raw);
 
         assert_eq!(
             clip.history,
@@ -549,14 +544,11 @@ mod tests {
     #[test]
     fn play_count_parses_top_level_and_defaults_to_zero() {
         let with_count = serde_json::json!({"id": "x", "play_count": 4242});
-        assert_eq!(Clip::from_json(&with_count).play_count, 4242);
+        assert_eq!(map_clip(&with_count).play_count, 4242);
         // Absent or non-integer play_count falls back to zero.
+        assert_eq!(map_clip(&serde_json::json!({"id": "x"})).play_count, 0);
         assert_eq!(
-            Clip::from_json(&serde_json::json!({"id": "x"})).play_count,
-            0
-        );
-        assert_eq!(
-            Clip::from_json(&serde_json::json!({"id": "x", "play_count": null})).play_count,
+            map_clip(&serde_json::json!({"id": "x", "play_count": null})).play_count,
             0
         );
     }
@@ -565,17 +557,15 @@ mod tests {
     fn has_stem_parses_from_metadata_and_defaults_to_false() {
         // Present and true in metadata.
         let with_stem = serde_json::json!({"id": "x", "metadata": {"has_stem": true}});
-        assert!(Clip::from_json(&with_stem).has_stem);
+        assert!(map_clip(&with_stem).has_stem);
         // Absent, null, or non-bool metadata.has_stem defaults to false, so a
         // clip is never mistaken for a stem source without an explicit true.
-        assert!(!Clip::from_json(&serde_json::json!({"id": "x"})).has_stem);
+        assert!(!map_clip(&serde_json::json!({"id": "x"})).has_stem);
         assert!(
-            !Clip::from_json(&serde_json::json!({"id": "x", "metadata": {"has_stem": null}}))
-                .has_stem
+            !map_clip(&serde_json::json!({"id": "x", "metadata": {"has_stem": null}})).has_stem
         );
         assert!(
-            !Clip::from_json(&serde_json::json!({"id": "x", "metadata": {"has_stem": false}}))
-                .has_stem
+            !map_clip(&serde_json::json!({"id": "x", "metadata": {"has_stem": false}})).has_stem
         );
     }
 
@@ -593,7 +583,7 @@ mod tests {
                 "stem_type_group_name": "Backing_Vocals"
             }
         });
-        let clip = Clip::from_json(&raw);
+        let clip = map_clip(&raw);
         assert_eq!(clip.stem_from_id, "source-074");
         assert_eq!(clip.stem_task, "twelve");
         assert_eq!(clip.stem_type_id, Some(91));
@@ -604,12 +594,12 @@ mod tests {
 
         // The plain integer form maps identically.
         let as_int = serde_json::json!({"id": "x", "metadata": {"stem_type_id": 91}});
-        assert_eq!(Clip::from_json(&as_int).stem_type_id, Some(91));
+        assert_eq!(map_clip(&as_int).stem_type_id, Some(91));
 
         // Absent, null, non-integral, or non-numeric stem_type_id is None, and
         // the string members default to empty, so a non-stem clip degrades
         // cleanly rather than fabricating a separation id.
-        let bare = Clip::from_json(&serde_json::json!({"id": "x"}));
+        let bare = map_clip(&serde_json::json!({"id": "x"}));
         assert_eq!(bare.stem_type_id, None);
         assert_eq!(bare.stem_from_id, "");
         assert_eq!(bare.stem_task, "");
@@ -619,7 +609,7 @@ mod tests {
             serde_json::json!({"id": "x", "metadata": {"stem_type_id": 91.5}}),
             serde_json::json!({"id": "x", "metadata": {"stem_type_id": "91"}}),
         ] {
-            assert_eq!(Clip::from_json(&odd).stem_type_id, None);
+            assert_eq!(map_clip(&odd).stem_type_id, None);
         }
     }
 
@@ -634,7 +624,7 @@ mod tests {
             }
         });
 
-        let clip = Clip::from_json(&raw);
+        let clip = map_clip(&raw);
 
         assert_eq!(clip.task, "");
         assert!(!clip.is_remix);

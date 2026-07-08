@@ -2,10 +2,11 @@
 //!
 //! The reconcile and execute layers trust their inputs; the parsers are the
 //! boundary where untrusted bytes enter. A panic here is a crash, and a bad
-//! path is a corrupt library, so every public parse and naming entry point must
-//! survive arbitrary input without panicking. Where the result shape lets us say
+//! path is a corrupt library, so every parse and naming entry point, plus the
+//! shared clip mapper they funnel through, must survive arbitrary input without
+//! panicking. Where the result shape lets us say
 //! more, we assert more: a rendered name is additionally checked to be a safe
-//! relative path. These properties feed garbage into [`Clip::from_json`], the
+//! relative path. These properties feed garbage into [`map_clip`], the
 //! feed reader behind [`SunoClient::list_clips`], [`RecencySpec::parse`],
 //! [`Config::from_toml`], and [`render_clip_name`], and assert exactly that.
 
@@ -23,6 +24,7 @@ use crate::model::Clip;
 use crate::naming::{DEFAULT_TEMPLATE, NamingConfig, NamingRequest, render_clip_name};
 use crate::select::RecencySpec;
 use crate::testutil::{ChaosHttp, Outcome, RecordingClock};
+use crate::wire::map_clip;
 
 /// A recursive arbitrary JSON value: nulls, bools, integers, arbitrary strings,
 /// and nested arrays and objects. Floats are omitted so the generator can never
@@ -85,8 +87,8 @@ fn arb_template() -> impl Strategy<Value = String> {
 proptest! {
     /// Mapping any JSON value to a clip never panics.
     #[test]
-    fn clip_from_json_never_panics(value in arb_json()) {
-        let _ = Clip::from_json(&value);
+    fn map_clip_never_panics(value in arb_json()) {
+        let _ = map_clip(&value);
     }
 
     /// Reading a feed page of arbitrary bytes never panics. The result (clips or

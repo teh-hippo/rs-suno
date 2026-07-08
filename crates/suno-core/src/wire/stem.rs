@@ -2,12 +2,14 @@
 
 use serde_json::Value;
 
-use crate::model::{Clip, Stem, stem_label};
+use crate::model::{Stem, stem_label};
+
+use super::map_clip;
 
 /// Parse one page of the stems listing (`{"stems": [<clip>, ...]}`) into
 /// [`Stem`]s.
 ///
-/// Each stem is a full clip object, so it is mapped with [`Clip::from_json`]:
+/// Each stem is a full clip object, so it is mapped with [`map_clip`]:
 /// the id is the stem clip id, the label is the trailing parenthetical of its
 /// title, and the download URL is its public CDN MP3. Only stems carrying both a
 /// non-empty id and URL are kept — a stem with no id cannot be WAV-rendered, and
@@ -35,7 +37,7 @@ pub(crate) fn parse_stems_page(body: &[u8]) -> Vec<Stem> {
 /// Map one raw stem clip element to a [`Stem`]: its clip id, its stem label,
 /// and its public CDN MP3 URL.
 fn parse_stem(raw: &Value) -> Stem {
-    let clip = Clip::from_json(raw);
+    let clip = map_clip(raw);
     Stem {
         id: clip.id.clone(),
         label: stem_label(&clip),
