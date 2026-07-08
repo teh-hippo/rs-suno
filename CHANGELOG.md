@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.1](https://github.com/teh-hippo/rs-suno/compare/v0.36.0...v0.36.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* **deps:** update schemars to 0.9 and emit a draft 2020-12 config schema ([62d369b](https://github.com/teh-hippo/rs-suno/commit/62d369bf7103072c7fac802d0008eb454f917d5b))
+
 ## [0.36.0](https://github.com/teh-hippo/rs-suno/compare/v0.35.0...v0.36.0) (2026-07-08)
 
 
