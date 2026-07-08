@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.0](https://github.com/teh-hippo/rs-suno/compare/v0.35.0...v0.36.0) (2026-07-08)
+
+
+### Features
+
+* publish a config JSON Schema for editor validation ([affe8cd](https://github.com/teh-hippo/rs-suno/commit/affe8cd55f10a44fbbe863bb2551c30e7c01d022))
+
 ## [0.35.0](https://github.com/teh-hippo/rs-suno/compare/v0.34.0...v0.35.0) (2026-07-07)
 
 
