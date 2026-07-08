@@ -23,8 +23,11 @@ use super::label_to_env;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Settings {
     pub format: Option<AudioFormat>,
+    #[cfg_attr(feature = "schema", schemars(range(max = u32::MAX)))]
     pub concurrency: Option<u32>,
+    #[cfg_attr(feature = "schema", schemars(range(max = u32::MAX)))]
     pub retries: Option<u32>,
+    #[cfg_attr(feature = "schema", schemars(range(max = u32::MAX)))]
     pub min_newest: Option<u32>,
     /// The command whose stdout mints a token. Resolved from the
     /// `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is
@@ -33,9 +36,13 @@ pub struct Settings {
     pub token_command: Option<String>,
     pub animated_covers: Option<bool>,
     pub video_cover_retention: Option<VideoCoverRetention>,
+    #[cfg_attr(feature = "schema", schemars(range(min = 0, max = 100)))]
     pub animated_cover_quality: Option<u8>,
+    #[cfg_attr(feature = "schema", schemars(range(max = u32::MAX)))]
     pub animated_cover_max_fps: Option<u32>,
+    #[cfg_attr(feature = "schema", schemars(range(max = u32::MAX)))]
     pub animated_cover_max_width: Option<u32>,
+    #[cfg_attr(feature = "schema", schemars(range(min = 0, max = 4)))]
     pub animated_cover_compression_level: Option<u8>,
     pub animated_cover_lossless: Option<bool>,
     pub details_sidecar: Option<bool>,
