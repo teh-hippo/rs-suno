@@ -234,16 +234,27 @@ fn lrc_omits_unknown_headers() {
 }
 
 fn sample_aligned() -> crate::lyrics::AlignedLyrics {
-    crate::lyrics::AlignedLyrics::from_json(&serde_json::json!({
-        "aligned_words": [],
-        "aligned_lyrics": [
-            {"text": "thunder rolls", "start_s": 1.5, "end_s": 2.4, "section": "Verse 1",
-             "words": [
-                 {"text": "thunder", "start_s": 1.5, "end_s": 2.0},
-                 {"text": "rolls", "start_s": 2.1, "end_s": 2.4}
-             ]}
-        ]
-    }))
+    crate::lyrics::AlignedLyrics {
+        lines: vec![crate::lyrics::AlignedLine {
+            text: "thunder rolls".to_owned(),
+            start_s: 1.5,
+            end_s: 2.4,
+            section: "Verse 1".to_owned(),
+            words: vec![
+                crate::lyrics::AlignedLineWord {
+                    text: "thunder".to_owned(),
+                    start_s: 1.5,
+                    end_s: 2.0,
+                },
+                crate::lyrics::AlignedLineWord {
+                    text: "rolls".to_owned(),
+                    start_s: 2.1,
+                    end_s: 2.4,
+                },
+            ],
+        }],
+        ..Default::default()
+    }
 }
 
 #[test]

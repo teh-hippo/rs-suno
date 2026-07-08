@@ -20,8 +20,9 @@ use crate::limiter::{AdaptiveLimiter, retry_after_delay};
 use crate::lyrics::AlignedLyrics;
 use crate::model::{BillingInfo, Clip, Playlist, Stem};
 use crate::wire::{
-    feed_v3_body, parse_billing_info, parse_clip, parse_feed_v3, parse_playlist_clips,
-    parse_playlists, parse_songs_batch, parse_stem_page_count, parse_stems_page, parse_wav_url,
+    feed_v3_body, parse_aligned_lyrics, parse_billing_info, parse_clip, parse_feed_v3,
+    parse_playlist_clips, parse_playlists, parse_songs_batch, parse_stem_page_count,
+    parse_stems_page, parse_wav_url,
 };
 
 /// A client for the Suno library API, owning the account's [`ClerkAuth`].
@@ -150,7 +151,7 @@ impl<C: Clock> SunoClient<C> {
     pub async fn aligned_lyrics(&self, http: &impl Http, id: &str) -> Result<AlignedLyrics> {
         let path = format!("/api/gen/{id}/aligned_lyrics/v2/");
         match self.api_get_retrying(http, &path).await {
-            Ok(body) => Ok(AlignedLyrics::from_bytes(&body)),
+            Ok(body) => Ok(parse_aligned_lyrics(&body)),
             Err(Error::NotFound(_)) => Ok(AlignedLyrics::default()),
             Err(err) => Err(err),
         }

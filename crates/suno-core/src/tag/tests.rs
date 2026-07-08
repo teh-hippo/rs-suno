@@ -1,5 +1,6 @@
 use super::*;
 use crate::lineage::ResolveStatus;
+use crate::lyrics::{AlignedLine, AlignedLineWord};
 
 fn full_clip() -> Clip {
     Clip {
@@ -237,18 +238,40 @@ fn lyrics_and_prompt_are_distinct_and_not_swapped() {
 }
 
 fn sample_aligned() -> AlignedLyrics {
-    AlignedLyrics::from_json(&serde_json::json!({
-        "aligned_words": [],
-        "aligned_lyrics": [
-            {"text": "Hello world", "start_s": 0.5, "end_s": 1.4, "section": "Verse 1",
-             "words": [
-                 {"text": "Hello", "start_s": 0.5, "end_s": 0.9},
-                 {"text": "world", "start_s": 1.0, "end_s": 1.4}
-             ]},
-            {"text": "again", "start_s": 61.2, "end_s": 61.8, "section": "Chorus",
-             "words": [{"text": "again", "start_s": 61.2, "end_s": 61.8}]}
-        ]
-    }))
+    AlignedLyrics {
+        lines: vec![
+            AlignedLine {
+                text: "Hello world".to_owned(),
+                start_s: 0.5,
+                end_s: 1.4,
+                section: "Verse 1".to_owned(),
+                words: vec![
+                    AlignedLineWord {
+                        text: "Hello".to_owned(),
+                        start_s: 0.5,
+                        end_s: 0.9,
+                    },
+                    AlignedLineWord {
+                        text: "world".to_owned(),
+                        start_s: 1.0,
+                        end_s: 1.4,
+                    },
+                ],
+            },
+            AlignedLine {
+                text: "again".to_owned(),
+                start_s: 61.2,
+                end_s: 61.8,
+                section: "Chorus".to_owned(),
+                words: vec![AlignedLineWord {
+                    text: "again".to_owned(),
+                    start_s: 61.2,
+                    end_s: 61.8,
+                }],
+            },
+        ],
+        ..Default::default()
+    }
 }
 
 #[test]
