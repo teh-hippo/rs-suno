@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/suno-core", "crates/rs-suno"]
 
 [workspace.package]
-version = "0.36.1"
+version = "0.36.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/teh-hippo/rs-suno"

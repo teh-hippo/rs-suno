@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.2](https://github.com/teh-hippo/rs-suno/compare/v0.36.1...v0.36.2) (2026-07-08)
+
+
+### Bug Fixes
+
+* **fs:** guard reads against symlink escape ([62cf40b](https://github.com/teh-hippo/rs-suno/commit/62cf40b4bc8558f37851876f29dea82b30e301bc))
+
 ## [0.36.1](https://github.com/teh-hippo/rs-suno/compare/v0.36.0...v0.36.1) (2026-07-08)
 
 
