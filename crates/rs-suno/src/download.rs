@@ -4,13 +4,12 @@
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
 use suno_core::{Clip, Http, HttpRequest};
 
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+use crate::scratch::{Scratch, unique_stamp};
 
 /// Download a public resource (CDN audio, rendered WAV, or cover art).
 ///
@@ -46,7 +45,7 @@ where
     F: FnOnce(&Path, &Path) -> std::io::Result<()>,
 {
     let tmp = temp_sibling(path);
-    let _scratch = Scratch(tmp.clone());
+    let _scratch = Scratch::new(tmp.clone());
     let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
     file.write_all(bytes)?;
     replace_fn(&tmp, path)?;
@@ -89,7 +88,7 @@ pub(crate) fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Copy `from` to a temp next to `to` (same device), then rename locally.
 fn cross_device_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     let tmp = temp_sibling(to);
-    let _scratch = Scratch(tmp.clone());
+    let _scratch = Scratch::new(tmp.clone());
     std::fs::copy(from, &tmp)?;
     // `tmp` is on the same device as `to`; a local rename or stash will work.
     match std::fs::rename(&tmp, to) {
@@ -156,25 +155,6 @@ fn temp_sibling(path: &Path) -> PathBuf {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".to_owned());
     path.with_file_name(format!(".{name}.{}.part", unique_stamp()))
-}
-
-/// A process- and call-unique stamp for temporary file names.
-fn unique_stamp() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{seq}", std::process::id())
-}
-
-/// Removes its temporary path when dropped, even on the error path.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
 }
 
 /// Minimum age before a `.part` temp file is considered abandoned by a dead
