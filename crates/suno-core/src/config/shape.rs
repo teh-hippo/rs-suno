@@ -132,29 +132,17 @@ impl<'de> Deserialize<'de> for AreaMode {
 
 #[cfg(feature = "schema")]
 impl schemars::JsonSchema for AreaMode {
-    fn schema_name() -> String {
-        "AreaMode".to_owned()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AreaMode".into()
     }
 
-    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        let values = ["off", "copy", "mirror"]
-            .into_iter()
-            .map(|s| serde_json::Value::String(s.to_owned()))
-            .collect();
-        schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            enum_values: Some(values),
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(
-                    "Deletion mode for the library area: 'off' arms deletion of \
-                     library-exclusive files, 'copy' is additive, 'mirror' deletes."
-                        .to_owned(),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
-        }
-        .into()
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "enum": ["off", "copy", "mirror"],
+            "description": "Deletion mode for the library area: 'off' arms deletion of \
+                library-exclusive files, 'copy' is additive, 'mirror' deletes.",
+        })
     }
 }
 
