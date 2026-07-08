@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.6](https://github.com/teh-hippo/rs-suno/compare/v0.36.5...v0.36.6) (2026-07-08)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate schemars to v1 ([f5c5daa](https://github.com/teh-hippo/rs-suno/commit/f5c5daa97a02704547307af3dbebf02c808af953))
+
 ## [0.36.5](https://github.com/teh-hippo/rs-suno/compare/v0.36.4...v0.36.5) (2026-07-08)
 
 
