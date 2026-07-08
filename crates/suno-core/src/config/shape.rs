@@ -52,6 +52,52 @@ pub struct Settings {
     pub number_singletons: Option<bool>,
 }
 
+/// The TOML keys of every [`Settings`] field, in struct order.
+///
+/// Kept in lockstep with [`Settings`] above: a new knob must be added here too.
+/// `#[serde(flatten)]` embeds `Settings` into each precedence tier, which
+/// disables serde's own `deny_unknown_fields`, so a mistyped knob is otherwise
+/// silently dropped. [`reject_unknown_keys`] uses this set to reject typos the
+/// way `[areas]` already does. The `settings_keys_match_struct` test guards the
+/// mirror against drift.
+const SETTINGS_KEYS: &[&str] = &[
+    "format",
+    "concurrency",
+    "retries",
+    "min_newest",
+    "token_command",
+    "animated_covers",
+    "video_cover_retention",
+    "animated_cover_quality",
+    "animated_cover_max_fps",
+    "animated_cover_max_width",
+    "animated_cover_compression_level",
+    "animated_cover_lossless",
+    "details_sidecar",
+    "lyrics_sidecar",
+    "lrc_sidecar",
+    "video_mp4",
+    "download_stems",
+    "stem_format",
+    "naming_template",
+    "character_set",
+    "number_singletons",
+];
+
+/// The structural (non-[`Settings`]) keys of an `[accounts.<label>]` table.
+const ACCOUNT_STRUCTURAL_KEYS: &[&str] = &[
+    "token",
+    "root",
+    "account_id",
+    "sources",
+    "areas",
+    "albums",
+    "lead_tracks",
+];
+
+/// The keys accepted at the top level of the config document.
+const TOP_LEVEL_KEYS: &[&str] = &["defaults", "accounts"];
+
 /// Global default settings applied when no account or source override applies.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -181,23 +227,8 @@ impl Config {
     /// inside one another. Duplicate account labels are rejected by the TOML
     /// parser itself.
     pub fn from_toml(toml_str: &str) -> Result<Self> {
-        let config: Self = toml::from_str(toml_str).map_err(|e| {
-            // Strip source-context lines (those containing " | ") to prevent
-            // token values from being echoed in error messages.
-            let raw = e.to_string();
-            let msg = raw
-                .lines()
-                .filter(|l| !l.contains(" | "))
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_owned();
-            Error::Config(if msg.is_empty() {
-                "parse error".into()
-            } else {
-                msg
-            })
-        })?;
+        let config: Self = toml::from_str(toml_str).map_err(redact_toml_error)?;
+        reject_unknown_keys(toml_str)?;
         config.validate()?;
         Ok(config)
     }
@@ -234,6 +265,84 @@ impl Config {
 
         Ok(())
     }
+}
+
+/// Convert a `toml` parse error into an [`Error::Config`], stripping the
+/// source-context lines (those containing `" | "`) so a token value on the
+/// offending line is never echoed back.
+fn redact_toml_error(e: toml::de::Error) -> Error {
+    let msg = e
+        .to_string()
+        .lines()
+        .filter(|l| !l.contains(" | "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+    Error::Config(if msg.is_empty() {
+        "parse error".into()
+    } else {
+        msg
+    })
+}
+
+/// Reject any key not recognised at the top level or at a settings tier.
+///
+/// `#[serde(flatten)]` embeds [`Settings`] into [`Defaults`], [`AccountConfig`],
+/// and [`SourceConfig`], which silently disables serde's `deny_unknown_fields`,
+/// so a mistyped knob (e.g. `min_newst`) would be dropped and its setting revert
+/// to the compiled default. That is unsafe for the deletion floor (`min_newest`)
+/// and misleading for every other knob, so re-parse the document generically and
+/// fail loudly, mirroring the hard error `[areas]` already gives. `[areas]`,
+/// `[...albums]`, and `lead_tracks` carry dynamic keys and are left to their own
+/// typed validation.
+fn reject_unknown_keys(toml_str: &str) -> Result<()> {
+    let doc: toml::Table = toml::from_str(toml_str).map_err(redact_toml_error)?;
+
+    check_known_keys(&doc, "the top-level table", |k| TOP_LEVEL_KEYS.contains(&k))?;
+
+    if let Some(defaults) = doc.get("defaults").and_then(toml::Value::as_table) {
+        check_known_keys(defaults, "[defaults]", |k| SETTINGS_KEYS.contains(&k))?;
+    }
+
+    if let Some(accounts) = doc.get("accounts").and_then(toml::Value::as_table) {
+        for (label, account) in accounts {
+            let Some(account) = account.as_table() else {
+                continue;
+            };
+            let section = format!("[accounts.{label}]");
+            check_known_keys(account, &section, |k| {
+                ACCOUNT_STRUCTURAL_KEYS.contains(&k) || SETTINGS_KEYS.contains(&k)
+            })?;
+
+            if let Some(sources) = account.get("sources").and_then(toml::Value::as_table) {
+                for (name, source) in sources {
+                    let Some(source) = source.as_table() else {
+                        continue;
+                    };
+                    let section = format!("[accounts.{label}.sources.{name}]");
+                    check_known_keys(source, &section, |k| SETTINGS_KEYS.contains(&k))?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Fail with a clear [`Error::Config`] naming the first key in `table` the
+/// `allowed` predicate rejects, reported against `section`.
+fn check_known_keys(
+    table: &toml::Table,
+    section: &str,
+    allowed: impl Fn(&str) -> bool,
+) -> Result<()> {
+    for key in table.keys() {
+        if !allowed(key.as_str()) {
+            return Err(Error::Config(format!("unknown key '{key}' in {section}")));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -418,6 +527,132 @@ mod tests {
             Config::from_toml(toml).unwrap().accounts["a"]
                 .areas
                 .is_none()
+        );
+    }
+
+    // --- cfg-6: unknown settings keys are rejected, not silently dropped. ---
+
+    #[test]
+    fn misspelled_min_newest_key_is_rejected() {
+        // The deletion-floor safety case: a typo must not silently revert
+        // `min_newest` to the default of 1. `#[serde(flatten)]` would drop it;
+        // the sweep names the offending key instead.
+        let err = Config::from_toml("[defaults]\nmin_newst = 50\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("min_newst"), "error should name the key: {err}");
+        assert!(
+            err.contains("[defaults]"),
+            "error should name the tier: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_defaults_key_is_rejected() {
+        assert!(Config::from_toml("[defaults]\nbogus = true\n").is_err());
+    }
+
+    #[test]
+    fn unknown_account_key_is_rejected() {
+        let err = Config::from_toml("[accounts.alice]\nroout = \"/music\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("roout"), "error should name the key: {err}");
+        assert!(
+            err.contains("[accounts.alice]"),
+            "error names the tier: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_source_key_is_rejected() {
+        let toml = "[accounts.alice.sources.liked]\nformta = \"mp3\"\n";
+        let err = Config::from_toml(toml).unwrap_err().to_string();
+        assert!(err.contains("formta"), "error should name the key: {err}");
+        assert!(
+            err.contains("[accounts.alice.sources.liked]"),
+            "error should name the source tier: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_top_level_table_is_rejected() {
+        // A misspelt `[defalts]` drops every default (including the deletion
+        // floor), so it too must fail loudly rather than parse to nothing.
+        let err = Config::from_toml("[defalts]\nmin_newest = 50\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("defalts"), "error should name the key: {err}");
+    }
+
+    #[test]
+    fn every_settings_key_is_accepted() {
+        // Precision guard: no legitimate knob is rejected by the sweep.
+        let toml = r#"
+            [defaults]
+            format = "flac"
+            concurrency = 4
+            retries = 3
+            min_newest = 1
+            token_command = "echo tok"
+            animated_covers = true
+            video_cover_retention = "both"
+            animated_cover_quality = 90
+            animated_cover_max_fps = 24
+            animated_cover_max_width = 640
+            animated_cover_compression_level = 4
+            animated_cover_lossless = false
+            details_sidecar = true
+            lyrics_sidecar = true
+            lrc_sidecar = true
+            video_mp4 = true
+            download_stems = true
+            stem_format = "wav"
+            naming_template = "{title}"
+            character_set = "unicode"
+            number_singletons = false
+        "#;
+        assert!(Config::from_toml(toml).is_ok());
+    }
+
+    #[test]
+    fn known_structural_account_keys_are_accepted() {
+        let toml = r#"
+            [accounts.alice]
+            token = "t"
+            root = "/music/alice"
+            account_id = "user_abc"
+            format = "mp3"
+            lead_tracks = ["abc123"]
+            [accounts.alice.areas]
+            library = "off"
+            [accounts.alice.albums]
+            root_xyz = "Greatest Hits"
+            [accounts.alice.sources.liked]
+            format = "flac"
+        "#;
+        assert!(Config::from_toml(toml).is_ok());
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn settings_keys_mirror_the_struct() {
+        // The generated JSON schema enumerates every real `Settings` field, so
+        // it is the source of truth the hand-maintained `SETTINGS_KEYS` mirror
+        // must track. Guards both directions: a new knob added to the struct but
+        // forgotten here (which would wrongly reject a legitimate key), or a key
+        // left here after the field is removed.
+        let schema = serde_json::to_value(schemars::schema_for!(Settings)).unwrap();
+        let schema_keys: std::collections::BTreeSet<&str> = schema["properties"]
+            .as_object()
+            .expect("Settings schema exposes properties")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let known: std::collections::BTreeSet<&str> = SETTINGS_KEYS.iter().copied().collect();
+        assert_eq!(
+            schema_keys, known,
+            "SETTINGS_KEYS is out of sync with Settings"
         );
     }
 }
