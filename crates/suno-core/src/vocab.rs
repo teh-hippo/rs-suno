@@ -104,8 +104,11 @@ impl AudioFormat {
 impl FromStr for AudioFormat {
     type Err = Error;
 
+    // Case-sensitive to match serde (TOML) and the published JSON schema, which
+    // accept lowercase only. The env tiers parse through here, so `SUNO_FORMAT`
+    // rejects `FLAC` exactly as `format = "FLAC"` does in the file.
     fn from_str(s: &str) -> Result<Self> {
-        match s.to_ascii_lowercase().as_str() {
+        match s {
             "mp3" => Ok(Self::Mp3),
             "flac" => Ok(Self::Flac),
             "wav" => Ok(Self::Wav),
@@ -157,8 +160,10 @@ impl StemFormat {
 impl FromStr for StemFormat {
     type Err = Error;
 
+    // Case-sensitive to match serde (TOML) and the JSON schema; see
+    // [`AudioFormat::from_str`].
     fn from_str(s: &str) -> Result<Self> {
-        match s.to_ascii_lowercase().as_str() {
+        match s {
             "wav" => Ok(Self::Wav),
             "mp3" => Ok(Self::Mp3),
             "flac" => Err(Error::Config(
@@ -200,8 +205,10 @@ impl VideoCoverRetention {
 impl FromStr for VideoCoverRetention {
     type Err = Error;
 
+    // Case-sensitive to match serde (TOML) and the JSON schema; see
+    // [`AudioFormat::from_str`].
     fn from_str(s: &str) -> Result<Self> {
-        match s.to_ascii_lowercase().as_str() {
+        match s {
             "neither" => Ok(Self::Neither),
             "webp" => Ok(Self::Webp),
             "mp4" => Ok(Self::Mp4),
@@ -271,11 +278,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audio_format_parses_case_insensitively() {
-        assert_eq!("FLAC".parse::<AudioFormat>().unwrap(), AudioFormat::Flac);
-        assert_eq!("Mp3".parse::<AudioFormat>().unwrap(), AudioFormat::Mp3);
+    fn audio_format_parses_lowercase_only() {
+        assert_eq!("flac".parse::<AudioFormat>().unwrap(), AudioFormat::Flac);
+        assert_eq!("mp3".parse::<AudioFormat>().unwrap(), AudioFormat::Mp3);
         assert_eq!("wav".parse::<AudioFormat>().unwrap(), AudioFormat::Wav);
         assert_eq!("alac".parse::<AudioFormat>().unwrap(), AudioFormat::Alac);
+        // Case-sensitive to match serde (TOML) and the JSON schema.
+        assert!("FLAC".parse::<AudioFormat>().is_err());
+        assert!("Mp3".parse::<AudioFormat>().is_err());
     }
 
     #[test]
@@ -319,8 +329,10 @@ mod tests {
 
     #[test]
     fn stem_format_parses_wav_and_mp3() {
-        assert_eq!("WAV".parse::<StemFormat>().unwrap(), StemFormat::Wav);
+        assert_eq!("wav".parse::<StemFormat>().unwrap(), StemFormat::Wav);
         assert_eq!("mp3".parse::<StemFormat>().unwrap(), StemFormat::Mp3);
+        // Case-sensitive to match serde (TOML) and the JSON schema.
+        assert!("WAV".parse::<StemFormat>().is_err());
     }
 
     #[test]
@@ -352,7 +364,7 @@ mod tests {
             VideoCoverRetention::Neither
         );
         assert_eq!(
-            "WEBP".parse::<VideoCoverRetention>().unwrap(),
+            "webp".parse::<VideoCoverRetention>().unwrap(),
             VideoCoverRetention::Webp
         );
         assert_eq!(
@@ -363,6 +375,8 @@ mod tests {
             "both".parse::<VideoCoverRetention>().unwrap(),
             VideoCoverRetention::Both
         );
+        // Case-sensitive to match serde (TOML) and the JSON schema.
+        assert!("WEBP".parse::<VideoCoverRetention>().is_err());
     }
 
     #[test]

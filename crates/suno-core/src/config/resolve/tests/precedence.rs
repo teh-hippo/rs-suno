@@ -189,6 +189,27 @@ fn global_env_overrides_file() {
 }
 
 #[test]
+fn env_enum_parsing_is_case_sensitive() {
+    // cfg-3: the env tiers parse enums case-sensitively, matching serde (TOML)
+    // and the JSON schema, so `SUNO_FORMAT=FLAC` errors just like the file's
+    // `format = "FLAC"` rather than being silently accepted.
+    let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+    let upper: HashMap<String, String> = [("SUNO_FORMAT".into(), "FLAC".into())]
+        .into_iter()
+        .collect();
+    assert!(cfg.resolve("alice", None, &upper, &no_flags()).is_err());
+    let lower: HashMap<String, String> = [("SUNO_FORMAT".into(), "flac".into())]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        cfg.resolve("alice", None, &lower, &no_flags())
+            .unwrap()
+            .format,
+        AudioFormat::Flac
+    );
+}
+
+#[test]
 fn per_account_env_overrides_global_env() {
     let toml = "[accounts.alice]\n";
     let cfg = Config::from_toml(toml).unwrap();
