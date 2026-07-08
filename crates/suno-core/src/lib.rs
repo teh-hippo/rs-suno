@@ -38,6 +38,7 @@ pub mod select;
 mod synced;
 mod tag;
 mod tag_alac;
+mod textfmt;
 mod tracks;
 mod vocab;
 mod wire;
