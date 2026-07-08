@@ -17,9 +17,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::extras::{render_clip_lrc, render_synced_lrc};
 use crate::hash::{SYNCED_LRC_VERSION, content_hash, synced_lrc_source_hash};
-use crate::lyrics::AlignedLyrics;
+use crate::lyrics::{AlignedLyrics, render_clip_lrc, render_synced_lrc};
 use crate::manifest::{Manifest, ManifestEntry};
 use crate::reconcile::Desired;
 use crate::vocab::ArtifactKind;
