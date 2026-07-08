@@ -6,11 +6,14 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::{
-    Clip, Desired, LIKED_PLAYLIST_ID, LineageStore, PlaylistDesired, PlaylistInput, SourceMode,
-    SourceStatus, area_authoritative, area_fully_enumerated, build_playlist_desired,
+use crate::desired::{LIKED_PLAYLIST_ID, PlaylistInput, build_playlist_desired};
+use crate::graph::LineageStore;
+use crate::model::Clip;
+use crate::reconcile::{
+    Desired, PlaylistDesired, SourceStatus, area_authoritative, area_fully_enumerated,
     deletion_allowed,
 };
+use crate::vocab::SourceMode;
 
 /// One area's listing outcome for the multi-area planner.
 ///
