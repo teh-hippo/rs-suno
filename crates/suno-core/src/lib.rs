@@ -71,8 +71,7 @@ pub use downloadable::is_downloadable;
 pub use error::{Error, Result};
 pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute};
 pub use extras::{
-    INDEX_SCHEMA_VERSION, M3u8Entry, render_clip_details, render_clip_lrc, render_clip_lyrics,
-    render_library_index, render_m3u8, render_synced_lrc,
+    INDEX_SCHEMA_VERSION, M3u8Entry, render_clip_details, render_library_index, render_m3u8,
 };
 pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind};
 pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
@@ -86,7 +85,10 @@ pub use lineage::{
     AttributionEdge, Edge, EdgeRole, EdgeType, LineageContext, Resolution, ResolveStatus, RootInfo,
     attribution_edges, edge_type, immediate_parent, lineage_edges,
 };
-pub use lyrics::{AlignedLine, AlignedLineWord, AlignedLyrics, AlignedWord};
+pub use lyrics::{
+    AlignedLine, AlignedLineWord, AlignedLyrics, AlignedWord, render_clip_lrc, render_clip_lyrics,
+    render_synced_lrc,
+};
 pub use manifest::{ArtifactState, Manifest, ManifestEntry, SyncedLyricsCheck};
 pub use model::{BillingInfo, Clip, ClipRoot, HistoryEntry, MediaUrl, Playlist, Stem};
 pub use naming::{

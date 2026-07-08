@@ -12,7 +12,6 @@ use serde::Serialize;
 use crate::consts::SUNO_SONG_BASE_URL;
 use crate::graph::LineageStore;
 use crate::lineage::LineageContext;
-use crate::lyrics::AlignedLyrics;
 use crate::manifest::Manifest;
 use crate::model::Clip;
 use crate::tag::{TrackMetadata, non_empty};
@@ -209,78 +208,6 @@ pub fn render_clip_details(clip: &Clip, lineage: &LineageContext) -> String {
             continue;
         }
         let _ = writeln!(out, "{label}: {}", to_single_line(value));
-    }
-    out
-}
-
-/// Render the plain-text lyrics sidecar for `clip`, or `None` when it has none.
-///
-/// The clip's own `lyrics`, verbatim, normalised to one trailing newline. Empty
-/// or whitespace-only lyrics return `None` so no empty `.lyrics.txt` is written.
-/// The generation prompt is not used here (it lives in the details sidecar).
-pub fn render_clip_lyrics(clip: &Clip) -> Option<String> {
-    if clip.lyrics.trim().is_empty() {
-        return None;
-    }
-    Some(format!("{}\n", clip.lyrics.trim_end()))
-}
-
-/// Render an untimed `.lrc` sidecar for `clip`, or `None` when it has no lyrics.
-///
-/// Plain lyric lines with no timestamps, under the shared `.lrc` header. Empty
-/// or whitespace-only lyrics return `None` so no empty `.lrc` is written. This is
-/// the fallback when Suno has no alignment; the synced [`render_synced_lrc`]
-/// supersedes it at the same path when available.
-pub fn render_clip_lrc(clip: &Clip, lineage: &LineageContext) -> Option<String> {
-    if clip.lyrics.trim().is_empty() {
-        return None;
-    }
-    let mut out = lrc_headers(clip, lineage);
-    for line in clip.lyrics.trim_end().lines() {
-        let _ = writeln!(out, "{line}");
-    }
-    Some(out)
-}
-
-/// Render a synced (timed) `.lrc` sidecar for `clip` from Suno's `aligned`
-/// lyrics, or `None` when there is nothing to time (an instrumental).
-///
-/// Same header as [`render_clip_lrc`]; the body is the line-level form from
-/// [`AlignedLyrics::lrc_body`], one `[mm:ss.xx]` stamp per line. Word-level
-/// timing rides the MP3 `SYLT` frame, not the `.lrc`. Returns `None` when there
-/// are no timed lines.
-pub fn render_synced_lrc(
-    clip: &Clip,
-    lineage: &LineageContext,
-    aligned: &AlignedLyrics,
-) -> Option<String> {
-    let body = aligned.lrc_body();
-    if body.is_empty() {
-        return None;
-    }
-    let mut out = lrc_headers(clip, lineage);
-    out.push_str(&body);
-    Some(out)
-}
-
-/// The shared `.lrc` header block: `[ti:]`, `[ar:]`, `[al:]`, `[length:]` (each
-/// omitted when empty or unknown), plus the constant `[re:rs-suno]` tool tag.
-fn lrc_headers(clip: &Clip, lineage: &LineageContext) -> String {
-    let meta = TrackMetadata::from_clip(clip, lineage);
-    let length = format_duration(clip.duration);
-    let headers: [(&str, &str); 5] = [
-        ("ti", &meta.title),
-        ("ar", &meta.artist),
-        ("al", &meta.album),
-        ("length", &length),
-        ("re", "rs-suno"),
-    ];
-    let mut out = String::new();
-    for (tag, value) in headers {
-        if value.is_empty() {
-            continue;
-        }
-        let _ = writeln!(out, "[{tag}:{}]", to_single_line(value));
     }
     out
 }
