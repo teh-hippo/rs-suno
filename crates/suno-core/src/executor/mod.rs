@@ -58,9 +58,12 @@ use crate::vocab::{ArtifactKind, AudioFormat, SourceMode, StemFormat, WebpEncode
 
 mod artifact;
 mod audio;
+mod classify;
 mod cover;
 mod stem;
 mod tag;
+
+use classify::*;
 
 /// The shared Suno client behind an async mutex, so concurrent audio work can
 /// serialise its order-sensitive API calls (JWT refresh, adaptive limiter)
@@ -589,70 +592,6 @@ enum Effect {
     ArtifactDeleted,
 }
 
-/// How a failure should be handled (SYNC-17).
-#[derive(Debug, Clone, Copy)]
-enum Class {
-    /// Stop the account run; do not retry.
-    Auth,
-    /// Stop the account run: a full disk is systemic, like auth, so aborting
-    /// beats skipping every remaining clip (each of which would first burn a
-    /// server-side WAV-render budget before failing the same way).
-    Disk,
-    /// Retry a bounded number of times, then record and skip.
-    Transient,
-    /// Record and skip immediately.
-    Permanent,
-}
-
-/// A classified action failure attributed to a clip.
-struct Fail {
-    class: Class,
-    clip_id: String,
-    reason: String,
-}
-
-/// The run-ending status for a failure class, or `None` when the failure is
-/// per-clip and the run continues.
-fn abort_status(class: Class) -> Option<RunStatus> {
-    match class {
-        Class::Auth => Some(RunStatus::AuthAborted),
-        Class::Disk => Some(RunStatus::DiskFull),
-        Class::Transient | Class::Permanent => None,
-    }
-}
-
-fn auth_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail {
-    Fail {
-        class: Class::Auth,
-        clip_id: clip_id.into(),
-        reason: reason.into(),
-    }
-}
-
-fn transient_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail {
-    Fail {
-        class: Class::Transient,
-        clip_id: clip_id.into(),
-        reason: reason.into(),
-    }
-}
-
-fn permanent_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail {
-    Fail {
-        class: Class::Permanent,
-        clip_id: clip_id.into(),
-        reason: reason.into(),
-    }
-}
-
-fn disk_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail {
-    Fail {
-        class: Class::Disk,
-        clip_id: clip_id.into(),
-        reason: reason.into(),
-    }
-}
-
 /// Whether an artifact kind is album-scoped folder art (owned by a root id and
 /// recorded on the album store) rather than a per-clip sidecar (recorded on the
 /// manifest).
@@ -694,39 +633,6 @@ fn playlist_name_from_path(path: &str) -> String {
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-/// A classified fetch failure, not yet attributed to a clip.
-struct FetchError {
-    class: Class,
-    reason: String,
-    retry_after: Option<Duration>,
-}
-
-impl FetchError {
-    fn transient(reason: impl Into<String>, retry_after: Option<Duration>) -> Self {
-        Self {
-            class: Class::Transient,
-            reason: reason.into(),
-            retry_after,
-        }
-    }
-
-    fn permanent(reason: impl Into<String>) -> Self {
-        Self {
-            class: Class::Permanent,
-            reason: reason.into(),
-            retry_after: None,
-        }
-    }
-
-    fn attribute(self, clip_id: &str) -> Fail {
-        Fail {
-            class: self.class,
-            clip_id: clip_id.to_owned(),
-            reason: self.reason,
-        }
-    }
 }
 
 /// The shared, read-only context threaded through every action handler.
@@ -1065,71 +971,6 @@ fn manifest_entry(d: &Desired, size: u64) -> ManifestEntry {
 /// source, or private. The reconcile delete guard reads this marker later.
 fn preserve_for(d: &Desired) -> bool {
     d.private || d.modes.contains(&SourceMode::Copy)
-}
-
-/// Classify one HTTP result into bytes or a [`FetchError`] (SYNC-14/17).
-fn classify_response(
-    result: Result<crate::http::HttpResponse, crate::http::TransportError>,
-) -> Result<Vec<u8>, FetchError> {
-    let response = match result {
-        Ok(response) => response,
-        Err(err) => {
-            return Err(FetchError::transient(
-                format!("transport error: {err}"),
-                None,
-            ));
-        }
-    };
-    match response.status {
-        200..=299 => {
-            if let Some(expected) = content_length(&response) {
-                let actual = response.body.len() as u64;
-                if actual != expected {
-                    return Err(FetchError::transient(
-                        format!("truncated download: {actual} of {expected} bytes"),
-                        None,
-                    ));
-                }
-            }
-            Ok(response.body)
-        }
-        401 | 403 => Err(FetchError::transient(
-            format!("download rejected: status {}", response.status),
-            None,
-        )),
-        408 => Err(FetchError::transient("request timed out", None)),
-        429 => Err(FetchError::transient(
-            "rate limited",
-            retry_after(&response),
-        )),
-        500..=599 => Err(FetchError::transient(
-            format!("server error {}", response.status),
-            None,
-        )),
-        status => Err(FetchError::permanent(format!(
-            "download failed: status {status}"
-        ))),
-    }
-}
-
-/// Map a core [`Error`] from the authenticated WAV flow to a [`Fail`].
-fn classify_core(id: &str, err: Error) -> Fail {
-    let reason = err.to_string();
-    match err {
-        Error::Auth(_) => auth_fail(id, reason),
-        Error::RateLimited { .. } | Error::Connection(_) => transient_fail(id, reason),
-        Error::Api(_)
-        | Error::BadRequest(_)
-        | Error::NotFound(_)
-        | Error::Tag(_)
-        | Error::Config(_)
-        | Error::Refused(_) => permanent_fail(id, reason),
-    }
-}
-
-/// The provider-reported body size from `Content-Length`, if present and valid.
-fn content_length(response: &crate::http::HttpResponse) -> Option<u64> {
-    response.header("content-length")?.trim().parse().ok()
 }
 
 #[cfg(test)]
