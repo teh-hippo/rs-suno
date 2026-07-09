@@ -4,15 +4,11 @@ use super::*;
 fn build_desired_appends_extension_and_mode() {
     let a = clip("id-a", "Song A", "alice");
     let clips = [&a];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert_eq!(desired.len(), 1);
     assert!(
@@ -36,15 +32,11 @@ fn build_desired_carries_the_trashed_flag_from_the_clip() {
     gone.is_trashed = true;
     let live = clip("id-live", "Kept", "alice");
     let clips = [&gone, &live];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert!(desired[0].trashed, "a trashed clip is marked trashed");
     assert!(!desired[1].trashed, "a live clip is not");
@@ -188,15 +180,11 @@ fn build_desired_disambiguates_collisions() {
     let a = clip("id-a", "Same", "alice");
     let b = clip("id-b", "Same", "alice");
     let clips = [&a, &b];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Mp3,
-        &modes_for(&clips, SourceMode::Copy),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Copy,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert_ne!(desired[0].path, desired[1].path);
     assert!(desired.iter().all(|d| d.path.ends_with(".mp3")));
@@ -207,15 +195,11 @@ fn build_desired_disambiguates_collisions() {
 fn build_desired_uses_forward_slashes() {
     let a = clip("id-a", "Song A", "alice");
     let clips = [&a];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert!(!desired[0].path.contains('\\'));
     assert!(desired[0].path.contains('/'));
@@ -248,15 +232,11 @@ fn cover_album_and_stem_paths_use_forward_slashes() {
     // separator into the manifest on Windows (#236).
     let a = art_clip("clipaaaa-1234");
     let clips = [&a];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     let d = &desired[0];
 

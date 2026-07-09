@@ -207,15 +207,9 @@ fn download_mp3_uses_cdn_fallback_when_audio_url_empty() {
 
 #[test]
 fn download_flac_renders_transcodes_and_records() {
-    let c = clip("b");
-    let d = desired(c.clone(), AudioFormat::Flac);
+    let (_c, d, action) = download("b", AudioFormat::Flac);
     let plan = Plan {
-        actions: vec![Action::Download {
-            clip: c.clone(),
-            lineage: LineageContext::own_root(&c),
-            path: d.path.clone(),
-            format: AudioFormat::Flac,
-        }],
+        actions: vec![action],
     };
     let http = ScriptedHttp::new()
         .with_auth()
@@ -251,15 +245,9 @@ fn download_flac_renders_transcodes_and_records() {
 
 #[test]
 fn download_flac_requests_render_then_polls_until_ready() {
-    let c = clip("c");
-    let d = desired(c.clone(), AudioFormat::Flac);
+    let (_c, d, action) = download("c", AudioFormat::Flac);
     let plan = Plan {
-        actions: vec![Action::Download {
-            clip: c.clone(),
-            lineage: LineageContext::own_root(&c),
-            path: d.path.clone(),
-            format: AudioFormat::Flac,
-        }],
+        actions: vec![action],
     };
     let http = ScriptedHttp::new()
         .with_auth()
@@ -293,15 +281,9 @@ fn download_flac_requests_render_then_polls_until_ready() {
 
 #[test]
 fn download_flac_unavailable_render_is_a_nonfatal_failure() {
-    let c = clip("d");
-    let d = desired(c.clone(), AudioFormat::Flac);
+    let (_c, d, action) = download("d", AudioFormat::Flac);
     let plan = Plan {
-        actions: vec![Action::Download {
-            clip: c.clone(),
-            lineage: LineageContext::own_root(&c),
-            path: d.path.clone(),
-            format: AudioFormat::Flac,
-        }],
+        actions: vec![action],
     };
     let http = ScriptedHttp::new()
         .with_auth()
@@ -332,15 +314,9 @@ fn download_flac_unavailable_render_is_a_nonfatal_failure() {
 
 #[test]
 fn flac_transcode_failure_is_recorded_and_skipped() {
-    let c = clip("t");
-    let d = desired(c.clone(), AudioFormat::Flac);
+    let (_c, d, action) = download("t", AudioFormat::Flac);
     let plan = Plan {
-        actions: vec![Action::Download {
-            clip: c.clone(),
-            lineage: LineageContext::own_root(&c),
-            path: d.path.clone(),
-            format: AudioFormat::Flac,
-        }],
+        actions: vec![action],
     };
     let http = ScriptedHttp::new()
         .with_auth()

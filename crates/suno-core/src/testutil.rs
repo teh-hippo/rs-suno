@@ -17,6 +17,8 @@ use crate::clock::Clock;
 use crate::ffmpeg::{Ffmpeg, FfmpegError};
 use crate::fs::{FileStat, Filesystem, FsError};
 use crate::http::{Http, HttpRequest, HttpResponse, TransportError};
+use crate::lineage::{EdgeType, LineageContext, ResolveStatus};
+use crate::model::Clip;
 use crate::vocab::{AudioFormat, WebpEncodeSettings};
 
 /// A canned reply for any request whose URL contains `url_contains`.
@@ -697,6 +699,44 @@ pub(crate) fn minimal_wav() -> Vec<u8> {
     out.extend_from_slice(&audio_len.to_le_bytes());
     out.extend_from_slice(AUDIO_DATA);
     out
+}
+
+/// A fully populated clip (title, tags, duration, art and audio URLs) — the
+/// real-shape fixture the details and lyric renderers exercise. Its resolved
+/// context is [`full_lineage`].
+pub(crate) fn full_clip() -> Clip {
+    Clip {
+        id: "clip-1234abcd".to_owned(),
+        title: "Electric Storm".to_owned(),
+        tags: "ambient, cinematic".to_owned(),
+        duration: 211.6,
+        created_at: "2024-03-10T14:22:01Z".to_owned(),
+        display_name: "alice".to_owned(),
+        handle: "alice".to_owned(),
+        prompt: "an orchestral storm".to_owned(),
+        gpt_description_prompt: "a moody cinematic build".to_owned(),
+        lyrics: "thunder rolls\nover the plains".to_owned(),
+        model_name: "chirp-v4".to_owned(),
+        major_model_version: "v4".to_owned(),
+        image_large_url: "https://cdn1.suno.ai/signed?token=secret".to_owned(),
+        audio_url: "https://cdn1.suno.ai/clip-1234abcd.mp3".to_owned(),
+        ..Clip::default()
+    }
+}
+
+/// A resolved extension context for [`full_clip`], rooted on the "Weather
+/// Series" album.
+pub(crate) fn full_lineage() -> LineageContext {
+    LineageContext {
+        root_id: "rootid567890".to_owned(),
+        root_title: "Weather Series".to_owned(),
+        root_date: String::new(),
+        parent_id: "parentid1234".to_owned(),
+        edge_type: Some(EdgeType::Extend),
+        status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
+    }
 }
 
 /// One programmed outcome for a [`ChaosHttp`] route.

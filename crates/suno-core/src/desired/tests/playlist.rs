@@ -4,15 +4,11 @@ use super::*;
 fn build_playlist_desired_orders_members_and_marks_absent() {
     let a = clip("id-a", "Song A", "alice");
     let b = clip("id-b", "Song B", "alice");
-    let desired = build_desired(
+    let desired = desired_of(
         &[&a, &b],
         AudioFormat::Flac,
-        &modes_for(&[&a, &b], SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     let missing = clip("id-x", "Missing Song", "bob");
     let members = vec![b.clone(), missing.clone(), a.clone()];
@@ -40,15 +36,11 @@ fn build_playlist_desired_orders_members_and_marks_absent() {
 #[test]
 fn build_playlist_desired_builds_liked_and_multiple_in_order() {
     let a = clip("id-a", "Song A", "alice");
-    let desired = build_desired(
+    let desired = desired_of(
         &[&a],
         AudioFormat::Flac,
-        &modes_for(&[&a], SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     let members = vec![a.clone()];
     let inputs = vec![

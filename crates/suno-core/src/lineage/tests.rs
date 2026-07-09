@@ -8,6 +8,21 @@ fn history(id: &str) -> HistoryEntry {
     }
 }
 
+/// An external (out-of-library) cover root with no title or date — the
+/// fallback shape the `album`/`year` own-value cases share.
+fn external_cover() -> LineageContext {
+    LineageContext {
+        root_id: "outside".into(),
+        root_title: String::new(),
+        root_date: String::new(),
+        parent_id: "outside".into(),
+        edge_type: Some(EdgeType::Cover),
+        status: ResolveStatus::External,
+        track: 0,
+        track_total: 0,
+    }
+}
+
 // A clean six-clip chain modelled on the real `chain1` grounding data:
 // upsample -> cover -> upsample -> cover -> edit -> root. For every hop the
 // op pointer and `edited_clip_id` agree, as they do in the live shape.
@@ -653,16 +668,7 @@ fn context_absent_from_resolution_is_its_own_root() {
 
 #[test]
 fn album_falls_back_to_own_title_when_root_title_is_empty() {
-    let ctx = LineageContext {
-        root_id: "outside".into(),
-        root_title: String::new(),
-        root_date: String::new(),
-        parent_id: "outside".into(),
-        edge_type: Some(EdgeType::Cover),
-        status: ResolveStatus::External,
-        track: 0,
-        track_total: 0,
-    };
+    let ctx = external_cover();
     assert_eq!(ctx.album("My Title"), "My Title");
 }
 
@@ -698,16 +704,7 @@ fn year_prefers_the_root_year_over_the_clips_own() {
 
 #[test]
 fn year_falls_back_to_own_when_the_root_date_is_unavailable() {
-    let ctx = LineageContext {
-        root_id: "outside".into(),
-        root_title: String::new(),
-        root_date: String::new(),
-        parent_id: "outside".into(),
-        edge_type: Some(EdgeType::Cover),
-        status: ResolveStatus::External,
-        track: 0,
-        track_total: 0,
-    };
+    let ctx = external_cover();
     assert_eq!(ctx.year("2024-07-01T00:00:00Z"), "2024");
 }
 

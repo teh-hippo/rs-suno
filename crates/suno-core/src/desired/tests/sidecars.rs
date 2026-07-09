@@ -4,15 +4,11 @@ use super::*;
 fn build_desired_emits_cover_jpg_next_to_audio() {
     let a = art_clip("id-a");
     let clips = [&a];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     let base = desired[0].path.strip_suffix(".flac").unwrap();
     assert_eq!(desired[0].artifacts.len(), 1);
@@ -28,18 +24,14 @@ fn build_desired_omits_cover_jpg_when_art_is_empty() {
     let a = clip("id-a", "Song", "alice");
     assert!(a.selected_image_url().is_none());
     let clips = [&a];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             animated_covers: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     assert!(desired[0].artifacts.is_empty());
 }
@@ -53,15 +45,11 @@ fn animated_covers_embed_via_art_hash_not_a_webp_sidecar() {
     let clips = [&with_video];
 
     // Feature off: only the static CoverJpg sidecar; art_hash is the static hash.
-    let off = build_desired(
+    let off = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert_eq!(off[0].artifacts.len(), 1);
     assert_eq!(off[0].artifacts[0].kind, ArtifactKind::CoverJpg);
@@ -70,18 +58,14 @@ fn animated_covers_embed_via_art_hash_not_a_webp_sidecar() {
     // Feature on: still NO `CoverWebp` sidecar and the `.jpg` stays static,
     // but the audio's art_hash now reflects the animated-WebP embed intent,
     // so it drifts from the static hash and triggers a retag.
-    let on = build_desired(
+    let on = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             animated_covers: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     assert!(
         on[0]
@@ -109,18 +93,14 @@ fn animated_covers_embed_via_art_hash_not_a_webp_sidecar() {
     // A clip with no video preview is unaffected: art_hash stays static.
     let no_video = art_clip("id-b");
     let clips = [&no_video];
-    let on_novideo = build_desired(
+    let on_novideo = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             animated_covers: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     assert!(
         on_novideo[0]
@@ -133,18 +113,14 @@ fn animated_covers_embed_via_art_hash_not_a_webp_sidecar() {
     // ALAC cannot embed WebP, so even with a video preview its art_hash stays
     // static (it always embeds the JPEG).
     let clips = [&with_video];
-    let alac = build_desired(
+    let alac = desired_of(
         &clips,
         AudioFormat::Alac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             animated_covers: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     assert_eq!(alac[0].art_hash, crate::hash::art_hash(&with_video));
 }
@@ -157,15 +133,11 @@ fn build_desired_emits_video_mp4_only_when_enabled_and_video_present() {
     };
     let clips = [&with_video];
 
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert!(
         desired[0]
@@ -174,18 +146,14 @@ fn build_desired_emits_video_mp4_only_when_enabled_and_video_present() {
             .all(|art| art.kind != ArtifactKind::VideoMp4)
     );
 
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             video: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     let base = desired[0].path.strip_suffix(".flac").unwrap();
     let video = desired[0]
@@ -200,18 +168,14 @@ fn build_desired_emits_video_mp4_only_when_enabled_and_video_present() {
 
     let no_video = art_clip("id-b");
     let clips = [&no_video];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             video: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     assert!(
         desired[0]
@@ -229,15 +193,11 @@ fn build_desired_emits_details_sidecar_only_when_enabled() {
     let a = clip("id-a", "Song", "alice");
     let clips = [&a];
 
-    let off = build_desired(
+    let off = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert!(
         off[0]
@@ -246,18 +206,14 @@ fn build_desired_emits_details_sidecar_only_when_enabled() {
             .all(|art| art.kind != ArtifactKind::DetailsTxt)
     );
 
-    let on = build_desired(
+    let on = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             details: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     let base = on[0].path.strip_suffix(".flac").unwrap();
     let details = on[0]
@@ -285,15 +241,11 @@ fn build_desired_emits_deferred_lyrics_sidecar_when_enabled() {
     };
     let clips = [&with_lyrics];
 
-    let off = build_desired(
+    let off = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert!(
         off[0]
@@ -302,18 +254,14 @@ fn build_desired_emits_deferred_lyrics_sidecar_when_enabled() {
             .all(|art| art.kind != ArtifactKind::LyricsTxt)
     );
 
-    let on = build_desired(
+    let on = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             lyrics: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     let base = on[0].path.strip_suffix(".flac").unwrap();
     let lyrics = on[0]
@@ -335,15 +283,11 @@ fn build_desired_emits_lrc_sidecar_only_when_enabled() {
     };
     let clips = [&with_lyrics];
 
-    let off = build_desired(
+    let off = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert!(
         off[0]
@@ -352,18 +296,14 @@ fn build_desired_emits_lrc_sidecar_only_when_enabled() {
             .all(|art| art.kind != ArtifactKind::Lrc)
     );
 
-    let on = build_desired(
+    let on = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             lrc: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     let base = on[0].path.strip_suffix(".flac").unwrap();
     let lrc = on[0]
@@ -385,18 +325,14 @@ fn build_desired_emits_lrc_sidecar_from_prompt_when_feed_omits_lyrics() {
     };
     assert!(prompt_only.lyrics.is_empty());
     let clips = [&prompt_only];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             lrc: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     let lrc = desired[0]
         .artifacts
@@ -412,18 +348,14 @@ fn build_desired_emits_lrc_sidecar_even_when_feed_has_no_lyrics_or_prompt() {
     let bare = clip("id-a", "Song", "alice");
     assert!(bare.lyrics.is_empty() && bare.prompt.is_empty());
     let clips = [&bare];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             lrc: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     let lrc = desired[0]
         .artifacts
@@ -443,18 +375,14 @@ fn build_desired_emits_deferred_lyrics_sidecar_even_when_clip_has_no_lyrics() {
     let no_lyrics = clip("id-a", "Song", "alice");
     assert!(no_lyrics.lyrics.is_empty());
     let clips = [&no_lyrics];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             lyrics: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     let lyrics = desired[0]
         .artifacts
@@ -472,19 +400,15 @@ fn build_desired_text_sidecars_are_independent() {
         ..art_clip("id-a")
     };
     let clips = [&full];
-    let desired = build_desired(
+    let desired = desired_of(
         &clips,
         AudioFormat::Flac,
-        &modes_for(&clips, SourceMode::Mirror),
-        &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        SourceMode::Mirror,
         ArtifactToggles {
             details: true,
             lyrics: true,
             ..Default::default()
         },
-        &NamingConfig::default(),
     );
     let base = desired[0].path.strip_suffix(".flac").unwrap();
     let kinds: BTreeSet<ArtifactKind> = desired[0].artifacts.iter().map(|a| a.kind).collect();

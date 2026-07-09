@@ -17,6 +17,21 @@ fn test_clip(id: &str, title: &str) -> Clip {
     }
 }
 
+/// A resolved cover-edge lineage whose root is its own parent — the shape the
+/// album/disambiguation cases reuse. Only `root_id` and `root_title` vary.
+fn cover_child(root_id: &str, root_title: &str) -> LineageContext {
+    LineageContext {
+        root_id: root_id.to_string(),
+        root_title: root_title.to_string(),
+        root_date: String::new(),
+        parent_id: root_id.to_string(),
+        edge_type: Some(EdgeType::Cover),
+        status: ResolveStatus::Resolved,
+        track: 0,
+        track_total: 0,
+    }
+}
+
 fn render_own(clip: &Clip, config: &NamingConfig) -> RenderedName {
     let lineage = LineageContext::own_root(clip);
     render_clip_name(
@@ -181,16 +196,7 @@ fn custom_template_replaces_all_known_placeholders_once() {
         handle: "handle".to_string(),
         ..Clip::default()
     };
-    let lineage = LineageContext {
-        root_id: "rootxyz9-extra".to_string(),
-        root_title: "Album".to_string(),
-        root_date: String::new(),
-        parent_id: "rootxyz9-extra".to_string(),
-        edge_type: Some(EdgeType::Cover),
-        status: ResolveStatus::Resolved,
-        track: 0,
-        track_total: 0,
-    };
+    let lineage = cover_child("rootxyz9-extra", "Album");
     let config = NamingConfig {
         template: "{creator}-{handle}-{album}-{title}-{root_id8}-{id8}-{id}-{unknown}".to_string(),
         ..NamingConfig::default()
@@ -273,16 +279,7 @@ fn long_titled_siblings_stay_distinct_with_balanced_brackets() {
     // Two same-(long-)titled clips sharing a root must remain distinct: only
     // the title is shortened, so their [id8] suffixes differ and neither name
     // ends up with an unbalanced bracket (#120).
-    let lineage = LineageContext {
-        root_id: "root-42".to_string(),
-        root_title: "Origin".to_string(),
-        root_date: String::new(),
-        parent_id: "root-42".to_string(),
-        edge_type: Some(EdgeType::Cover),
-        status: ResolveStatus::Resolved,
-        track: 0,
-        track_total: 0,
-    };
+    let lineage = cover_child("root-42", "Origin");
     let title = "z".repeat(200);
     let first = test_clip("aaaa1111-x", &title);
     let second = test_clip("bbbb2222-y", &title);
@@ -369,16 +366,7 @@ fn ascii_expanding_chars_do_not_slice_the_disambiguator() {
 fn same_title_siblings_stay_distinct_via_id8() {
     // Two clips sharing a root (same album folder) and the same title must
     // still land on distinct files; the default template's {id8} does that.
-    let lineage = LineageContext {
-        root_id: "root-9".to_string(),
-        root_title: "Origin".to_string(),
-        root_date: String::new(),
-        parent_id: "root-9".to_string(),
-        edge_type: Some(EdgeType::Cover),
-        status: ResolveStatus::Resolved,
-        track: 0,
-        track_total: 0,
-    };
+    let lineage = cover_child("root-9", "Origin");
     let first = test_clip("11111111-alpha", "Shared");
     let second = test_clip("22222222-beta", "Shared");
     let requests = [
@@ -464,16 +452,7 @@ fn album_is_root_title_for_a_remix() {
         display_name: "München".to_string(),
         ..Clip::default()
     };
-    let lineage = LineageContext {
-        root_id: "root-1".to_string(),
-        root_title: "Original".to_string(),
-        root_date: String::new(),
-        parent_id: "root-1".to_string(),
-        edge_type: Some(EdgeType::Cover),
-        status: ResolveStatus::Resolved,
-        track: 0,
-        track_total: 0,
-    };
+    let lineage = cover_child("root-1", "Original");
 
     let rendered = render_clip_name(
         NamingRequest {
