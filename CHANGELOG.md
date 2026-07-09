@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.11](https://github.com/teh-hippo/rs-suno/compare/v0.36.10...v0.36.11) (2026-07-09)
+
+
+### Bug Fixes
+
+* **config:** case-fold the account-root nesting guard on case-insensitive filesystems ([a6f63cd](https://github.com/teh-hippo/rs-suno/commit/a6f63cdedcf8152cde2c59e3c3988b43359c5e86)), closes [#380](https://github.com/teh-hippo/rs-suno/issues/380)
+
 ## [0.36.10](https://github.com/teh-hippo/rs-suno/compare/v0.36.9...v0.36.10) (2026-07-09)
 
 
