@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   release:
-    uses: teh-hippo/common-repo-configs/.github/workflows/rust-release.yml@962b691da7463ad73773f2a803a5ac2a1cdd1b46  # v2.0.1
+    uses: teh-hippo/common-repo-configs/.github/workflows/rust-release.yml@6995ce5f2e6cc4832dc8f7457b35dabbc1bacfe6  # v2.0.2
     permissions:
       contents: write
       id-token: write
