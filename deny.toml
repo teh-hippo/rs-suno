@@ -1,0 +1,30 @@
+# cargo-deny policy. https://embarkstudios.github.io/cargo-deny/
+#
+# Advisories: no [advisories] section is needed to scan. cargo-deny fetches the
+# RustSec Advisory DB by default and fails the check on any vulnerability,
+# unsound, or unmaintained advisory (a green run today can still turn red when a
+# new advisory lands, which is why CI also runs on a schedule).
+
+[licenses]
+# Allow-list derived from the crate graph (all targets, all features): every
+# dependency's SPDX expression is satisfied by exactly one of these, so the run
+# is green today and any new licence entering the tree must be added here.
+allow = [
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+]
+
+[bans]
+# The lockfile carries a handful of duplicate transitive versions (getrandom,
+# r-efi, windows-sys); warn rather than fail so routine updates aren't blocked.
+multiple-versions = "warn"
+
+[sources]
+# Every crate resolves from crates.io today; forbid unknown registries and git
+# sources so introducing one is a deliberate, reviewed change.
+unknown-registry = "deny"
+unknown-git = "deny"
