@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.14](https://github.com/teh-hippo/rs-suno/compare/v0.36.13...v0.36.14) (2026-07-09)
+
+
+### Performance Improvements
+
+* stat the manifest concurrently with a bounded fan-out ([33c3ebe](https://github.com/teh-hippo/rs-suno/commit/33c3ebec9c560779a3c99c96a4af92e03e227651)), closes [#372](https://github.com/teh-hippo/rs-suno/issues/372)
+
 ## [0.36.13](https://github.com/teh-hippo/rs-suno/compare/v0.36.12...v0.36.13) (2026-07-09)
 
 
