@@ -398,13 +398,9 @@ fn disk_full_superseded_sidecar_unlink_aborts_the_run() {
     // A full disk striking the unlink of a *superseded sidecar* is systemic,
     // exactly like the audio-reformat unlink above: commit_artifact writes the
     // new sidecar, then removing the old one fails out-of-space, so the run
-    // aborts (DiskFull) rather than skipping the clip. This pins the now
-    // disk-aware classification of the shared `remove_superseded` helper (#369):
-    // the artifact path previously hard-coded a per-clip permanent skip here.
-    // The production `FsAdapter::remove` never signals out-of-space, so only the
-    // in-memory double reaches this arm today; routing it through the shared
-    // disk-or-permanent verdict is forward-safe (#406) and stops the two paths
-    // drifting.
+    // aborts (DiskFull) rather than skipping the clip. This pins the disk-aware
+    // classification of the shared `remove_superseded` helper, which the sidecar
+    // and stem paths share, exercised here through the in-memory fs double.
     let mut manifest = Manifest::new();
     let mut e = entry("old/a.flac", AudioFormat::Flac);
     e.lyrics_txt = Some(ArtifactState {

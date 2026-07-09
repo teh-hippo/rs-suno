@@ -58,12 +58,26 @@ impl Ffmpeg for FfmpegAdapter {
         mp4: &[u8],
         settings: WebpEncodeSettings,
     ) -> impl Future<Output = Result<Vec<u8>, FfmpegError>> + Send {
+        let scratch = self.scratch.clone();
         let mp4 = mp4.to_vec();
         async move {
-            tokio::task::spawn_blocking(move || crate::transcode::mp4_to_webp(&mp4, settings))
-                .await
-                .map_err(|err| FfmpegError::new(format!("transcode task failed: {err}")))?
-                .map_err(|err| FfmpegError::new(err.to_string()))
+            if let Err(err) = std::fs::create_dir_all(&scratch) {
+                return Err(crate::diskspace::ffmpeg_error(
+                    &err,
+                    format!("could not create scratch {}: {err}", scratch.display()),
+                ));
+            }
+            tokio::task::spawn_blocking(move || {
+                crate::transcode::mp4_to_webp(&mp4, settings, &scratch)
+            })
+            .await
+            .map_err(|err| FfmpegError::new(format!("transcode task failed: {err}")))?
+            // ffmpeg reports a full disk only as stderr text and the WebP streams
+            // over a pipe, so transcode probes the scratch dir and attaches a real
+            // out-of-space io::Error; a full disk also surfaces from the
+            // create_dir_all above. Both are classified as disk-full so a cover
+            // transcode aborts the run, like the audio path.
+            .map_err(|err| crate::diskspace::ffmpeg_error_from_anyhow(&err, err.to_string()))
         }
     }
 }

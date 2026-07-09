@@ -117,7 +117,16 @@ fn lossless_codec_args(format: AudioFormat) -> Result<(&'static str, &'static st
 /// threads while a third feeds stdin, because ffmpeg interleaves writing the
 /// encoded frames with reading the input: draining only after `wait` would
 /// deadlock once a pipe buffer fills.
-pub fn mp4_to_webp(mp4: &[u8], settings: WebpEncodeSettings) -> Result<Vec<u8>> {
+///
+/// `scratch_dir` stages nothing here; it is a probe target on the library
+/// filesystem so a full disk (which ffmpeg only reports as stderr text) is told
+/// apart from an ordinary encode failure and aborts the run rather than
+/// degrading to a per-cover skip.
+pub fn mp4_to_webp(
+    mp4: &[u8],
+    settings: WebpEncodeSettings,
+    scratch_dir: &Path,
+) -> Result<Vec<u8>> {
     let mut child = Command::new("ffmpeg")
         .arg("-y")
         .args(["-i", "pipe:0", "-an"])
@@ -175,6 +184,18 @@ pub fn mp4_to_webp(mp4: &[u8], settings: WebpEncodeSettings) -> Result<Vec<u8>> 
     let stderr = stderr_reader.join().unwrap_or_default();
 
     if !status.success() {
+        // ffmpeg reports a full disk only as stderr text with no io::Error, and
+        // the WebP streams over a pipe so there is no staged output whose write
+        // would carry one. The scratch dir is on the library filesystem, so a
+        // disk that fills mid-encode would otherwise degrade to a per-cover skip
+        // and repeat for every clip. Probe it: if a tiny write also hits ENOSPC,
+        // carry a real out-of-space io::Error so the adapter classifies this as a
+        // disk-full run abort.
+        if let Some(err) = scratch_out_of_space(scratch_dir) {
+            return Err(
+                anyhow::Error::new(err).context("disk full while transcoding a cover to WebP")
+            );
+        }
         bail!(
             "ffmpeg failed to transcode MP4 to WebP: {}",
             stderr_tail(&stderr)
@@ -414,7 +435,7 @@ mod tests {
         assert!(made.success());
 
         let mp4 = std::fs::read(&mp4_path).unwrap();
-        let webp = mp4_to_webp(&mp4, WebpEncodeSettings::default()).unwrap();
+        let webp = mp4_to_webp(&mp4, WebpEncodeSettings::default(), &dir).unwrap();
         assert!(!webp.is_empty());
         assert_eq!(&webp[..4], b"RIFF");
         assert_eq!(&webp[8..12], b"WEBP");
