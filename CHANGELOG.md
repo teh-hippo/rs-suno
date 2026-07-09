@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.13](https://github.com/teh-hippo/rs-suno/compare/v0.36.12...v0.36.13) (2026-07-09)
+
+
+### Performance Improvements
+
+* borrow the roots index and clip metadata instead of cloning ([bbdea23](https://github.com/teh-hippo/rs-suno/commit/bbdea23d2f0264b12da803a5f0fc38543b803835)), closes [#371](https://github.com/teh-hippo/rs-suno/issues/371)
+
 ## [0.36.12](https://github.com/teh-hippo/rs-suno/compare/v0.36.11...v0.36.12) (2026-07-09)
 
 
