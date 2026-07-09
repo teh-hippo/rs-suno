@@ -2,6 +2,7 @@
 name = "suno-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Engine for a download-only Suno.ai library tool: feed selection, sync reconciliation, and audio tagging."
