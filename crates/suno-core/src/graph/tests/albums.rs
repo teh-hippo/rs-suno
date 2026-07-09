@@ -304,6 +304,7 @@ fn colliding_node_less_overrides_keep_album_art_paths_distinct() {
         .collect(),
     );
     let colliding = store.colliding_root_titles();
+    let colliding_ids = store.colliding_clip_ids();
 
     let clip_of = |id: &str| Clip {
         id: id.to_owned(),
@@ -340,6 +341,7 @@ fn colliding_node_less_overrides_keep_album_art_paths_distinct() {
         &requests,
         &crate::naming::NamingConfig::default(),
         &colliding,
+        &colliding_ids,
     );
 
     let desired_of = |clip: &Clip, ctx: &LineageContext, name: &crate::naming::RenderedName| {
@@ -449,6 +451,7 @@ fn override_on_uncached_selected_root_is_ignored_and_keeps_albums_distinct() {
     };
     let real_ctx = store.context_for(&real_clip);
     let colliding = store.colliding_root_titles();
+    let colliding_ids = store.colliding_clip_ids();
     let requests = [
         crate::naming::NamingRequest {
             clip: &real_clip,
@@ -463,6 +466,7 @@ fn override_on_uncached_selected_root_is_ignored_and_keeps_albums_distinct() {
         &requests,
         &crate::naming::NamingConfig::default(),
         &colliding,
+        &colliding_ids,
     );
     let desired_of = |clip: &Clip, ctx: &LineageContext, name: &crate::naming::RenderedName| {
         crate::reconcile::Desired {

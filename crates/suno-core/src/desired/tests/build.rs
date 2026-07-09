@@ -10,6 +10,7 @@ fn build_desired_appends_extension_and_mode() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -41,6 +42,7 @@ fn build_desired_carries_the_trashed_flag_from_the_clip() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -71,6 +73,7 @@ fn build_desired_uses_supplied_lineage_context() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &contexts,
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
@@ -142,6 +145,7 @@ fn lineage_is_stable_when_a_later_resolution_fails() {
         &modes_for(&clips, SourceMode::Mirror),
         &contexts_of(&store),
         &store.colliding_root_titles(),
+        &store.colliding_clip_ids(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -158,6 +162,7 @@ fn lineage_is_stable_when_a_later_resolution_fails() {
         &modes_for(&clips, SourceMode::Mirror),
         &contexts_of(&store),
         &store.colliding_root_titles(),
+        &store.colliding_clip_ids(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -189,6 +194,7 @@ fn build_desired_disambiguates_collisions() {
         &modes_for(&clips, SourceMode::Copy),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -206,6 +212,7 @@ fn build_desired_uses_forward_slashes() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
@@ -246,6 +253,7 @@ fn cover_album_and_stem_paths_use_forward_slashes() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
@@ -310,6 +318,7 @@ fn build_desired_one_pass_disambiguates_and_stamps_modes() {
         &modes,
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -335,6 +344,7 @@ fn build_desired_respects_custom_naming_config() {
         &HashMap::from([("abcdefgh-1234".to_owned(), vec![SourceMode::Mirror])]),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &custom,
     );
@@ -344,4 +354,86 @@ fn build_desired_respects_custom_naming_config() {
         desired[0].path
     );
     assert!(desired[0].path.contains(&a.id[..8]));
+}
+
+#[test]
+fn id8_twin_path_is_stable_when_a_twin_leaves_the_selection() {
+    use crate::graph::LineageStore;
+    use crate::lineage::{Resolution, ResolveStatus, RootInfo};
+
+    // #356 at the desired-state layer, mirroring the album idempotence test:
+    // two id8-twins recorded in the store keep the kept clip's path fixed when
+    // its twin drops out of the selection, because `colliding_clip_ids` is
+    // store-derived and batch-independent.
+    let a = clip("abcd1234-a", "Untitled", "alice");
+    let b = clip("abcd1234-b", "Untitled", "alice");
+
+    let mut roots = HashMap::new();
+    for id in ["abcd1234-a", "abcd1234-b"] {
+        roots.insert(
+            id.to_owned(),
+            RootInfo {
+                root_id: id.to_owned(),
+                root_title: "Untitled".into(),
+                status: ResolveStatus::Resolved,
+            },
+        );
+    }
+    let mut store = LineageStore::new();
+    store.update(
+        &[a.clone(), b.clone()],
+        &Resolution {
+            roots,
+            gap_filled: Vec::new(),
+            bridges: Vec::new(),
+        },
+        "t1",
+    );
+    let colliding_ids = store.colliding_clip_ids();
+    assert!(
+        colliding_ids.contains("abcd1234-a") && colliding_ids.contains("abcd1234-b"),
+        "the store should flag both twins"
+    );
+
+    let both = [&a, &b];
+    let with_twin = build_desired(
+        &both,
+        AudioFormat::Flac,
+        &modes_for(&both, SourceMode::Mirror),
+        &no_contexts(),
+        &store.colliding_root_titles(),
+        &colliding_ids,
+        ArtifactToggles::default(),
+        &NamingConfig::default(),
+    );
+    let a_with_twin = with_twin
+        .iter()
+        .find(|d| d.clip.id == "abcd1234-a")
+        .unwrap();
+    assert!(
+        a_with_twin.path.contains("[abcd1234-a]"),
+        "the twin should carry the whole-library suffix: {}",
+        a_with_twin.path
+    );
+
+    let alone = [&a];
+    let without_twin = build_desired(
+        &alone,
+        AudioFormat::Flac,
+        &modes_for(&alone, SourceMode::Mirror),
+        &no_contexts(),
+        &store.colliding_root_titles(),
+        &colliding_ids,
+        ArtifactToggles::default(),
+        &NamingConfig::default(),
+    );
+    let a_alone = without_twin
+        .iter()
+        .find(|d| d.clip.id == "abcd1234-a")
+        .unwrap();
+
+    assert_eq!(
+        a_with_twin.path, a_alone.path,
+        "the kept clip's path drifted when its twin left the selection"
+    );
 }

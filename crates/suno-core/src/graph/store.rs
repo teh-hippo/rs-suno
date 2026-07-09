@@ -340,6 +340,37 @@ impl LineageStore {
             .collect()
     }
 
+    /// Full clip ids whose 8-char id prefix (`{id8}`) is shared by more than one
+    /// distinct clip anywhere in the archive.
+    ///
+    /// The file-name counterpart of [`colliding_root_titles`]: distinct clips
+    /// must never share a path, so naming appends the full clip id to any clip in
+    /// this set. Computed from the whole store — every clip ever seen, including
+    /// trashed and since-purged ancestors ([`nodes`](Self::nodes)) — so the
+    /// decision is stable across runs and independent of the current batch: a
+    /// `--limit`/`--since` slice or a trashed twin never flips the suffix on or
+    /// off, which is the churn #356 is about.
+    ///
+    /// [`colliding_root_titles`]: LineageStore::colliding_root_titles
+    pub fn colliding_clip_ids(&self) -> BTreeSet<String> {
+        let mut ids_by_id8: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for id in self.nodes.keys() {
+            // The `{id8}` group key. Must stay in lock-step with how the path
+            // renders `{id8}`: the first 8 scalar values (mirrors
+            // `truncate_chars(id, 8)` in `naming.rs`) then ASCII-fold.
+            // `to_ascii_lowercase` future-proofs against a non-lowercase id
+            // diverging from the ASCII-sanitised `{id8}` in the path; today's
+            // Suno UUIDs are already lowercase, so it is a no-op.
+            let id8 = id.chars().take(8).collect::<String>().to_ascii_lowercase();
+            ids_by_id8.entry(id8).or_default().insert(id.clone());
+        }
+        ids_by_id8
+            .into_values()
+            .filter(|ids| ids.len() > 1)
+            .flatten()
+            .collect()
+    }
+
     /// Number of nodes in the graph.
     pub fn len(&self) -> usize {
         self.nodes.len()

@@ -93,15 +93,35 @@ pub struct RenderedName {
     pub base_name: String,
 }
 
+/// Render one clip's relative path in isolation.
+///
+/// Unlike [`render_clip_names`], this does **not** apply whole-library id
+/// disambiguation: a lone clip cannot know whether another clip shares its
+/// `{id8}`, so only the plural form (reached via
+/// [`build_desired`](crate::desired::build_desired)) appends the stable full-id
+/// suffix for an id8-twin. Callers that need that stability must batch through
+/// the plural form.
 pub fn render_clip_name(request: NamingRequest<'_>, config: &NamingConfig) -> RenderedName {
     let album = album_component(request, config);
     render_with_album(request, config, &album)
 }
 
+/// Render every request's relative path as a batch, disambiguating collisions.
+///
+/// The `{id8}` suffix is **whole-library-stable**: a clip whose id is in
+/// `colliding_ids` (the store-derived set of clip ids sharing an `{id8}` with
+/// another distinct clip, see
+/// [`colliding_clip_ids`](crate::LineageStore::colliding_clip_ids)) gets
+/// the full clip id appended regardless of which other clips are in this batch,
+/// so trashing or `--limit`-excluding an id8-twin never renames the kept clip
+/// (#356). The two trailing batch passes remain as a correctness backstop for
+/// template shapes the id8 set cannot see (no `{id8}`/`{id}` placeholder) and for
+/// case/NFC collisions.
 pub fn render_clip_names(
     requests: &[NamingRequest<'_>],
     config: &NamingConfig,
     colliding_albums: &BTreeSet<String>,
+    colliding_ids: &BTreeSet<String>,
 ) -> Vec<RenderedName> {
     let albums = disambiguated_albums(requests, config, colliding_albums);
     let mut rendered = requests
@@ -109,6 +129,21 @@ pub fn render_clip_names(
         .zip(&albums)
         .map(|(request, album)| render_with_album(*request, config, album))
         .collect::<Vec<_>>();
+
+    // Whole-library id pass (#356): append the full clip id to any clip whose
+    // id8 is shared archive-wide, before the batch passes so they never re-flag
+    // an already-disambiguated pair. The decision depends only on the
+    // store-derived set, never on the batch, so it is stable across runs.
+    for (index, request) in requests.iter().enumerate() {
+        if colliding_ids.contains(&request.clip.id) {
+            rendered[index] = with_suffix(
+                rendered[index].clone(),
+                &request.clip.id,
+                config.character_set,
+                config.max_component_len,
+            );
+        }
+    }
 
     // Two passes so distinct clips never land on one path: the first keys on the
     // exact rendered string, the second on the filesystem-canonical form (NFC +
@@ -651,3 +686,6 @@ fn is_reserved_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod proptests;

@@ -60,13 +60,18 @@ pub struct PlaylistInput<'a> {
 /// tags, change hash), falling back to a self-rooted context when absent.
 /// `colliding_albums` is the set of root titles shared by more than one root; a
 /// clip in that set is folded into a `[{root_id8}]`-suffixed folder so two roots
-/// never share one. `toggles` gates the per-song sidecars in [`clip_artifacts`].
+/// never share one. `colliding_ids` is the file-name counterpart: the set of
+/// clip ids sharing an `{id8}` with another distinct clip archive-wide, so a
+/// clip in it gets a stable full-id suffix regardless of the batch (#356).
+/// `toggles` gates the per-song sidecars in [`clip_artifacts`].
+#[allow(clippy::too_many_arguments)]
 pub fn build_desired(
     clips: &[&Clip],
     format: AudioFormat,
     modes_by_id: &HashMap<String, Vec<SourceMode>>,
     contexts: &HashMap<String, LineageContext>,
     colliding_albums: &BTreeSet<String>,
+    colliding_ids: &BTreeSet<String>,
     toggles: ArtifactToggles,
     naming: &NamingConfig,
 ) -> Vec<Desired> {
@@ -87,7 +92,7 @@ pub fn build_desired(
             .zip(&lineages)
             .map(|(clip, lineage)| NamingRequest { clip, lineage })
             .collect();
-        render_clip_names(&requests, naming, colliding_albums)
+        render_clip_names(&requests, naming, colliding_albums, colliding_ids)
     };
 
     clips
