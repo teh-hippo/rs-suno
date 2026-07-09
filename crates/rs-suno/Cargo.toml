@@ -11,6 +11,9 @@ keywords = ["suno", "music", "download", "cli", "sync"]
 categories = ["command-line-utilities", "multimedia::audio"]
 readme = "../../README.md"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "suno"
 path = "src/main.rs"

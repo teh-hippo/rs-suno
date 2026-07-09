@@ -229,7 +229,7 @@ fn update_defaults_a_blank_attribution_type_to_attribution() {
         id: "child".into(),
         title: "Remix".into(),
         handle: "me".into(),
-        clip_attribution_type: "".into(),
+        clip_attribution_type: String::new(),
         clip_roots: vec![crate::model::ClipRoot {
             id: "attr-root".into(),
             handle: "me".into(),

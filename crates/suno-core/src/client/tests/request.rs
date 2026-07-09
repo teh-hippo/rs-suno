@@ -7,7 +7,7 @@ fn api_request_uses_clock_now_unix_for_jwt_expiry() {
     let exp = 1_000_000i64;
     let payload =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
-    let jwt_str = format!("hdr.{}.sig", payload);
+    let jwt_str = format!("hdr.{payload}.sig");
     let token_body = format!(r#"{{"jwt": "{jwt_str}"}}"#);
     let client_body = serde_json::json!({
         "response": {
