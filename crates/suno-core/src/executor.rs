@@ -968,6 +968,7 @@ fn manifest_entry(d: &Desired, size: u64) -> ManifestEntry {
         format: d.format,
         meta_hash: d.meta_hash.clone(),
         art_hash: d.art_hash.clone(),
+        embedded_lyrics_hash: d.embedded_lyrics_hash.clone(),
         size,
         preserve: preserve_for(d),
         ..Default::default()

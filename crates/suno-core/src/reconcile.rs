@@ -842,6 +842,7 @@ fn aggregate_desired(desired: &[Desired]) -> Vec<Desired> {
                     acc.format = d.format;
                     acc.meta_hash = d.meta_hash.clone();
                     acc.art_hash = d.art_hash.clone();
+                    acc.embedded_lyrics_hash = d.embedded_lyrics_hash.clone();
                     acc.artifacts = d.artifacts.clone();
                     acc.stems = d.stems.clone();
                 }
@@ -1122,7 +1123,7 @@ fn plan_desired(
             to: d.path.clone(),
         });
         // A rename still needs a retag when the metadata or art drifted.
-        if meta_or_art_changed(d, entry) {
+        if meta_art_or_lyrics_changed(d, entry) {
             out.push(Action::Retag {
                 clip: d.clip.clone(),
                 lineage: d.lineage.clone(),
@@ -1132,7 +1133,7 @@ fn plan_desired(
         return;
     }
 
-    if meta_or_art_changed(d, entry) {
+    if meta_art_or_lyrics_changed(d, entry) {
         out.push(Action::Retag {
             clip: d.clip.clone(),
             lineage: d.lineage.clone(),
@@ -1146,9 +1147,14 @@ fn plan_desired(
     });
 }
 
-/// Whether the desired metadata or art hash differs from the manifest entry.
-fn meta_or_art_changed(d: &Desired, entry: &ManifestEntry) -> bool {
-    d.meta_hash != entry.meta_hash || d.art_hash != entry.art_hash
+/// Whether any tag-bearing input differs from the manifest: metadata, cover art,
+/// or the embedded aligned lyrics. Each has its own sentinel, so a drift in one
+/// re-tags without depending on the others (the lyrics clause back-fills Suno's
+/// fetched alignment into the tag, #354).
+fn meta_art_or_lyrics_changed(d: &Desired, entry: &ManifestEntry) -> bool {
+    d.meta_hash != entry.meta_hash
+        || d.art_hash != entry.art_hash
+        || d.embedded_lyrics_hash != entry.embedded_lyrics_hash
 }
 
 #[cfg(test)]

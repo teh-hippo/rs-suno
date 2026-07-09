@@ -65,6 +65,16 @@ pub struct ManifestEntry {
     pub meta_hash: String,
     /// Hash of the embedded cover art, for detecting art drift.
     pub art_hash: String,
+    /// Fingerprint of the aligned lyrics currently embedded in the audio tag
+    /// (the FLAC `LYRICS` / MP3 `USLT` / ALAC `©lyr` frame), or empty when none
+    /// are embedded. Tracked separately from [`meta_hash`](Self::meta_hash)
+    /// because the embedded text is Suno's fetched alignment, not `clip.lyrics`,
+    /// so a drift here re-tags to back-fill the embed (#354). Its value is the
+    /// content hash of the `.lrc` body the embed was rendered from, mirroring how
+    /// [`lrc`](Self::lrc) tracks the sidecar. Additive: old manifests load with
+    /// `""` and the common no-embed case is omitted from the serialised object.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub embedded_lyrics_hash: String,
     /// Size of the file in bytes when last written.
     pub size: u64,
     /// When set, this clip is held by a copy or archive source, or is private,
@@ -451,5 +461,38 @@ mod tests {
         let json = serde_json::to_string(&populated).unwrap();
         let back: ArtifactState = serde_json::from_str(&json).unwrap();
         assert_eq!(populated, back);
+    }
+
+    #[test]
+    fn embedded_lyrics_hash_defaults_and_roundtrips() {
+        // A pre-field manifest loads with an empty embed fingerprint (additive
+        // growth), an empty value is omitted from the serialised object (so the
+        // on-disk manifest is byte-identical for the no-embed majority), and a
+        // populated value round-trips.
+        let json = r#"{"clip1":{"path":"a.flac","format":"flac","meta_hash":"m","art_hash":"a","size":1}}"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.get("clip1").unwrap().embedded_lyrics_hash, "");
+        let value: serde_json::Value = serde_json::to_value(&m).unwrap();
+        assert!(
+            value
+                .get("clip1")
+                .unwrap()
+                .get("embedded_lyrics_hash")
+                .is_none(),
+            "an empty embed hash is omitted from the manifest"
+        );
+
+        let mut e = entry("a.flac", AudioFormat::Flac);
+        e.embedded_lyrics_hash = "lrc-content-hash".to_string();
+        let mut m2 = Manifest::new();
+        m2.insert("a", e);
+        let serialised = serde_json::to_string(&m2).unwrap();
+        assert!(serialised.contains("embedded_lyrics_hash"));
+        let back: Manifest = serde_json::from_str(&serialised).unwrap();
+        assert_eq!(m2, back);
+        assert_eq!(
+            back.get("a").unwrap().embedded_lyrics_hash,
+            "lrc-content-hash"
+        );
     }
 }

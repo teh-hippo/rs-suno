@@ -229,6 +229,113 @@ fn rename_with_meta_change_also_retags() {
 }
 
 #[test]
+fn embedded_lyrics_drift_retags_in_place() {
+    // #354: the aligned-lyrics embed drifted (manifest "" vs desired "L") while
+    // meta and art match, so exactly one in-place Retag back-fills the tag.
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+    let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+    d.embedded_lyrics_hash = "L".to_string();
+    let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+    assert_eq!(
+        plan.actions,
+        vec![Action::Retag {
+            clip: clip("a"),
+            lineage: lineage("a"),
+            path: "a.flac".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn embedded_lyrics_match_skips() {
+    // Both sides carry the same embed fingerprint -> no retag (idempotent).
+    let mut manifest = Manifest::new();
+    let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+    e.embedded_lyrics_hash = "L".to_string();
+    manifest.insert("a", e);
+    let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+    d.embedded_lyrics_hash = "L".to_string();
+    let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+    assert_eq!(
+        plan.actions,
+        vec![Action::Skip {
+            clip_id: "a".to_string()
+        }]
+    );
+}
+
+#[test]
+fn no_embedded_lyrics_both_sides_skips() {
+    // A clip with no `.lrc` (instrumental / feature off): "" on both sides, so no
+    // spurious upgrade churn for clips that embed nothing.
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
+    let d = vec![desired("a", "a.flac", AudioFormat::Flac, "m", "art")];
+    let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+    assert_eq!(
+        plan.actions,
+        vec![Action::Skip {
+            clip_id: "a".to_string()
+        }]
+    );
+}
+
+#[test]
+fn rename_with_lyrics_drift_also_retags() {
+    // A path change plus an embed drift renames then retags at the new path.
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry("old/a.flac", AudioFormat::Flac, "m", "art"));
+    let mut d = desired("a", "new/a.flac", AudioFormat::Flac, "m", "art");
+    d.embedded_lyrics_hash = "L".to_string();
+    let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+    assert_eq!(
+        plan.actions,
+        vec![
+            Action::Rename {
+                from: "old/a.flac".to_string(),
+                to: "new/a.flac".to_string(),
+            },
+            Action::Retag {
+                clip: clip("a"),
+                lineage: lineage("a"),
+                path: "new/a.flac".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn retag_loop_regression_stable_after_backfill() {
+    // After a back-fill retag, the entry is stamped embedded_lyrics_hash = "L"
+    // (== lrc.hash) and the desired carries "L" with a matching `.lrc` artifact,
+    // so the next reconcile is a Skip: no retag loop, no artifact churn.
+    let mut manifest = Manifest::new();
+    let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+    e.embedded_lyrics_hash = "L".to_string();
+    e.lrc = Some(ArtifactState {
+        path: "a.lrc".to_string(),
+        hash: "L".to_string(),
+    });
+    manifest.insert("a", e);
+    let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
+    d.embedded_lyrics_hash = "L".to_string();
+    d.artifacts.push(DesiredArtifact {
+        kind: ArtifactKind::Lrc,
+        path: "a.lrc".to_string(),
+        source_url: String::new(),
+        hash: "L".to_string(),
+        content: None,
+    });
+    let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+    assert_eq!(plan.retags(), 0, "matching sentinels -> no retag loop");
+    assert_eq!(plan.artifact_writes(), 0, "matching `.lrc` -> no rewrite");
+    assert!(plan.actions.contains(&Action::Skip {
+        clip_id: "a".to_string()
+    }));
+}
+
+#[test]
 fn bulk_album_rename_moves_and_retags_without_redownload() {
     // Renaming an album (a manual override) changes both the folder path and
     // the ALBUM tag/hash for every member clip. Reconcile must emit a Rename

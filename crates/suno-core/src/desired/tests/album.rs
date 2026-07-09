@@ -22,6 +22,7 @@ fn album_member(clip: Clip, root_id: &str, path: &str) -> Desired {
         format: AudioFormat::Flac,
         meta_hash: "m".to_string(),
         art_hash: "a".to_string(),
+        embedded_lyrics_hash: String::new(),
         modes: vec![SourceMode::Mirror],
         trashed: false,
         private: false,

@@ -44,7 +44,11 @@ pub fn content_hash(text: &str) -> String {
 /// change to a non-embedded field (e.g. the animated-cover URL) does not. Taking
 /// [`TrackMetadata`] directly keeps it in lock-step with the tag writer: if a
 /// value is embedded, it is in this hash. Chosen art is tracked separately by
-/// [`art_hash`].
+/// [`art_hash`], and the embedded aligned lyrics (Suno's fetched alignment, not
+/// `clip.lyrics`) by
+/// [`ManifestEntry::embedded_lyrics_hash`](crate::manifest::ManifestEntry::embedded_lyrics_hash);
+/// both are the invariant's two exceptions, embedded but fingerprinted outside
+/// this hash.
 ///
 /// A pure path change is handled as a rename, by comparing the rendered path
 /// with the stored one, not by this hash.
