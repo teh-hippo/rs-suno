@@ -119,7 +119,7 @@ impl Filesystem for FsAdapter {
         match std::fs::remove_file(full) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(FsError::new(err.to_string())),
+            Err(err) => Err(crate::diskspace::fs_error(&err, err.to_string())),
         }
     }
 
