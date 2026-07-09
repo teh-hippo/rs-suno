@@ -214,20 +214,11 @@ where
         client_lock: &ClientLock<'_, C>,
         id: &str,
     ) -> Result<Option<String>, Fail> {
-        let mut attempt: u32 = 0;
-        loop {
-            let result = {
-                let client = client_lock.lock().await;
-                client.wav_url(self.http, id).await
-            };
-            match result {
-                Ok(url) => return Ok(url),
-                Err(err) => match self.retry_core(id, err, &mut attempt).await {
-                    Some(fail) => return Err(fail),
-                    None => continue,
-                },
-            }
-        }
+        self.retry_client(id, async || {
+            let client = client_lock.lock().await;
+            client.wav_url(self.http, id).await
+        })
+        .await
     }
 
     /// Ask Suno to render a WAV, retrying transient API failures with backoff.
@@ -236,19 +227,10 @@ where
         client_lock: &ClientLock<'_, C>,
         id: &str,
     ) -> Result<(), Fail> {
-        let mut attempt: u32 = 0;
-        loop {
-            let result = {
-                let client = client_lock.lock().await;
-                client.request_wav(self.http, id).await
-            };
-            match result {
-                Ok(()) => return Ok(()),
-                Err(err) => match self.retry_core(id, err, &mut attempt).await {
-                    Some(fail) => return Err(fail),
-                    None => continue,
-                },
-            }
-        }
+        self.retry_client(id, async || {
+            let client = client_lock.lock().await;
+            client.request_wav(self.http, id).await
+        })
+        .await
     }
 }

@@ -220,6 +220,38 @@ impl LineageStore {
         self.resolution_cache.get(id)
     }
 
+    /// Resolve a clip's lineage root anchor — `(root_id, root_title, root_date)`
+    /// — from the durable store, falling back to the supplied own identity when
+    /// the cache or the archived root node has no better answer.
+    ///
+    /// The single source the live-clip [`context_for`](Self::context_for) and the
+    /// clip-less [`album_for_id`](Self::album_for_id) share, so the two can never
+    /// drift on how a root is anchored. Each caller passes its own fallback
+    /// identity (a live [`Clip`]'s fields, or the archived node's stored values),
+    /// keeping that difference explicit rather than folded away.
+    fn root_anchor(
+        &self,
+        own_id: &str,
+        own_title: &str,
+        own_date: &str,
+    ) -> (String, String, String) {
+        let root_id = self
+            .get_root(own_id)
+            .map(|entry| entry.root_id.clone())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| own_id.to_owned());
+        let root_title = self
+            .node(&root_id)
+            .map(|node| node.title.clone())
+            .unwrap_or_else(|| own_title.to_owned());
+        let root_title = self.effective_root_title(&root_id, root_title);
+        let root_date = self
+            .node(&root_id)
+            .map(|node| node.created_at.clone())
+            .unwrap_or_else(|| own_date.to_owned());
+        (root_id, root_title, root_date)
+    }
+
     /// Build a [`LineageContext`] for `clip` from the durable store.
     ///
     /// The source of truth for every file-affecting lineage decision (album
@@ -230,25 +262,14 @@ impl LineageStore {
     /// last-known-good album (even a since-purged ancestor) and the Year tag
     /// anchors on the root's year. The parent edge is read structurally.
     pub fn context_for(&self, clip: &Clip) -> LineageContext {
-        let cached = self.get_root(&clip.id);
-        let root_id = cached
-            .map(|entry| entry.root_id.clone())
-            .filter(|id| !id.is_empty())
-            .unwrap_or_else(|| clip.id.clone());
-        let root_title = self
-            .node(&root_id)
-            .map(|node| node.title.clone())
-            .unwrap_or_else(|| clip.title.clone());
-        let root_title = self.effective_root_title(&root_id, root_title);
-        let root_date = self
-            .node(&root_id)
-            .map(|node| node.created_at.clone())
-            .unwrap_or_else(|| clip.created_at.clone());
+        let (root_id, root_title, root_date) =
+            self.root_anchor(&clip.id, &clip.title, &clip.created_at);
         let (parent_id, edge_type) = match immediate_parent(clip) {
             Some((id, edge)) => (id, Some(edge)),
             None => (String::new(), None),
         };
-        let status = cached
+        let status = self
+            .get_root(&clip.id)
             .map(|entry| entry.status)
             .unwrap_or(ResolveStatus::Resolved);
         LineageContext {
@@ -274,20 +295,7 @@ impl LineageStore {
         let own = self.node(id);
         let own_title = own.map(|node| node.title.clone()).unwrap_or_default();
         let own_created_at = own.map(|node| node.created_at.clone()).unwrap_or_default();
-        let root_id = self
-            .get_root(id)
-            .map(|entry| entry.root_id.clone())
-            .filter(|root| !root.is_empty())
-            .unwrap_or_else(|| id.to_owned());
-        let root_title = self
-            .node(&root_id)
-            .map(|node| node.title.clone())
-            .unwrap_or_else(|| own_title.clone());
-        let root_title = self.effective_root_title(&root_id, root_title);
-        let root_date = self
-            .node(&root_id)
-            .map(|node| node.created_at.clone())
-            .unwrap_or(own_created_at);
+        let (root_id, root_title, root_date) = self.root_anchor(id, &own_title, &own_created_at);
         let context = LineageContext {
             root_id,
             root_title,

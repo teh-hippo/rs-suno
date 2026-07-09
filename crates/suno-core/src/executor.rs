@@ -893,6 +893,30 @@ where
         }
     }
 
+    /// Run one authenticated client call, retrying transient core errors with the
+    /// shared backoff ([`retry_core`](Self::retry_core)) until the budget is spent.
+    ///
+    /// The single home for the WAV render loop shape: `op` performs one attempt,
+    /// acquiring and releasing the client lock as its future completes, so the
+    /// backoff sleep in `retry_core` always runs unlocked and concurrent clips
+    /// interleave rather than serialising behind one clip's retries.
+    async fn retry_client<T>(
+        &self,
+        id: &str,
+        mut op: impl AsyncFnMut() -> Result<T, Error>,
+    ) -> Result<T, Fail> {
+        let mut attempt: u32 = 0;
+        loop {
+            match op().await {
+                Ok(value) => return Ok(value),
+                Err(err) => match self.retry_core(id, err, &mut attempt).await {
+                    Some(fail) => return Err(fail),
+                    None => continue,
+                },
+            }
+        }
+    }
+
     /// GET `url`, retrying transient failures with backoff, verifying size.
     async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, FetchError> {
         let mut attempt: u32 = 0;
