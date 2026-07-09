@@ -125,56 +125,48 @@ mod tests {
     }
 
     #[test]
-    fn requires_ffmpeg_flac_always_needs_it() {
-        let mut eff = base_settings(AudioFormat::Flac);
-        eff.animated_covers = false;
-        assert!(eff.requires_ffmpeg());
-        eff.animated_covers = true;
-        assert!(eff.requires_ffmpeg());
+    fn requires_ffmpeg_truth_table() {
+        // ffmpeg is needed for lossless output (FLAC/ALAC transcode from WAV) or
+        // an animated WebP cover (MP4->WebP). A raw MP4 cover alone does not need
+        // it, so raw_animated_cover never changes the answer.
+        for (label, format, animated, raw, want) in [
+            ("flac, no covers", AudioFormat::Flac, false, false, true),
+            ("flac, animated", AudioFormat::Flac, true, false, true),
+            ("alac, no covers", AudioFormat::Alac, false, false, true),
+            ("mp3, no covers", AudioFormat::Mp3, false, false, false),
+            ("mp3, animated webp", AudioFormat::Mp3, true, false, true),
+            (
+                "mp3, both webp and raw mp4",
+                AudioFormat::Mp3,
+                true,
+                true,
+                true,
+            ),
+            ("mp3, raw mp4 only", AudioFormat::Mp3, false, true, false),
+        ] {
+            let mut eff = base_settings(format);
+            eff.animated_covers = animated;
+            eff.raw_animated_cover = raw;
+            assert_eq!(eff.requires_ffmpeg(), want, "{label}");
+        }
     }
 
     #[test]
-    fn requires_ffmpeg_alac_always_needs_it() {
-        let mut eff = base_settings(AudioFormat::Alac);
-        eff.animated_covers = false;
-        assert!(eff.requires_ffmpeg(), "alac transcodes, so needs ffmpeg");
-    }
-
-    #[test]
-    fn requires_ffmpeg_mp3_needs_it_only_for_animated_webp() {
-        let mut eff = base_settings(AudioFormat::Mp3);
-        assert!(!eff.requires_ffmpeg(), "mp3 + no covers = no ffmpeg");
-        eff.animated_covers = true;
-        assert!(eff.requires_ffmpeg(), "mp3 + animated webp = needs ffmpeg");
-        eff.raw_animated_cover = true;
-        assert!(
-            eff.requires_ffmpeg(),
-            "mp3 + both (webp + raw mp4) = needs ffmpeg"
-        );
-        eff.animated_covers = false;
-        assert!(!eff.requires_ffmpeg(), "mp3 + raw mp4 only = no ffmpeg");
-    }
-
-    #[test]
-    fn flag_override_detected_for_neither_and_mp4() {
-        // `--animated-covers` was passed (`Some(true)`) but a `neither`/`mp4`
-        // retention keeps no animated WebP, so the resolver dropped it to
-        // `false`: the flag was silently overridden.
-        assert!(animated_covers_flag_overridden(Some(true), false));
-    }
-
-    #[test]
-    fn no_override_for_webp_or_both() {
-        // `webp`/`both` keep the animated cover, so the resolved value is `true`
-        // and the flag was honoured: no note.
-        assert!(!animated_covers_flag_overridden(Some(true), true));
-    }
-
-    #[test]
-    fn no_override_when_flag_absent() {
-        // No `--animated-covers`: never a flag override, whatever the retention
-        // resolved the effective value to.
-        assert!(!animated_covers_flag_overridden(None, false));
-        assert!(!animated_covers_flag_overridden(None, true));
+    fn animated_covers_flag_override_truth_table() {
+        // `--animated-covers` maps to Some(true) and is reported as overridden
+        // only when the resolved effective value is false (a neither/mp4
+        // retention dropped it). An absent flag is never an override.
+        for (label, flag, effective, want) in [
+            ("neither/mp4 drops the flag", Some(true), false, true),
+            ("webp/both honours the flag", Some(true), true, false),
+            ("absent flag, effective false", None, false, false),
+            ("absent flag, effective true", None, true, false),
+        ] {
+            assert_eq!(
+                animated_covers_flag_overridden(flag, effective),
+                want,
+                "{label}"
+            );
+        }
     }
 }

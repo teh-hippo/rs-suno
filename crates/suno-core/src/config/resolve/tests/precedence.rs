@@ -163,23 +163,22 @@ fn per_account_env_label_uppersnakedcase() {
 }
 
 #[test]
-fn invalid_env_u32_errors() {
-    let toml = "[accounts.alice]\n";
-    let cfg = Config::from_toml(toml).unwrap();
-    let env: HashMap<String, String> = [("SUNO_CONCURRENCY".into(), "many".into())]
-        .into_iter()
-        .collect();
-    assert!(cfg.resolve("alice", None, &env, &no_flags()).is_err());
-}
-
-#[test]
-fn invalid_env_bool_errors() {
-    let toml = "[accounts.alice]\n";
-    let cfg = Config::from_toml(toml).unwrap();
-    let env: HashMap<String, String> = [("SUNO_ANIMATED_COVERS".into(), "yes".into())]
-        .into_iter()
-        .collect();
-    assert!(cfg.resolve("alice", None, &env, &no_flags()).is_err());
+fn invalid_env_values_are_rejected() {
+    // A malformed env override is a config error, never a silent fallback: a
+    // bad integer, boolean, or enum token each fails the resolve.
+    let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+    for (label, var, value) in [
+        ("u32 concurrency", "SUNO_CONCURRENCY", "many"),
+        ("bool animated_covers", "SUNO_ANIMATED_COVERS", "yes"),
+        ("enum character_set", "SUNO_CHARACTER_SET", "utf8"),
+    ] {
+        let env: HashMap<String, String> =
+            [(var.to_string(), value.to_string())].into_iter().collect();
+        assert!(
+            cfg.resolve("alice", None, &env, &no_flags()).is_err(),
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -399,16 +398,6 @@ fn character_set_follows_precedence() {
     };
     let eff = cfg.resolve("alice", None, &env, &flags).unwrap();
     assert_eq!(eff.character_set, CharacterSet::Ascii);
-}
-
-#[test]
-fn invalid_character_set_env_errors() {
-    let toml = "[accounts.alice]\n";
-    let cfg = Config::from_toml(toml).unwrap();
-    let env: HashMap<String, String> = [("SUNO_CHARACTER_SET".into(), "utf8".into())]
-        .into_iter()
-        .collect();
-    assert!(cfg.resolve("alice", None, &env, &no_flags()).is_err());
 }
 
 #[test]
