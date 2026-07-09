@@ -471,45 +471,31 @@ mod tests {
     }
 
     #[test]
-    fn validation_nested_roots() {
-        let toml = r#"
-            [accounts.alice]
-            root = "/music"
-
-            [accounts.bob]
-            root = "/music/bob"
-        "#;
-        assert!(Config::from_toml(toml).is_err());
-    }
-
-    #[test]
-    fn validation_non_nested_roots_ok() {
-        let toml = r#"
-            [accounts.alice]
-            root = "/music/alice"
-
-            [accounts.bob]
-            root = "/music/bob"
-        "#;
-        assert!(Config::from_toml(toml).is_ok());
-    }
-
-    #[test]
-    fn invalid_toml_errors() {
-        assert!(Config::from_toml("not valid toml ][").is_err());
-    }
-
-    #[test]
-    fn duplicate_account_label_errors() {
-        // The TOML spec prohibits duplicate keys; the parser must reject this.
-        let toml = "
+    fn malformed_documents_are_rejected() {
+        // Invalid TOML, duplicate account labels, and env-prefix collisions
+        // (`my-lib`/`my_lib` both map to SUNO_MY_LIB_*) must each be rejected.
+        for (label, toml) in [
+            ("invalid toml", "not valid toml ]["),
+            (
+                "duplicate account label",
+                "
             [accounts.alice]
             token = \"tok1\"
 
             [accounts.alice]
             token = \"tok2\"
-        ";
-        assert!(Config::from_toml(toml).is_err());
+        ",
+            ),
+            (
+                "env prefix collision",
+                "
+            [accounts.my-lib]
+            [accounts.my_lib]
+        ",
+            ),
+        ] {
+            assert!(Config::from_toml(toml).is_err(), "{label}");
+        }
     }
 
     #[test]
@@ -518,16 +504,6 @@ mod tests {
         let toml = "[accounts.alice]\ntoken = \"unterminated\n";
         let err = Config::from_toml(toml).unwrap_err().to_string();
         assert!(!err.contains("unterminated"), "error leaked token: {err}");
-    }
-
-    #[test]
-    fn validation_env_prefix_collision_errors() {
-        // 'my-lib' and 'my_lib' both map to SUNO_MY_LIB_* and must be rejected.
-        let toml = "
-            [accounts.my-lib]
-            [accounts.my_lib]
-        ";
-        assert!(Config::from_toml(toml).is_err());
     }
 
     #[test]
@@ -569,23 +545,25 @@ mod tests {
     }
 
     #[test]
-    fn areas_bad_mode_errors() {
-        let toml = "[accounts.a]\ntoken = \"t\"\n[accounts.a.areas]\nliked = \"miror\"\n";
-        assert!(Config::from_toml(toml).is_err());
-    }
-
-    #[test]
-    fn areas_bad_playlist_mode_errors() {
-        let toml = "[accounts.a]\ntoken = \"t\"\n[accounts.a.areas.playlist]\n\"pl1\" = \"off\"\n";
-        // `off` is a library-only value; a per-playlist entry must be copy/mirror.
-        assert!(Config::from_toml(toml).is_err());
-    }
-
-    #[test]
-    fn areas_unknown_field_errors() {
-        // D7: a mistyped key (libary) is a parse error, not a silent no-op.
-        let toml = "[accounts.a]\ntoken = \"t\"\n[accounts.a.areas]\nlibary = \"off\"\n";
-        assert!(Config::from_toml(toml).is_err());
+    fn areas_reject_invalid_modes_and_unknown_keys() {
+        // A bad mode, a library-only value on a per-playlist entry, or a
+        // mistyped area key is a parse error, not a silent no-op.
+        for (label, toml) in [
+            (
+                "bad library mode",
+                "[accounts.a]\ntoken = \"t\"\n[accounts.a.areas]\nliked = \"miror\"\n",
+            ),
+            (
+                "off is library-only, invalid per playlist",
+                "[accounts.a]\ntoken = \"t\"\n[accounts.a.areas.playlist]\n\"pl1\" = \"off\"\n",
+            ),
+            (
+                "mistyped area key",
+                "[accounts.a]\ntoken = \"t\"\n[accounts.a.areas]\nlibary = \"off\"\n",
+            ),
+        ] {
+            assert!(Config::from_toml(toml).is_err(), "{label}");
+        }
     }
 
     #[test]
@@ -601,59 +579,46 @@ mod tests {
     // --- cfg-6: unknown settings keys are rejected, not silently dropped. ---
 
     #[test]
-    fn misspelled_min_newest_key_is_rejected() {
-        // The deletion-floor safety case: a typo must not silently revert
-        // `min_newest` to the default of 1. `#[serde(flatten)]` would drop it;
-        // the sweep names the offending key instead.
-        let err = Config::from_toml("[defaults]\nmin_newst = 50\n")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("min_newst"),
-            "error should name the key: {err}"
-        );
-        assert!(
-            err.contains("[defaults]"),
-            "error should name the tier: {err}"
-        );
-    }
-
-    #[test]
-    fn unknown_defaults_key_is_rejected() {
-        assert!(Config::from_toml("[defaults]\nbogus = true\n").is_err());
-    }
-
-    #[test]
-    fn unknown_account_key_is_rejected() {
-        let err = Config::from_toml("[accounts.alice]\nroout = \"/music\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("roout"), "error should name the key: {err}");
-        assert!(
-            err.contains("[accounts.alice]"),
-            "error names the tier: {err}"
-        );
-    }
-
-    #[test]
-    fn unknown_source_key_is_rejected() {
-        let toml = "[accounts.alice.sources.liked]\nformta = \"mp3\"\n";
-        let err = Config::from_toml(toml).unwrap_err().to_string();
-        assert!(err.contains("formta"), "error should name the key: {err}");
-        assert!(
-            err.contains("[accounts.alice.sources.liked]"),
-            "error should name the source tier: {err}"
-        );
-    }
-
-    #[test]
-    fn unknown_top_level_table_is_rejected() {
-        // A misspelt `[defalts]` drops every default (including the deletion
-        // floor), so it too must fail loudly rather than parse to nothing.
-        let err = Config::from_toml("[defalts]\nmin_newest = 50\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("defalts"), "error should name the key: {err}");
+    fn unknown_keys_are_rejected_naming_key_and_tier() {
+        // `#[serde(flatten)]` would silently drop a mistyped knob and revert its
+        // setting to the compiled default (unsafe for the `min_newest` deletion
+        // floor), so the sweep re-parses and fails loudly. Each row lists the
+        // substrings the error must contain (empty = the rejection alone).
+        for (label, toml, needles) in [
+            (
+                "misspelled min_newest in defaults",
+                "[defaults]\nmin_newst = 50\n",
+                &["min_newst", "[defaults]"][..],
+            ),
+            (
+                "unknown defaults key",
+                "[defaults]\nbogus = true\n",
+                &[][..],
+            ),
+            (
+                "unknown account key",
+                "[accounts.alice]\nroout = \"/music\"\n",
+                &["roout", "[accounts.alice]"][..],
+            ),
+            (
+                "unknown source key",
+                "[accounts.alice.sources.liked]\nformta = \"mp3\"\n",
+                &["formta", "[accounts.alice.sources.liked]"][..],
+            ),
+            (
+                "misspelt top-level table drops every default",
+                "[defalts]\nmin_newest = 50\n",
+                &["defalts"][..],
+            ),
+        ] {
+            let err = Config::from_toml(toml).unwrap_err().to_string();
+            for needle in needles {
+                assert!(
+                    err.contains(needle),
+                    "{label}: error should name {needle:?}: {err}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -730,64 +695,66 @@ mod tests {
     // --- cfg-path: roots are lexically normalised before the nesting check. ---
 
     #[test]
-    fn nested_roots_with_dot_prefix_and_bare_are_rejected() {
-        // `./music` and `music` are the same directory; the raw `starts_with`
-        // guard missed this, leaving a cross-account deletion-overlap hole.
-        let toml = "[accounts.alice]\nroot = \"./music\"\n\n[accounts.bob]\nroot = \"music\"\n";
-        assert!(Config::from_toml(toml).is_err());
-    }
-
-    #[test]
-    fn nested_roots_with_trailing_slash_are_rejected() {
-        let toml =
-            "[accounts.alice]\nroot = \"/music/\"\n\n[accounts.bob]\nroot = \"/music/alice\"\n";
-        assert!(Config::from_toml(toml).is_err());
-    }
-
-    #[test]
-    fn nested_roots_via_parent_segments_are_rejected() {
-        // `sub/../shared` resolves lexically to `shared`, nesting with `shared`.
-        let toml =
-            "[accounts.alice]\nroot = \"sub/../shared\"\n\n[accounts.bob]\nroot = \"shared\"\n";
-        assert!(Config::from_toml(toml).is_err());
-    }
-
-    #[test]
-    fn disjoint_relative_roots_are_accepted() {
-        let toml = "[accounts.alice]\nroot = \"./alice\"\n\n[accounts.bob]\nroot = \"bob\"\n";
-        assert!(Config::from_toml(toml).is_ok());
-    }
-
-    #[test]
-    fn case_only_differing_roots_are_rejected() {
-        // On a case-insensitive filesystem `Music` and `music` are one
-        // directory; the nesting guard must fold case so this pair cannot open
-        // a cross-account deletion-overlap hole.
-        let toml = "[accounts.alice]\nroot = \"/Music\"\n\n[accounts.bob]\nroot = \"/music\"\n";
-        assert!(Config::from_toml(toml).is_err());
-    }
-
-    #[test]
-    fn case_only_nested_roots_are_rejected() {
-        // The nested child differs from its parent only by case.
-        let toml = "[accounts.alice]\nroot = \"/Music\"\n\n[accounts.bob]\nroot = \"/music/bob\"\n";
-        assert!(Config::from_toml(toml).is_err());
-    }
-
-    #[test]
-    fn nfc_nfd_differing_roots_are_rejected() {
-        // "é" as NFC (U+00E9) vs NFD (e + U+0301) name one directory on a
-        // normalising filesystem, so they must be detected as nesting.
-        let toml = "[accounts.alice]\nroot = \"/\u{00e9}toile\"\n\n[accounts.bob]\nroot = \"/e\u{0301}toile\"\n";
-        assert!(Config::from_toml(toml).is_err());
-    }
-
-    #[test]
-    fn genuinely_distinct_roots_are_still_accepted() {
-        // Folding must not over-reject: names that differ by more than case
-        // stay disjoint.
-        let toml = "[accounts.alice]\nroot = \"/Music\"\n\n[accounts.bob]\nroot = \"/Videos\"\n";
-        assert!(Config::from_toml(toml).is_ok());
+    fn root_nesting_is_validated_after_normalisation() {
+        // Cross-account roots may not nest: a child under another account's root
+        // would open a deletion-overlap hole. Roots are lexically normalised
+        // (`.`/`..`/trailing slash) and case/NFC-folded before comparison, so
+        // equal directories spelled differently are still caught while
+        // genuinely disjoint roots are accepted.
+        for (label, toml, expect_ok) in [
+            (
+                "sibling nested under parent",
+                "[accounts.alice]\nroot = \"/music\"\n\n[accounts.bob]\nroot = \"/music/bob\"\n",
+                false,
+            ),
+            (
+                "disjoint absolute roots",
+                "[accounts.alice]\nroot = \"/music/alice\"\n\n[accounts.bob]\nroot = \"/music/bob\"\n",
+                true,
+            ),
+            (
+                "dot-prefix and bare name the same dir",
+                "[accounts.alice]\nroot = \"./music\"\n\n[accounts.bob]\nroot = \"music\"\n",
+                false,
+            ),
+            (
+                "trailing slash still nests",
+                "[accounts.alice]\nroot = \"/music/\"\n\n[accounts.bob]\nroot = \"/music/alice\"\n",
+                false,
+            ),
+            (
+                "parent segments resolve then nest",
+                "[accounts.alice]\nroot = \"sub/../shared\"\n\n[accounts.bob]\nroot = \"shared\"\n",
+                false,
+            ),
+            (
+                "disjoint relative roots",
+                "[accounts.alice]\nroot = \"./alice\"\n\n[accounts.bob]\nroot = \"bob\"\n",
+                true,
+            ),
+            (
+                "case-only difference folds together",
+                "[accounts.alice]\nroot = \"/Music\"\n\n[accounts.bob]\nroot = \"/music\"\n",
+                false,
+            ),
+            (
+                "case-only nested child",
+                "[accounts.alice]\nroot = \"/Music\"\n\n[accounts.bob]\nroot = \"/music/bob\"\n",
+                false,
+            ),
+            (
+                "NFC and NFD name the same dir",
+                "[accounts.alice]\nroot = \"/\u{00e9}toile\"\n\n[accounts.bob]\nroot = \"/e\u{0301}toile\"\n",
+                false,
+            ),
+            (
+                "distinct names stay disjoint",
+                "[accounts.alice]\nroot = \"/Music\"\n\n[accounts.bob]\nroot = \"/Videos\"\n",
+                true,
+            ),
+        ] {
+            assert_eq!(Config::from_toml(toml).is_ok(), expect_ok, "{label}");
+        }
     }
 
     #[test]
@@ -804,30 +771,38 @@ mod tests {
     // --- cfg-7: an empty naming template is rejected; numeric zeros stay legal. ---
 
     #[test]
-    fn empty_naming_template_is_rejected() {
-        assert!(Config::from_toml("[defaults]\nnaming_template = \"\"\n").is_err());
-    }
-
-    #[test]
-    fn whitespace_only_naming_template_is_rejected() {
-        assert!(Config::from_toml("[defaults]\nnaming_template = \"   \"\n").is_err());
-    }
-
-    #[test]
-    fn empty_naming_template_in_account_is_rejected() {
-        assert!(Config::from_toml("[accounts.alice]\nnaming_template = \"\"\n").is_err());
-    }
-
-    #[test]
-    fn empty_naming_template_in_source_is_rejected() {
-        let toml = "[accounts.alice.sources.liked]\nnaming_template = \"\"\n";
-        assert!(Config::from_toml(toml).is_err());
-    }
-
-    #[test]
-    fn non_empty_naming_template_is_accepted() {
-        let toml = "[defaults]\nnaming_template = \"{creator}/{title}\"\n";
-        assert!(Config::from_toml(toml).is_ok());
+    fn naming_template_must_be_non_empty() {
+        // A blank or whitespace-only template at any tier is rejected so a run
+        // can never derive an empty path; a real template is accepted.
+        for (label, toml, expect_ok) in [
+            (
+                "empty in defaults",
+                "[defaults]\nnaming_template = \"\"\n",
+                false,
+            ),
+            (
+                "whitespace-only in defaults",
+                "[defaults]\nnaming_template = \"   \"\n",
+                false,
+            ),
+            (
+                "empty in account",
+                "[accounts.alice]\nnaming_template = \"\"\n",
+                false,
+            ),
+            (
+                "empty in source",
+                "[accounts.alice.sources.liked]\nnaming_template = \"\"\n",
+                false,
+            ),
+            (
+                "non-empty accepted",
+                "[defaults]\nnaming_template = \"{creator}/{title}\"\n",
+                true,
+            ),
+        ] {
+            assert_eq!(Config::from_toml(toml).is_ok(), expect_ok, "{label}");
+        }
     }
 
     #[test]
