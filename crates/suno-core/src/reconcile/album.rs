@@ -141,10 +141,7 @@ pub(crate) fn delete_album_artifact_action(
     path: &str,
     can_delete: bool,
 ) -> Option<Action> {
-    if !can_delete || path.is_empty() {
-        return None;
-    }
-    Some(Action::DeleteArtifact {
+    delete_gate_open(can_delete, path).then(|| Action::DeleteArtifact {
         kind,
         path: path.to_string(),
         owner_id: owner_id.to_string(),

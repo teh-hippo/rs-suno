@@ -223,6 +223,32 @@ fn delete_action(clip_id: &str, manifest: &Manifest, can_delete: bool) -> Option
     })
 }
 
+/// The deletion floor every per-kind delete gate shares.
+///
+/// A delete may be authorised only on a deletion-enabled run (`can_delete`, the
+/// shared [`deletion_allowed`] verdict) and never against an empty `path` (which
+/// could otherwise target the account root). Each gate ANDs its own specific
+/// predicates on top of this floor.
+fn delete_gate_open(can_delete: bool, path: &str) -> bool {
+    can_delete && !path.is_empty()
+}
+
+/// The manifest-backed deletion floor shared by the per-clip artifact and stem
+/// gates.
+///
+/// The run floor ([`delete_gate_open`]) plus a live, non-`preserve`-marked owning
+/// manifest entry: a preserved clip's sidecars and stems are preserved too, and
+/// an untracked owner is never delete-reconciled.
+fn clip_owned_delete_open(
+    owner_id: &str,
+    path: &str,
+    manifest: &Manifest,
+    can_delete: bool,
+) -> bool {
+    delete_gate_open(can_delete, path)
+        && manifest.get(owner_id).is_some_and(|entry| !entry.preserve)
+}
+
 /// The gate every per-clip-sidecar `DeleteArtifact` passes through.
 ///
 /// This is the artifact analogue of [`delete_action`] and deliberately shares
@@ -239,14 +265,7 @@ fn delete_artifact_action(
     manifest: &Manifest,
     can_delete: bool,
 ) -> Option<Action> {
-    if !can_delete {
-        return None;
-    }
-    let entry = manifest.get(owner_id)?;
-    if path.is_empty() || entry.preserve {
-        return None;
-    }
-    Some(Action::DeleteArtifact {
+    clip_owned_delete_open(owner_id, path, manifest, can_delete).then(|| Action::DeleteArtifact {
         kind,
         path: path.to_string(),
         owner_id: owner_id.to_string(),
@@ -620,14 +639,7 @@ fn delete_stem_action(
     manifest: &Manifest,
     can_delete: bool,
 ) -> Option<Action> {
-    if !can_delete {
-        return None;
-    }
-    let entry = manifest.get(clip_id)?;
-    if path.is_empty() || entry.preserve {
-        return None;
-    }
-    Some(Action::DeleteStem {
+    clip_owned_delete_open(clip_id, path, manifest, can_delete).then(|| Action::DeleteStem {
         clip_id: clip_id.to_string(),
         key: key.to_string(),
         path: path.to_string(),
