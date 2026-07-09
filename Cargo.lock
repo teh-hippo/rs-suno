@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "rs-suno"
-version = "0.36.12"
+version = "0.36.13"
 dependencies = [
  "anyhow",
  "clap",
@@ -1322,7 +1322,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "suno-core"
-version = "0.36.12"
+version = "0.36.13"
 dependencies = [
  "base64",
  "fnv",
