@@ -670,7 +670,13 @@ fn non_blank(value: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-fn is_reserved_name(value: &str) -> bool {
+/// Whether `value`'s stem is a Windows reserved device name (`CON`, `PRN`,
+/// `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`), matched case-insensitively.
+///
+/// Exposed to the crate so the naming-safety fuzz can assert no rendered path
+/// component is ever a reserved name; the sanitiser guarantees it at
+/// [`sanitise_component`].
+pub(crate) fn is_reserved_name(value: &str) -> bool {
     let stem = value.split('.').next().unwrap_or(value);
     // Every reserved device name is 3 (CON/PRN/AUX/NUL) or 4 (COMx/LPTx) ASCII
     // bytes, so anything else cannot match without allocating an uppercased copy.
