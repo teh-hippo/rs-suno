@@ -5,8 +5,8 @@
 use std::sync::Mutex;
 
 use base64::Engine;
+use futures_util::lock::Mutex as AsyncMutex;
 use serde_json::Value;
-use tokio::sync::Mutex as AsyncMutex;
 
 use crate::consts::{CLERK_BASE_URL, CLERK_JS_VERSION, JWT_REFRESH_BUFFER};
 use crate::error::{Error, Result};

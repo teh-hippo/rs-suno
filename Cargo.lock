@@ -1336,7 +1336,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
- "tokio",
  "toml",
  "unicode-normalization",
 ]
