@@ -64,6 +64,7 @@ fn chain_resolution() -> Resolution {
 }
 
 mod albums;
+mod collision;
 mod context;
 mod shape;
 mod update;

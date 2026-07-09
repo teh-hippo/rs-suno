@@ -10,6 +10,7 @@ fn build_playlist_desired_orders_members_and_marks_absent() {
         &modes_for(&[&a, &b], SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -44,6 +45,7 @@ fn build_playlist_desired_builds_liked_and_multiple_in_order() {
         AudioFormat::Flac,
         &modes_for(&[&a], SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),

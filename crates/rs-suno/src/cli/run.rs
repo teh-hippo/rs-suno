@@ -693,6 +693,7 @@ mod tests {
             &modes,
             &HashMap::new(),
             &BTreeSet::new(),
+            &BTreeSet::new(),
             ArtifactToggles::default(),
             &suno_core::NamingConfig::default(),
         );

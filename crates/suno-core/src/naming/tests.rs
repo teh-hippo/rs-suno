@@ -32,6 +32,7 @@ fn render_all_own(
     clips: &[Clip],
     config: &NamingConfig,
     colliding: &BTreeSet<String>,
+    colliding_ids: &BTreeSet<String>,
 ) -> Vec<RenderedName> {
     let lineages: Vec<LineageContext> = clips.iter().map(LineageContext::own_root).collect();
     let requests: Vec<NamingRequest> = clips
@@ -39,7 +40,7 @@ fn render_all_own(
         .zip(&lineages)
         .map(|(clip, lineage)| NamingRequest { clip, lineage })
         .collect();
-    render_clip_names(&requests, config, colliding)
+    render_clip_names(&requests, config, colliding, colliding_ids)
 }
 
 /// Render `clip` as its own root but numbered `track` of `total`.
@@ -296,7 +297,12 @@ fn long_titled_siblings_stay_distinct_with_balanced_brackets() {
         },
     ];
 
-    let names = render_clip_names(&requests, &NamingConfig::default(), &BTreeSet::new());
+    let names = render_clip_names(
+        &requests,
+        &NamingConfig::default(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
 
     assert!(names[0].base_name.ends_with(" [aaaa1111]"));
     assert!(names[1].base_name.ends_with(" [bbbb2222]"));
@@ -321,7 +327,12 @@ fn long_colliding_album_keeps_its_root_id8() {
         ..Clip::default()
     };
     let colliding: BTreeSet<String> = [title].into_iter().collect();
-    let names = render_all_own(&[clip], &NamingConfig::default(), &colliding);
+    let names = render_all_own(
+        &[clip],
+        &NamingConfig::default(),
+        &colliding,
+        &BTreeSet::new(),
+    );
 
     let album = names[0]
         .relative_path
@@ -381,7 +392,12 @@ fn same_title_siblings_stay_distinct_via_id8() {
         },
     ];
 
-    let names = render_clip_names(&requests, &NamingConfig::default(), &BTreeSet::new());
+    let names = render_clip_names(
+        &requests,
+        &NamingConfig::default(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
 
     assert_eq!(
         names[0].relative_path,
@@ -404,8 +420,18 @@ fn id8_prefix_collision_falls_back_to_full_id() {
     let first = test_clip("abcd1234-first", "Untitled");
     let second = test_clip("abcd1234-second", "Untitled");
 
-    let names = render_all_own(&[first.clone(), second.clone()], &config, &BTreeSet::new());
-    let swapped = render_all_own(&[second.clone(), first.clone()], &config, &BTreeSet::new());
+    let names = render_all_own(
+        &[first.clone(), second.clone()],
+        &config,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    let swapped = render_all_own(
+        &[second.clone(), first.clone()],
+        &config,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
 
     assert_ne!(
         names[0].relative_path.to_string_lossy(),
@@ -500,11 +526,13 @@ fn shared_album_title_from_distinct_roots_is_disambiguated() {
         &[first.clone(), second.clone()],
         &NamingConfig::default(),
         &colliding,
+        &BTreeSet::new(),
     );
     let swapped = render_all_own(
         &[second.clone(), first.clone()],
         &NamingConfig::default(),
         &colliding,
+        &BTreeSet::new(),
     );
 
     let album_of = |rendered: &RenderedName| {
@@ -528,6 +556,7 @@ fn shared_album_title_from_distinct_roots_is_disambiguated() {
         std::slice::from_ref(&first),
         &NamingConfig::default(),
         &colliding,
+        &BTreeSet::new(),
     );
     assert_eq!(album_of(&alone[0]), "Break Through [aaaa1111]");
 }
@@ -542,7 +571,12 @@ fn unique_root_title_stays_a_bare_album() {
         display_name: "München".to_string(),
         ..Clip::default()
     };
-    let names = render_all_own(&[clip], &NamingConfig::default(), &BTreeSet::new());
+    let names = render_all_own(
+        &[clip],
+        &NamingConfig::default(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
     assert_eq!(
         names[0].relative_path,
         Path::new("München/Solo/München-Solo [solo-1]")
@@ -621,7 +655,12 @@ fn case_only_path_difference_is_a_canonical_collision() {
     let first = test_clip("aaaa1111-x", "sunrise");
     let second = test_clip("bbbb2222-y", "SUNRISE");
 
-    let names = render_all_own(&[first, second], &config, &BTreeSet::new());
+    let names = render_all_own(
+        &[first, second],
+        &config,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
 
     assert_ne!(
         names[0].relative_path.to_string_lossy(),
@@ -644,7 +683,12 @@ fn nfc_nfd_path_difference_is_a_canonical_collision() {
     let first = test_clip("aaaa1111-x", nfc_title);
     let second = test_clip("bbbb2222-y", nfd_title);
 
-    let names = render_all_own(&[first, second], &config, &BTreeSet::new());
+    let names = render_all_own(
+        &[first, second],
+        &config,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
 
     assert_ne!(
         names[0].relative_path.to_string_lossy(),
@@ -665,7 +709,12 @@ fn genuinely_distinct_paths_are_never_wrongly_disambiguated() {
     let first = test_clip("aaaa1111-x", "Alpha");
     let second = test_clip("bbbb2222-y", "Beta");
 
-    let names = render_all_own(&[first, second], &config, &BTreeSet::new());
+    let names = render_all_own(
+        &[first, second],
+        &config,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
 
     assert_eq!(
         names[0].relative_path,
@@ -677,4 +726,191 @@ fn genuinely_distinct_paths_are_never_wrongly_disambiguated() {
         Path::new("München/Beta"),
         "distinct path was wrongly suffixed"
     );
+}
+
+// --- Whole-library id8 disambiguation (#356) ---
+
+#[test]
+fn id8_twin_suffix_is_whole_library_stable() {
+    // #356 headline: a clip's path must not depend on which other clips are in
+    // the batch. Two id8-twins are flagged whole-library, so rendering the kept
+    // clip alone yields the identical path as rendering it beside its twin —
+    // the suffix decision reads only `colliding_ids`, never the batch.
+    //
+    // The `colliding_ids` set is the SAME for both renders, mirroring a real
+    // run where it is derived from the monotonic store. (First-time twins on a
+    // resolution-failed run are not yet in the store; they fall back to the
+    // batch backstop that run and lock stable on the next resolved run.)
+    let first = test_clip("abcd1234-a", "Untitled");
+    let second = test_clip("abcd1234-b", "Untitled");
+    let colliding_ids: BTreeSet<String> =
+        [first.id.clone(), second.id.clone()].into_iter().collect();
+
+    let both = render_all_own(
+        &[first.clone(), second.clone()],
+        &NamingConfig::default(),
+        &BTreeSet::new(),
+        &colliding_ids,
+    );
+    let alone = render_all_own(
+        std::slice::from_ref(&first),
+        &NamingConfig::default(),
+        &BTreeSet::new(),
+        &colliding_ids,
+    );
+
+    assert_eq!(
+        both[0].relative_path, alone[0].relative_path,
+        "the kept clip's path drifted when its twin left the batch"
+    );
+    assert!(
+        alone[0].base_name.ends_with(" [abcd1234-a]"),
+        "the whole-library suffix is missing: {:?}",
+        alone[0].base_name
+    );
+}
+
+#[test]
+fn unrelated_twin_add_remove_is_a_no_op_for_the_kept_clip() {
+    // The re-add direction: when the twin returns to the selection, the kept
+    // clip must not be renamed, because its suffix is fixed by the store set.
+    let first = test_clip("abcd1234-a", "Untitled");
+    let second = test_clip("abcd1234-b", "Untitled");
+    let colliding_ids: BTreeSet<String> =
+        [first.id.clone(), second.id.clone()].into_iter().collect();
+
+    let alone = render_all_own(
+        std::slice::from_ref(&first),
+        &NamingConfig::default(),
+        &BTreeSet::new(),
+        &colliding_ids,
+    );
+    let rejoined = render_all_own(
+        &[first.clone(), second.clone()],
+        &NamingConfig::default(),
+        &BTreeSet::new(),
+        &colliding_ids,
+    );
+
+    assert_eq!(
+        alone[0].relative_path, rejoined[0].relative_path,
+        "the kept clip was renamed when its twin re-joined the batch"
+    );
+}
+
+#[test]
+fn distinct_id8_twins_never_share_a_path() {
+    // Two genuinely colliding twins (same title and creator) are both flagged
+    // whole-library, so each carries its distinct full-id suffix and the two
+    // paths differ.
+    let first = test_clip("abcd1234-a", "Untitled");
+    let second = test_clip("abcd1234-b", "Untitled");
+    let colliding_ids: BTreeSet<String> =
+        [first.id.clone(), second.id.clone()].into_iter().collect();
+
+    let names = render_all_own(
+        &[first, second],
+        &NamingConfig::default(),
+        &BTreeSet::new(),
+        &colliding_ids,
+    );
+
+    assert!(names[0].base_name.ends_with(" [abcd1234-a]"));
+    assert!(names[1].base_name.ends_with(" [abcd1234-b]"));
+    assert_ne!(names[0].relative_path, names[1].relative_path);
+}
+
+#[test]
+fn whole_library_pass_does_not_suffix_a_lone_clip() {
+    // The migration boundary: with an empty `colliding_ids` the whole-library
+    // pass is a no-op, so a unique clip keeps the bare `[{id8}]` base and gains
+    // no spurious full-id suffix.
+    let clip = test_clip("abcd1234-a", "Untitled");
+    let names = render_all_own(
+        std::slice::from_ref(&clip),
+        &NamingConfig::default(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+
+    assert!(
+        names[0].base_name.ends_with(" [abcd1234]"),
+        "expected the bare id8 base, got {:?}",
+        names[0].base_name
+    );
+    assert!(
+        !names[0].base_name.contains("[abcd1234-a]"),
+        "a lone clip must not gain a full-id suffix"
+    );
+}
+
+#[test]
+fn case_and_nfc_collisions_still_deduped() {
+    // With the whole-library pass off (empty `colliding_ids`), the retained
+    // canonical batch pass must still separate paths that differ only by case
+    // or NFC/NFD, so the case/normalisation dedup #356 asks to preserve is
+    // untouched.
+    let config = NamingConfig {
+        template: "{creator}/{title}".to_string(),
+        ..NamingConfig::default()
+    };
+
+    let case_first = test_clip("aaaa1111-x", "sunrise");
+    let case_second = test_clip("bbbb2222-y", "SUNRISE");
+    let case_names = render_all_own(
+        &[case_first, case_second],
+        &config,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    assert_ne!(
+        case_names[0].relative_path.to_string_lossy(),
+        case_names[1].relative_path.to_string_lossy(),
+        "case-only collision was not disambiguated"
+    );
+
+    // "é" as NFC (U+00E9) vs NFD (e + U+0301).
+    let nfc_first = test_clip("cccc3333-x", "\u{00e9}toile");
+    let nfc_second = test_clip("dddd4444-y", "e\u{0301}toile");
+    let nfc_names = render_all_own(
+        &[nfc_first, nfc_second],
+        &config,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    assert_ne!(
+        nfc_names[0].relative_path.to_string_lossy(),
+        nfc_names[1].relative_path.to_string_lossy(),
+        "NFC/NFD collision was not disambiguated"
+    );
+}
+
+#[test]
+fn unicode_title_id8_twin_keeps_its_suffix() {
+    // The full-id suffix survives a long Unicode title through the shared
+    // with_suffix/append_suffix truncation budget (#120), so no new truncation
+    // path is introduced by the whole-library pass.
+    let title = "日本語のタイトル".repeat(20);
+    let first = test_clip("abcd1234-a", &title);
+    let second = test_clip("abcd1234-b", &title);
+    let colliding_ids: BTreeSet<String> =
+        [first.id.clone(), second.id.clone()].into_iter().collect();
+
+    let names = render_all_own(
+        &[first, second],
+        &NamingConfig::default(),
+        &BTreeSet::new(),
+        &colliding_ids,
+    );
+
+    assert!(names[0].base_name.ends_with(" [abcd1234-a]"));
+    assert!(names[1].base_name.ends_with(" [abcd1234-b]"));
+    assert_ne!(names[0].relative_path, names[1].relative_path);
+    for name in &names {
+        assert!(
+            name.base_name.chars().count() <= 80,
+            "base overflowed the component budget: {:?}",
+            name.base_name
+        );
+    }
 }

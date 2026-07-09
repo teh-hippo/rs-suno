@@ -55,6 +55,7 @@ fn nested_manifest_path_reconciles_without_rename_or_delete() {
         &modes,
         &HashMap::new(),
         &BTreeSet::new(),
+        &BTreeSet::new(),
         crate::desired::ArtifactToggles::default(),
         &crate::naming::NamingConfig::default(),
     );
@@ -716,4 +717,122 @@ fn plan_counts_sum_to_len() {
     assert_eq!(plan.renames(), 1);
     assert_eq!(plan.deletes(), 1);
     assert_eq!(plan.skips(), 1);
+}
+
+#[test]
+fn removing_a_twin_yields_no_rename_for_the_kept_clip() {
+    use crate::graph::LineageStore;
+    use crate::lineage::{Resolution, ResolveStatus, RootInfo};
+
+    // #356 at the reconcile boundary (reconcile.rs Rename emission on path
+    // drift). Run 1 records two id8-twins and writes A at its whole-library
+    // suffixed path. Run 2 selects only A; the store still remembers B, so A
+    // keeps its suffix, the recomputed path matches the manifest, and reconcile
+    // emits NO Rename for the kept clip. Without the fix, run 2 would render A
+    // with the bare `[{id8}]` base, drift from the manifest, and churn a rename.
+    let a = Clip {
+        id: "abcd1234-a".to_owned(),
+        title: "Untitled".to_owned(),
+        display_name: "alice".to_owned(),
+        ..Clip::default()
+    };
+    let b = Clip {
+        id: "abcd1234-b".to_owned(),
+        title: "Untitled".to_owned(),
+        display_name: "alice".to_owned(),
+        ..Clip::default()
+    };
+
+    let mut roots = HashMap::new();
+    for id in ["abcd1234-a", "abcd1234-b"] {
+        roots.insert(
+            id.to_owned(),
+            RootInfo {
+                root_id: id.to_owned(),
+                root_title: "Untitled".to_owned(),
+                status: ResolveStatus::Resolved,
+            },
+        );
+    }
+    let mut store = LineageStore::new();
+    store.update(
+        &[a.clone(), b.clone()],
+        &Resolution {
+            roots,
+            gap_filled: Vec::new(),
+            bridges: Vec::new(),
+        },
+        "t1",
+    );
+    let colliding_ids = store.colliding_clip_ids();
+    let colliding_albums = store.colliding_root_titles();
+
+    let run1 = crate::desired::build_desired(
+        &[&a, &b],
+        AudioFormat::Flac,
+        &[
+            ("abcd1234-a".to_owned(), vec![SourceMode::Mirror]),
+            ("abcd1234-b".to_owned(), vec![SourceMode::Mirror]),
+        ]
+        .into_iter()
+        .collect(),
+        &HashMap::new(),
+        &colliding_albums,
+        &colliding_ids,
+        crate::desired::ArtifactToggles::default(),
+        &crate::naming::NamingConfig::default(),
+    );
+    let a1 = run1.iter().find(|d| d.clip.id == "abcd1234-a").unwrap();
+    assert!(
+        a1.path.contains("[abcd1234-a]"),
+        "run 1 should suffix the kept clip: {}",
+        a1.path
+    );
+
+    // The manifest run 1 wrote for A, at its stable suffixed path.
+    let mut manifest = Manifest::new();
+    manifest.insert(
+        "abcd1234-a",
+        ManifestEntry {
+            path: a1.path.clone(),
+            format: AudioFormat::Flac,
+            meta_hash: a1.meta_hash.clone(),
+            art_hash: a1.art_hash.clone(),
+            size: 100,
+            ..Default::default()
+        },
+    );
+
+    // Run 2 selects A alone; B is gone from the batch but remembered by the store.
+    let run2 = crate::desired::build_desired(
+        &[&a],
+        AudioFormat::Flac,
+        &[("abcd1234-a".to_owned(), vec![SourceMode::Mirror])]
+            .into_iter()
+            .collect(),
+        &HashMap::new(),
+        &colliding_albums,
+        &colliding_ids,
+        crate::desired::ArtifactToggles::default(),
+        &crate::naming::NamingConfig::default(),
+    );
+
+    let local: HashMap<String, LocalFile> = [("abcd1234-a".to_owned(), present(100))]
+        .into_iter()
+        .collect();
+    let plan = reconcile(&manifest, &run2, &local, &mirror_ok());
+
+    assert_eq!(
+        plan.renames(),
+        0,
+        "the kept clip was renamed after its twin left the selection"
+    );
+    assert!(
+        !plan
+            .actions
+            .iter()
+            .any(|action| matches!(action, Action::Rename { from, .. } if from == &a1.path)),
+        "no rename should target the kept clip's path"
+    );
+    assert_eq!(plan.skips(), 1, "the unchanged kept clip is skipped");
 }

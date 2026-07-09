@@ -10,6 +10,7 @@ fn build_desired_emits_cover_jpg_next_to_audio() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -32,6 +33,7 @@ fn build_desired_omits_cover_jpg_when_art_is_empty() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles {
             animated_covers: true,
@@ -57,6 +59,7 @@ fn animated_covers_embed_via_art_hash_not_a_webp_sidecar() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -72,6 +75,7 @@ fn animated_covers_embed_via_art_hash_not_a_webp_sidecar() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles {
             animated_covers: true,
@@ -111,6 +115,7 @@ fn animated_covers_embed_via_art_hash_not_a_webp_sidecar() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles {
             animated_covers: true,
             ..Default::default()
@@ -133,6 +138,7 @@ fn animated_covers_embed_via_art_hash_not_a_webp_sidecar() {
         AudioFormat::Alac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles {
             animated_covers: true,
@@ -157,6 +163,7 @@ fn build_desired_emits_video_mp4_only_when_enabled_and_video_present() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -172,6 +179,7 @@ fn build_desired_emits_video_mp4_only_when_enabled_and_video_present() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles {
             video: true,
@@ -197,6 +205,7 @@ fn build_desired_emits_video_mp4_only_when_enabled_and_video_present() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles {
             video: true,
@@ -226,6 +235,7 @@ fn build_desired_emits_details_sidecar_only_when_enabled() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -241,6 +251,7 @@ fn build_desired_emits_details_sidecar_only_when_enabled() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles {
             details: true,
@@ -275,6 +286,7 @@ fn build_desired_emits_lyrics_sidecar_only_when_enabled_and_present() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -290,6 +302,7 @@ fn build_desired_emits_lyrics_sidecar_only_when_enabled_and_present() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles {
             lyrics: true,
@@ -323,6 +336,7 @@ fn build_desired_emits_lrc_sidecar_only_when_enabled() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles::default(),
         &NamingConfig::default(),
     );
@@ -338,6 +352,7 @@ fn build_desired_emits_lrc_sidecar_only_when_enabled() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles {
             lrc: true,
@@ -371,6 +386,7 @@ fn build_desired_emits_lrc_sidecar_from_prompt_when_feed_omits_lyrics() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles {
             lrc: true,
             ..Default::default()
@@ -396,6 +412,7 @@ fn build_desired_emits_lrc_sidecar_even_when_feed_has_no_lyrics_or_prompt() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles {
             lrc: true,
@@ -423,6 +440,7 @@ fn build_desired_omits_lyrics_sidecar_when_clip_has_no_lyrics() {
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
         &no_collisions(),
+        &no_collisions(),
         ArtifactToggles {
             lyrics: true,
             ..Default::default()
@@ -449,6 +467,7 @@ fn build_desired_text_sidecars_are_independent() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &no_contexts(),
+        &no_collisions(),
         &no_collisions(),
         ArtifactToggles {
             details: true,

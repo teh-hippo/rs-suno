@@ -601,6 +601,7 @@ mod tests {
             &modes,
             &HashMap::new(),
             &BTreeSet::new(),
+            &BTreeSet::new(),
             ArtifactToggles::default(),
             &NamingConfig::default(),
         );

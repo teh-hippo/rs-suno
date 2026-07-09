@@ -28,6 +28,7 @@ pub(super) async fn assemble(
     // `library="off"` does not) that fully enumerated.
     let library_authoritative = library_authoritative(areas, force_copy);
     let colliding_albums = store.colliding_root_titles();
+    let colliding_ids = store.colliding_clip_ids();
 
     // Every clip's modes across the areas holding it, so each Desired carries the
     // Copy protection of any Copy area even when a Mirror area also holds it
@@ -104,6 +105,7 @@ pub(super) async fn assemble(
         &modes_by_id,
         &contexts,
         &colliding_albums,
+        &colliding_ids,
         ArtifactToggles {
             animated_covers: settings.animated_covers,
             details: settings.details_sidecar,
