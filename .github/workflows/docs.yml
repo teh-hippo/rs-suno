@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   docs:
-    uses: teh-hippo/common-repo-configs/.github/workflows/mdbook.yml@6995ce5f2e6cc4832dc8f7457b35dabbc1bacfe6  # v2.0.2
+    uses: teh-hippo/common-repo-configs/.github/workflows/mdbook.yml@2a1423750ab58fdbe2ce21d35f583f07c79fcdc8  # v2.0.3
     permissions:
       pages: write
       id-token: write
