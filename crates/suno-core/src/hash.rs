@@ -131,6 +131,18 @@ pub fn synced_lrc_source_hash(clip_id: &str) -> String {
     content_hash(&format!("synced-lrc/v{SYNCED_LRC_VERSION}/{clip_id}"))
 }
 
+/// A stable per-clip source sentinel for the deferred `.lyrics.txt` sidecar.
+///
+/// The plain-text sidecar is resolved from the fetched alignment (or, when the
+/// feed carries them, `clip.lyrics`) only when a write is actually planned, so
+/// its desired artifact carries this placeholder until
+/// [`apply_synced_lrc`](crate::apply_synced_lrc) fills the real content hash,
+/// exactly as [`synced_lrc_source_hash`] defers the `.lrc`. A distinct salt
+/// keeps it from ever colliding with the `.lrc` sentinel for the same clip.
+pub fn lyrics_txt_source_hash(clip_id: &str) -> String {
+    content_hash(&format!("lyrics-txt/v{SYNCED_LRC_VERSION}/{clip_id}"))
+}
+
 /// A sentinel for the embedded cover art: a digest of the selected art URL, or
 /// the empty string when the clip carries no art. A mismatch against the
 /// manifest means the file on disk holds stale art even if its tags are current.
@@ -359,5 +371,23 @@ mod tests {
         // value, so a desired synced `.lrc` is never mistaken for "no artifact".
         assert_ne!(a, synced_lrc_source_hash("clip-b"));
         assert!(!a.is_empty());
+    }
+
+    #[test]
+    fn lyrics_txt_source_hash_is_stable_per_clip_and_distinct_from_lrc() {
+        let a = lyrics_txt_source_hash("clip-a");
+        assert_eq!(a.len(), 16);
+        assert_eq!(a, lyrics_txt_source_hash("clip-a"), "stable per clip id");
+        // Distinct clips get distinct sentinels; none is the empty ("absent")
+        // value, so a desired `.lyrics.txt` is never mistaken for "no artifact".
+        assert_ne!(a, lyrics_txt_source_hash("clip-b"));
+        assert!(!a.is_empty());
+        // The distinct salt keeps it from colliding with the `.lrc` sentinel for
+        // the SAME clip, so a clip that desires both sidecars gets two artifacts.
+        assert_ne!(
+            a,
+            synced_lrc_source_hash("clip-a"),
+            "the `.lyrics.txt` sentinel never collides with the `.lrc` one"
+        );
     }
 }

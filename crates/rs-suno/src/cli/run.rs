@@ -17,9 +17,10 @@ use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
     AlbumArt, ArtifactToggles, ClerkAuth, Config, FlagOverrides, LineageContext, NamingConfig,
     OwnerGate, PlaylistState, ResolveOpts, SourceMode, SunoClient, adopt_decision,
-    adoption_enumerated, album_desired, assign_track_numbers, build_desired, build_modes_by_id,
-    build_scoped_playlist_desired, clip_stems, deletion_allowed, library_authoritative,
-    narrows_downloads, owner_gate, resolve_lead_ids, resolve_roots, source_statuses, union_clips,
+    adoption_enumerated, album_desired, animated_covers_flag_overridden, assign_track_numbers,
+    build_desired, build_modes_by_id, build_scoped_playlist_desired, clip_stems, deletion_allowed,
+    library_authoritative, narrows_downloads, owner_gate, resolve_lead_ids, resolve_roots,
+    source_statuses, union_clips,
 };
 
 use crate::cli::account;

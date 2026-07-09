@@ -636,6 +636,129 @@ mod tests {
         assert!(!config_library.is_plain_library());
     }
 
+    // ---- F4 (#357): scoped additive runs now render their `.m3u8` ----
+
+    /// A fully-enumerated (complete, unfiltered, un-narrowed) Copy playlist area
+    /// carrying one member, as an additive scoped run lists it.
+    fn enumerated_playlist_area(id: &str, name: &str, mode: SourceMode) -> suno_core::AreaListing {
+        let member = suno_core::Clip {
+            id: "a".to_owned(),
+            title: "A".to_owned(),
+            ..Default::default()
+        };
+        suno_core::AreaListing::listed(
+            suno_core::AreaKind::Playlist {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            },
+            mode,
+            vec![member],
+            true,  // complete
+            false, // any_filtered
+            false, // narrowed
+        )
+    }
+
+    /// Assert that an additive scoped run (`members_intact == false`) still
+    /// renders the area's `.m3u8` and authorises no playlist delete. This locks
+    /// the F4 write/delete gate decoupling for the CLI invocations below.
+    fn assert_additive_area_renders(area: suno_core::AreaListing, force_copy: bool, want_id: &str) {
+        use std::collections::BTreeSet;
+        let store = suno_core::LineageStore::default();
+        let mut protected = BTreeSet::new();
+        let (rendered, delete_gate) = suno_core::build_scoped_playlist_desired(
+            &[area],
+            &[],
+            &store,
+            &mut protected,
+            force_copy,
+            false, // members_intact: the additive-scoped value that used to block the write
+        );
+        assert_eq!(rendered.len(), 1, "the selected area renders its `.m3u8`");
+        assert_eq!(rendered[0].id, want_id);
+        assert!(!protected.contains(want_id), "it is owned, not protected");
+        assert!(
+            !delete_gate,
+            "an additive scoped run authorises no playlist delete"
+        );
+    }
+
+    #[test]
+    fn bare_sync_scoped_playlist_renders_selected_m3u8() {
+        // `sync --playlist X` (no `--mode`) resolves the playlist to Copy, so the
+        // run is additive and `members_intact == false`. F4: the fully-enumerated
+        // area must still write `X.m3u8` (before the fix it never did).
+        let sel = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &["holiday".to_owned()],
+            None,
+            false,
+        );
+        assert_eq!(
+            sel.playlists,
+            PlaylistPolicy::Explicit(vec![("holiday".to_owned(), SourceMode::Copy)])
+        );
+        assert!(!sel.is_armed(), "additive -> members_intact would be false");
+        // verb=Sync, not force-additive, so force_copy=false; the area mode is Copy.
+        assert_additive_area_renders(
+            enumerated_playlist_area("holiday", "Holiday", SourceMode::Copy),
+            false,
+            "holiday",
+        );
+    }
+
+    #[test]
+    fn config_driven_copy_playlists_render_all_selected_m3u8() {
+        // A config `playlists = "copy"` with no armed mirror/library resolves
+        // every playlist to Copy (additive, `members_intact == false`), yet each
+        // selected area must render its `.m3u8`.
+        let sel = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &[],
+            Some(&areas("playlists = \"copy\"\n")),
+            false,
+        );
+        match &sel.playlists {
+            PlaylistPolicy::All { default, .. } => assert_eq!(*default, SourceMode::Copy),
+            other => panic!("expected an All copy group, got {other:?}"),
+        }
+        assert!(!sel.is_armed(), "a copy playlists group arms nothing");
+        for id in ["mix", "chill"] {
+            assert_additive_area_renders(
+                enumerated_playlist_area(id, id, SourceMode::Copy),
+                false,
+                id,
+            );
+        }
+    }
+
+    #[test]
+    fn library_off_scoped_playlist_renders_m3u8() {
+        // `copy --playlist X` with no authoritative library: the copy verb forces
+        // additive (`force_copy = true`) and no library area is present, so
+        // `members_intact == false`. The selected playlist must still render
+        // `X.m3u8` and delete nothing.
+        let sel = resolve_selection(
+            SourceMode::Mirror,
+            None,
+            false,
+            &["holiday".to_owned()],
+            None,
+            true,
+        );
+        assert!(sel.library.is_none(), "no authoritative library area");
+        assert!(!sel.is_armed());
+        assert_additive_area_renders(
+            enumerated_playlist_area("holiday", "Holiday", SourceMode::Copy),
+            true,
+            "holiday",
+        );
+    }
+
     // Test 4: an armed config playlist with no `library` key injects the Copy
     // protector; `library="off"` suppresses it and leaves no library area.
     #[test]

@@ -273,7 +273,12 @@ fn build_desired_emits_details_sidecar_only_when_enabled() {
 }
 
 #[test]
-fn build_desired_emits_lyrics_sidecar_only_when_enabled_and_present() {
+fn build_desired_emits_deferred_lyrics_sidecar_when_enabled() {
+    // The `.lyrics.txt` is now a DEFERRED artifact (F1, #357): under the toggle
+    // it is emitted for every clip with no inline body and a stable placeholder
+    // hash, then resolved from the fetched alignment (or `clip.lyrics`) at the
+    // synced seam, exactly like the `.lrc` below it. So even a clip that carries
+    // inline lyrics emits the deferred shape here.
     let with_lyrics = Clip {
         lyrics: "la la la".to_owned(),
         ..clip("id-a", "Song", "alice")
@@ -318,8 +323,8 @@ fn build_desired_emits_lyrics_sidecar_only_when_enabled_and_present() {
         .expect("lyrics sidecar expected");
     assert_eq!(lyrics.path, format!("{base}.lyrics.txt"));
     assert_eq!(lyrics.source_url, "");
-    assert_eq!(lyrics.content.as_deref(), Some("la la la\n"));
-    assert_eq!(lyrics.hash, content_hash("la la la\n"));
+    assert_eq!(lyrics.content, None, "deferred: no inline body");
+    assert_eq!(lyrics.hash, lyrics_txt_source_hash(&with_lyrics.id));
 }
 
 #[test]
@@ -430,7 +435,11 @@ fn build_desired_emits_lrc_sidecar_even_when_feed_has_no_lyrics_or_prompt() {
 }
 
 #[test]
-fn build_desired_omits_lyrics_sidecar_when_clip_has_no_lyrics() {
+fn build_desired_emits_deferred_lyrics_sidecar_even_when_clip_has_no_lyrics() {
+    // Deferred model (F1): the `.lyrics.txt` is emitted under the toggle even for
+    // a clip whose feed carries no inline lyrics, because its body is resolved
+    // from the fetched alignment later. A genuine instrumental drops the artifact
+    // at the synced seam, not here. Mirrors the `.lrc` emit for a lyric-less clip.
     let no_lyrics = clip("id-a", "Song", "alice");
     assert!(no_lyrics.lyrics.is_empty());
     let clips = [&no_lyrics];
@@ -447,12 +456,13 @@ fn build_desired_omits_lyrics_sidecar_when_clip_has_no_lyrics() {
         },
         &NamingConfig::default(),
     );
-    assert!(
-        desired[0]
-            .artifacts
-            .iter()
-            .all(|art| art.kind != ArtifactKind::LyricsTxt)
-    );
+    let lyrics = desired[0]
+        .artifacts
+        .iter()
+        .find(|art| art.kind == ArtifactKind::LyricsTxt)
+        .expect("deferred lyrics sidecar expected even with no feed lyrics");
+    assert_eq!(lyrics.content, None);
+    assert_eq!(lyrics.hash, lyrics_txt_source_hash(&no_lyrics.id));
 }
 
 #[test]
