@@ -1,0 +1,19 @@
+# Codecov policy. https://docs.codecov.com/docs/codecovyml-reference
+#
+# Coverage is informational. This repo gates PRs only on the CI `check` job;
+# Codecov never fails a status here. The uploaded report already contains
+# suno-core only (cargo llvm-cov -p suno-core in .github/workflows/coverage.yml),
+# so the project coverage number is the suno-core number the README badge quotes.
+
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+        target: auto
+    patch:
+      default:
+        informational: true
+
+comment:
+  require_changes: true
