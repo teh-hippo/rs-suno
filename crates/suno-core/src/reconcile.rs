@@ -97,7 +97,9 @@ pub fn reconcile(
         // Decide the audio action(s) first (unchanged), then reconcile the
         // clip's artifacts alongside. A clip whose audio is being deleted this
         // run has its sidecars co-deleted under the same gate; otherwise its
-        // desired artifacts are written and any removed kind reconciled.
+        // desired artifacts are written, any removed kind reconciled, and any
+        // sidecar or stem stranded by a retitle (or a pre-fix run) relocated to
+        // the current audio base (#355).
         let before = actions.len();
         plan_desired(d, manifest, local, can_delete, &mut actions);
         let audio_deleted = actions[before..]
@@ -421,6 +423,27 @@ fn needs_write_drift(
     }
 }
 
+/// The extensionless audio base of a rendered path (the value the sidecars and
+/// the `.stems` folder are built from). `path` ends with `.{format.ext()}` by
+/// construction in `build_desired`, so strip that exact suffix rather than the
+/// last `.`, keeping a base whose own name contains a dot intact
+/// ("Artist/Song 2.0.flac" -> "Artist/Song 2.0"). `None` when the extension is
+/// absent (a hand-edited manifest), so a malformed input is skipped, never
+/// panicked (#355).
+fn audio_base(path: &str, format: AudioFormat) -> Option<&str> {
+    path.strip_suffix(format!(".{}", format.ext()).as_str())
+}
+
+/// Reparent a stem's folder segment onto `new_base`, preserving the inner file
+/// name verbatim. `None` when `old` carries no `.stems/` segment (#355).
+fn relocated_stem_path(new_base: &str, old: &str) -> Option<String> {
+    let idx = old.rfind(".stems/")?;
+    Some(format!(
+        "{new_base}.stems/{}",
+        &old[idx + ".stems/".len()..]
+    ))
+}
+
 /// Reconcile the artifacts of a clip whose audio is kept this run.
 ///
 /// Writes each desired per-clip artifact that the manifest lacks, whose stored
@@ -430,6 +453,12 @@ fn needs_write_drift(
 /// gate, unless the clip is protected this run, and unless the kind opts out of
 /// removed-kind deletion ([`removed_kind_delete_eligible`]) — cover art does, so
 /// a transient empty URL keeps its sidecar rather than deleting it.
+///
+/// Finally, a stranded-sidecar relocation pass (#355) reparents to the current
+/// audio base any tracked per-clip sidecar the desired-write loop did not move
+/// and the delete loop is not deleting, so an audio retitle no longer strands
+/// the cover or text sidecars at an old base. It is anchored on the CURRENT
+/// desired base, so it heals a historical strand too, and is idempotent.
 ///
 /// `local` is the same path-keyed probe map that [`reconcile`] received,
 /// extended by the caller to include the artifact paths in the manifest. A
@@ -528,6 +557,65 @@ fn plan_clip_artifacts(
             }
         }
     }
+
+    // #355: relocate any per-clip sidecar the desired-write loop did not, to the
+    // current audio base. A kept kind absent from `d.artifacts` (cover, lyrics,
+    // .lrc, video), or a delete-eligible kind on a run that is not deleting it,
+    // would otherwise strand at an old base after a retitle - or stay stranded
+    // from a pre-fix run that advanced `entry.path` without moving it. Reparenting
+    // to `{new_base}{suffix}` heals both; it is idempotent (a correctly placed
+    // file equals its expected path, so `same_fs_path` short-circuits). Guarded
+    // on the old file being present (no source_url is known, so a fetch fallback
+    // cannot help) and rides `suppress_target_clobber`, so it can never clobber a
+    // kept file.
+    // NOTE: !d.trashed is a conservative superset; see plan "Review deltas" #1 (a
+    // trashed+private+renamed clip's sidecar heal is deferred, never a
+    // delete/clobber).
+    if !d.trashed
+        && let Some(entry) = entry
+        && let Some(new_base) = audio_base(&d.path, d.format).filter(|b| !b.is_empty())
+    {
+        let desired_kinds: BTreeSet<ArtifactKind> = d
+            .artifacts
+            .iter()
+            .filter(|a| is_per_clip_kind(a.kind))
+            .map(|a| a.kind)
+            .collect();
+        for (kind, state) in manifest_artifacts(entry) {
+            if desired_kinds.contains(&kind) {
+                continue; // owned by the desired-write loop above
+            }
+            // A kind actually being deleted this run must not also be moved. Gate
+            // on the REAL delete verdict (not a `can_delete` proxy), which also
+            // refuses for a protected clip or a preserve-marked entry, so those
+            // kinds are healed rather than stranded. The gate is pure, so this
+            // second evaluation has no side effect.
+            let deleted_this_run = !protected_now
+                && removed_kind_delete_eligible(kind)
+                && delete_artifact_action(owner_id, kind, &state.path, manifest, can_delete)
+                    .is_some();
+            if deleted_this_run {
+                continue;
+            }
+            if let Some(suffix) = kind.sidecar_suffix() {
+                let to = format!("{new_base}{suffix}");
+                if !same_fs_path(&state.path, &to)
+                    && local
+                        .get(&state.path)
+                        .is_some_and(|f| f.exists && f.size > 0)
+                {
+                    out.push(Action::MoveArtifact {
+                        kind,
+                        from: state.path.clone(),
+                        to,
+                        source_url: String::new(),
+                        hash: state.hash.clone(),
+                        owner_id: owner_id.to_string(),
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// Co-delete every sidecar of a clip whose audio is being deleted this run.
@@ -584,10 +672,12 @@ fn delete_stem_action(
 
 /// Reconcile the keyed stems of a clip whose audio is kept this run.
 ///
-/// Does nothing when `d.stems` is `None` (the listing was not authoritative:
-/// feature off, `has_stem` false, or a disabled/failed/partial/`400` listing),
-/// so existing local stems are always KEPT — a paging error is never read as
-/// "no stems". When `d.stems` is `Some(set)`, the set is authoritative:
+/// When `d.stems` is `None` the listing is not authoritative (feature off,
+/// `has_stem` false, or a disabled/failed/partial/`400` listing), so nothing is
+/// written and nothing is deleted — a paging error is never read as "no stems".
+/// It does, however, relocate any tracked stem to the current `.stems` folder so
+/// a retitle (or a pre-fix strand) no longer orphans it (#355). When `d.stems`
+/// is `Some(set)`, the set is authoritative:
 ///
 /// - each desired stem the manifest lacks, whose stored hash drifts, or whose
 ///   stored path drifts (the song moved), is written or, when only the path
@@ -605,11 +695,45 @@ fn plan_clip_stems(
     can_delete: bool,
     out: &mut Vec<Action>,
 ) {
-    let Some(desired_stems) = &d.stems else {
-        return;
-    };
     let clip_id = d.clip.id.as_str();
     let entry = manifest.get(clip_id);
+    let Some(desired_stems) = &d.stems else {
+        // #355: no authoritative stem listing this run, so write nothing and
+        // delete nothing; but relocate any tracked stem to the current `.stems`
+        // folder rather than stranding it after a retitle (or from a pre-fix
+        // run). Folder-only reparent: the inner filename keeps the old title and
+        // self-heals to the new one on the next `--download-stems` run via the
+        // existing path-drift MoveStem. Guarded on the old file being present;
+        // rides the clobber backstop.
+        // NOTE: !d.trashed is a conservative superset; see plan "Review deltas"
+        // #1 (a trashed+private+renamed clip's sidecar heal is deferred, never a
+        // delete/clobber).
+        if !d.trashed
+            && let Some(entry) = entry
+            && let Some(new_base) = audio_base(&d.path, d.format).filter(|b| !b.is_empty())
+        {
+            for (key, state) in &entry.stems {
+                if let Some(to) = relocated_stem_path(new_base, &state.path)
+                    && !same_fs_path(&state.path, &to)
+                    && local
+                        .get(&state.path)
+                        .is_some_and(|f| f.exists && f.size > 0)
+                {
+                    out.push(Action::MoveStem {
+                        clip_id: clip_id.to_string(),
+                        key: key.clone(),
+                        stem_id: String::new(),
+                        from: state.path.clone(),
+                        to,
+                        source_url: String::new(),
+                        format: StemFormat::Mp3,
+                        hash: state.hash.clone(),
+                    });
+                }
+            }
+        }
+        return;
+    };
 
     for stem in desired_stems {
         let state = entry.and_then(|e| e.stems.get(&stem.key));
