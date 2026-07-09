@@ -75,7 +75,10 @@ impl HttpResponse {
 pub struct TransportError(pub String);
 
 /// The HTTP port an adapter implements for the engine.
-pub trait Http {
+///
+/// `Sync` so engine code can hold a shared `&impl Http` across an `.await` and
+/// keep the resulting future `Send` (`&T: Send` requires `T: Sync`).
+pub trait Http: Sync {
     /// Perform `request` and return the response, or a [`TransportError`].
     fn send(
         &self,

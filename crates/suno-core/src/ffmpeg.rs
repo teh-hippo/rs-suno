@@ -64,7 +64,10 @@ impl FfmpegError {
 ///
 /// Async so the adapter can offload the blocking child process without stalling
 /// the runtime; tests resolve immediately.
-pub trait Ffmpeg {
+///
+/// `Sync` so the executor can hold a shared `&impl Ffmpeg` across an `.await`
+/// and keep the resulting future `Send`.
+pub trait Ffmpeg: Sync {
     /// Transcode `wav` to the given lossless `format`'s bytes.
     fn wav_to_lossless(
         &self,
