@@ -831,3 +831,177 @@ fn full_stems_mirror_wav_default_renders_free_wav_and_no_generation() {
     assert_eq!(http.count("separate"), 0);
     assert_eq!(http.count("generate"), 0);
 }
+
+#[test]
+fn move_artifact_toctou_cover_fails_per_clip_without_delete_or_abort() {
+    // #355: a synthesised MoveArtifact (empty source_url) whose old file has
+    // vanished by commit time. The in-place rename fails, and the fetch fallback
+    // has no URL: it is a per-clip Fail, never a delete, panic, or run abort. A
+    // sibling clip's move still succeeds, proving the run continued.
+    let mut manifest = Manifest::new();
+    let mut a = entry("New.flac", AudioFormat::Flac);
+    a.cover_jpg = Some(ArtifactState {
+        path: "Old.jpg".to_owned(),
+        hash: "ah".to_owned(),
+    });
+    manifest.insert("a", a);
+    let mut b = entry("BNew.flac", AudioFormat::Flac);
+    b.cover_jpg = Some(ArtifactState {
+        path: "BOld.jpg".to_owned(),
+        hash: "bh".to_owned(),
+    });
+    manifest.insert("b", b);
+    // Only b's old cover is on disk, so b renames cleanly; a's is gone.
+    let fs = MemFs::new().with_file("BOld.jpg", b"BCOVER".to_vec());
+    let plan = Plan {
+        actions: vec![
+            Action::MoveArtifact {
+                kind: ArtifactKind::CoverJpg,
+                from: "Old.jpg".to_owned(),
+                to: "New.jpg".to_owned(),
+                source_url: String::new(),
+                hash: "ah".to_owned(),
+                owner_id: "a".to_owned(),
+            },
+            Action::MoveArtifact {
+                kind: ArtifactKind::CoverJpg,
+                from: "BOld.jpg".to_owned(),
+                to: "BNew.jpg".to_owned(),
+                source_url: String::new(),
+                hash: "bh".to_owned(),
+                owner_id: "b".to_owned(),
+            },
+        ],
+    };
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[],
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &small_poll(),
+    );
+
+    assert_eq!(outcome.failed(), 1, "only clip a fails, per-clip");
+    assert_eq!(outcome.failures[0].clip_id, "a");
+    assert_eq!(
+        outcome.status,
+        RunStatus::Completed,
+        "a vanished old file never aborts the run"
+    );
+    assert_eq!(outcome.artifacts_deleted, 0, "no delete on a failed move");
+    // a's slot is untouched (still the old path); b relocated cleanly.
+    assert_eq!(
+        manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().path,
+        "Old.jpg"
+    );
+    assert_eq!(outcome.renamed, 1, "b's move still succeeded");
+    assert_eq!(fs.read_file("BNew.jpg").unwrap(), b"BCOVER");
+}
+
+#[test]
+fn move_artifact_toctou_text_sidecar_permanent_fails() {
+    // A synthesised MoveArtifact for a text kind (details) whose old file
+    // vanished: the fetch fallback rejects a text kind outright
+    // (permanent_fail), so it is a per-clip Fail with no delete and no abort.
+    let mut manifest = Manifest::new();
+    let mut a = entry("New.flac", AudioFormat::Flac);
+    a.details_txt = Some(ArtifactState {
+        path: "Old.details.txt".to_owned(),
+        hash: "dh".to_owned(),
+    });
+    manifest.insert("a", a);
+    let fs = MemFs::new(); // Old.details.txt is absent.
+    let plan = Plan {
+        actions: vec![Action::MoveArtifact {
+            kind: ArtifactKind::DetailsTxt,
+            from: "Old.details.txt".to_owned(),
+            to: "New.details.txt".to_owned(),
+            source_url: String::new(),
+            hash: "dh".to_owned(),
+            owner_id: "a".to_owned(),
+        }],
+    };
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[],
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &small_poll(),
+    );
+
+    assert_eq!(outcome.failed(), 1);
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(outcome.artifacts_deleted, 0);
+    assert!(!fs.exists("New.details.txt"), "nothing was written");
+    assert_eq!(
+        manifest
+            .get("a")
+            .unwrap()
+            .details_txt
+            .as_ref()
+            .unwrap()
+            .path,
+        "Old.details.txt",
+        "the slot is untouched after a failed move"
+    );
+}
+
+#[test]
+fn move_stem_toctou_fails_per_clip_without_delete_or_abort() {
+    // #355: a synthesised MoveStem (empty source_url and stem_id) whose old file
+    // has vanished. The rename fails and the fetch fallback has no URL: a
+    // per-clip Fail, never a delete, panic, or run abort.
+    let mut manifest = Manifest::new();
+    let mut e = entry("New.flac", AudioFormat::Flac);
+    e.stems.insert(
+        "voc".to_owned(),
+        ArtifactState {
+            path: "Old.stems/voc.mp3".to_owned(),
+            hash: "h1".to_owned(),
+        },
+    );
+    manifest.insert("a", e);
+    let fs = MemFs::new(); // Old.stems/voc.mp3 is absent.
+    let plan = Plan {
+        actions: vec![Action::MoveStem {
+            clip_id: "a".to_owned(),
+            key: "voc".to_owned(),
+            stem_id: String::new(),
+            from: "Old.stems/voc.mp3".to_owned(),
+            to: "New.stems/voc.mp3".to_owned(),
+            source_url: String::new(),
+            format: StemFormat::Mp3,
+            hash: "h1".to_owned(),
+        }],
+    };
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[],
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &small_poll(),
+    );
+
+    assert_eq!(outcome.failed(), 1);
+    assert_eq!(outcome.failures[0].clip_id, "a");
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(outcome.artifacts_deleted, 0);
+    assert!(!fs.exists("New.stems/voc.mp3"));
+    assert_eq!(
+        manifest.get("a").unwrap().stems.get("voc").unwrap().path,
+        "Old.stems/voc.mp3",
+        "the stem slot is untouched after a failed move"
+    );
+}

@@ -348,3 +348,179 @@ fn stem_delete_is_suppressed_when_it_aliases_a_stem_write() {
         "a stem delete must never alias a stem write target"
     );
 }
+
+// #355: with no authoritative stem listing (`d.stems == None`), a retitle (or a
+// pre-fix strand) relocates every tracked stem to the current `.stems` folder
+// with a folder-only reparent, emitting only MoveStem and never a delete.
+
+/// A kept FLAC entry at `audio` carrying the given tracked stems.
+fn stems_entry_at(audio: &str, stems: &[(&str, &str, &str)]) -> ManifestEntry {
+    let mut e = entry(audio, AudioFormat::Flac, "m", "art");
+    for (key, path, hash) in stems {
+        e.stems.insert(
+            key.to_string(),
+            ArtifactState {
+                path: path.to_string(),
+                hash: hash.to_string(),
+            },
+        );
+    }
+    e
+}
+
+/// A kept clip whose audio drifts to `new_path`, with no authoritative stems.
+fn stems_none_at(id: &str, new_path: &str) -> Desired {
+    Desired {
+        stems: None,
+        ..desired(id, new_path, AudioFormat::Flac, "m", "art")
+    }
+}
+
+#[test]
+fn stems_none_relocates_stranded_stems_on_retitle() {
+    let mut manifest = Manifest::new();
+    manifest.insert(
+        "a",
+        stems_entry_at(
+            "Old.flac",
+            &[
+                ("voc", "Old.stems/voc.mp3", "h1"),
+                ("drm", "Old.stems/drm.mp3", "h2"),
+            ],
+        ),
+    );
+    let d = vec![stems_none_at("a", "New.flac")];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("Old.stems/voc.mp3".to_string(), present(50)),
+        ("Old.stems/drm.mp3".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert_eq!(plan.stem_moves(), 2);
+    assert_eq!(plan.stem_writes(), 0);
+    assert_eq!(plan.stem_deletes(), 0);
+    assert!(plan.actions.contains(&Action::MoveStem {
+        clip_id: "a".to_string(),
+        key: "voc".to_string(),
+        stem_id: String::new(),
+        from: "Old.stems/voc.mp3".to_string(),
+        to: "New.stems/voc.mp3".to_string(),
+        source_url: String::new(),
+        format: StemFormat::Mp3,
+        hash: "h1".to_string(),
+    }));
+    assert!(plan.actions.contains(&Action::MoveStem {
+        clip_id: "a".to_string(),
+        key: "drm".to_string(),
+        stem_id: String::new(),
+        from: "Old.stems/drm.mp3".to_string(),
+        to: "New.stems/drm.mp3".to_string(),
+        source_url: String::new(),
+        format: StemFormat::Mp3,
+        hash: "h2".to_string(),
+    }));
+}
+
+#[test]
+fn stems_none_relocation_skipped_when_old_stem_absent() {
+    // No source_url or stem_id is known, so a vanished stem cannot be
+    // re-rendered: skip cleanly, never write, never delete.
+    let mut manifest = Manifest::new();
+    manifest.insert(
+        "a",
+        stems_entry_at("Old.flac", &[("voc", "Old.stems/voc.mp3", "h1")]),
+    );
+    let d = vec![stems_none_at("a", "New.flac")];
+    // Only the audio is present on disk.
+    let plan = reconcile(&manifest, &d, &local_present("a"), &mirror_ok());
+    assert_eq!(plan.stem_moves(), 0);
+    assert_eq!(plan.stem_writes(), 0);
+    assert_eq!(plan.stem_deletes(), 0);
+}
+
+#[test]
+fn stems_none_no_relocation_without_retitle() {
+    // Stems already sit at the current base and the audio is stable: idempotent,
+    // no move. Complements `stems_none_keeps_every_existing_stem`.
+    let mut manifest = Manifest::new();
+    manifest.insert(
+        "a",
+        stems_entry_at("a.flac", &[("voc", "a.stems/voc.mp3", "h1")]),
+    );
+    let d = vec![stem_desired("a", None)];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("a.stems/voc.mp3".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert_eq!(plan.stem_moves(), 0);
+    assert_eq!(plan.stem_writes(), 0);
+    assert_eq!(plan.stem_deletes(), 0);
+}
+
+#[test]
+fn stems_none_not_relocated_for_trashed_clip() {
+    // A trashed clip kept in place (delete gate refuses) with a drifted d.path
+    // must NOT have its stems relocated to the new base (strand inversion).
+    let mut manifest = Manifest::new();
+    manifest.insert(
+        "a",
+        stems_entry_at("Old.flac", &[("voc", "Old.stems/voc.mp3", "h1")]),
+    );
+    let d = vec![Desired {
+        trashed: true,
+        ..stems_none_at("a", "New.flac")
+    }];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("Old.stems/voc.mp3".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let not_enumerated = vec![SourceStatus {
+        mode: SourceMode::Mirror,
+        fully_enumerated: false,
+    }];
+    let plan = reconcile(&manifest, &d, &local, &not_enumerated);
+    assert_eq!(plan.stem_moves(), 0, "no strand inversion");
+    assert_eq!(plan.stem_deletes(), 0);
+    assert_eq!(plan.deletes(), 0);
+}
+
+#[test]
+fn two_clip_title_swap_with_stems_is_clobber_safe() {
+    // Clips a and b swap titles, each with a tracked stem. a's stem reparents
+    // onto b's held stem path and vice versa; the clobber backstop suppresses
+    // both, so no `.stems` file is targeted onto another live clip's path and
+    // none is lost.
+    let mut manifest = Manifest::new();
+    manifest.insert(
+        "a",
+        stems_entry_at("A.flac", &[("voc", "A.stems/voc.mp3", "h1")]),
+    );
+    manifest.insert(
+        "b",
+        stems_entry_at("B.flac", &[("voc", "B.stems/voc.mp3", "h2")]),
+    );
+    // a takes B's base, b takes A's base.
+    let d = vec![stems_none_at("a", "B.flac"), stems_none_at("b", "A.flac")];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("b".to_string(), present(100)),
+        ("A.stems/voc.mp3".to_string(), present(50)),
+        ("B.stems/voc.mp3".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert_eq!(
+        plan.stem_moves(),
+        0,
+        "both colliding stem moves are suppressed to Skip"
+    );
+    assert_eq!(plan.stem_deletes(), 0, "no stem is lost");
+}

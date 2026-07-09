@@ -74,4 +74,5 @@ mod clobber;
 mod deletion;
 mod plan;
 mod playlist;
+mod relocation;
 mod stems;

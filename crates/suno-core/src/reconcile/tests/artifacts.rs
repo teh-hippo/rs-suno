@@ -1166,3 +1166,341 @@ fn sidecar_probe_absent_falls_back_to_hash_comparison_no_write() {
         "missing probe must never trigger a delete"
     );
 }
+
+// #355: stranded-sidecar relocation. A retitle (or a pre-fix strand) reparents a
+// tracked sidecar the desired-write loop did not move and the delete loop is not
+// deleting, anchored on the CURRENT audio base, emitting only a MoveArtifact.
+
+/// A retitled FLAC clip (audio drifts to `new_path`) that desires the given
+/// artifacts.
+fn retitle_desired(id: &str, new_path: &str, arts: Vec<DesiredArtifact>) -> Desired {
+    Desired {
+        artifacts: arts,
+        ..desired(id, new_path, AudioFormat::Flac, "m", "art")
+    }
+}
+
+#[test]
+fn retitle_relocates_stranded_cover_from_manifest() {
+    // The cover is tracked at the old base and absent from d.artifacts (empty
+    // URL this run); a retitle must reparent it, not strand it.
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry_with_cover_jpg("a", "Old.jpg", "ah"));
+    let d = vec![retitle_desired("a", "New.flac", vec![])];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("Old.jpg".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert_eq!(plan.renames(), 1);
+    assert_eq!(plan.artifact_moves(), 1);
+    assert_eq!(plan.artifact_writes(), 0);
+    assert_eq!(plan.artifact_deletes(), 0);
+    assert!(plan.actions.contains(&Action::MoveArtifact {
+        kind: ArtifactKind::CoverJpg,
+        from: "Old.jpg".to_string(),
+        to: "New.jpg".to_string(),
+        source_url: String::new(),
+        hash: "ah".to_string(),
+        owner_id: "a".to_string(),
+    }));
+}
+
+#[test]
+fn stranded_cover_relocation_skipped_when_old_file_absent() {
+    // No source_url is known, so a vanished old file cannot be fetched: skip
+    // cleanly (no move, no write), never delete.
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry_with_cover_jpg("a", "Old.jpg", "ah"));
+    let d = vec![retitle_desired("a", "New.flac", vec![])];
+    let local = local_with_missing("a", "Old.jpg");
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert_eq!(plan.artifact_moves(), 0);
+    assert_eq!(plan.artifact_writes(), 0);
+    assert_eq!(plan.artifact_deletes(), 0);
+}
+
+#[test]
+fn stranded_cover_not_double_moved_when_also_desired() {
+    // The cover is tracked at Old.jpg AND desired at New.jpg (same bytes): the
+    // desired-write loop already emits the relocation, so the stranded pass must
+    // not emit a second move.
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry_with_cover_jpg("a", "Old.jpg", "ah"));
+    let d = vec![retitle_desired(
+        "a",
+        "New.flac",
+        vec![art(
+            ArtifactKind::CoverJpg,
+            "New.jpg",
+            "https://art/a",
+            "ah",
+        )],
+    )];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("Old.jpg".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert_eq!(plan.artifact_moves(), 1, "exactly one move, not two");
+    assert!(plan.actions.contains(&Action::MoveArtifact {
+        kind: ArtifactKind::CoverJpg,
+        from: "Old.jpg".to_string(),
+        to: "New.jpg".to_string(),
+        source_url: "https://art/a".to_string(),
+        hash: "ah".to_string(),
+        owner_id: "a".to_string(),
+    }));
+}
+
+#[test]
+fn historical_strand_healed_without_a_retitle() {
+    // A pre-fix run advanced entry.path to New.flac but left the cover at
+    // Old.jpg. The audio is stable now (no rename), yet the current-base anchor
+    // still heals the strand.
+    let mut manifest = Manifest::new();
+    let mut e = entry("New.flac", AudioFormat::Flac, "m", "art");
+    e.cover_jpg = Some(cover("Old.jpg", "ah"));
+    manifest.insert("a", e);
+    let d = vec![retitle_desired("a", "New.flac", vec![])];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("Old.jpg".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert_eq!(plan.renames(), 0, "audio is already at the new base");
+    assert_eq!(plan.artifact_moves(), 1);
+    assert_eq!(plan.artifact_deletes(), 0);
+    assert!(plan.actions.contains(&Action::MoveArtifact {
+        kind: ArtifactKind::CoverJpg,
+        from: "Old.jpg".to_string(),
+        to: "New.jpg".to_string(),
+        source_url: String::new(),
+        hash: "ah".to_string(),
+        owner_id: "a".to_string(),
+    }));
+}
+
+#[test]
+fn delete_eligible_kind_relocated_on_non_deletion_run() {
+    // DetailsTxt is delete-eligible, but on a non-deletion run (deletion
+    // disarmed) the delete gate refuses, so the retitled sidecar is HEALED, not
+    // stranded.
+    let mut manifest = Manifest::new();
+    let mut e = entry("Old.flac", AudioFormat::Flac, "m", "art");
+    e.details_txt = Some(cover("Old.details.txt", "dh"));
+    manifest.insert("a", e);
+    let d = vec![retitle_desired("a", "New.flac", vec![])];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("Old.details.txt".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let not_enumerated = vec![SourceStatus {
+        mode: SourceMode::Mirror,
+        fully_enumerated: false,
+    }];
+    let plan = reconcile(&manifest, &d, &local, &not_enumerated);
+    assert_eq!(plan.artifact_deletes(), 0, "the delete gate refused");
+    assert_eq!(plan.artifact_moves(), 1);
+    assert!(plan.actions.contains(&Action::MoveArtifact {
+        kind: ArtifactKind::DetailsTxt,
+        from: "Old.details.txt".to_string(),
+        to: "New.details.txt".to_string(),
+        source_url: String::new(),
+        hash: "dh".to_string(),
+        owner_id: "a".to_string(),
+    }));
+}
+
+#[test]
+fn delete_eligible_kind_deleted_not_moved_on_deletion_run() {
+    // Same setup but deletion IS armed and the feature is off: DetailsTxt is a
+    // genuine removal, so it is deleted (at its old path), never relocated. The
+    // delete-XOR-move partition.
+    let mut manifest = Manifest::new();
+    let mut e = entry("Old.flac", AudioFormat::Flac, "m", "art");
+    e.details_txt = Some(cover("Old.details.txt", "dh"));
+    manifest.insert("a", e);
+    let d = vec![retitle_desired("a", "New.flac", vec![])];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("Old.details.txt".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert!(plan.artifact_deletes() >= 1, "the removed kind is deleted");
+    assert!(plan.actions.contains(&Action::DeleteArtifact {
+        kind: ArtifactKind::DetailsTxt,
+        path: "Old.details.txt".to_string(),
+        owner_id: "a".to_string(),
+    }));
+    assert!(
+        !plan.actions.iter().any(|a| matches!(
+            a,
+            Action::MoveArtifact { to, .. } if to == "New.details.txt"
+        )),
+        "a deleted kind must not also be moved"
+    );
+}
+
+#[test]
+fn reformat_and_retitle_relocates_cover() {
+    // Format drift (FLAC -> WAV) plus a retitle: the audio reformats and the
+    // cover reparents onto the WAV-derived base (audio_base uses d.format).
+    let mut manifest = Manifest::new();
+    let mut e = entry("Old.flac", AudioFormat::Flac, "m", "art");
+    e.cover_jpg = Some(cover("Old.jpg", "ah"));
+    manifest.insert("a", e);
+    let d = vec![Desired {
+        artifacts: vec![],
+        ..desired("a", "New.wav", AudioFormat::Wav, "m", "art")
+    }];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("Old.jpg".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert_eq!(plan.reformats(), 1);
+    assert_eq!(plan.artifact_moves(), 1);
+    assert_eq!(plan.artifact_deletes(), 0);
+    assert!(plan.actions.contains(&Action::MoveArtifact {
+        kind: ArtifactKind::CoverJpg,
+        from: "Old.jpg".to_string(),
+        to: "New.jpg".to_string(),
+        source_url: String::new(),
+        hash: "ah".to_string(),
+        owner_id: "a".to_string(),
+    }));
+}
+
+#[test]
+fn stranded_cover_relocation_suppressed_when_target_held_by_kept_clip() {
+    // Clip a retitles so its cover reparents onto New.jpg, but clip b already
+    // holds (and keeps) New.jpg. The clobber backstop downgrades a's move to a
+    // Skip; New.jpg is never overwritten and never deleted.
+    let mut manifest = Manifest::new();
+    let mut a = entry("Old.flac", AudioFormat::Flac, "m", "art");
+    a.cover_jpg = Some(cover("Old.jpg", "ah"));
+    manifest.insert("a", a);
+    let mut b = entry("Bee.flac", AudioFormat::Flac, "m", "art");
+    b.cover_jpg = Some(cover("New.jpg", "bh"));
+    manifest.insert("b", b);
+    let d = vec![
+        retitle_desired("a", "New.flac", vec![]),
+        // b keeps its cover at New.jpg (desired there, no drift), so it is not
+        // relocated or deleted.
+        Desired {
+            artifacts: vec![art(
+                ArtifactKind::CoverJpg,
+                "New.jpg",
+                "https://art/b",
+                "bh",
+            )],
+            ..desired("b", "Bee.flac", AudioFormat::Flac, "m", "art")
+        },
+    ];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("b".to_string(), present(100)),
+        ("Old.jpg".to_string(), present(50)),
+        ("New.jpg".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert!(
+        !plan.actions.iter().any(|a| matches!(
+            a,
+            Action::MoveArtifact { to, .. } if to == "New.jpg"
+        )),
+        "a's colliding move onto a kept file is suppressed"
+    );
+    assert!(
+        !plan.actions.iter().any(|a| matches!(
+            a,
+            Action::DeleteArtifact { path, .. } if path == "New.jpg"
+        )),
+        "b's kept cover is never deleted"
+    );
+}
+
+#[test]
+fn malformed_audio_base_is_a_noop_not_a_panic() {
+    // A hand-edited desired path without the format extension: audio_base is
+    // None, so the relocation pass is a no-op and never panics.
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry_with_cover_jpg("a", "Old.jpg", "ah"));
+    let d = vec![retitle_desired("a", "NoExtBase", vec![])];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("Old.jpg".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert_eq!(plan.artifact_moves(), 0);
+    assert_eq!(plan.artifact_deletes(), 0);
+}
+
+#[test]
+fn stable_run_relocates_no_sidecar() {
+    // Cover correctly placed at New.jpg, audio stable at New.flac, cover absent
+    // from d.artifacts: the expected path equals the stored path, so the pass is
+    // idempotent.
+    let mut manifest = Manifest::new();
+    let mut e = entry("New.flac", AudioFormat::Flac, "m", "art");
+    e.cover_jpg = Some(cover("New.jpg", "ah"));
+    manifest.insert("a", e);
+    let d = vec![retitle_desired("a", "New.flac", vec![])];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("New.jpg".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let plan = reconcile(&manifest, &d, &local, &mirror_ok());
+    assert_eq!(plan.artifact_moves(), 0);
+    assert_eq!(plan.artifact_deletes(), 0);
+}
+
+#[test]
+fn trashed_kept_clip_does_not_relocate_sidecars() {
+    // A trashed clip whose audio is kept in place (delete gate refuses) must not
+    // have its sidecars relocated to the drifted base: that would invert the
+    // strand (sidecar moves, audio does not). Guarded by !d.trashed.
+    let mut manifest = Manifest::new();
+    let mut e = entry("Old.flac", AudioFormat::Flac, "m", "art");
+    e.cover_jpg = Some(cover("Old.jpg", "ah"));
+    manifest.insert("a", e);
+    // Trashed, not private, not copy-held; deletion disarmed so the audio is
+    // Skipped in place while d.path has drifted.
+    let d = vec![Desired {
+        trashed: true,
+        ..retitle_desired("a", "New.flac", vec![])
+    }];
+    let local: HashMap<String, LocalFile> = [
+        ("a".to_string(), present(100)),
+        ("Old.jpg".to_string(), present(50)),
+    ]
+    .into_iter()
+    .collect();
+    let not_enumerated = vec![SourceStatus {
+        mode: SourceMode::Mirror,
+        fully_enumerated: false,
+    }];
+    let plan = reconcile(&manifest, &d, &local, &not_enumerated);
+    assert_eq!(plan.artifact_moves(), 0, "no strand inversion");
+    assert_eq!(plan.artifact_deletes(), 0);
+    assert_eq!(plan.deletes(), 0);
+}

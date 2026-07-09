@@ -67,6 +67,28 @@ pub enum ArtifactKind {
     Playlist,
 }
 
+impl ArtifactKind {
+    /// The fixed file-name suffix a per-clip sidecar of this kind appends to the
+    /// song's extensionless base (`{base}{suffix}`). `None` for the album/library
+    /// classes, whose paths are not song-base derived. The extension is fixed and
+    /// config-independent (only the base name is sanitised, never the extension),
+    /// so this is the single home for it, consumed by both `desired`'s path
+    /// construction and reconcile's stranded-sidecar relocation (#355).
+    pub(crate) fn sidecar_suffix(self) -> Option<&'static str> {
+        Some(match self {
+            Self::CoverJpg => ".jpg",
+            Self::CoverWebp => ".webp",
+            Self::DetailsTxt => ".details.txt",
+            Self::LyricsTxt => ".lyrics.txt",
+            Self::Lrc => ".lrc",
+            Self::VideoMp4 => ".mp4",
+            Self::FolderJpg | Self::FolderWebp | Self::FolderMp4 | Self::Playlist => {
+                return None;
+            }
+        })
+    }
+}
+
 /// Audio format for downloaded clips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -299,6 +321,30 @@ mod tests {
     #[test]
     fn audio_format_default_is_flac() {
         assert_eq!(AudioFormat::default(), AudioFormat::Flac);
+    }
+
+    #[test]
+    fn sidecar_suffix_maps_each_per_clip_kind() {
+        assert_eq!(ArtifactKind::CoverJpg.sidecar_suffix(), Some(".jpg"));
+        assert_eq!(ArtifactKind::CoverWebp.sidecar_suffix(), Some(".webp"));
+        assert_eq!(
+            ArtifactKind::DetailsTxt.sidecar_suffix(),
+            Some(".details.txt")
+        );
+        assert_eq!(
+            ArtifactKind::LyricsTxt.sidecar_suffix(),
+            Some(".lyrics.txt")
+        );
+        assert_eq!(ArtifactKind::Lrc.sidecar_suffix(), Some(".lrc"));
+        assert_eq!(ArtifactKind::VideoMp4.sidecar_suffix(), Some(".mp4"));
+    }
+
+    #[test]
+    fn sidecar_suffix_is_none_for_album_and_library_kinds() {
+        assert_eq!(ArtifactKind::FolderJpg.sidecar_suffix(), None);
+        assert_eq!(ArtifactKind::FolderWebp.sidecar_suffix(), None);
+        assert_eq!(ArtifactKind::FolderMp4.sidecar_suffix(), None);
+        assert_eq!(ArtifactKind::Playlist.sidecar_suffix(), None);
     }
 
     #[test]

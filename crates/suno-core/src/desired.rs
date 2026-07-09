@@ -224,7 +224,7 @@ fn clip_artifacts(
     if let Some(url) = clip.selected_image_url().filter(|u| !u.is_empty()) {
         artifacts.push(DesiredArtifact {
             kind: ArtifactKind::CoverJpg,
-            path: format!("{base}.jpg"),
+            path: sidecar_path(base, ArtifactKind::CoverJpg),
             source_url: url.to_owned(),
             hash: art_hash(clip),
             content: None,
@@ -234,7 +234,7 @@ fn clip_artifacts(
         let text = render_clip_details(clip, lineage);
         artifacts.push(DesiredArtifact {
             kind: ArtifactKind::DetailsTxt,
-            path: format!("{base}.details.txt"),
+            path: sidecar_path(base, ArtifactKind::DetailsTxt),
             source_url: String::new(),
             hash: content_hash(&text),
             content: Some(text),
@@ -245,7 +245,7 @@ fn clip_artifacts(
     {
         artifacts.push(DesiredArtifact {
             kind: ArtifactKind::LyricsTxt,
-            path: format!("{base}.lyrics.txt"),
+            path: sidecar_path(base, ArtifactKind::LyricsTxt),
             source_url: String::new(),
             hash: content_hash(&text),
             content: Some(text),
@@ -254,7 +254,7 @@ fn clip_artifacts(
     if toggles.lrc {
         artifacts.push(DesiredArtifact {
             kind: ArtifactKind::Lrc,
-            path: format!("{base}.lrc"),
+            path: sidecar_path(base, ArtifactKind::Lrc),
             source_url: String::new(),
             hash: synced_lrc_source_hash(&clip.id),
             content: None,
@@ -263,13 +263,28 @@ fn clip_artifacts(
     if toggles.video && !clip.video_url.is_empty() {
         artifacts.push(DesiredArtifact {
             kind: ArtifactKind::VideoMp4,
-            path: format!("{base}.mp4"),
+            path: sidecar_path(base, ArtifactKind::VideoMp4),
             source_url: clip.video_url.clone(),
             hash: art_url_hash(&clip.video_url),
             content: None,
         });
     }
     artifacts
+}
+
+/// The path of a per-clip sidecar built from the song's extensionless `base`.
+///
+/// The per-kind extension lives once on [`ArtifactKind::sidecar_suffix`] (#355),
+/// so the desired path and reconcile's stranded-sidecar relocation derive it
+/// from the same source. The `.expect` is only ever reached with a per-clip
+/// kind and fails loudly on a future miswiring, matching the codebase's
+/// existing guard style.
+fn sidecar_path(base: &str, kind: ArtifactKind) -> String {
+    format!(
+        "{base}{}",
+        kind.sidecar_suffix()
+            .expect("per-clip sidecar kind has a suffix")
+    )
 }
 
 /// Build the desired `.m3u8` playlists for this run from the fetched playlists.
