@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 use crate::naming::CharacterSet;
+use crate::pathkey::canonical_path_key;
 use crate::vocab::{AudioFormat, SourceMode, StemFormat, VideoCoverRetention};
 
 use super::label_to_env;
@@ -375,14 +376,22 @@ fn check_known_keys(
     Ok(())
 }
 
-/// Lexically normalise a configured root for the nesting comparison: strip a
-/// leading `./`, collapse repeated separators, drop a trailing separator, and
-/// resolve `.`/`..` segments purely textually. This never touches the
-/// filesystem (suno-core is IO-free), so it neither follows symlinks nor folds
-/// case. Case-insensitive-filesystem folding (Windows, macOS), where `Music`
-/// and `music` are the same directory, is a genuine FS concern and is
-/// deliberately left as a follow-up.
-fn normalise_root(root: &str) -> PathBuf {
+/// Normalise a configured root into its comparison key: strip a leading `./`,
+/// collapse repeated separators, drop a trailing separator, resolve `.`/`..`
+/// segments purely textually, then fold every remaining component's letter case
+/// and Unicode normalisation into a canonical string. This never touches the
+/// filesystem (suno-core is IO-free), so it neither follows symlinks nor probes
+/// real case sensitivity. Each component is folded through the same canonical
+/// key the reconciler uses ([`canonical_path_key`]: NFC then lowercase) so two
+/// roots that are one directory on a case-insensitive or NFC-normalising
+/// filesystem (`Music` and `music`, `C:` and `c:`, a UNC share differing only
+/// by case, or NFC vs NFD spellings) are detected as nesting rather than
+/// slipping past the overlap guard as a cross-account deletion hole. On a
+/// case-sensitive filesystem this is deliberately conservative — it may reject
+/// two roots that differ only by case — matching the engine-wide canonical-key
+/// model. The returned components compare component-wise via slice
+/// [`starts_with`](slice::starts_with), so `music` never prefixes `musicfoo`.
+fn normalise_root(root: &str) -> Vec<String> {
     let mut out = PathBuf::new();
     for component in Path::new(root).components() {
         match component {
@@ -399,7 +408,9 @@ fn normalise_root(root: &str) -> PathBuf {
             other => out.push(other.as_os_str()),
         }
     }
-    out
+    out.components()
+        .map(|c| canonical_path_key(&c.as_os_str().to_string_lossy()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -745,6 +756,49 @@ mod tests {
     fn disjoint_relative_roots_are_accepted() {
         let toml = "[accounts.alice]\nroot = \"./alice\"\n\n[accounts.bob]\nroot = \"bob\"\n";
         assert!(Config::from_toml(toml).is_ok());
+    }
+
+    #[test]
+    fn case_only_differing_roots_are_rejected() {
+        // On a case-insensitive filesystem `Music` and `music` are one
+        // directory; the nesting guard must fold case so this pair cannot open
+        // a cross-account deletion-overlap hole.
+        let toml = "[accounts.alice]\nroot = \"/Music\"\n\n[accounts.bob]\nroot = \"/music\"\n";
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn case_only_nested_roots_are_rejected() {
+        // The nested child differs from its parent only by case.
+        let toml = "[accounts.alice]\nroot = \"/Music\"\n\n[accounts.bob]\nroot = \"/music/bob\"\n";
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn nfc_nfd_differing_roots_are_rejected() {
+        // "é" as NFC (U+00E9) vs NFD (e + U+0301) name one directory on a
+        // normalising filesystem, so they must be detected as nesting.
+        let toml = "[accounts.alice]\nroot = \"/\u{00e9}toile\"\n\n[accounts.bob]\nroot = \"/e\u{0301}toile\"\n";
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn genuinely_distinct_roots_are_still_accepted() {
+        // Folding must not over-reject: names that differ by more than case
+        // stay disjoint.
+        let toml = "[accounts.alice]\nroot = \"/Music\"\n\n[accounts.bob]\nroot = \"/Videos\"\n";
+        assert!(Config::from_toml(toml).is_ok());
+    }
+
+    #[test]
+    fn normalise_root_folds_case_and_normalisation() {
+        // Case and NFC/NFD spellings of the same root collapse to one key, so
+        // the nesting comparison treats them as the same directory. `musicfoo`
+        // must not fold to a prefix of `music` — components stay whole.
+        assert_eq!(normalise_root("Foo/BAR"), normalise_root("foo/bar"));
+        assert_eq!(normalise_root("/\u{00e9}"), normalise_root("/e\u{0301}"));
+        assert_ne!(normalise_root("/music"), normalise_root("/musicfoo"));
+        assert!(!normalise_root("/musicfoo").starts_with(&normalise_root("/music")));
     }
 
     // --- cfg-7: an empty naming template is rejected; numeric zeros stay legal. ---
