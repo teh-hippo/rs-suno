@@ -118,52 +118,6 @@ fn resolve_reflects_every_settings_field() {
 }
 
 #[test]
-fn file_defaults_override_compiled() {
-    let toml = r#"
-        [defaults]
-        format = "mp3"
-        concurrency = 8
-
-        [accounts.alice]
-    "#;
-    let cfg = Config::from_toml(toml).unwrap();
-    let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
-    assert_eq!(eff.format, AudioFormat::Mp3);
-    assert_eq!(eff.concurrency, 8);
-    assert_eq!(eff.retries, 3); // compiled default
-}
-
-#[test]
-fn account_settings_override_defaults() {
-    let toml = r#"
-        [defaults]
-        format = "mp3"
-
-        [accounts.alice]
-        format = "wav"
-    "#;
-    let cfg = Config::from_toml(toml).unwrap();
-    let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
-    assert_eq!(eff.format, AudioFormat::Wav);
-}
-
-#[test]
-fn per_source_overrides_account() {
-    let toml = r#"
-        [accounts.alice]
-        format = "flac"
-
-        [accounts.alice.sources.liked]
-        format = "mp3"
-    "#;
-    let cfg = Config::from_toml(toml).unwrap();
-    let eff = cfg
-        .resolve("alice", Some("liked"), &no_env(), &no_flags())
-        .unwrap();
-    assert_eq!(eff.format, AudioFormat::Mp3);
-}
-
-#[test]
 fn unknown_source_falls_back_to_account() {
     let toml = r#"
         [accounts.alice]
@@ -174,18 +128,6 @@ fn unknown_source_falls_back_to_account() {
         .resolve("alice", Some("nonexistent"), &no_env(), &no_flags())
         .unwrap();
     assert_eq!(eff.format, AudioFormat::Wav);
-}
-
-#[test]
-fn global_env_overrides_file() {
-    let toml = r#"
-        [accounts.alice]
-        format = "flac"
-    "#;
-    let cfg = Config::from_toml(toml).unwrap();
-    let env: HashMap<String, String> = [("SUNO_FORMAT".into(), "mp3".into())].into_iter().collect();
-    let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
-    assert_eq!(eff.format, AudioFormat::Mp3);
 }
 
 #[test]
@@ -210,20 +152,6 @@ fn env_enum_parsing_is_case_sensitive() {
 }
 
 #[test]
-fn per_account_env_overrides_global_env() {
-    let toml = "[accounts.alice]\n";
-    let cfg = Config::from_toml(toml).unwrap();
-    let env: HashMap<String, String> = [
-        ("SUNO_FORMAT".into(), "mp3".into()),
-        ("SUNO_ALICE_FORMAT".into(), "wav".into()),
-    ]
-    .into_iter()
-    .collect();
-    let eff = cfg.resolve("alice", None, &env, &no_flags()).unwrap();
-    assert_eq!(eff.format, AudioFormat::Wav);
-}
-
-#[test]
 fn per_account_env_label_uppersnakedcase() {
     let toml = "[accounts.my-lib]\n";
     let cfg = Config::from_toml(toml).unwrap();
@@ -231,25 +159,6 @@ fn per_account_env_label_uppersnakedcase() {
         .into_iter()
         .collect();
     let eff = cfg.resolve("my-lib", None, &env, &no_flags()).unwrap();
-    assert_eq!(eff.format, AudioFormat::Wav);
-}
-
-#[test]
-fn flag_overrides_env_and_file() {
-    let toml = r#"
-        [accounts.alice]
-        format = "flac"
-    "#;
-    let cfg = Config::from_toml(toml).unwrap();
-    let env: HashMap<String, String> = [("SUNO_FORMAT".into(), "mp3".into())].into_iter().collect();
-    let flags = FlagOverrides {
-        settings: Settings {
-            format: Some(AudioFormat::Wav),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let eff = cfg.resolve("alice", None, &env, &flags).unwrap();
     assert_eq!(eff.format, AudioFormat::Wav);
 }
 

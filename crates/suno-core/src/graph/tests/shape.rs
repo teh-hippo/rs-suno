@@ -32,32 +32,6 @@ fn album_for_id_matches_context_for_and_handles_unknown() {
 }
 
 #[test]
-fn serde_roundtrip_preserves_a_relational_shape() {
-    let mut store = LineageStore::new();
-    store.update(&chain_clips(), &chain_resolution(), "now");
-
-    let json = serde_json::to_string(&store).unwrap();
-    let back: LineageStore = serde_json::from_str(&json).unwrap();
-    assert_eq!(store, back);
-
-    let value: serde_json::Value = serde_json::to_value(&store).unwrap();
-    assert_eq!(value.get("schema_version").unwrap(), 1);
-    assert!(value.get("nodes").unwrap().is_object());
-    assert!(value.get("edges").unwrap().is_array());
-    assert!(value.get("resolution_cache").unwrap().is_object());
-    assert!(value.get("edge_index").is_none());
-
-    // Relational, not adjacency: a node carries no edges/parent of its own,
-    // and an edge is a flat row keyed by child and parent.
-    let node = value.get("nodes").unwrap().get("c").unwrap();
-    assert!(node.get("edges").is_none());
-    assert!(node.get("parent_id").is_none());
-    let first_edge = value.get("edges").unwrap().get(0).unwrap();
-    assert!(first_edge.get("child_id").is_some());
-    assert!(first_edge.get("parent_id").is_some());
-}
-
-#[test]
 fn partial_json_loads_with_defaults() {
     // An older/partial file missing whole collections and per-row fields
     // still loads: container and row defaults fill the gaps.

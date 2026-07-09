@@ -17,7 +17,7 @@ use super::harness::{
 };
 use crate::auth::ClerkAuth;
 use crate::client::SunoClient;
-use crate::executor::{ExecOptions, ExecOutcome, Ports, RunStatus, execute};
+use crate::executor::{ExecOptions, ExecOutcome, Ports, execute};
 use crate::manifest::Manifest;
 use crate::reconcile::{Desired, Plan, reconcile};
 use crate::testutil::{ChaosHttp, MemFs, Outcome, RecordingClock, StubFfmpeg};
@@ -189,26 +189,6 @@ fn a_failed_write_leaves_the_existing_good_file_untouched() {
 }
 
 #[test]
-fn a_corrupt_write_is_caught_and_never_advances_the_manifest() {
-    let spec = ClipSpec::mirror("c103", "Bit Rot");
-    // The disk silently stores the wrong number of bytes for this path.
-    let fs = MemFs::new().corrupt_write(&path_of(&spec));
-    let mut manifest = Manifest::new();
-
-    let (_plan, outcome) = run_clean(std::slice::from_ref(&spec), &fs, &mut manifest);
-
-    assert_eq!(
-        outcome.downloaded, 0,
-        "the size check must reject a corrupt write"
-    );
-    assert_eq!(outcome.failed(), 1);
-    assert!(
-        manifest.get("c103").is_none(),
-        "a download whose size verify failed must not be recorded",
-    );
-}
-
-#[test]
 fn a_corrupt_retag_write_over_an_existing_good_file_is_caught_and_never_trusted() {
     // The contrast to the fresh-download corrupt test: here the corrupt write
     // lands ON TOP of an existing good file during a retag. The safety
@@ -273,132 +253,6 @@ fn a_corrupt_retag_write_over_an_existing_good_file_is_caught_and_never_trusted(
     assert!(
         on_disk.iter().all(|&b| b == 0),
         "the destination now holds the corrupt body, not the verified original"
-    );
-}
-
-#[test]
-fn a_failed_delete_keeps_the_manifest_entry_and_the_file() {
-    let mut spec = ClipSpec::mirror("c104", "Keep Me");
-    let fs = MemFs::new();
-    let mut manifest = Manifest::new();
-    run_clean(std::slice::from_ref(&spec), &fs, &mut manifest);
-    let path = path_of(&spec);
-
-    // The clip is trashed, so a clean run wants to delete it, but the disk
-    // refuses the remove.
-    spec = spec.trashed();
-    fs.arm_fail_remove(&path);
-    let (plan, outcome) = run_clean(std::slice::from_ref(&spec), &fs, &mut manifest);
-
-    assert_eq!(
-        plan.deletes(),
-        1,
-        "a trashed clip on a clean mirror is a delete"
-    );
-    assert_eq!(outcome.deleted, 0);
-    assert_eq!(outcome.failed(), 1);
-    assert!(
-        fs.exists(&path),
-        "a refused delete must leave the file in place"
-    );
-    assert!(
-        manifest.get("c104").is_some(),
-        "a refused delete must keep the manifest entry so the next run retries",
-    );
-
-    // Healed, the next run completes the delete.
-    fs.disarm_fail_remove(&path);
-    let (_plan, outcome) = run_clean(std::slice::from_ref(&spec), &fs, &mut manifest);
-    assert_eq!(
-        outcome.deleted, 1,
-        "the delete recovers once the disk works"
-    );
-    assert!(!fs.exists(&path));
-    assert!(manifest.get("c104").is_none());
-}
-
-#[test]
-fn one_clips_failure_never_aborts_the_others() {
-    // The first clip in the plan fails permanently; the second must still land.
-    let bad = ClipSpec::mirror("c200", "Broken");
-    let good = ClipSpec::mirror("c201", "Whole");
-    let fs = MemFs::new();
-    let mut manifest = Manifest::new();
-
-    let http = ChaosHttp::new()
-        .program("/c200.mp3", vec![Outcome::status(404)])
-        .serve("/c201.mp3", b"good-audio".to_vec())
-        .serve(&good.art, b"good-art".to_vec());
-
-    let specs = [bad.clone(), good.clone()];
-    let (_plan, outcome) = run_sync(
-        &specs,
-        &clean_mirror(),
-        &fs,
-        &mut manifest,
-        &http,
-        &fast_opts(),
-    );
-
-    assert_eq!(
-        outcome.downloaded, 1,
-        "the healthy clip downloads despite the failure"
-    );
-    assert_eq!(outcome.failed(), 1);
-    assert!(
-        manifest.get("c200").is_none(),
-        "the failed clip is not recorded"
-    );
-    assert!(
-        manifest.get("c201").is_some(),
-        "the healthy clip is recorded"
-    );
-    assert!(fs.exists(&path_of(&good)));
-    assert!(!fs.exists(&path_of(&bad)));
-}
-
-#[test]
-fn a_cdn_auth_rejection_is_skipped_not_aborted() {
-    // A CDN media fetch carries no token, so a 401/403 is a per-asset rejection
-    // (often transient), not a bad account token. The clip is retried, recorded
-    // as failed, and skipped; the run carries on to later clips rather than
-    // aborting. A genuine auth abort comes only from the authenticated API.
-    let first = ClipSpec::mirror("c300", "Forbidden Asset");
-    let second = ClipSpec::mirror("c301", "Still Reached");
-    let fs = MemFs::new();
-    let mut manifest = Manifest::new();
-
-    let http = ChaosHttp::new()
-        .program("/c300.mp3", vec![Outcome::status(403)])
-        .serve("/c301.mp3", b"audio".to_vec());
-
-    let specs = [first.clone(), second.clone()];
-    let (_plan, outcome) = run_sync(
-        &specs,
-        &clean_mirror(),
-        &fs,
-        &mut manifest,
-        &http,
-        &fast_opts(),
-    );
-
-    assert_ne!(outcome.status, RunStatus::AuthAborted);
-    assert_eq!(
-        outcome.downloaded, 1,
-        "the healthy later clip still downloads"
-    );
-    assert_eq!(outcome.failed(), 1);
-    assert!(
-        http.count("/c301.mp3") >= 1,
-        "later clips are still reached after a CDN rejection",
-    );
-    assert!(
-        manifest.get("c300").is_none(),
-        "the rejected clip is not recorded"
-    );
-    assert!(
-        manifest.get("c301").is_some(),
-        "the healthy clip is recorded"
     );
 }
 

@@ -797,16 +797,6 @@ impl ChaosHttp {
         self
     }
 
-    /// How many requested URLs contained `needle`.
-    pub(crate) fn count(&self, needle: &str) -> usize {
-        self.log
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|url| url.contains(needle))
-            .count()
-    }
-
     /// Resolve the next outcome for `url`, advancing the matched route.
     fn next_outcome(&self, url: &str) -> Outcome {
         let mut routes = self.routes.lock().unwrap();
