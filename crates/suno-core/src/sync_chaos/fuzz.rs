@@ -21,7 +21,9 @@ use crate::client::SunoClient;
 use crate::config::Config;
 use crate::lineage::LineageContext;
 use crate::model::Clip;
-use crate::naming::{DEFAULT_TEMPLATE, NamingConfig, NamingRequest, render_clip_name};
+use crate::naming::{
+    CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, is_reserved_name, render_clip_name,
+};
 use crate::select::RecencySpec;
 use crate::testutil::{ChaosHttp, Outcome, RecordingClock};
 use crate::wire::map_clip;
@@ -129,20 +131,29 @@ proptest! {
         let _ = Config::from_toml(&text);
     }
 
-    /// Rendering a clip name for an arbitrary clip, template, and length cap
-    /// never panics and always yields a safe relative path: at least one
-    /// component, every component non-empty, free of separators, and never `.`
-    /// or `..` (so a hostile title can never escape the library root).
+    /// Rendering a clip name for an arbitrary clip, template, length cap, and
+    /// character set never panics and always yields a safe relative path: at
+    /// least one component, every component non-empty, free of separators, and
+    /// never `.` or `..` (so a hostile title can never escape the library
+    /// root). Every component is additionally free of the Windows-forbidden
+    /// characters and control codes, never a reserved device name (`CON`,
+    /// `NUL`, `COM1`, ...), and pure ASCII under the ASCII character set, so a
+    /// title can neither smuggle a `:` or a control byte into a path nor, in
+    /// ASCII mode, a non-ASCII byte.
     #[test]
     fn render_clip_name_is_always_a_safe_relative_path(
         clip in arb_clip(),
         template in arb_template(),
+        character_set in prop_oneof![
+            Just(CharacterSet::Unicode),
+            Just(CharacterSet::Ascii),
+        ],
         max_component_len in 1usize..120,
     ) {
         let config = NamingConfig {
             template,
+            character_set,
             max_component_len,
-            ..Default::default()
         };
         let lineage = LineageContext::own_root(&clip);
         let request = NamingRequest { clip: &clip, lineage: &lineage };
@@ -164,6 +175,22 @@ proptest! {
                     );
                     prop_assert_ne!(text.as_ref(), ".", "no current-dir component");
                     prop_assert_ne!(text.as_ref(), "..", "no parent-dir component");
+                    prop_assert!(
+                        !is_reserved_name(&text),
+                        "no Windows reserved device name: {text:?}",
+                    );
+                    prop_assert!(
+                        !text.chars().any(|c| {
+                            matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || c.is_control()
+                        }),
+                        "no forbidden or control character: {text:?}",
+                    );
+                    if character_set == CharacterSet::Ascii {
+                        prop_assert!(
+                            text.is_ascii(),
+                            "the ASCII character set must yield a pure-ASCII component: {text:?}",
+                        );
+                    }
                 }
                 other => prop_assert!(false, "unexpected non-normal component: {other:?}"),
             }
