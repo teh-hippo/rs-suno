@@ -90,11 +90,12 @@ where
             .mp4_to_webp(&mp4, self.opts.cover_webp)
             .await
             .map_err(|err| {
-                if err.is_out_of_space() {
-                    disk_fail(&clip.id, "disk full: no space left to transcode cover")
-                } else {
-                    permanent_fail(&clip.id, format!("cover transcode failed: {err}"))
-                }
+                disk_or_permanent(
+                    &clip.id,
+                    err.is_out_of_space(),
+                    "disk full: no space left to transcode cover",
+                    format!("cover transcode failed: {err}"),
+                )
             })
     }
 }

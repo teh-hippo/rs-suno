@@ -838,11 +838,12 @@ where
             .map(|d| d.clip.id.clone())
             .unwrap_or_else(|| to.to_owned());
         self.fs.rename(from, to).map_err(|err| {
-            if err.is_out_of_space() {
-                disk_fail(label, "disk full: no space left to rename")
-            } else {
-                permanent_fail(label, format!("rename failed: {err}"))
-            }
+            disk_or_permanent(
+                label,
+                err.is_out_of_space(),
+                "disk full: no space left to rename",
+                format!("rename failed: {err}"),
+            )
         })?;
 
         let clip_id = self.by_path.get(to).map(|d| d.clip.id.clone()).or_else(|| {
@@ -866,14 +867,12 @@ where
     /// Remove the file and drop the manifest entry.
     fn delete(&self, manifest: &mut Manifest, path: &str, clip_id: &str) -> Result<Effect, Fail> {
         self.fs.remove(path).map_err(|err| {
-            if err.is_out_of_space() {
-                disk_fail(
-                    clip_id,
-                    format!("disk full: no space left to remove {path}"),
-                )
-            } else {
-                permanent_fail(clip_id, format!("delete failed: {err}"))
-            }
+            disk_or_permanent(
+                clip_id,
+                err.is_out_of_space(),
+                format!("disk full: no space left to remove {path}"),
+                format!("delete failed: {err}"),
+            )
         })?;
         manifest.remove(clip_id);
         Ok(Effect::Deleted)
@@ -916,11 +915,12 @@ where
     /// Write `bytes` atomically, then confirm the on-disk size (SYNC-13/14).
     fn write_verify(&self, clip_id: &str, path: &str, bytes: &[u8]) -> Result<u64, Fail> {
         self.fs.write_atomic(path, bytes).map_err(|err| {
-            if err.is_out_of_space() {
-                disk_fail(clip_id, format!("disk full: no space left to write {path}"))
-            } else {
-                permanent_fail(clip_id, format!("write failed: {err}"))
-            }
+            disk_or_permanent(
+                clip_id,
+                err.is_out_of_space(),
+                format!("disk full: no space left to write {path}"),
+                format!("write failed: {err}"),
+            )
         })?;
         match self.fs.metadata(path) {
             Some(stat) if stat.size == bytes.len() as u64 => Ok(stat.size),
