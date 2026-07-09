@@ -300,26 +300,10 @@ async fn stat_manifest(
         // Audio file, keyed by clip_id (may share a path with another clip; stat separately).
         to_stat.push((clip_id.clone(), dest.join(&entry.path)));
 
-        for path in [
-            entry.cover_jpg.as_ref().map(|s| s.path.as_str()),
-            entry.cover_webp.as_ref().map(|s| s.path.as_str()),
-            entry.details_txt.as_ref().map(|s| s.path.as_str()),
-            entry.lyrics_txt.as_ref().map(|s| s.path.as_str()),
-            entry.lrc.as_ref().map(|s| s.path.as_str()),
-            entry.video_mp4.as_ref().map(|s| s.path.as_str()),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|p| !p.is_empty())
-        {
+        // Per-clip sidecars and stems, keyed by their stored path.
+        for path in entry.artifact_paths().filter(|p| !p.is_empty()) {
             if seen.insert(path.to_owned()) {
                 to_stat.push((path.to_owned(), dest.join(path)));
-            }
-        }
-
-        for state in entry.stems.values().filter(|s| !s.path.is_empty()) {
-            if seen.insert(state.path.clone()) {
-                to_stat.push((state.path.clone(), dest.join(&state.path)));
             }
         }
     }

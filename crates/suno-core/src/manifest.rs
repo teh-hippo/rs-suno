@@ -12,7 +12,7 @@ use std::collections::btree_map::Iter;
 
 use serde::{Deserialize, Serialize};
 
-use crate::vocab::AudioFormat;
+use crate::vocab::{ArtifactKind, AudioFormat};
 
 /// The prior known state of one external sidecar artifact for a clip.
 ///
@@ -116,10 +116,11 @@ pub struct ManifestEntry {
 }
 
 impl ManifestEntry {
-    /// Every per-clip sidecar path this entry currently records. The kind list
-    /// lives here once so the executor can tell whether a path is still owned by
-    /// some artifact before it removes a stale copy.
-    pub(crate) fn artifact_paths(&self) -> impl Iterator<Item = &str> {
+    /// Every per-clip sidecar (and stem) path this entry currently records,
+    /// enumerated in one place so its consumers — the executor's stale-copy
+    /// cleanup, orphan detection, and the local-file stat passes — all agree on
+    /// which paths a clip still owns.
+    pub fn artifact_paths(&self) -> impl Iterator<Item = &str> {
         [
             self.cover_jpg.as_ref(),
             self.cover_webp.as_ref(),
@@ -132,6 +133,25 @@ impl ManifestEntry {
         .flatten()
         .chain(self.stems.values())
         .map(|state| state.path.as_str())
+    }
+
+    /// The stored state for one per-clip sidecar `kind`, if present. Album and
+    /// library kinds have no per-clip slot and map to `None`. Mirrors
+    /// [`AlbumArt::artifact`](crate::album_art::AlbumArt::artifact) so the
+    /// kind-to-slot read lives in one place.
+    pub(crate) fn artifact(&self, kind: ArtifactKind) -> Option<&ArtifactState> {
+        match kind {
+            ArtifactKind::CoverJpg => self.cover_jpg.as_ref(),
+            ArtifactKind::CoverWebp => self.cover_webp.as_ref(),
+            ArtifactKind::DetailsTxt => self.details_txt.as_ref(),
+            ArtifactKind::LyricsTxt => self.lyrics_txt.as_ref(),
+            ArtifactKind::Lrc => self.lrc.as_ref(),
+            ArtifactKind::VideoMp4 => self.video_mp4.as_ref(),
+            ArtifactKind::FolderJpg
+            | ArtifactKind::FolderWebp
+            | ArtifactKind::FolderMp4
+            | ArtifactKind::Playlist => None,
+        }
     }
 }
 
@@ -443,6 +463,34 @@ mod tests {
         let paths: Vec<&str> = back.get("clip1").unwrap().artifact_paths().collect();
         assert!(paths.contains(&"song.stems/song - Vocals [stem-voc].mp3"));
         assert!(paths.contains(&"song.stems/song - Drums [stem-drm].mp3"));
+    }
+
+    #[test]
+    fn artifact_returns_the_slot_for_each_per_clip_kind() {
+        let mut e = entry("song.flac", AudioFormat::Flac);
+        let state = |name: &str| ArtifactState {
+            path: name.to_string(),
+            hash: format!("{name}-hash"),
+        };
+        e.cover_jpg = Some(state("cover.jpg"));
+        e.cover_webp = Some(state("cover.webp"));
+        e.details_txt = Some(state("details.txt"));
+        e.lyrics_txt = Some(state("lyrics.txt"));
+        e.lrc = Some(state("song.lrc"));
+        e.video_mp4 = Some(state("song.mp4"));
+
+        assert_eq!(e.artifact(ArtifactKind::CoverJpg), e.cover_jpg.as_ref());
+        assert_eq!(e.artifact(ArtifactKind::CoverWebp), e.cover_webp.as_ref());
+        assert_eq!(e.artifact(ArtifactKind::DetailsTxt), e.details_txt.as_ref());
+        assert_eq!(e.artifact(ArtifactKind::LyricsTxt), e.lyrics_txt.as_ref());
+        assert_eq!(e.artifact(ArtifactKind::Lrc), e.lrc.as_ref());
+        assert_eq!(e.artifact(ArtifactKind::VideoMp4), e.video_mp4.as_ref());
+
+        // Album/library kinds have no per-clip slot.
+        assert_eq!(e.artifact(ArtifactKind::FolderJpg), None);
+        assert_eq!(e.artifact(ArtifactKind::FolderWebp), None);
+        assert_eq!(e.artifact(ArtifactKind::FolderMp4), None);
+        assert_eq!(e.artifact(ArtifactKind::Playlist), None);
     }
 
     #[test]

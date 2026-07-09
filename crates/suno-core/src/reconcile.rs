@@ -253,23 +253,6 @@ fn delete_artifact_action(
     })
 }
 
-/// Whether an artifact kind is a per-clip sidecar reconciled per clip.
-///
-/// The per-clip sidecars (cover art, details, lyrics, `.lrc`, video) live on the
-/// manifest entry; album/library classes (folder art, playlists) are owned by
-/// later phases and reconciled elsewhere, so per-clip planning ignores them.
-fn is_per_clip_kind(kind: ArtifactKind) -> bool {
-    matches!(
-        kind,
-        ArtifactKind::CoverJpg
-            | ArtifactKind::CoverWebp
-            | ArtifactKind::DetailsTxt
-            | ArtifactKind::LyricsTxt
-            | ArtifactKind::Lrc
-            | ArtifactKind::VideoMp4
-    )
-}
-
 /// Whether a no-longer-desired ("removed kind") artifact may be delete-reconciled
 /// while its owning clip's audio is kept this run.
 ///
@@ -313,25 +296,6 @@ fn removed_kind_delete_eligible(kind: ArtifactKind) -> bool {
         | ArtifactKind::FolderWebp
         | ArtifactKind::FolderMp4
         | ArtifactKind::Playlist => true,
-    }
-}
-
-/// The manifest slot for a per-clip artifact kind, if that kind is stored on the
-/// entry. Album/library classes have no per-clip slot yet, so they map to
-/// `None`; the match stays generic so later phases can add slots without
-/// touching callers.
-fn manifest_artifact_by_kind(entry: &ManifestEntry, kind: ArtifactKind) -> Option<&ArtifactState> {
-    match kind {
-        ArtifactKind::CoverJpg => entry.cover_jpg.as_ref(),
-        ArtifactKind::CoverWebp => entry.cover_webp.as_ref(),
-        ArtifactKind::DetailsTxt => entry.details_txt.as_ref(),
-        ArtifactKind::LyricsTxt => entry.lyrics_txt.as_ref(),
-        ArtifactKind::Lrc => entry.lrc.as_ref(),
-        ArtifactKind::VideoMp4 => entry.video_mp4.as_ref(),
-        ArtifactKind::FolderJpg
-        | ArtifactKind::FolderWebp
-        | ArtifactKind::FolderMp4
-        | ArtifactKind::Playlist => None,
     }
 }
 
@@ -480,7 +444,7 @@ fn plan_clip_artifacts(
         // lyrics, .lrc, video). Album/library classes (folder art, playlists)
         // belong to later phases; ignore them here so they are not rewritten
         // every run.
-        if !is_per_clip_kind(artifact.kind) {
+        if !artifact.kind.is_per_clip() {
             continue;
         }
         // A write is needed when the manifest lacks the sidecar, its bytes drift
@@ -488,7 +452,7 @@ fn plan_clip_artifacts(
         // tracked file is absent (or empty) on disk. A pure relocation (same
         // bytes, new path, old file present) is emitted as a MoveArtifact below,
         // which renames rather than re-fetching (#141).
-        let state = entry.and_then(|e| manifest_artifact_by_kind(e, artifact.kind));
+        let state = entry.and_then(|e| e.artifact(artifact.kind));
         let needs_write = needs_write_drift(
             state.map(|state| (state.hash.as_str(), state.path.as_str())),
             artifact.hash.as_str(),
@@ -539,7 +503,7 @@ fn plan_clip_artifacts(
         let desired_kinds: BTreeSet<ArtifactKind> = d
             .artifacts
             .iter()
-            .filter(|a| is_per_clip_kind(a.kind))
+            .filter(|a| a.kind.is_per_clip())
             .map(|a| a.kind)
             .collect();
         for (kind, state) in manifest_artifacts(entry) {
@@ -578,7 +542,7 @@ fn plan_clip_artifacts(
         let desired_kinds: BTreeSet<ArtifactKind> = d
             .artifacts
             .iter()
-            .filter(|a| is_per_clip_kind(a.kind))
+            .filter(|a| a.kind.is_per_clip())
             .map(|a| a.kind)
             .collect();
         for (kind, state) in manifest_artifacts(entry) {
