@@ -68,18 +68,6 @@ impl Http for GatedHttp {
     }
 }
 
-fn download(id: &str, format: AudioFormat) -> (Clip, Desired, Action) {
-    let c = clip(id);
-    let d = desired(c.clone(), format);
-    let action = Action::Download {
-        clip: c.clone(),
-        lineage: LineageContext::own_root(&c),
-        path: d.path.clone(),
-        format,
-    };
-    (c, d, action)
-}
-
 fn opts_with(concurrency: u32) -> ExecOptions {
     ExecOptions {
         concurrency,

@@ -37,6 +37,22 @@ fn desired(clip: Clip, format: AudioFormat) -> Desired {
     }
 }
 
+/// A `clip(id)`, its `desired` entry, and the single-`Download` action for it —
+/// the shape every plain-audio download test starts from. Only sites whose clip
+/// is exactly `clip(id)` and whose path is exactly `d.path` use this; art-bearing,
+/// mutated, or custom-path downloads stay explicit.
+fn download(id: &str, format: AudioFormat) -> (Clip, Desired, Action) {
+    let c = clip(id);
+    let d = desired(c.clone(), format);
+    let action = Action::Download {
+        clip: c.clone(),
+        lineage: LineageContext::own_root(&c),
+        path: d.path.clone(),
+        format,
+    };
+    (c, d, action)
+}
+
 fn entry(path: &str, format: AudioFormat) -> ManifestEntry {
     ManifestEntry {
         path: path.to_owned(),

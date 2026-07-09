@@ -1,38 +1,6 @@
 use super::*;
 use crate::lineage::{EdgeType, ResolveStatus};
-
-fn full_clip() -> Clip {
-    Clip {
-        id: "clip-1234abcd".to_owned(),
-        title: "Electric Storm".to_owned(),
-        tags: "ambient, cinematic".to_owned(),
-        duration: 211.6,
-        created_at: "2024-03-10T14:22:01Z".to_owned(),
-        display_name: "alice".to_owned(),
-        handle: "alice".to_owned(),
-        prompt: "an orchestral storm".to_owned(),
-        gpt_description_prompt: "a moody cinematic build".to_owned(),
-        lyrics: "thunder rolls\nover the plains".to_owned(),
-        model_name: "chirp-v4".to_owned(),
-        major_model_version: "v4".to_owned(),
-        image_large_url: "https://cdn1.suno.ai/signed?token=secret".to_owned(),
-        audio_url: "https://cdn1.suno.ai/clip-1234abcd.mp3".to_owned(),
-        ..Clip::default()
-    }
-}
-
-fn full_lineage() -> LineageContext {
-    LineageContext {
-        root_id: "rootid567890".to_owned(),
-        root_title: "Weather Series".to_owned(),
-        root_date: String::new(),
-        parent_id: "parentid1234".to_owned(),
-        edge_type: Some(EdgeType::Extend),
-        status: ResolveStatus::Resolved,
-        track: 0,
-        track_total: 0,
-    }
-}
+use crate::testutil::{full_clip, full_lineage};
 
 #[test]
 fn details_render_is_exact_and_fixed_order() {

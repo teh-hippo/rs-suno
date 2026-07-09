@@ -34,6 +34,28 @@ fn modes_for(clips: &[&Clip], mode: SourceMode) -> HashMap<String, Vec<SourceMod
     clips.iter().map(|c| (c.id.clone(), vec![mode])).collect()
 }
 
+/// `build_desired` with the defaults every plain case repeats: one `mode` for
+/// all clips, no lineage contexts, no album/id collisions, and the default
+/// naming config. Sites that vary any of those (custom contexts, collisions,
+/// per-id modes, or naming) call `build_desired` directly.
+fn desired_of(
+    clips: &[&Clip],
+    format: AudioFormat,
+    mode: SourceMode,
+    toggles: ArtifactToggles,
+) -> Vec<Desired> {
+    build_desired(
+        clips,
+        format,
+        &modes_for(clips, mode),
+        &no_contexts(),
+        &no_collisions(),
+        &no_collisions(),
+        toggles,
+        &NamingConfig::default(),
+    )
+}
+
 fn art_clip(id: &str) -> Clip {
     Clip {
         image_large_url: format!("https://art.suno.ai/{id}/large.jpg"),

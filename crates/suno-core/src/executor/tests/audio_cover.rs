@@ -219,15 +219,9 @@ fn cover_sidecar_refetches_when_embed_fell_back_to_another_url() {
 
 #[test]
 fn flac_render_retries_a_rate_limited_wav_lookup() {
-    let c = clip("rl");
-    let d = desired(c.clone(), AudioFormat::Flac);
+    let (_c, d, action) = download("rl", AudioFormat::Flac);
     let plan = Plan {
-        actions: vec![Action::Download {
-            clip: c.clone(),
-            lineage: LineageContext::own_root(&c),
-            path: d.path.clone(),
-            format: AudioFormat::Flac,
-        }],
+        actions: vec![action],
     };
     let http = ScriptedHttp::new()
         .with_auth()
