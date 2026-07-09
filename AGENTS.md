@@ -10,6 +10,7 @@ Rust (edition 2024, toolchain 1.96+) · Cargo workspace · tokio + reqwest (rust
 cargo fmt --all --check                                   # format check (CI gate)
 cargo clippy --all-targets --all-features -- -D warnings  # lint (CI gate)
 cargo test --all-features                                 # tests (CI gate)
+cargo llvm-cov -p suno-core --summary-only                # coverage (suno-core; ~97% today)
 cargo run -p rs-suno -- ls --limit 5                      # run the CLI
 ```
 

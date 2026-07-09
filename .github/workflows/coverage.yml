@@ -1,0 +1,52 @@
+name: Coverage
+
+# Measures suno-core line coverage with cargo-llvm-cov and uploads the lcov
+# report to Codecov. It is scoped to suno-core (-p suno-core) so the number
+# matches the ~80% target in AGENTS.md and excludes the adapter/IO code in
+# rs-suno. It is installed as a prebuilt binary (no compile) via the same
+# install-action the supply-chain scan uses. Informational only: this workflow
+# is not a required status, the upload never fails the build
+# (fail_ci_if_error: false), and codecov.yml marks the project and patch
+# statuses informational, so a coverage delta never blocks a PR. The push leg on
+# main feeds the default-branch number the README coverage badge reads; a public
+# repo needs no Codecov token when the org allows tokenless public-repo uploads.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: suno-core coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@5ebac0d9522d786674368e47e92963ba13f2c376 # v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
+          fallback: none
+      - run: cargo llvm-cov -p suno-core --locked --lcov --output-path lcov.info
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: lcov.info
+          disable_search: true
+          flags: suno-core
+          fail_ci_if_error: false
