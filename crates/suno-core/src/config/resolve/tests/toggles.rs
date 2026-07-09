@@ -1,155 +1,105 @@
 use super::*;
 
 #[test]
-fn animated_covers_defaults_off_and_follows_precedence() {
-    // Compiled default is off.
-    let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
-    let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
-    assert!(!eff.animated_covers);
-
-    // File default on; per-source off; env on; flag off — flag wins.
-    let toml = r#"
-        [defaults]
-        animated_covers = true
-
-        [accounts.alice.sources.liked]
-        animated_covers = false
-    "#;
-    let cfg = Config::from_toml(toml).unwrap();
-
-    // File default (defaults) turns it on for an unscoped resolve.
-    let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
-    assert!(eff.animated_covers);
-
-    // Per-source file setting overrides the file default.
-    let eff = cfg
-        .resolve("alice", Some("liked"), &no_env(), &no_flags())
-        .unwrap();
-    assert!(!eff.animated_covers);
-
-    // Env overrides file (even the per-source off).
-    let env: HashMap<String, String> = [("SUNO_ANIMATED_COVERS".into(), "true".into())]
-        .into_iter()
-        .collect();
-    let eff = cfg
-        .resolve("alice", Some("liked"), &env, &no_flags())
-        .unwrap();
-    assert!(eff.animated_covers);
-
-    // Flag overrides env.
-    let flags = FlagOverrides {
-        settings: Settings {
-            animated_covers: Some(false),
-            ..Default::default()
+fn bool_toggles_default_off_and_follow_precedence() {
+    // animated_covers, video_mp4 and download_stems share one precedence
+    // ladder: compiled default off; file default on; per-source off; env on;
+    // flag off wins. Only the key, env var and accessor differ per row.
+    struct Row {
+        label: &'static str,
+        key: &'static str,
+        env_var: &'static str,
+        get: fn(&EffectiveSettings) -> bool,
+        flag_off: FlagOverrides,
+    }
+    let rows = [
+        Row {
+            label: "animated_covers",
+            key: "animated_covers",
+            env_var: "SUNO_ANIMATED_COVERS",
+            get: |e| e.animated_covers,
+            flag_off: FlagOverrides {
+                settings: Settings {
+                    animated_covers: Some(false),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
         },
-        ..Default::default()
-    };
-    let eff = cfg.resolve("alice", Some("liked"), &env, &flags).unwrap();
-    assert!(!eff.animated_covers);
-}
-
-#[test]
-fn video_mp4_defaults_off_and_follows_precedence() {
-    // Compiled default is off.
-    let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
-    let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
-    assert!(!eff.video_mp4);
-
-    // File default on; per-source off; env on; flag off — flag wins.
-    let toml = r#"
-        [defaults]
-        video_mp4 = true
-
-        [accounts.alice.sources.liked]
-        video_mp4 = false
-    "#;
-    let cfg = Config::from_toml(toml).unwrap();
-    assert!(
-        cfg.resolve("alice", None, &no_env(), &no_flags())
-            .unwrap()
-            .video_mp4
-    );
-    assert!(
-        !cfg.resolve("alice", Some("liked"), &no_env(), &no_flags())
-            .unwrap()
-            .video_mp4
-    );
-
-    let env: HashMap<String, String> = [("SUNO_VIDEO_MP4".into(), "true".into())]
-        .into_iter()
-        .collect();
-    assert!(
-        cfg.resolve("alice", Some("liked"), &env, &no_flags())
-            .unwrap()
-            .video_mp4
-    );
-
-    let flags = FlagOverrides {
-        settings: Settings {
-            video_mp4: Some(false),
-            ..Default::default()
+        Row {
+            label: "video_mp4",
+            key: "video_mp4",
+            env_var: "SUNO_VIDEO_MP4",
+            get: |e| e.video_mp4,
+            flag_off: FlagOverrides {
+                settings: Settings {
+                    video_mp4: Some(false),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
         },
-        ..Default::default()
-    };
-    assert!(
-        !cfg.resolve("alice", Some("liked"), &env, &flags)
-            .unwrap()
-            .video_mp4
-    );
-}
-
-#[test]
-fn download_stems_defaults_off_and_follows_precedence() {
-    // Compiled default is off (bulk stem mirroring never spends, but it is
-    // opt-in so it never runs unless asked).
-    let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
-    assert!(
-        !cfg.resolve("alice", None, &no_env(), &no_flags())
-            .unwrap()
-            .download_stems
-    );
-
-    // File default on; per-source off; env on; flag off — flag wins.
-    let toml = r#"
-        [defaults]
-        download_stems = true
-
-        [accounts.alice.sources.liked]
-        download_stems = false
-    "#;
-    let cfg = Config::from_toml(toml).unwrap();
-    assert!(
-        cfg.resolve("alice", None, &no_env(), &no_flags())
-            .unwrap()
-            .download_stems
-    );
-    assert!(
-        !cfg.resolve("alice", Some("liked"), &no_env(), &no_flags())
-            .unwrap()
-            .download_stems
-    );
-
-    let env: HashMap<String, String> = [("SUNO_DOWNLOAD_STEMS".into(), "true".into())]
-        .into_iter()
-        .collect();
-    assert!(
-        cfg.resolve("alice", Some("liked"), &env, &no_flags())
-            .unwrap()
-            .download_stems
-    );
-
-    let flags = FlagOverrides {
-        settings: Settings {
-            download_stems: Some(false),
-            ..Default::default()
+        Row {
+            label: "download_stems",
+            key: "download_stems",
+            env_var: "SUNO_DOWNLOAD_STEMS",
+            get: |e| e.download_stems,
+            flag_off: FlagOverrides {
+                settings: Settings {
+                    download_stems: Some(false),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
         },
-        ..Default::default()
-    };
-    assert!(
-        !cfg.resolve("alice", Some("liked"), &env, &flags)
-            .unwrap()
-            .download_stems
-    );
+    ];
+    for Row {
+        label,
+        key,
+        env_var,
+        get,
+        flag_off,
+    } in rows
+    {
+        // Compiled default is off.
+        let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+        let eff = cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap();
+        assert!(!get(&eff), "{label}: compiled default off");
+
+        // File default on; per-source off.
+        let toml =
+            format!("[defaults]\n{key} = true\n\n[accounts.alice.sources.liked]\n{key} = false\n");
+        let cfg = Config::from_toml(&toml).unwrap();
+        assert!(
+            get(&cfg.resolve("alice", None, &no_env(), &no_flags()).unwrap()),
+            "{label}: file default on (unscoped)"
+        );
+        assert!(
+            !get(&cfg
+                .resolve("alice", Some("liked"), &no_env(), &no_flags())
+                .unwrap()),
+            "{label}: per-source off overrides file default"
+        );
+
+        // Env on overrides file (even the per-source off).
+        let env: HashMap<String, String> = [(env_var.to_string(), "true".to_string())]
+            .into_iter()
+            .collect();
+        assert!(
+            get(&cfg
+                .resolve("alice", Some("liked"), &env, &no_flags())
+                .unwrap()),
+            "{label}: env on overrides file"
+        );
+
+        // Flag off overrides env.
+        assert!(
+            !get(&cfg
+                .resolve("alice", Some("liked"), &env, &flag_off)
+                .unwrap()),
+            "{label}: flag off overrides env"
+        );
+    }
 }
 
 #[test]
