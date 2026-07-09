@@ -5,6 +5,11 @@
 //! in isolation.
 
 #![forbid(unsafe_code)]
+// Every public async method here is driven on the CLI's multi-threaded runtime,
+// so its future must be `Send`. Deny crate-wide (scoped to suno-core, not the
+// workspace) so a future that holds a non-`Send` value across an `.await` fails
+// the existing `clippy -D warnings` CI leg.
+#![deny(clippy::future_not_send)]
 
 mod album_art;
 mod area;

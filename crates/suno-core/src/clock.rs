@@ -12,7 +12,9 @@ use std::future::Future;
 use std::time::Duration;
 
 /// The time and delay port.
-pub trait Clock {
+///
+/// `Sync` so a `&SunoClient<impl Clock>` held across an `.await` stays `Send`.
+pub trait Clock: Sync {
     /// Wait for `duration`, then resolve.
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send;
 

@@ -71,7 +71,10 @@ impl FsError {
 /// Methods are synchronous: disk IO is fast and the adapter can offload it if
 /// it must. Every method returns a [`Result`] so the engine never panics on an
 /// IO fault; a write failure must leave any prior file intact (atomic write).
-pub trait Filesystem {
+///
+/// `Sync` so the executor can hold a shared `&impl Filesystem` across an
+/// `.await` and keep the resulting future `Send`.
+pub trait Filesystem: Sync {
     /// Write `bytes` to `path` atomically, replacing any existing file.
     ///
     /// On failure the prior file at `path` is left untouched: the adapter
