@@ -11,6 +11,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
+use futures_util::stream::{self, StreamExt};
 use suno_core::{
     AlbumArt, AlbumDesired, AlignedLyrics, Clip, ExecOptions, Filesystem, LocalFile,
     PlaylistDesired, PlaylistState, Ports, RunStatus, SourceStatus, SunoClient, deletion_allowed,
@@ -32,6 +33,12 @@ use crate::http::ReqwestHttp;
 
 const WAV_POLL_ATTEMPTS: u32 = 24;
 const WAV_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Bound on concurrent manifest stats. Stats are cheap, latency-bound, and hold
+/// no file descriptor, so a modest fixed fan-out overlaps network-storage latency
+/// without an FD blow-up. Deliberately separate from the executor's `concurrency`
+/// (which bounds the far heavier render/download/transcode work).
+const STAT_CONCURRENCY: usize = 16;
 
 /// The inputs to [`execute_plan`]: the reconciled plan plus the owned run state
 /// it commits (the manifest, this run's synced lyrics, and the pending
@@ -330,21 +337,33 @@ async fn stat_manifest(
         }
     }
 
-    tokio::task::spawn_blocking(move || {
-        to_stat
-            .into_iter()
-            .map(|(key, path)| {
+    // Stat concurrently: each path is an independent, latency-bound `metadata`
+    // call, so fan them out on the blocking pool bounded to `STAT_CONCURRENCY`.
+    // `buffer_unordered` yields in completion order, so each result carries its
+    // original `to_stat` index; sorting by it before building the map reproduces
+    // the serial loop's "last write wins" ordering exactly, so the result is
+    // byte-identical even if a clip-id key ever equalled a path key.
+    let mut stated: Vec<(usize, String, LocalFile)> = stream::iter(to_stat.into_iter().enumerate())
+        .map(|(idx, (key, path))| async move {
+            let local = tokio::task::spawn_blocking(move || {
                 let meta = std::fs::metadata(&path).ok();
-                let local = LocalFile {
+                LocalFile {
                     exists: meta.is_some(),
                     size: meta.map(|m| m.len()).unwrap_or(0),
-                };
-                (key, local)
+                }
             })
-            .collect()
-    })
-    .await
-    .expect("stat_manifest blocking task panicked")
+            .await
+            .expect("stat_manifest blocking task panicked");
+            (idx, key, local)
+        })
+        .buffer_unordered(STAT_CONCURRENCY)
+        .collect()
+        .await;
+    stated.sort_by_key(|entry| entry.0);
+    stated
+        .into_iter()
+        .map(|(_, key, local)| (key, local))
+        .collect::<HashMap<String, LocalFile>>()
 }
 
 /// Whether a file extension names one of the audio formats we write.
@@ -421,5 +440,109 @@ mod tests {
             !dir.exists(),
             "dry-run path must not create the destination directory"
         );
+    }
+
+    #[tokio::test]
+    async fn stat_manifest_reports_present_empty_and_missing_files() {
+        // The concurrent fan-out must yield exactly the map a serial stat would:
+        // a present file carries its true size, an empty file is exists-but-zero,
+        // an absent path is exists:false/size:0, and a path-keyed sidecar is
+        // statted alongside the clip-id-keyed audio.
+        let dir = Path::new("target").join(format!(
+            "stat-manifest-{}-{}",
+            std::process::id(),
+            wallclock::now_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("song.flac"), b"abcdef").unwrap();
+        std::fs::write(dir.join("empty.flac"), b"").unwrap();
+        std::fs::write(dir.join("cover.jpg"), b"xy").unwrap();
+
+        let mut manifest = suno_core::Manifest::new();
+        manifest.insert(
+            "clip-present",
+            suno_core::ManifestEntry {
+                path: "song.flac".to_string(),
+                cover_jpg: Some(suno_core::ArtifactState {
+                    path: "cover.jpg".to_string(),
+                    hash: "h".to_string(),
+                }),
+                ..Default::default()
+            },
+        );
+        manifest.insert(
+            "clip-empty",
+            suno_core::ManifestEntry {
+                path: "empty.flac".to_string(),
+                ..Default::default()
+            },
+        );
+        manifest.insert(
+            "clip-missing",
+            suno_core::ManifestEntry {
+                path: "missing.flac".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let local = stat_manifest(&dir, &manifest, &BTreeMap::new(), &BTreeMap::new()).await;
+
+        // Audio, keyed by clip id.
+        assert!(local["clip-present"].exists);
+        assert_eq!(local["clip-present"].size, 6);
+        assert!(local["clip-empty"].exists);
+        assert_eq!(local["clip-empty"].size, 0);
+        assert!(!local["clip-missing"].exists);
+        assert_eq!(local["clip-missing"].size, 0);
+        // Sidecar, keyed by its stored path.
+        assert!(local["cover.jpg"].exists);
+        assert_eq!(local["cover.jpg"].size, 2);
+        // Three clips plus one sidecar, no phantom keys.
+        assert_eq!(local.len(), 4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn stat_manifest_is_order_deterministic_on_a_key_collision() {
+        // A clip id equal to a sidecar path key is structurally near-impossible
+        // but not enforced. The serial loop resolved such a collision by "last
+        // write wins" in `to_stat` order (audio is pushed before its sidecars),
+        // so the sidecar wins. The concurrent fan-out must reproduce that exactly,
+        // regardless of which stat finishes first.
+        let dir = Path::new("target").join(format!(
+            "stat-collide-{}-{}",
+            std::process::id(),
+            wallclock::now_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("audio.flac"), b"aaa").unwrap();
+        std::fs::write(dir.join("collide.key"), b"ddddddd").unwrap();
+
+        let mut manifest = suno_core::Manifest::new();
+        // The clip id collides with its own cover sidecar's path key.
+        manifest.insert(
+            "collide.key",
+            suno_core::ManifestEntry {
+                path: "audio.flac".to_string(),
+                cover_jpg: Some(suno_core::ArtifactState {
+                    path: "collide.key".to_string(),
+                    hash: "h".to_string(),
+                }),
+                ..Default::default()
+            },
+        );
+
+        let local = stat_manifest(&dir, &manifest, &BTreeMap::new(), &BTreeMap::new()).await;
+
+        // One key, and the sidecar (last in `to_stat` order, 7 bytes) wins
+        // deterministically over the audio file (3 bytes).
+        assert_eq!(local.len(), 1);
+        assert!(local["collide.key"].exists);
+        assert_eq!(local["collide.key"].size, 7);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
