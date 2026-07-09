@@ -116,6 +116,7 @@ where
                 .unwrap_or(false);
             if !still_referenced && !committed.contains(old) {
                 self.fs.remove(old).map_err(|err| {
+                    // Always permanent: FsAdapter::remove never reports out-of-space (#367).
                     permanent_fail(
                         &owner_id,
                         format!("could not remove old sidecar {old}: {err}"),
@@ -283,11 +284,12 @@ where
                 .mp4_to_webp(&source, self.opts.cover_webp)
                 .await
                 .map_err(|err| {
-                    if err.is_out_of_space() {
-                        disk_fail(owner_id, "disk full: no space left to transcode")
-                    } else {
-                        permanent_fail(owner_id, format!("cover transcode failed: {err}"))
-                    }
+                    disk_or_permanent(
+                        owner_id,
+                        err.is_out_of_space(),
+                        "disk full: no space left to transcode",
+                        format!("cover transcode failed: {err}"),
+                    )
                 }),
             // The text sidecars are generated and always carry inline content, so
             // `write_artifact` never reaches this fetch path for them. Guard it so
@@ -327,11 +329,12 @@ where
         owner_id: &str,
     ) -> Result<Effect, Fail> {
         self.fs.remove(path).map_err(|err| {
-            if err.is_out_of_space() {
-                disk_fail(owner_id, "disk full: no space left to remove artifact")
-            } else {
-                permanent_fail(owner_id, format!("artifact delete failed: {err}"))
-            }
+            disk_or_permanent(
+                owner_id,
+                err.is_out_of_space(),
+                "disk full: no space left to remove artifact",
+                format!("artifact delete failed: {err}"),
+            )
         })?;
         if is_album_kind(kind) {
             set_album_artifact(albums, owner_id, kind, None);

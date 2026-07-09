@@ -12,16 +12,6 @@ use suno_core::{FileStat, Filesystem, FsError};
 
 use crate::download::{replace, write_atomic};
 
-/// Map an [`io::Error`](std::io::Error) from a write or rename to an [`FsError`],
-/// tagging a full disk or exhausted quota so the engine aborts the run.
-fn classify_fs(err: &std::io::Error) -> FsError {
-    if crate::diskspace::is_out_of_space(err) {
-        FsError::out_of_space(err.to_string())
-    } else {
-        FsError::new(err.to_string())
-    }
-}
-
 /// A `std::fs` filesystem rooted at one account directory.
 pub struct FsAdapter {
     root: PathBuf,
@@ -95,11 +85,10 @@ impl FsAdapter {
     fn ensure_parent(full: &Path) -> Result<(), FsError> {
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent).map_err(|err| {
-                if crate::diskspace::is_out_of_space(&err) {
-                    FsError::out_of_space(format!("could not create {}: {err}", parent.display()))
-                } else {
-                    FsError::new(format!("could not create {}: {err}", parent.display()))
-                }
+                crate::diskspace::fs_error(
+                    &err,
+                    format!("could not create {}: {err}", parent.display()),
+                )
             })?;
         }
         Ok(())
@@ -111,7 +100,7 @@ impl Filesystem for FsAdapter {
         let full = self.resolve(path)?;
         self.verify_contained(&full)?;
         Self::ensure_parent(&full)?;
-        write_atomic(&full, bytes).map_err(|err| classify_fs(&err))
+        write_atomic(&full, bytes).map_err(|err| crate::diskspace::fs_error(&err, err.to_string()))
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<(), FsError> {
@@ -120,7 +109,8 @@ impl Filesystem for FsAdapter {
         self.verify_contained(&from_full)?;
         self.verify_contained(&to_full)?;
         Self::ensure_parent(&to_full)?;
-        replace(&from_full, &to_full).map_err(|err| classify_fs(&err))
+        replace(&from_full, &to_full)
+            .map_err(|err| crate::diskspace::fs_error(&err, err.to_string()))
     }
 
     fn remove(&self, path: &str) -> Result<(), FsError> {

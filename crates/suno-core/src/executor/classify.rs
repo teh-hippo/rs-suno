@@ -68,6 +68,29 @@ pub(super) fn disk_fail(clip_id: impl Into<String>, reason: impl Into<String>) -
     }
 }
 
+/// Classify a filesystem or transcode failure into the run-ending disk-full
+/// abort or a per-clip permanent skip, from the port error's own out-of-space
+/// flag.
+///
+/// A full disk is systemic: it aborts the run (exit 9) rather than skipping one
+/// clip, so this is the single place the disk-vs-permanent verdict is decided,
+/// keeping the call sites from drifting. Each site still supplies its own two
+/// messages, because the wording is specific to the operation; only the verdict
+/// is shared. The predicate is a plain `bool` (the caller reads its error's
+/// `is_out_of_space` flag), so `suno-core` needs no `std::io`.
+pub(super) fn disk_or_permanent(
+    clip_id: impl Into<String>,
+    out_of_space: bool,
+    disk: impl Into<String>,
+    permanent: impl Into<String>,
+) -> Fail {
+    if out_of_space {
+        disk_fail(clip_id, disk)
+    } else {
+        permanent_fail(clip_id, permanent)
+    }
+}
+
 /// A classified fetch failure, not yet attributed to a clip.
 pub(super) struct FetchError {
     pub(super) class: Class,
@@ -164,4 +187,41 @@ pub(super) fn classify_core(id: &str, err: Error) -> Fail {
 /// The provider-reported body size from `Content-Length`, if present and valid.
 pub(super) fn content_length(response: &crate::http::HttpResponse) -> Option<u64> {
     response.header("content-length")?.trim().parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_or_permanent_out_of_space_aborts_the_run() {
+        // The sole direct guard for the collapsed sites whose disk-full path has
+        // no dedicated integration test (webp sidecar, delete_artifact, stem
+        // remove-old, delete_stem, audio remove-old): out-of-space is systemic.
+        let fail = disk_or_permanent(
+            "clip-1",
+            true,
+            "disk full: no space left",
+            "write failed: x",
+        );
+        assert!(matches!(fail.class, Class::Disk));
+        assert_eq!(fail.clip_id, "clip-1");
+        assert_eq!(fail.reason, "disk full: no space left");
+        assert_eq!(abort_status(fail.class), Some(RunStatus::DiskFull));
+    }
+
+    #[test]
+    fn disk_or_permanent_other_error_is_a_per_clip_skip() {
+        // Any non-disk failure stays per-clip: the run continues, no exit-9.
+        let fail = disk_or_permanent(
+            "clip-2",
+            false,
+            "disk full: no space left",
+            "write failed: x",
+        );
+        assert!(matches!(fail.class, Class::Permanent));
+        assert_eq!(fail.clip_id, "clip-2");
+        assert_eq!(fail.reason, "write failed: x");
+        assert_eq!(abort_status(fail.class), None);
+    }
 }

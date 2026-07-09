@@ -93,11 +93,12 @@ where
         if let Some(from) = from_path {
             // The new file is safely in place; only now drop the old rendering.
             self.fs.remove(&from).map_err(|err| {
-                if err.is_out_of_space() {
-                    disk_fail(&clip_id, "disk full: no space left to remove old file")
-                } else {
-                    permanent_fail(&clip_id, format!("could not remove old file: {err}"))
-                }
+                disk_or_permanent(
+                    &clip_id,
+                    err.is_out_of_space(),
+                    "disk full: no space left to remove old file",
+                    format!("could not remove old file: {err}"),
+                )
             })?;
         }
         manifest.insert(clip_id.clone(), self.entry(&clip_id, &path, format, size));
@@ -136,11 +137,12 @@ where
                     .wav_to_lossless(&wav, format)
                     .await
                     .map_err(|err| {
-                        if err.is_out_of_space() {
-                            disk_fail(&clip.id, "disk full: no space left to transcode")
-                        } else {
-                            permanent_fail(&clip.id, format!("transcode failed: {err}"))
-                        }
+                        disk_or_permanent(
+                            &clip.id,
+                            err.is_out_of_space(),
+                            "disk full: no space left to transcode",
+                            format!("transcode failed: {err}"),
+                        )
                     })?;
                 let cover = self.resolve_cover(clip, format).await?;
                 let cover = cover.as_ref().map(EmbedCover::as_cover);

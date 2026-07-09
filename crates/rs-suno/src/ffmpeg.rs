@@ -35,12 +35,10 @@ impl Ffmpeg for FfmpegAdapter {
         let wav = wav.to_vec();
         async move {
             if let Err(err) = std::fs::create_dir_all(&scratch) {
-                let reason = format!("could not create scratch {}: {err}", scratch.display());
-                return Err(if crate::diskspace::is_out_of_space(&err) {
-                    FfmpegError::out_of_space(reason)
-                } else {
-                    FfmpegError::new(reason)
-                });
+                return Err(crate::diskspace::ffmpeg_error(
+                    &err,
+                    format!("could not create scratch {}: {err}", scratch.display()),
+                ));
             }
             tokio::task::spawn_blocking(move || {
                 crate::transcode::wav_to_lossless(&wav, format, &scratch)
@@ -51,13 +49,7 @@ impl Ffmpeg for FfmpegAdapter {
             // a real io::Error, and a failure while ffmpeg writes the output
             // .flac is proven by transcode's scratch probe, which attaches a
             // real out-of-space io::Error. Both are classified as disk-full.
-            .map_err(|err| {
-                if crate::diskspace::anyhow_is_out_of_space(&err) {
-                    FfmpegError::out_of_space(err.to_string())
-                } else {
-                    FfmpegError::new(err.to_string())
-                }
-            })
+            .map_err(|err| crate::diskspace::ffmpeg_error_from_anyhow(&err, err.to_string()))
         }
     }
 

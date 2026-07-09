@@ -3,7 +3,9 @@
 //!
 //! A full disk (or exhausted quota) is systemic: it will fail every remaining
 //! clip, so the engine treats it as a run-ending abort rather than one more
-//! skippable per-clip fault. These helpers recognise it portably.
+//! skippable per-clip fault. These helpers recognise it portably, and the
+//! `*_error` constructors stamp that verdict onto a typed [`FsError`] /
+//! [`FfmpegError`] in one place so the adapters never reimplement the choice.
 
 use std::io::ErrorKind;
 
@@ -52,6 +54,42 @@ fn link_is_out_of_space(err: &(dyn std::error::Error + 'static)) -> bool {
         return ff.is_out_of_space();
     }
     false
+}
+
+/// Build an [`FsError`] from an [`io::Error`](std::io::Error), tagging a full
+/// disk or exhausted quota so the engine aborts the run instead of skipping one
+/// clip. The single place the disk-vs-other verdict is stamped onto an
+/// [`FsError`].
+pub(crate) fn fs_error(err: &std::io::Error, reason: impl Into<String>) -> FsError {
+    if is_out_of_space(err) {
+        FsError::out_of_space(reason)
+    } else {
+        FsError::new(reason)
+    }
+}
+
+/// Build an [`FfmpegError`] from an [`io::Error`](std::io::Error), tagging
+/// out-of-space (used when staging the scratch directory fails).
+pub(crate) fn ffmpeg_error(err: &std::io::Error, reason: impl Into<String>) -> FfmpegError {
+    if is_out_of_space(err) {
+        FfmpegError::out_of_space(reason)
+    } else {
+        FfmpegError::new(reason)
+    }
+}
+
+/// Build an [`FfmpegError`] from an [`anyhow::Error`], tagging out-of-space when
+/// any link in the chain is a full disk (the ffmpeg output-write case, proven by
+/// the scratch probe in `transcode`).
+pub(crate) fn ffmpeg_error_from_anyhow(
+    err: &anyhow::Error,
+    reason: impl Into<String>,
+) -> FfmpegError {
+    if anyhow_is_out_of_space(err) {
+        FfmpegError::out_of_space(reason)
+    } else {
+        FfmpegError::new(reason)
+    }
 }
 
 #[cfg(test)]
