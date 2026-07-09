@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.15](https://github.com/teh-hippo/rs-suno/compare/v0.36.14...v0.36.15) (2026-07-09)
+
+
+### Bug Fixes
+
+* report out-of-space from the remove and cover-transcode adapters ([0d1bc25](https://github.com/teh-hippo/rs-suno/commit/0d1bc253692294f6d6e00d882de8cf9d1652a608)), closes [#406](https://github.com/teh-hippo/rs-suno/issues/406)
+
 ## [0.36.14](https://github.com/teh-hippo/rs-suno/compare/v0.36.13...v0.36.14) (2026-07-09)
 
 
