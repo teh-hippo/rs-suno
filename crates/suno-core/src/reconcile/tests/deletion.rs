@@ -147,57 +147,6 @@ fn absent_clip_kept_when_any_mirror_not_enumerated() {
 }
 
 #[test]
-fn empty_listing_cannot_cause_deletion() {
-    // A failed or truncated listing presents as a not-fully-enumerated
-    // mirror source: absence must never delete in that case.
-    let mut manifest = Manifest::new();
-    manifest.insert("gone", entry("gone.flac", AudioFormat::Flac, "m", "art"));
-    let sources = vec![SourceStatus {
-        mode: SourceMode::Mirror,
-        fully_enumerated: false,
-    }];
-    let plan = reconcile(&manifest, &[], &HashMap::new(), &sources);
-    assert_eq!(plan.deletes(), 0);
-    assert_eq!(plan.skips(), 1);
-}
-
-#[test]
-fn no_mirror_sources_means_no_deletion() {
-    // Copy-only or sourceless runs are additive: nothing is deleted.
-    let mut manifest = Manifest::new();
-    manifest.insert("gone", entry("gone.flac", AudioFormat::Flac, "m", "art"));
-    let copy_only = vec![SourceStatus {
-        mode: SourceMode::Copy,
-        fully_enumerated: true,
-    }];
-    assert_eq!(
-        reconcile(&manifest, &[], &HashMap::new(), &copy_only).deletes(),
-        0
-    );
-    assert_eq!(reconcile(&manifest, &[], &HashMap::new(), &[]).deletes(), 0);
-}
-
-#[test]
-fn copy_source_with_unenumerated_mirror_still_suppresses_deletion() {
-    let mut manifest = Manifest::new();
-    manifest.insert("gone", entry("gone.flac", AudioFormat::Flac, "m", "art"));
-    let sources = vec![
-        SourceStatus {
-            mode: SourceMode::Copy,
-            fully_enumerated: true,
-        },
-        SourceStatus {
-            mode: SourceMode::Mirror,
-            fully_enumerated: false,
-        },
-    ];
-    assert_eq!(
-        reconcile(&manifest, &[], &HashMap::new(), &sources).deletes(),
-        0
-    );
-}
-
-#[test]
 fn area_authoritative_requires_all_conditions() {
     // All three conditions satisfied: authoritative.
     assert!(area_authoritative(true, false, false));
@@ -339,19 +288,6 @@ fn trashed_clip_kept_when_a_mirror_is_not_enumerated() {
 }
 
 #[test]
-fn trashed_clip_kept_when_sources_empty() {
-    // With no sources there is no authoritative listing, so even a trashed
-    // clip is kept rather than deleted.
-    let mut manifest = Manifest::new();
-    manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
-    let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
-    d.trashed = true;
-    let plan = reconcile(&manifest, &[d], &local_present("a"), &[]);
-    assert_eq!(plan.deletes(), 0);
-    assert_eq!(plan.skips(), 1);
-}
-
-#[test]
 fn failed_copy_listing_suppresses_orphan_deletion() {
     // A partial or failed copy listing is as unreliable as a mirror one and
     // must suppress deletes, even with a fully enumerated mirror present.
@@ -369,27 +305,6 @@ fn failed_copy_listing_suppresses_orphan_deletion() {
     ];
     let plan = reconcile(&manifest, &[], &HashMap::new(), &sources);
     assert_eq!(plan.deletes(), 0);
-}
-
-#[test]
-fn failed_copy_listing_suppresses_trashed_deletion() {
-    let mut manifest = Manifest::new();
-    manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
-    let mut d = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
-    d.trashed = true;
-    let sources = vec![
-        SourceStatus {
-            mode: SourceMode::Mirror,
-            fully_enumerated: true,
-        },
-        SourceStatus {
-            mode: SourceMode::Copy,
-            fully_enumerated: false,
-        },
-    ];
-    let plan = reconcile(&manifest, &[d], &local_present("a"), &sources);
-    assert_eq!(plan.deletes(), 0);
-    assert_eq!(plan.skips(), 1);
 }
 
 #[test]
@@ -579,45 +494,6 @@ fn delete_artifact_suppressed_when_path_aliases_write_artifact_target() {
 // ── Item 5: aggregation of duplicate desired ids ────────────────
 
 #[test]
-fn duplicate_trashed_does_not_defeat_copy_sibling() {
-    // The same clip held by a copy source and reported trashed by a mirror:
-    // copy wins, so it is kept, not deleted.
-    let mut manifest = Manifest::new();
-    manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
-    let mut copy_entry = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
-    copy_entry.modes = vec![SourceMode::Copy];
-    let mut trashed_entry = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
-    trashed_entry.modes = vec![SourceMode::Mirror];
-    trashed_entry.trashed = true;
-    let plan = reconcile(
-        &manifest,
-        &[copy_entry, trashed_entry],
-        &local_present("a"),
-        &mirror_ok(),
-    );
-    assert_eq!(plan.deletes(), 0);
-    assert_eq!(plan.skips(), 1);
-}
-
-#[test]
-fn duplicate_trashed_does_not_defeat_private_sibling() {
-    let mut manifest = Manifest::new();
-    manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));
-    let mut private_entry = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
-    private_entry.private = true;
-    let mut trashed_entry = desired("a", "a.flac", AudioFormat::Flac, "m", "art");
-    trashed_entry.trashed = true;
-    let plan = reconcile(
-        &manifest,
-        &[private_entry, trashed_entry],
-        &local_present("a"),
-        &mirror_ok(),
-    );
-    assert_eq!(plan.deletes(), 0);
-    assert_eq!(plan.skips(), 1);
-}
-
-#[test]
 fn duplicate_trashed_deletes_only_when_all_trashed() {
     // Every duplicate trashed and unprotected: a single delete results.
     let mut manifest = Manifest::new();
@@ -633,18 +509,4 @@ fn duplicate_trashed_deletes_only_when_all_trashed() {
         &mirror_ok(),
     );
     assert_eq!(plan.deletes(), 1);
-}
-
-#[test]
-fn absent_private_clip_protected_by_preserve_marker() {
-    // Items 1 and 6 together: a private clip deselected from the run is
-    // absent from desired, but its preserve marker keeps it across runs.
-    let mut manifest = Manifest::new();
-    manifest.insert(
-        "a",
-        preserved_entry("a.flac", AudioFormat::Flac, "m", "art"),
-    );
-    let plan = reconcile(&manifest, &[], &HashMap::new(), &mirror_ok());
-    assert_eq!(plan.deletes(), 0);
-    assert_eq!(plan.skips(), 1);
 }

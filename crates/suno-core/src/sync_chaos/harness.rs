@@ -91,16 +91,6 @@ impl ClipSpec {
         self.tags = tags.to_owned();
         self
     }
-
-    pub(super) fn with_title(mut self, title: &str) -> Self {
-        self.title = title.to_owned();
-        self
-    }
-
-    pub(super) fn with_creator(mut self, creator: &str) -> Self {
-        self.creator = creator.to_owned();
-        self
-    }
 }
 
 /// Reduce a title to a path-safe slug, so a title change yields a path change.
