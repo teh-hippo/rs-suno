@@ -3,13 +3,14 @@ name: API docs
 # rustdoc builds the public API docs with intra-doc link checking. With
 # `-D warnings` a broken or private-linking doc comment becomes a hard error, so
 # a regression in the generated docs (part of the public surface for the first
-# release) fails CI. Kept as its own workflow to stay clear of the `Docs` Pages
-# publisher and to avoid churn on `ci.yml`.
+# release) fails the build. It runs on push to main rather than per PR: a
+# doc-link regression is caught on the main run, keeping pull requests lean.
+# Kept as its own workflow to stay clear of the `Docs` Pages publisher and to
+# avoid churn on `ci.yml`.
 
 on:
   push:
     branches: [main]
-  pull_request:
 
 permissions: {}
 

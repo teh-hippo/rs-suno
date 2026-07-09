@@ -4,17 +4,16 @@ name: Coverage
 # report to Codecov. It is scoped to suno-core (-p suno-core) so the number
 # matches the ~80% target in AGENTS.md and excludes the adapter/IO code in
 # rs-suno. It is installed as a prebuilt binary (no compile) via the same
-# install-action the supply-chain scan uses. Informational only: this workflow
-# is not a required status, the upload never fails the build
-# (fail_ci_if_error: false), and codecov.yml marks the project and patch
-# statuses informational, so a coverage delta never blocks a PR. The push leg on
-# main feeds the default-branch number the README coverage badge reads; a public
-# repo needs no Codecov token when the org allows tokenless public-repo uploads.
+# install-action the supply-chain scan uses. Informational only: it never gated
+# a pull request (not a required status, the upload uses fail_ci_if_error: false,
+# and codecov.yml marks the project and patch statuses informational), so it runs
+# on push to main rather than per PR to save runner load. The main run feeds the
+# default-branch number the README coverage badge reads; a public repo needs no
+# Codecov token when the org allows tokenless public-repo uploads.
 
 on:
   push:
     branches: [main]
-  pull_request:
 
 permissions: {}
 
