@@ -673,6 +673,32 @@ pub(crate) fn minimal_flac() -> Vec<u8> {
     out
 }
 
+/// Build a minimal but structurally valid RIFF/WAVE container: a `fmt ` (PCM)
+/// chunk and a `data` chunk. Enough for the ID3-based WAV tagger to parse and
+/// round-trip without invoking a real encoder.
+pub(crate) fn minimal_wav() -> Vec<u8> {
+    const AUDIO_DATA: &[u8] = b"\x00\x01\x02wav-sample-payload";
+    let audio_len = AUDIO_DATA.len() as u32;
+    let riff_size = 4u32 + 8 + 16 + 8 + audio_len;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&44_100u32.to_le_bytes());
+    out.extend_from_slice(&88_200u32.to_le_bytes()); // byte rate
+    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&audio_len.to_le_bytes());
+    out.extend_from_slice(AUDIO_DATA);
+    out
+}
+
 /// One programmed outcome for a [`ChaosHttp`] route.
 ///
 /// A [`Transport`](Outcome::Transport) models a request that never produces a

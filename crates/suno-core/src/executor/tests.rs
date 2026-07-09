@@ -28,6 +28,7 @@ fn desired(clip: Clip, format: AudioFormat) -> Desired {
         format,
         meta_hash: "m".to_owned(),
         art_hash: "art".to_owned(),
+        embedded_lyrics_hash: String::new(),
         modes: vec![SourceMode::Mirror],
         trashed: false,
         private: false,
@@ -122,6 +123,39 @@ fn run_full<G: Ffmpeg>(
         playlists,
         desired,
         &synced,
+        Ports {
+            client: &client,
+            http,
+            fs,
+            ffmpeg,
+            clock,
+        },
+        opts,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_synced<G: Ffmpeg>(
+    plan: &Plan,
+    manifest: &mut Manifest,
+    desired: &[Desired],
+    synced: &HashMap<String, AlignedLyrics>,
+    http: &ScriptedHttp,
+    fs: &MemFs,
+    ffmpeg: &G,
+    clock: &RecordingClock,
+    opts: &ExecOptions,
+) -> ExecOutcome {
+    let mut albums = BTreeMap::new();
+    let mut playlists = BTreeMap::new();
+    let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+    pollster::block_on(execute(
+        plan,
+        manifest,
+        &mut albums,
+        &mut playlists,
+        desired,
+        synced,
         Ports {
             client: &client,
             http,

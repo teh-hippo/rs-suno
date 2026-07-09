@@ -26,6 +26,15 @@ pub struct Desired {
     pub meta_hash: String,
     /// Hash of the clip's cover art.
     pub art_hash: String,
+    /// Fingerprint of the aligned lyrics this run intends to have embedded in the
+    /// audio tag, or empty when none. Compared against
+    /// [`ManifestEntry::embedded_lyrics_hash`](crate::manifest::ManifestEntry::embedded_lyrics_hash)
+    /// to drive a back-fill retag when Suno's fetched alignment is missing or
+    /// stale in the tag (#354). Populated at the synced-lyrics resolve seam: the
+    /// content hash of the fetched `.lrc` body on a fetch, otherwise the
+    /// persisted value carried forward (so a retag only ever fires when alignment
+    /// was actually fetched this run).
+    pub embedded_lyrics_hash: String,
     /// Every selected source that currently holds this clip.
     pub modes: Vec<SourceMode>,
     /// True when the clip is trashed in Suno (removed from the source).

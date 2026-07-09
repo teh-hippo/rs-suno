@@ -155,6 +155,7 @@ pub(super) fn desired_of(spec: &ClipSpec) -> Desired {
         format: spec.format,
         meta_hash: meta_hash(&clip, &lineage),
         art_hash: art_hash(&clip),
+        embedded_lyrics_hash: String::new(),
         modes: spec.modes.clone(),
         trashed: spec.trashed,
         private: spec.private,

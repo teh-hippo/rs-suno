@@ -45,6 +45,7 @@ fn desired(id: &str, path: &str, format: AudioFormat, meta: &str, art: &str) -> 
         format,
         meta_hash: meta.to_string(),
         art_hash: art.to_string(),
+        embedded_lyrics_hash: String::new(),
         modes: vec![SourceMode::Mirror],
         trashed: false,
         private: false,

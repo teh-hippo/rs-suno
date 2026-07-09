@@ -142,6 +142,7 @@ fn build_desired(id: String, fields: DesiredFields) -> Desired {
         format,
         meta_hash,
         art_hash,
+        embedded_lyrics_hash: String::new(),
         modes,
         trashed,
         private,

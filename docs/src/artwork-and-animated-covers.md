@@ -76,6 +76,12 @@ is never downgraded. Turning `lrc_sidecar` off writes no `.lrc`, embeds nothing,
 and fetches no alignment, and leaves any existing `.lrc` files in place (it is
 never treated as a deletion).
 
+Files downloaded before the embed was tracked keep their `.lrc` on disk but
+carry no lyrics in the audio tag; the next `sync` back-fills them once, re-fetching
+the alignment to write the `LYRICS`/`USLT` (and `SYLT`) tag, after which they stay
+stable. This back-fill follows the `.lrc` feature, so it only happens while
+`lrc_sidecar` is enabled.
+
 ## Cover art
 
 Each download carries cover art:

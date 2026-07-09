@@ -92,6 +92,7 @@ where
             if let Some(d) = desired {
                 entry.meta_hash = d.meta_hash.clone();
                 entry.art_hash = d.art_hash.clone();
+                entry.embedded_lyrics_hash = d.embedded_lyrics_hash.clone();
                 entry.preserve = preserve_for(d);
             }
             if let Some(size) = size {
