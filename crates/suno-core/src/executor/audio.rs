@@ -65,6 +65,8 @@ where
                     bytes,
                 })
             }
+            // prepare_audio() is only ever dispatched for audio actions.
+            #[allow(clippy::unreachable)]
             _ => unreachable!("prepare_audio only handles audio actions"),
         }
     }

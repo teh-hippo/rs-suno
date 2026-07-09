@@ -404,6 +404,8 @@ where
                     ctx.commit_stem(manifest, prepared, &mut tracked_paths, &committed)
                 }
                 Some(Err(fail)) => Err(fail),
+                // Buffered fan-out yields exactly one result per prepareable action.
+                #[allow(clippy::unreachable)]
                 None => unreachable!("buffered yields one result per prepareable action"),
             }
         } else {
@@ -683,6 +685,8 @@ where
         committed: &BTreeSet<String>,
     ) -> Result<Effect, Fail> {
         match action {
+            // Audio actions are prepared concurrently, never routed through apply().
+            #[allow(clippy::unreachable)]
             Action::Download { .. } | Action::Reformat { .. } => {
                 unreachable!("audio actions are prepared concurrently")
             }

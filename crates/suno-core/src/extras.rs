@@ -154,7 +154,10 @@ pub fn render_library_index(
         schema_version: INDEX_SCHEMA_VERSION,
         clips,
     };
-    serde_json::to_string_pretty(&index).expect("library index serialises")
+    // LibraryIndex is owned strings and numbers, so serialising to a String cannot fail.
+    #[allow(clippy::expect_used)]
+    let json = serde_json::to_string_pretty(&index).expect("library index serialises");
+    json
 }
 
 /// Round a duration in seconds to the nearest whole second for `#EXTINF`.

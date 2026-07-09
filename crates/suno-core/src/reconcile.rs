@@ -931,6 +931,8 @@ fn suppress_path_aliasing(actions: &mut [Action]) {
             Action::DeleteArtifact { owner_id, .. } => Action::Skip {
                 clip_id: owner_id.clone(),
             },
+            // Only delete actions are collected into the aliased set.
+            #[allow(clippy::unreachable)]
             _ => unreachable!("only delete actions are collected as aliased"),
         };
     }

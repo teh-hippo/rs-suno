@@ -8,6 +8,7 @@ where
     C: Clock,
 {
     /// Lock the cover cache, panicking on poison (uniform access point, no repeated magic string).
+    #[allow(clippy::expect_used)]
     pub(crate) fn cover_cache_lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<u8>>> {
         self.cover_cache.lock().expect("cover cache mutex poisoned")
     }
