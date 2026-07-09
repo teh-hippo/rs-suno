@@ -10,6 +10,7 @@
 //! caller's listing. The dependency is one-way: `roots` depends on `lineage`,
 //! never the reverse.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::client::SunoClient;
@@ -89,7 +90,7 @@ enum Walk {
 /// maps a missing id to the known parent that the parent endpoint returned in
 /// its place, and `external` records ids the API reported as parentless roots.
 struct Resolver<'a> {
-    index: HashMap<String, Clip>,
+    index: HashMap<String, Cow<'a, Clip>>,
     /// Persisted `child_id -> parent_id` links from the durable store's primary
     /// edges. Consulted before any network gap-fill so a walk can hop through an
     /// ancestor whose clip is absent (e.g. an intermediate remix, or one Suno
@@ -110,13 +111,13 @@ struct Resolver<'a> {
 
 impl<'a> Resolver<'a> {
     fn new(
-        clips: &[Clip],
+        clips: &'a [Clip],
         opts: ResolveOpts,
         archived_parents: &'a HashMap<String, String>,
     ) -> Self {
         let index = clips
             .iter()
-            .map(|clip| (clip.id.clone(), clip.clone()))
+            .map(|clip| (clip.id.clone(), Cow::Borrowed(clip)))
             .collect();
         let targets = clips.iter().map(|clip| clip.id.clone()).collect();
         Self {
@@ -359,7 +360,7 @@ impl<'a> Resolver<'a> {
             return false;
         }
         self.gap_filled.insert(clip.id.clone());
-        self.index.insert(clip.id.clone(), clip);
+        self.index.insert(clip.id.clone(), Cow::Owned(clip));
         true
     }
 
@@ -408,7 +409,7 @@ impl<'a> Resolver<'a> {
 
     /// Project the memo onto the input clips (so every one has a root entry) and
     /// collect the gap-filled ancestors, sorted by id for a deterministic order.
-    fn into_resolution(self, clips: &[Clip]) -> Resolution {
+    fn into_resolution(mut self, clips: &[Clip]) -> Resolution {
         let mut roots = HashMap::with_capacity(clips.len());
         for clip in clips {
             let info = self
@@ -423,10 +424,14 @@ impl<'a> Resolver<'a> {
             roots.insert(clip.id.clone(), info);
         }
 
-        let mut gap_filled: Vec<Clip> = self
-            .gap_filled
+        // Gap-filled ancestors are held as `Cow::Owned`, so move them out of the
+        // index rather than cloning; the input clips are borrowed and never
+        // collected here.
+        let gap_filled_ids = std::mem::take(&mut self.gap_filled);
+        let mut gap_filled: Vec<Clip> = gap_filled_ids
             .iter()
-            .filter_map(|id| self.index.get(id).cloned())
+            .filter_map(|id| self.index.remove(id))
+            .map(Cow::into_owned)
             .collect();
         gap_filled.sort_by(|a, b| a.id.cmp(&b.id));
 

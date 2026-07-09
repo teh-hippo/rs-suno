@@ -42,13 +42,18 @@ pub(super) fn unwrap_clip(value: &Value) -> &Value {
         .unwrap_or(value)
 }
 
+/// The absent-metadata sentinel, borrowed when a clip object carries no
+/// `metadata` block so the field readers below share one `&Value` instead of
+/// cloning the whole subtree.
+static NULL_METADATA: Value = Value::Null;
+
 /// Build a [`Clip`] from one raw API clip object.
 ///
 /// Clip-level fields and lineage live at the top level; content fields like
 /// tags and duration live under `metadata`. Temporary `audiopipe` audio URLs
 /// expire, so they are rewritten to the permanent CDN URL.
 pub(crate) fn map_clip(raw: &Value) -> Clip {
-    let metadata = raw.get("metadata").cloned().unwrap_or(Value::Null);
+    let metadata: &Value = raw.get("metadata").unwrap_or(&NULL_METADATA);
     let id = string(raw, "id");
 
     let audio_url = cdn_audio_url(&string(raw, "audio_url"), &id);
@@ -67,7 +72,7 @@ pub(crate) fn map_clip(raw: &Value) -> Clip {
         image_large_url: cdn(raw, "image_large_url"),
         video_url: cdn(raw, "video_url"),
         video_cover_url: cdn(raw, "video_cover_url"),
-        tags: string(&metadata, "tags"),
+        tags: string(metadata, "tags"),
         duration: metadata
             .get("duration")
             .and_then(Value::as_f64)
@@ -86,29 +91,29 @@ pub(crate) fn map_clip(raw: &Value) -> Clip {
         avatar_image_url: string_or(raw, "avatar_image_url", "user_avatar_image_url"),
         is_liked: bool_field(raw, "is_liked"),
         is_trashed: bool_field(raw, "is_trashed"),
-        has_vocal: bool_field(&metadata, "has_vocal"),
-        has_stem: bool_field(&metadata, "has_stem"),
-        stem_from_id: string(&metadata, "stem_from_id"),
-        stem_task: string(&metadata, "stem_task"),
-        stem_type_id: int_tolerant(&metadata, "stem_type_id"),
-        stem_type_group_name: string(&metadata, "stem_type_group_name"),
-        clip_type: string(&metadata, "type"),
-        prompt: string(&metadata, "prompt"),
-        gpt_description_prompt: string(&metadata, "gpt_description_prompt"),
+        has_vocal: bool_field(metadata, "has_vocal"),
+        has_stem: bool_field(metadata, "has_stem"),
+        stem_from_id: string(metadata, "stem_from_id"),
+        stem_task: string(metadata, "stem_task"),
+        stem_type_id: int_tolerant(metadata, "stem_type_id"),
+        stem_type_group_name: string(metadata, "stem_type_group_name"),
+        clip_type: string(metadata, "type"),
+        prompt: string(metadata, "prompt"),
+        gpt_description_prompt: string(metadata, "gpt_description_prompt"),
         lyrics: string(raw, "lyrics"),
         model_name: string(raw, "model_name"),
         major_model_version: string(raw, "major_model_version"),
-        edited_clip_id: string(&metadata, "edited_clip_id"),
-        task: string(&metadata, "task"),
-        is_remix: bool_field(&metadata, "is_remix"),
-        cover_clip_id: string(&metadata, "cover_clip_id"),
-        upsample_clip_id: string(&metadata, "upsample_clip_id"),
-        remaster_clip_id: string(&metadata, "remaster_clip_id"),
-        speed_clip_id: string(&metadata, "speed_clip_id"),
-        override_history_clip_id: string(&metadata, "override_history_clip_id"),
-        override_future_clip_id: string(&metadata, "override_future_clip_id"),
-        history: history_entries(&metadata, "history"),
-        concat_history: history_entries(&metadata, "concat_history"),
+        edited_clip_id: string(metadata, "edited_clip_id"),
+        task: string(metadata, "task"),
+        is_remix: bool_field(metadata, "is_remix"),
+        cover_clip_id: string(metadata, "cover_clip_id"),
+        upsample_clip_id: string(metadata, "upsample_clip_id"),
+        remaster_clip_id: string(metadata, "remaster_clip_id"),
+        speed_clip_id: string(metadata, "speed_clip_id"),
+        override_history_clip_id: string(metadata, "override_history_clip_id"),
+        override_future_clip_id: string(metadata, "override_future_clip_id"),
+        history: history_entries(metadata, "history"),
+        concat_history: history_entries(metadata, "concat_history"),
         clip_roots: parse_clip_roots(raw),
         clip_attribution_type: raw
             .get("clip_roots")
@@ -160,7 +165,12 @@ fn int_tolerant(value: &Value, key: &str) -> Option<i64> {
 
 /// Read a CDN URL field, rewriting the unreliable `cdn2` host to `cdn1`.
 fn cdn(value: &Value, key: &str) -> String {
-    string(value, key).replace("cdn2.suno.ai", "cdn1.suno.ai")
+    let url = string(value, key);
+    if url.contains("cdn2.suno.ai") {
+        url.replace("cdn2.suno.ai", "cdn1.suno.ai")
+    } else {
+        url
+    }
 }
 
 /// Read the nested `clip_roots.clips[]` array into [`ClipRoot`]s.
