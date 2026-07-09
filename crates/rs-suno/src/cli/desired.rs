@@ -862,44 +862,64 @@ mod tests {
     }
 
     #[test]
-    fn resolve_playlist_matches_by_id_first() {
-        let playlists = vec![playlist("id-1", "Chill"), playlist("id-2", "id-1")];
-        // The literal id wins even though another playlist is named "id-1".
-        assert_eq!(resolve_playlist("id-1", &playlists).unwrap().name, "Chill");
-    }
-
-    #[test]
-    fn resolve_playlist_matches_by_exact_name() {
-        let playlists = vec![playlist("id-1", "Chill"), playlist("id-2", "Focus")];
-        assert_eq!(resolve_playlist("Focus", &playlists).unwrap().id, "id-2");
-    }
-
-    #[test]
-    fn resolve_playlist_matches_case_insensitively() {
-        let playlists = vec![playlist("id-1", "Chill Beats")];
-        assert_eq!(
-            resolve_playlist("chill beats", &playlists).unwrap().id,
-            "id-1"
-        );
-    }
-
-    #[test]
-    fn resolve_playlist_rejects_an_unknown_value() {
-        let playlists = vec![playlist("id-1", "Chill")];
-        assert_eq!(
-            resolve_playlist("missing", &playlists),
-            Err(PlaylistResolveError::NotFound("missing".to_owned()))
-        );
-    }
-
-    #[test]
-    fn resolve_playlist_rejects_an_ambiguous_name() {
-        let playlists = vec![playlist("id-1", "Mix"), playlist("id-2", "mix")];
-        // Two playlists collide case-insensitively and neither id was given.
-        assert_eq!(
-            resolve_playlist("MIX", &playlists),
-            Err(PlaylistResolveError::Ambiguous("MIX".to_owned()))
-        );
+    fn resolve_playlist_matches_and_rejects() {
+        // Matching order is id, then exact name, then case-insensitive name; an
+        // unknown or ambiguous value is an error. Want::Name/Id assert the
+        // matched playlist's field; Want::Err asserts the exact variant.
+        enum Want {
+            Name(&'static str),
+            Id(&'static str),
+            Err(PlaylistResolveError),
+        }
+        let cases = [
+            (
+                "id wins over a name collision",
+                vec![playlist("id-1", "Chill"), playlist("id-2", "id-1")],
+                "id-1",
+                Want::Name("Chill"),
+            ),
+            (
+                "exact name match",
+                vec![playlist("id-1", "Chill"), playlist("id-2", "Focus")],
+                "Focus",
+                Want::Id("id-2"),
+            ),
+            (
+                "case-insensitive name match",
+                vec![playlist("id-1", "Chill Beats")],
+                "chill beats",
+                Want::Id("id-1"),
+            ),
+            (
+                "unknown value is NotFound",
+                vec![playlist("id-1", "Chill")],
+                "missing",
+                Want::Err(PlaylistResolveError::NotFound("missing".to_owned())),
+            ),
+            (
+                "case collision is Ambiguous",
+                vec![playlist("id-1", "Mix"), playlist("id-2", "mix")],
+                "MIX",
+                Want::Err(PlaylistResolveError::Ambiguous("MIX".to_owned())),
+            ),
+        ];
+        for (label, playlists, value, want) in cases {
+            match want {
+                Want::Name(name) => assert_eq!(
+                    resolve_playlist(value, &playlists).unwrap().name,
+                    name,
+                    "{label}"
+                ),
+                Want::Id(id) => assert_eq!(
+                    resolve_playlist(value, &playlists).unwrap().id,
+                    id,
+                    "{label}"
+                ),
+                Want::Err(err) => {
+                    assert_eq!(resolve_playlist(value, &playlists), Err(err), "{label}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1114,32 +1134,80 @@ mod tests {
     }
 
     #[test]
-    fn confirm_copy_never_prompts() {
-        assert_eq!(confirm_decision(false, 9, false, true), Confirm::Proceed);
-        assert_eq!(confirm_decision(false, 9, false, false), Confirm::Proceed);
-    }
-
-    #[test]
-    fn confirm_sync_no_deletes_proceeds() {
-        assert_eq!(confirm_decision(true, 0, false, false), Confirm::Proceed);
-    }
-
-    #[test]
-    fn confirm_sync_yes_proceeds() {
-        assert_eq!(confirm_decision(true, 3, true, false), Confirm::Proceed);
-    }
-
-    #[test]
-    fn confirm_sync_tty_prompts() {
-        assert_eq!(confirm_decision(true, 3, false, true), Confirm::Prompt);
-    }
-
-    #[test]
-    fn confirm_sync_non_tty_refuses() {
-        assert_eq!(
-            confirm_decision(true, 3, false, false),
-            Confirm::RefuseNonInteractive
-        );
+    fn confirm_decision_gates_destructive_runs() {
+        // copy never prompts; a sync with pending deletes proceeds on `--yes`,
+        // prompts on a TTY, and refuses without one.
+        struct Case {
+            label: &'static str,
+            is_sync: bool,
+            deletes: usize,
+            yes: bool,
+            tty: bool,
+            want: Confirm,
+        }
+        for Case {
+            label,
+            is_sync,
+            deletes,
+            yes,
+            tty,
+            want,
+        } in [
+            Case {
+                label: "copy never prompts (tty)",
+                is_sync: false,
+                deletes: 9,
+                yes: false,
+                tty: true,
+                want: Confirm::Proceed,
+            },
+            Case {
+                label: "copy never prompts (no tty)",
+                is_sync: false,
+                deletes: 9,
+                yes: false,
+                tty: false,
+                want: Confirm::Proceed,
+            },
+            Case {
+                label: "sync, no deletes",
+                is_sync: true,
+                deletes: 0,
+                yes: false,
+                tty: false,
+                want: Confirm::Proceed,
+            },
+            Case {
+                label: "sync, --yes",
+                is_sync: true,
+                deletes: 3,
+                yes: true,
+                tty: false,
+                want: Confirm::Proceed,
+            },
+            Case {
+                label: "sync, tty prompts",
+                is_sync: true,
+                deletes: 3,
+                yes: false,
+                tty: true,
+                want: Confirm::Prompt,
+            },
+            Case {
+                label: "sync, non-tty refuses",
+                is_sync: true,
+                deletes: 3,
+                yes: false,
+                tty: false,
+                want: Confirm::RefuseNonInteractive,
+            },
+        ] {
+            assert_eq!(
+                confirm_decision(is_sync, deletes, yes, tty),
+                want,
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -1174,41 +1242,78 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_auth_abort() {
-        let o = outcome(3, 0, 1, RunStatus::AuthAborted);
-        assert_eq!(run_exit_code(&o), ExitCode::Auth);
-    }
-
-    #[test]
-    fn exit_code_disk_full_abort() {
-        // A disk-full abort maps to 9, ahead of the failures-based partial logic
-        // even though one clip is recorded as failed.
-        let o = outcome(3, 0, 1, RunStatus::DiskFull);
-        assert_eq!(run_exit_code(&o), ExitCode::DiskFull);
-    }
-
-    #[test]
-    fn exit_code_clean_run() {
-        let o = outcome(12, 100, 0, RunStatus::Completed);
-        assert_eq!(run_exit_code(&o), ExitCode::Ok);
-    }
-
-    #[test]
-    fn exit_code_partial_when_some_progress() {
-        let o = outcome(10, 0, 2, RunStatus::Completed);
-        assert_eq!(run_exit_code(&o), ExitCode::Partial);
-    }
-
-    #[test]
-    fn exit_code_partial_counts_skips_as_progress() {
-        let o = outcome(0, 5, 2, RunStatus::Completed);
-        assert_eq!(run_exit_code(&o), ExitCode::Partial);
-    }
-
-    #[test]
-    fn exit_code_transient_when_nothing_progressed() {
-        let o = outcome(0, 0, 5, RunStatus::Completed);
-        assert_eq!(run_exit_code(&o), ExitCode::Transient);
+    fn run_exit_code_maps_outcomes() {
+        // Disk-full (9) and auth (4) aborts win ahead of the failures list; a
+        // clean run is 0; with failures the run is transient (6) when nothing
+        // progressed, else partial (5). Skips count as progress.
+        struct Case {
+            label: &'static str,
+            downloaded: usize,
+            skipped: usize,
+            failures: usize,
+            status: RunStatus,
+            want: ExitCode,
+        }
+        for Case {
+            label,
+            downloaded,
+            skipped,
+            failures,
+            status,
+            want,
+        } in [
+            Case {
+                label: "auth abort",
+                downloaded: 3,
+                skipped: 0,
+                failures: 1,
+                status: RunStatus::AuthAborted,
+                want: ExitCode::Auth,
+            },
+            Case {
+                label: "disk full abort ahead of partial",
+                downloaded: 3,
+                skipped: 0,
+                failures: 1,
+                status: RunStatus::DiskFull,
+                want: ExitCode::DiskFull,
+            },
+            Case {
+                label: "clean run",
+                downloaded: 12,
+                skipped: 100,
+                failures: 0,
+                status: RunStatus::Completed,
+                want: ExitCode::Ok,
+            },
+            Case {
+                label: "partial when some progress",
+                downloaded: 10,
+                skipped: 0,
+                failures: 2,
+                status: RunStatus::Completed,
+                want: ExitCode::Partial,
+            },
+            Case {
+                label: "skips count as progress",
+                downloaded: 0,
+                skipped: 5,
+                failures: 2,
+                status: RunStatus::Completed,
+                want: ExitCode::Partial,
+            },
+            Case {
+                label: "transient when nothing progressed",
+                downloaded: 0,
+                skipped: 0,
+                failures: 5,
+                status: RunStatus::Completed,
+                want: ExitCode::Transient,
+            },
+        ] {
+            let o = outcome(downloaded, skipped, failures, status);
+            assert_eq!(run_exit_code(&o), want, "{label}");
+        }
     }
 
     #[test]
