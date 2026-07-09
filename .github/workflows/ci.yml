@@ -55,3 +55,21 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo check --workspace --all-features --locked
+  # cargo-machete flags any direct dependency in a workspace crate's manifest
+  # that no source file references: unused-dependency drift that neither clippy
+  # (which sees only unused private items) nor cargo-deny (the transitive
+  # lockfile) reports. It runs as a prebuilt binary with no compile, on every PR
+  # and on push to main. A dependency is orphaned by a code edit dropping its
+  # last use, not necessarily a manifest change, so this cannot sit behind
+  # supply-chain.yml's dependency-file path filter.
+  machete:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: taiki-e/install-action@5ebac0d9522d786674368e47e92963ba13f2c376 # v2
+        with:
+          tool: cargo-machete@0.9.2
+          fallback: none
+      - run: cargo machete
