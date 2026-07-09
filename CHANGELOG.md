@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.8](https://github.com/teh-hippo/rs-suno/compare/v0.36.7...v0.36.8) (2026-07-09)
+
+
+### Bug Fixes
+
+* **synced:** back-fill embedded aligned lyrics via a tracked embedded_lyrics_hash ([#354](https://github.com/teh-hippo/rs-suno/issues/354)) ([f208a3c](https://github.com/teh-hippo/rs-suno/commit/f208a3c871108c5cef7f6a8d4034c72e0afd2410))
+
 ## [0.36.7](https://github.com/teh-hippo/rs-suno/compare/v0.36.6...v0.36.7) (2026-07-09)
 
 
