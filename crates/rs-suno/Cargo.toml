@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation = "https://teh-hippo.github.io/rs-suno/"
 description = "A download-only command-line tool for mirroring your Suno.ai library."
 keywords = ["suno", "music", "download", "cli", "sync"]
 categories = ["command-line-utilities", "multimedia::audio"]

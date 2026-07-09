@@ -1,5 +1,11 @@
 # rs-suno
 
+[![CI](https://github.com/teh-hippo/rs-suno/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/teh-hippo/rs-suno/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/rs-suno.svg)](https://crates.io/crates/rs-suno)
+[![docs](https://img.shields.io/badge/docs-user%20guide-blue)](https://teh-hippo.github.io/rs-suno/)
+[![coverage](https://codecov.io/gh/teh-hippo/rs-suno/branch/main/graph/badge.svg)](https://codecov.io/gh/teh-hippo/rs-suno)
+[![licence](https://img.shields.io/badge/licence-MIT-blue)](https://github.com/teh-hippo/rs-suno/blob/main/LICENSE)
+
 A download-only command line tool that mirrors your [Suno.ai](https://suno.com)
 library to local files, modelled on [rclone](https://rclone.org).
 
