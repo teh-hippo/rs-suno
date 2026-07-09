@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.9](https://github.com/teh-hippo/rs-suno/compare/v0.36.8...v0.36.9) (2026-07-09)
+
+
+### Bug Fixes
+
+* **naming:** make id8 file-name disambiguation whole-library-stable ([#356](https://github.com/teh-hippo/rs-suno/issues/356)) ([67ab7fb](https://github.com/teh-hippo/rs-suno/commit/67ab7fb73ac375e2f2eb46b29a9de62ad6ac1bd6))
+
 ## [0.36.8](https://github.com/teh-hippo/rs-suno/compare/v0.36.7...v0.36.8) (2026-07-09)
 
 
