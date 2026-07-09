@@ -191,16 +191,22 @@ impl ClerkAuth {
         }
     }
 
+    /// Lock the auth-state mutex, panicking on poison. Single access point; the
+    /// guarded sections only clone or assign fields and never panic, so poison
+    /// (a prior panic while holding the lock) is unreachable.
+    #[allow(clippy::unwrap_used)]
+    fn locked_state(&self) -> std::sync::MutexGuard<'_, AuthState> {
+        self.state.lock().unwrap()
+    }
+
     /// The Suno user ID, available after [`authenticate`](Self::authenticate).
     pub fn user_id(&self) -> Option<String> {
-        self.state.lock().unwrap().user_id.clone()
+        self.locked_state().user_id.clone()
     }
 
     /// The account display name, or `"Suno"` when none is known.
     pub fn display_name(&self) -> String {
-        self.state
-            .lock()
-            .unwrap()
+        self.locked_state()
             .display_name
             .clone()
             .unwrap_or_else(|| "Suno".to_owned())
@@ -228,7 +234,7 @@ impl ClerkAuth {
         let _guard = self.refresh_flight.lock().await;
         self.fetch_session(http).await?;
         self.refresh_jwt(http).await?;
-        self.state.lock().unwrap().user_id.clone().ok_or_else(|| {
+        self.locked_state().user_id.clone().ok_or_else(|| {
             Error::Auth("could not determine the user ID from the Clerk session".into())
         })
     }
@@ -241,22 +247,20 @@ impl ClerkAuth {
                 self.refresh_jwt(http).await?;
             }
         }
-        self.state
-            .lock()
-            .unwrap()
+        self.locked_state()
             .jwt
             .clone()
             .ok_or_else(|| Error::Auth("failed to obtain a JWT".into()))
     }
 
     fn jwt_is_fresh(&self, now_unix: i64) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.locked_state();
         state.jwt.is_some() && now_unix < state.jwt_exp - JWT_REFRESH_BUFFER
     }
 
     /// Drop the cached JWT so the next [`ensure_jwt`](Self::ensure_jwt) refreshes.
     pub fn invalidate_jwt(&self) {
-        self.state.lock().unwrap().jwt = None;
+        self.locked_state().jwt = None;
     }
 
     async fn fetch_session(&self, http: &impl Http) -> Result<()> {
@@ -264,7 +268,7 @@ impl ClerkAuth {
         let url = format!("{CLERK_BASE_URL}/v1/client?_clerk_js_version={CLERK_JS_VERSION}");
         let data = clerk_request_json(http, &cookie, Method::Get, url).await?;
         let info = parse_client_response(&data)?;
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.locked_state();
         state.session_id = Some(info.session_id);
         state.user_id = info.user_id;
         state.display_name = info.display_name;
@@ -272,10 +276,10 @@ impl ClerkAuth {
     }
 
     async fn refresh_jwt(&self, http: &impl Http) -> Result<()> {
-        let mut session_id = self.state.lock().unwrap().session_id.clone();
+        let mut session_id = self.locked_state().session_id.clone();
         if session_id.is_none() {
             self.fetch_session(http).await?;
-            session_id = self.state.lock().unwrap().session_id.clone();
+            session_id = self.locked_state().session_id.clone();
         }
         let session_id = session_id.ok_or_else(|| Error::Auth("no Clerk session".into()))?;
         let cookie = self.cookie.clone();
@@ -284,7 +288,7 @@ impl ClerkAuth {
         );
         let data = clerk_request_json(http, &cookie, Method::Post, url).await?;
         let jwt = parse_token_response(&data)?;
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.locked_state();
         state.jwt_exp = decode_jwt_exp(&jwt);
         state.jwt = Some(jwt);
         Ok(())

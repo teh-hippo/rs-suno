@@ -51,6 +51,8 @@ where
             AudioFormat::Mp3 => tag_mp3(&existing, &meta, cover, synced),
             AudioFormat::Flac => tag_flac(&existing, &meta, cover),
             AudioFormat::Alac => tag_alac(&existing, &meta, cover),
+            // WAV is rendered before this match, so it never reaches the tag arm.
+            #[allow(clippy::unreachable)]
             AudioFormat::Wav => unreachable!("WAV handled above"),
         }
         .map_err(|err| permanent_fail(&clip.id, err.to_string()))?;

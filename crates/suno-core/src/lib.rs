@@ -10,6 +10,20 @@
 // workspace) so a future that holds a non-`Send` value across an `.await` fails
 // the existing `clippy -D warnings` CI leg.
 #![deny(clippy::future_not_send)]
+// Make the never-panic contract auditable: in non-test library code every
+// unwrap/expect/panic/unreachable/todo/unimplemented is denied, so each
+// intentional site must carry an explicit `#[allow]` with a justification.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 
 mod album_art;
 mod area;

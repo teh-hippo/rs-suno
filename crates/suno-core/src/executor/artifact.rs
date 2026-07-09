@@ -58,6 +58,8 @@ where
                     bytes,
                 }))
             }
+            // prepare() is only ever dispatched for prepareable actions.
+            #[allow(clippy::unreachable)]
             _ => unreachable!("prepare only handles prepareable actions"),
         }
     }

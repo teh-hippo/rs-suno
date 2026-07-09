@@ -13,6 +13,8 @@ use crate::config::Config;
 /// trailing newline so it round-trips cleanly through editors and `git`.
 pub fn config_schema_json() -> String {
     let schema = schemars::schema_for!(Config);
+    // Serialising a schemars-derived Schema (owned JSON) to a String cannot fail.
+    #[allow(clippy::expect_used)]
     let mut json = serde_json::to_string_pretty(&schema).expect("schema serialises");
     json.push('\n');
     json

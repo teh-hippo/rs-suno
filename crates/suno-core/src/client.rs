@@ -52,10 +52,18 @@ impl<C: Clock> SunoClient<C> {
         &self.auth
     }
 
+    /// Lock the adaptive-limiter mutex, panicking on poison. Single access
+    /// point; the guarded sections only read or update pacing counters and
+    /// never panic, so poison is unreachable.
+    #[allow(clippy::unwrap_used)]
+    fn locked_limiter(&self) -> std::sync::MutexGuard<'_, AdaptiveLimiter> {
+        self.limiter.lock().unwrap()
+    }
+
     /// The adaptive limiter's current requests-per-second rate, for tests.
     #[cfg(test)]
     pub(crate) fn limiter_rate(&self) -> f64 {
-        self.limiter.lock().unwrap().rate()
+        self.locked_limiter().rate()
     }
 
     /// List clips across the whole library, or only liked clips.
@@ -443,7 +451,7 @@ impl<C: Clock> SunoClient<C> {
         path: &str,
         body: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        let pace = self.limiter.lock().unwrap().pace(Instant::now());
+        let pace = self.locked_limiter().pace(Instant::now());
         if !pace.is_zero() {
             self.clock.sleep(pace).await;
         }
@@ -500,7 +508,7 @@ impl<C: Clock> SunoClient<C> {
                 .map_err(|err| Error::Connection(err.to_string()))?;
             match response.status {
                 200..=299 => {
-                    self.limiter.lock().unwrap().on_success();
+                    self.locked_limiter().on_success();
                     return Ok(response.body);
                 }
                 401 | 403 if !auth_refreshed => {
@@ -514,7 +522,7 @@ impl<C: Clock> SunoClient<C> {
                     )));
                 }
                 429 => {
-                    self.limiter.lock().unwrap().on_rate_limit();
+                    self.locked_limiter().on_rate_limit();
                     return Err(Error::RateLimited {
                         retry_after: retry_after(&response),
                     });

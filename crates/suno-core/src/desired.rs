@@ -286,6 +286,7 @@ fn clip_artifacts(
 /// from the same source. The `.expect` is only ever reached with a per-clip
 /// kind and fails loudly on a future miswiring, matching the codebase's
 /// existing guard style.
+#[allow(clippy::expect_used)]
 fn sidecar_path(base: &str, kind: ArtifactKind) -> String {
     format!(
         "{base}{}",
