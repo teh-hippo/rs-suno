@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation = "https://docs.rs/suno-core"
 description = "Engine for a download-only Suno.ai library tool: feed selection, sync reconciliation, and audio tagging."
 keywords = ["suno", "music", "download", "sync", "audio"]
 categories = ["multimedia::audio", "api-bindings"]
