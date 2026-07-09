@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.12](https://github.com/teh-hippo/rs-suno/compare/v0.36.11...v0.36.12) (2026-07-09)
+
+
+### Bug Fixes
+
+* **lyrics:** omit structural section labels from the timed .lrc and SYLT ([9bcda80](https://github.com/teh-hippo/rs-suno/commit/9bcda80084b9acd90bacfce9dd65d9b27f927ba0)), closes [#359](https://github.com/teh-hippo/rs-suno/issues/359)
+
 ## [0.36.11](https://github.com/teh-hippo/rs-suno/compare/v0.36.10...v0.36.11) (2026-07-09)
 
 
