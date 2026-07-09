@@ -2,7 +2,7 @@
 //! failure logs, and config-path resolution.
 //!
 //! These are the engine's own records, not library audio, so the CLI touches
-//! them with `std::fs` directly rather than through the rooted [`Filesystem`]
+//! them with `std::fs` directly rather than through the rooted [`Filesystem`](suno_core::Filesystem)
 //! adapter. The manifest is saved atomically (temp sibling then rename) and a
 //! single exclusive lock prevents two runs from corrupting it.
 

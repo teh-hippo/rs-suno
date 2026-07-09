@@ -244,7 +244,7 @@ pub(crate) struct ReconcileInputs<'a> {
 /// sees each `.lrc`'s real content hash. Statting absent files is harmless, so
 /// this never creates the destination directory. The folder-art actions share
 /// the run's single deletion verdict ([`deletion_allowed`]) so album art is
-/// never removed on an incomplete listing, and they land on the same [`Plan`] so
+/// never removed on an incomplete listing, and they land on the same [`Plan`](suno_core::Plan) so
 /// the mass-delete cap and the confirmation prompt already cover them.
 ///
 /// Playlists carry a second, independent gate: `playlists_enumerated` is true
@@ -252,7 +252,7 @@ pub(crate) struct ReconcileInputs<'a> {
 /// [`plan_playlist_artifacts`] emits a playlist delete only when BOTH the shared
 /// `can_delete` verdict and `playlists_enumerated` hold, so a failed, empty, or
 /// partial playlist listing never removes an existing `.m3u8` (HARDENING B2).
-/// These deletes also count toward the mass-delete cap via [`Plan::artifact_deletes`].
+/// These deletes also count toward the mass-delete cap via [`Plan::artifact_deletes`](suno_core::Plan::artifact_deletes).
 ///
 /// `sources` is one [`SourceStatus`] per selected area, so [`deletion_allowed`]
 /// requires every area fully enumerated and at least one Mirror. Folder art

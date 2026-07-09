@@ -466,7 +466,7 @@ fn sanitise_segment(
 /// Sanitise a free-form playlist name into a single safe path component.
 ///
 /// Applies the same Unicode filtering and length cap as clip path components
-/// (default [`CharacterSet::Unicode`], [`DEFAULT_MAX_COMPONENT_LEN`]), so a
+/// (default [`CharacterSet::Unicode`], `DEFAULT_MAX_COMPONENT_LEN`), so a
 /// playlist file name obeys the same filesystem rules as the rest of the
 /// library. An empty or fully-stripped name falls back to `playlist` so the
 /// caller always has a non-empty stem to append `.m3u8` to.
@@ -497,7 +497,7 @@ pub fn stems_folder(base: &str) -> String {
 /// `{song file name} - {label} [{stem id8}].{ext}`; ` - {label}` is dropped when
 /// the label sanitises to empty, and the `[{stem id8}]` disambiguator (first 8
 /// of the stable stem id) keeps blank or duplicate labels collision-free. Every
-/// component runs through the same [`sanitise_component`] filter, honouring
+/// component runs through the same `sanitise_component` filter, honouring
 /// `character_set`.
 pub fn stem_file_path(
     base: &str,

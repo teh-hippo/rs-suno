@@ -7,7 +7,7 @@ use crate::vocab::{AudioFormat, StemFormat, VideoCoverRetention, WebpEncodeSetti
 
 use super::shape::{AreasConfig, Settings};
 
-/// CLI flag overrides passed to [`Config::resolve`]. `None` means the flag
+/// CLI flag overrides passed to [`Config::resolve`](crate::config::Config::resolve). `None` means the flag
 /// was not provided.
 ///
 /// Only `token` is carried top-level (the one field with a global `--token`
@@ -28,7 +28,7 @@ pub struct EffectiveSettings {
     pub stored_token: Option<String>,
     /// A command to run for the token when no direct token was supplied.
     pub token_command: Option<String>,
-    /// The optional configured account id assertion (see [`AccountConfig`]).
+    /// The optional configured account id assertion (see [`AccountConfig`](crate::config::AccountConfig)).
     pub account_id: Option<String>,
     pub format: AudioFormat,
     pub concurrency: u32,
@@ -52,12 +52,12 @@ pub struct EffectiveSettings {
     pub areas: Option<AreasConfig>,
     /// Manual album-name overrides, keyed by lineage root id, resolved from the
     /// account's `[accounts.<label>.albums]` table. Deterministically ordered
-    /// (a [`BTreeMap`]) and pre-trimmed of empty values by [`Config::resolve`].
+    /// (a [`BTreeMap`]) and pre-trimmed of empty values by [`Config::resolve`](crate::config::Config::resolve).
     pub album_overrides: BTreeMap<String, String>,
     /// Lead-track flags from `[accounts.<label>].lead_tracks`: clip ids (or
     /// unique prefixes) each promoted to track 1 of their lineage album.
     /// Trimmed, de-duplicated, and deterministically ordered by
-    /// [`Config::resolve`].
+    /// [`Config::resolve`](crate::config::Config::resolve).
     pub lead_tracks: Vec<String>,
     /// Whether a lone-track album is numbered (defaults to `true`). `false`
     /// leaves singletons unnumbered.

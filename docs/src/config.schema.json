@@ -214,7 +214,7 @@
           ]
         },
         "token_command": {
-          "description": "The command whose stdout mints a token. Resolved from the\n`SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\ndeliberately no `--token-command` flag, so it is never read from\n[`FlagOverrides`]; set it in config or the environment.",
+          "description": "The command whose stdout mints a token. Resolved from the\n`SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\ndeliberately no `--token-command` flag, so it is never read from\n`FlagOverrides`; set it in config or the environment.",
           "type": [
             "string",
             "null"
@@ -455,7 +455,7 @@
           ]
         },
         "token_command": {
-          "description": "The command whose stdout mints a token. Resolved from the\n`SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\ndeliberately no `--token-command` flag, so it is never read from\n[`FlagOverrides`]; set it in config or the environment.",
+          "description": "The command whose stdout mints a token. Resolved from the\n`SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\ndeliberately no `--token-command` flag, so it is never read from\n`FlagOverrides`; set it in config or the environment.",
           "type": [
             "string",
             "null"
@@ -626,7 +626,7 @@
           ]
         },
         "token_command": {
-          "description": "The command whose stdout mints a token. Resolved from the\n`SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\ndeliberately no `--token-command` flag, so it is never read from\n[`FlagOverrides`]; set it in config or the environment.",
+          "description": "The command whose stdout mints a token. Resolved from the\n`SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is\ndeliberately no `--token-command` flag, so it is never read from\n`FlagOverrides`; set it in config or the environment.",
           "type": [
             "string",
             "null"

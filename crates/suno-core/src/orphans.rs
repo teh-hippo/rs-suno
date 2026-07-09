@@ -29,7 +29,7 @@ use crate::pathkey::canonical_path_key;
 /// result is a pure function of its inputs: no filesystem, network, or clock.
 ///
 /// Tracked and on-disk paths are compared by their filesystem-canonical key
-/// (NFC + lowercase, see [`canonical_path_key`]), so a tracked file the walk
+/// (NFC + lowercase, see `canonical_path_key`), so a tracked file the walk
 /// recorded under a different case or Unicode normalisation is not mis-reported
 /// as an orphan on a case-insensitive or NFC-folding filesystem.
 pub fn untracked_audio(manifest: &Manifest, on_disk: &[String]) -> Vec<String> {

@@ -88,7 +88,7 @@ pub enum PlaylistPolicy {
 /// This is a pure function of the verb, CLI scope flags, `--mode`, the account's
 /// `[areas]` config, and whether the run is force-additive (copy verb, re-pin,
 /// or first-use adoption). The caller enumerates each present area and assembles
-/// the union, `modes_by_id`, and per-area [`SourceStatus`] from it.
+/// the union, `modes_by_id`, and per-area [`SourceStatus`](suno_core::SourceStatus) from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSelection {
     /// The library area, or `None` when `library = "off"` deliberately arms

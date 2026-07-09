@@ -34,7 +34,7 @@ pub struct ArtifactToggles {
     pub lrc: bool,
     pub video: bool,
     /// The animated-cover encode settings, folded into the embedded-cover hash
-    /// (see [`embedded_art_hash`]) so a settings change re-embeds existing covers.
+    /// (see `embedded_art_hash`) so a settings change re-embeds existing covers.
     pub webp: WebpEncodeSettings,
 }
 
@@ -62,7 +62,7 @@ pub struct PlaylistInput<'a> {
 /// never share one. `colliding_ids` is the file-name counterpart: the set of
 /// clip ids sharing an `{id8}` with another distinct clip archive-wide, so a
 /// clip in it gets a stable full-id suffix regardless of the batch (#356).
-/// `toggles` gates the per-song sidecars in [`clip_artifacts`].
+/// `toggles` gates the per-song sidecars in `clip_artifacts`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_desired(
     clips: &[&Clip],

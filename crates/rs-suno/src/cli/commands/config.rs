@@ -400,7 +400,7 @@ fn render_areas(out: &mut String, label: &str, areas: &suno_core::AreasConfig) {
     }
 }
 
-/// The TOML keyword for a [`SourceMode`].
+/// The TOML keyword for a [`SourceMode`](suno_core::SourceMode).
 fn source_mode_str(mode: suno_core::SourceMode) -> &'static str {
     match mode {
         suno_core::SourceMode::Mirror => "mirror",
@@ -408,7 +408,7 @@ fn source_mode_str(mode: suno_core::SourceMode) -> &'static str {
     }
 }
 
-/// The TOML keyword for an [`AreaMode`], including the library-only `off`.
+/// The TOML keyword for an [`AreaMode`](suno_core::AreaMode), including the library-only `off`.
 fn area_mode_str(mode: suno_core::AreaMode) -> &'static str {
     match mode {
         suno_core::AreaMode::Off => "off",
