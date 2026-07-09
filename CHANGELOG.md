@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.7](https://github.com/teh-hippo/rs-suno/compare/v0.36.6...v0.36.7) (2026-07-09)
+
+
+### Bug Fixes
+
+* **reconcile:** relocate stranded cover and stems on an audio retitle ([#355](https://github.com/teh-hippo/rs-suno/issues/355)) ([745ca39](https://github.com/teh-hippo/rs-suno/commit/745ca39b4bb1af5395c904b0e05546bb3d501de2))
+
 ## [0.36.6](https://github.com/teh-hippo/rs-suno/compare/v0.36.5...v0.36.6) (2026-07-08)
 
 
