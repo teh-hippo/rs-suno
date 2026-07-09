@@ -1,3 +1,4 @@
+use super::lifecycle::Relocate;
 use super::*;
 
 impl<H, F, G, C> Ctx<'_, H, F, G, C>
@@ -37,28 +38,14 @@ where
             .and_then(|e| e.stems.get(&key))
             .map(|s| s.path.clone());
         self.write_verify(&clip_id, &path, &bytes)?;
-        if let Some(old) = old_path.as_deref()
-            && !old.is_empty()
-            && old != path
-        {
-            let still_referenced = tracked_paths
-                .get_mut(old)
-                .map(|count| {
-                    *count = count.saturating_sub(1);
-                    *count > 0
-                })
-                .unwrap_or(false);
-            if !still_referenced && !committed.contains(old) {
-                self.fs.remove(old).map_err(|err| {
-                    disk_or_permanent(
-                        &clip_id,
-                        err.is_out_of_space(),
-                        format!("disk full: no space left to remove old stem {old}"),
-                        format!("could not remove old stem {old}: {err}"),
-                    )
-                })?;
-            }
-        }
+        self.remove_superseded(
+            &clip_id,
+            old_path.as_deref(),
+            &path,
+            tracked_paths,
+            committed,
+            "stem",
+        )?;
         if let Some(entry) = manifest.entries.get_mut(&clip_id) {
             set_manifest_stem(
                 entry,
@@ -102,33 +89,27 @@ where
         if manifest.get(clip_id).is_none() {
             return Ok(Effect::Skipped);
         }
-        let exclusive =
-            tracked_paths.get(from).is_none_or(|count| *count <= 1) && !committed.contains(from);
-        if from != to && exclusive {
-            match self.fs.rename(from, to) {
-                Ok(()) => {
-                    if let Some(count) = tracked_paths.get_mut(from) {
-                        *count = count.saturating_sub(1);
-                    }
-                    if let Some(entry) = manifest.entries.get_mut(clip_id) {
-                        set_manifest_stem(
-                            entry,
-                            key,
-                            Some(ArtifactState {
-                                path: to.to_owned(),
-                                hash: hash.to_owned(),
-                            }),
-                        );
-                    }
-                    return Ok(Effect::Renamed);
+        // Try the in-place rename shared with `move_artifact`; on a fall-through
+        // the fetch-and-write fallback re-fetches the correct bytes at `to`, so a
+        // co-referenced shared stem is never renamed away with mismatched content.
+        match self.try_relocate(from, to, tracked_paths, committed) {
+            Relocate::Renamed => {
+                if let Some(entry) = manifest.entries.get_mut(clip_id) {
+                    set_manifest_stem(
+                        entry,
+                        key,
+                        Some(ArtifactState {
+                            path: to.to_owned(),
+                            hash: hash.to_owned(),
+                        }),
+                    );
                 }
-                Err(err) if err.is_out_of_space() => {
-                    return Err(disk_fail(clip_id, "disk full: no space left to move stem"));
-                }
-                // The old file has vanished, or the rename is unsupported: fall
-                // through to a fetch-and-write at `to`.
-                Err(_) => {}
+                return Ok(Effect::Renamed);
             }
+            Relocate::DiskFull => {
+                return Err(disk_fail(clip_id, "disk full: no space left to move stem"));
+            }
+            Relocate::Refetch => {}
         }
         let bytes = self
             .fetch_stem_bytes(client_lock, clip_id, stem_id, source_url, format)
