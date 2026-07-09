@@ -25,10 +25,10 @@ jobs:
       - run: cargo test --all-features
   # Windows runtime behaviour (path canonicalisation, case-insensitive renames,
   # symlink privilege) can differ even though the code is OS-agnostic, so a
-  # single x86_64 leg runs on merges to main as a post-merge safety net. PRs gate
-  # on the Linux `check` leg alone; the release build validates every target.
+  # single x86_64 leg runs on every PR and on merges to main, gating PRs beside
+  # the Linux `check` leg to catch a Windows-only regression before merge, not
+  # after; the release build validates every target.
   windows-check:
-    if: github.event_name == 'push'
     runs-on: windows-latest
     permissions:
       contents: read
