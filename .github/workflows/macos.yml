@@ -1,0 +1,25 @@
+# A manual, on-demand macOS verification (build and test only). The project is
+# OS-agnostic but has no macOS CI evidence; this proves the suite on Darwin when
+# run by hand. It is deliberately NOT wired into push, pull_request, schedule,
+# or any release/CD yet: workflow_dispatch is the only trigger.
+name: macOS
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  macos-check:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+      - run: cargo test --workspace --all-features
