@@ -125,10 +125,7 @@ pub(crate) fn delete_playlist_artifact_action(
     can_delete: bool,
     list_fully_enumerated: bool,
 ) -> Option<Action> {
-    if !can_delete || !list_fully_enumerated || path.is_empty() {
-        return None;
-    }
-    Some(Action::DeleteArtifact {
+    (delete_gate_open(can_delete, path) && list_fully_enumerated).then(|| Action::DeleteArtifact {
         kind: ArtifactKind::Playlist,
         path: path.to_string(),
         owner_id: owner_id.to_string(),

@@ -73,6 +73,7 @@ mod album_art;
 mod artifacts;
 mod clobber;
 mod deletion;
+mod gates;
 mod plan;
 mod playlist;
 mod relocation;
