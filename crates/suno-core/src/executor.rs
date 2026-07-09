@@ -60,6 +60,7 @@ mod artifact;
 mod audio;
 mod classify;
 mod cover;
+mod lifecycle;
 mod stem;
 mod tag;
 

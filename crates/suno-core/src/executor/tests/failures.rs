@@ -475,6 +475,65 @@ fn disk_full_unlink_aborts_the_run_before_a_later_delete() {
 }
 
 #[test]
+fn disk_full_superseded_sidecar_unlink_aborts_the_run() {
+    // A full disk striking the unlink of a *superseded sidecar* is systemic,
+    // exactly like the audio-reformat unlink above: commit_artifact writes the
+    // new sidecar, then removing the old one fails out-of-space, so the run
+    // aborts (DiskFull) rather than skipping the clip. This pins the now
+    // disk-aware classification of the shared `remove_superseded` helper (#369):
+    // the artifact path previously hard-coded a per-clip permanent skip here.
+    // The production `FsAdapter::remove` never signals out-of-space, so only the
+    // in-memory double reaches this arm today; routing it through the shared
+    // disk-or-permanent verdict is forward-safe (#406) and stops the two paths
+    // drifting.
+    let mut manifest = Manifest::new();
+    let mut e = entry("old/a.flac", AudioFormat::Flac);
+    e.lyrics_txt = Some(ArtifactState {
+        path: "old/a.lyrics.txt".to_owned(),
+        hash: "lh".to_owned(),
+    });
+    manifest.insert("a", e.clone());
+    // The sidecar moved to a new base and its bytes changed, so it is rewritten
+    // (not a pure MoveArtifact) at the new path; the commit then unlinks the old,
+    // which is out of space.
+    let plan = Plan {
+        actions: vec![Action::WriteArtifact {
+            kind: ArtifactKind::LyricsTxt,
+            path: "new/a.lyrics.txt".to_owned(),
+            source_url: String::new(),
+            hash: "lh2".to_owned(),
+            owner_id: "a".to_owned(),
+            content: Some("new words\n".to_owned()),
+        }],
+    };
+    let fs = MemFs::new()
+        .with_file("old/a.flac", b"AUDIO".to_vec())
+        .with_file("old/a.lyrics.txt", b"old words\n".to_vec())
+        .fail_remove_out_of_space("old/a.lyrics.txt");
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[],
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &ExecOptions::default(),
+    );
+
+    assert_eq!(outcome.status, RunStatus::DiskFull);
+    assert_eq!(outcome.failed(), 1);
+    assert_eq!(outcome.failures[0].clip_id, "a");
+    assert!(outcome.failures[0].reason.contains("disk full"));
+    assert_eq!(outcome.artifacts_written, 0);
+    // The unlink failed before the slot update, so the manifest entry is
+    // unmutated (still the old sidecar path) and the old file survives.
+    assert_eq!(manifest.get("a"), Some(&e));
+    assert!(fs.exists("old/a.lyrics.txt"));
+}
+
+#[test]
 fn cdn_download_rejection_skips_the_clip_without_aborting() {
     let c1 = clip("k1");
     let c2 = clip("k2");
