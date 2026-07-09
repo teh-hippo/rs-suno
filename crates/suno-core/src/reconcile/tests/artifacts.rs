@@ -328,7 +328,7 @@ fn details_sidecar_written_with_inline_content_when_slot_absent() {
 fn lrc_sidecar_written_with_inline_content_when_slot_absent() {
     // The audio is unchanged (Skip) but no lrc slot exists, so the generated
     // sidecar is written and carries its body inline. This is the guard that
-    // the type system cannot provide: dropping Lrc from is_per_clip_kind
+    // the type system cannot provide: dropping Lrc from is_per_clip
     // would silently never write the file, and only this test would catch it.
     let mut manifest = Manifest::new();
     manifest.insert("a", entry("a.flac", AudioFormat::Flac, "m", "art"));

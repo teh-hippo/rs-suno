@@ -88,39 +88,19 @@ where
             owner_id,
             bytes,
         } = prepared;
-        if is_per_clip_kind(kind) && manifest.get(&owner_id).is_none() {
+        if kind.is_per_clip() && manifest.get(&owner_id).is_none() {
             return Ok(Effect::Skipped);
         }
-        let old_path = match kind {
-            ArtifactKind::CoverJpg => manifest
-                .get(&owner_id)
-                .and_then(|e| e.cover_jpg.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::CoverWebp => manifest
-                .get(&owner_id)
-                .and_then(|e| e.cover_webp.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::DetailsTxt => manifest
-                .get(&owner_id)
-                .and_then(|e| e.details_txt.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::LyricsTxt => manifest
-                .get(&owner_id)
-                .and_then(|e| e.lyrics_txt.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::Lrc => manifest
-                .get(&owner_id)
-                .and_then(|e| e.lrc.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::VideoMp4 => manifest
-                .get(&owner_id)
-                .and_then(|e| e.video_mp4.as_ref())
-                .map(|s| s.path.clone()),
-            ArtifactKind::FolderJpg | ArtifactKind::FolderWebp | ArtifactKind::FolderMp4 => albums
+        let old_path = if is_album_kind(kind) {
+            albums
                 .get(&owner_id)
                 .and_then(|a| a.artifact(kind))
-                .map(|s| s.path.clone()),
-            ArtifactKind::Playlist => None,
+                .map(|s| s.path.clone())
+        } else {
+            manifest
+                .get(&owner_id)
+                .and_then(|e| e.artifact(kind))
+                .map(|s| s.path.clone())
         };
         self.write_verify(&owner_id, &path, &bytes)?;
         if let Some(old) = old_path.as_deref()
@@ -203,7 +183,7 @@ where
         committed: &BTreeSet<String>,
     ) -> Result<Effect, Fail> {
         // A per-clip sidecar needs its owning clip's audio present.
-        if is_per_clip_kind(kind) && manifest.get(owner_id).is_none() {
+        if kind.is_per_clip() && manifest.get(owner_id).is_none() {
             return Ok(Effect::Skipped);
         }
         // Relocate in place only when `from` is ours alone to give up: no other

@@ -87,6 +87,18 @@ impl ArtifactKind {
             }
         })
     }
+
+    /// Whether this kind is a per-clip sidecar (recorded on a
+    /// [`ManifestEntry`](crate::manifest::ManifestEntry) and reconciled per
+    /// clip) rather than an album/library class owned by a later phase.
+    ///
+    /// A per-clip kind is exactly one whose path is the song base plus a fixed
+    /// suffix, so membership is derived from [`sidecar_suffix`](Self::sidecar_suffix)
+    /// and never drifts from it: adding a sidecar kind's suffix opts it in here
+    /// automatically.
+    pub(crate) fn is_per_clip(self) -> bool {
+        self.sidecar_suffix().is_some()
+    }
 }
 
 /// Audio format for downloaded clips.
@@ -345,6 +357,30 @@ mod tests {
         assert_eq!(ArtifactKind::FolderWebp.sidecar_suffix(), None);
         assert_eq!(ArtifactKind::FolderMp4.sidecar_suffix(), None);
         assert_eq!(ArtifactKind::Playlist.sidecar_suffix(), None);
+    }
+
+    #[test]
+    fn is_per_clip_matches_sidecar_suffix_set() {
+        for kind in [
+            ArtifactKind::CoverJpg,
+            ArtifactKind::CoverWebp,
+            ArtifactKind::DetailsTxt,
+            ArtifactKind::LyricsTxt,
+            ArtifactKind::Lrc,
+            ArtifactKind::VideoMp4,
+        ] {
+            assert!(kind.is_per_clip(), "{kind:?} is a per-clip sidecar");
+            assert_eq!(kind.is_per_clip(), kind.sidecar_suffix().is_some());
+        }
+        for kind in [
+            ArtifactKind::FolderJpg,
+            ArtifactKind::FolderWebp,
+            ArtifactKind::FolderMp4,
+            ArtifactKind::Playlist,
+        ] {
+            assert!(!kind.is_per_clip(), "{kind:?} is album/library-scoped");
+            assert_eq!(kind.is_per_clip(), kind.sidecar_suffix().is_some());
+        }
     }
 
     #[test]

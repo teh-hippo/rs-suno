@@ -275,19 +275,8 @@ pub(super) fn probe_local(manifest: &Manifest, fs: &MemFs) -> HashMap<String, Lo
         // Audio file, keyed by clip_id.
         map.insert(id.clone(), probe(&entry.path));
 
-        // Per-clip sidecars, keyed by their stored path.
-        for path in [
-            entry.cover_jpg.as_ref().map(|s| s.path.as_str()),
-            entry.cover_webp.as_ref().map(|s| s.path.as_str()),
-            entry.details_txt.as_ref().map(|s| s.path.as_str()),
-            entry.lyrics_txt.as_ref().map(|s| s.path.as_str()),
-            entry.lrc.as_ref().map(|s| s.path.as_str()),
-            entry.video_mp4.as_ref().map(|s| s.path.as_str()),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|p| !p.is_empty())
-        {
+        // Per-clip sidecars (and stems), keyed by their stored path.
+        for path in entry.artifact_paths().filter(|p| !p.is_empty()) {
             map.entry(path.to_owned()).or_insert_with(|| probe(path));
         }
     }

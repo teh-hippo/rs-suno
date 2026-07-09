@@ -494,7 +494,7 @@ fn is_prepareable(
             if *kind == ArtifactKind::CoverJpg && audio_clip_ids.contains(owner_id.as_str()) {
                 return false;
             }
-            !is_per_clip_kind(*kind) || pre_clip_ids.contains(owner_id.as_str())
+            !kind.is_per_clip() || pre_clip_ids.contains(owner_id.as_str())
         }
         Action::WriteStem { clip_id, .. } => pre_clip_ids.contains(clip_id.as_str()),
         _ => false,
@@ -607,21 +607,6 @@ fn is_playlist_kind(kind: ArtifactKind) -> bool {
     matches!(kind, ArtifactKind::Playlist)
 }
 
-/// True for a per-song sidecar (`cover.jpg`/`cover.webp`), whose write requires
-/// the owning clip's manifest entry. Album and playlist kinds are keyed by a
-/// root/playlist id that is deliberately absent from the manifest.
-fn is_per_clip_kind(kind: ArtifactKind) -> bool {
-    matches!(
-        kind,
-        ArtifactKind::CoverJpg
-            | ArtifactKind::CoverWebp
-            | ArtifactKind::DetailsTxt
-            | ArtifactKind::LyricsTxt
-            | ArtifactKind::Lrc
-            | ArtifactKind::VideoMp4
-    )
-}
-
 /// Recover a playlist's display name from its `.m3u8` path's file stem.
 ///
 /// The path is `<sanitised name>.m3u8` at the library root, so the stem is the
@@ -727,7 +712,7 @@ where
                 let bytes = match content.as_deref() {
                     Some(text) => text.as_bytes().to_vec(),
                     None => {
-                        if is_per_clip_kind(*kind) && manifest.get(owner_id).is_none() {
+                        if kind.is_per_clip() && manifest.get(owner_id).is_none() {
                             // Owner never landed (audio failed or never existed).
                             // Drain any stale cache entry so it doesn't outlive
                             // this clip, then skip without fetching.
