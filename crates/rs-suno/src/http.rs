@@ -1,4 +1,4 @@
-//! A reqwest-backed adapter for the engine's [`Http`](suno_core::Http) port.
+//! A reqwest-backed adapter for the engine's [`Http`] port.
 
 use std::future::Future;
 

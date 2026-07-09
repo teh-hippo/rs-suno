@@ -392,8 +392,8 @@ pub fn lineage_edges(clip: &Clip) -> Vec<Edge> {
 /// This is informational lineage the API states directly (the clip was remixed
 /// from these roots), NOT a structural parent. It is deliberately kept apart
 /// from the [`EdgeType`]-classified structural [`Edge`]s: it is NEVER read by
-/// [`immediate_parent`], [`primary_parent`], [`lineage_edges`], or the root
-/// walk in [`crate::roots`]. It feeds only the durable graph store (as a
+/// [`immediate_parent`], `primary_parent`, [`lineage_edges`], or the root
+/// walk in `crate::roots`. It feeds only the durable graph store (as a
 /// secondary edge carrying the open attribution slug) and, for a same-owner
 /// root, a bounded gap-fill seed. It can never fabricate a structural parent,
 /// an external boundary, or a download candidate.

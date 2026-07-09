@@ -109,7 +109,7 @@ impl AlignedLyrics {
     /// in the MP3 `SYLT` frame (see [`sylt_entries`](Self::sylt_entries)). A line
     /// with empty text falls back to its nested words joined by spaces. Structural
     /// section labels (`[Chorus]`, `[Verse 1]`) are omitted (see
-    /// [`is_section_label`]); they are never sung, so a timed stamp would
+    /// `is_section_label`); they are never sung, so a timed stamp would
     /// highlight a non-lyric line. They are kept in the untimed
     /// [`plain_text`](Self::plain_text). The body is empty when there are no
     /// lines; callers treat that as "no `.lrc`".
@@ -140,7 +140,7 @@ impl AlignedLyrics {
     /// line breaks (the ID3v2 `SYLT` convention). Uses Suno's own line grouping;
     /// a line with no nested words contributes its whole text as one segment.
     /// Structural section labels (`[Chorus]`, `[Verse 1]`) are skipped (see
-    /// [`is_section_label`]), matching the `.lrc` body. The leading newline tracks
+    /// `is_section_label`), matching the `.lrc` body. The leading newline tracks
     /// the first *emitted* segment, not the line index, so skipping a label at the
     /// start (or between lines) never leaves a stray or missing break.
     pub fn sylt_entries(&self) -> Vec<(u32, String)> {

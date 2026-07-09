@@ -312,7 +312,7 @@ impl LineageStore {
     /// disambiguates rather than oscillating.
     ///
     /// It iterates the same eligible-root set that
-    /// [`effective_root_title`](Self::effective_root_title) gates overrides on,
+    /// `effective_root_title` gates overrides on,
     /// so the two can never disagree. A root with no node and no override has an
     /// empty effective title and is skipped.
     pub fn colliding_root_titles(&self) -> BTreeSet<String> {
@@ -346,7 +346,7 @@ impl LineageStore {
     /// The file-name counterpart of [`colliding_root_titles`]: distinct clips
     /// must never share a path, so naming appends the full clip id to any clip in
     /// this set. Computed from the whole store — every clip ever seen, including
-    /// trashed and since-purged ancestors ([`nodes`](Self::nodes)) — so the
+    /// trashed and since-purged ancestors (`nodes`) — so the
     /// decision is stable across runs and independent of the current batch: a
     /// `--limit`/`--since` slice or a trashed twin never flips the suffix on or
     /// off, which is the churn #356 is about.

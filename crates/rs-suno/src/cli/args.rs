@@ -151,7 +151,7 @@ pub enum OutputFormat {
     Json,
 }
 
-/// The per-run area mode selected by `--mode`, mapped onto [`SourceMode`].
+/// The per-run area mode selected by `--mode`, mapped onto [`SourceMode`](suno_core::SourceMode).
 ///
 /// `mirror` arms deletion for the selected areas; `copy` keeps them additive.
 /// Absent, scoped runs default to copy and a plain library run keeps the verb's

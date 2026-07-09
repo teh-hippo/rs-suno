@@ -3,8 +3,8 @@
 //! Parses a TOML string and merges in environment variables and CLI flag
 //! overrides supplied by the caller. Performs no disk or environment IO.
 //!
-//! [`shape`] holds the parsed input types and their validation, [`resolve`]
-//! layers the precedence tiers into [`EffectiveSettings`], and [`effective`]
+//! `shape` holds the parsed input types and their validation, `resolve`
+//! layers the precedence tiers into [`EffectiveSettings`], and `effective`
 //! is the resolved output. [`label_to_env`] is the shared env-prefix rule both
 //! the validator and the resolver use.
 

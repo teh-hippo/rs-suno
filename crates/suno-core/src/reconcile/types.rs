@@ -254,7 +254,7 @@ pub enum Action {
     /// Delete an external sidecar artifact (a removed kind, or a co-deleted
     /// sidecar of a clip whose audio is being deleted).
     ///
-    /// Only ever emitted through [`delete_artifact_action`], which shares the
+    /// Only ever emitted through `delete_artifact_action`, which shares the
     /// audio `can_delete` gate and the owning entry's `preserve` marker, so a
     /// sidecar is never removed on an incomplete listing or for a preserved clip.
     DeleteArtifact {
@@ -299,7 +299,7 @@ pub enum Action {
     },
     /// Delete one stem file and clear its slot in the clip's keyed stem map.
     ///
-    /// Only ever emitted through [`delete_stem_action`], which shares the audio
+    /// Only ever emitted through `delete_stem_action`, which shares the audio
     /// `can_delete` gate and the owning entry's `preserve` marker, so a stem is
     /// never removed on an incomplete listing or for a preserved clip. Emitted
     /// either when an AUTHORITATIVE stem listing no longer contains `key`, or as

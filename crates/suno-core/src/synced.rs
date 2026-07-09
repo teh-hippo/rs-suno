@@ -184,7 +184,7 @@ fn needs_fetch(
 /// Empty when `enabled` is false, so the synced-lyrics feature being off means
 /// zero alignment fetches. Only clips carrying a desired lyric artifact (a `.lrc`
 /// or a deferred `.lyrics.txt`) are considered; such a clip is a target when ANY
-/// of its desired lyric slots still needs a fetch (see [`needs_fetch`]), so
+/// of its desired lyric slots still needs a fetch (see `needs_fetch`), so
 /// enabling one sidecar on a library whose other sidecar has long converged still
 /// back-fills the new one. Each slot is fetched at most once per render version.
 pub fn synced_lyrics_targets(
@@ -443,7 +443,7 @@ fn apply_lyrics_txt_slot(
 /// dry run, without any fetch.
 ///
 /// Each desired lyric slot is previewed on its OWN fetch decision (mirroring
-/// [`needs_fetch`]): a slot that WOULD be (re)fetched keeps a distinct pending
+/// `needs_fetch`): a slot that WOULD be (re)fetched keeps a distinct pending
 /// source hash so the previewed plan reports the write; a slot already resolved
 /// reuses its stored slot hash (so it shows as skipped) or is dropped when it is
 /// a known instrumental. Per-slot (not clip-level) so a back-fill clip previews

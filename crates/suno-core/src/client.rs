@@ -27,8 +27,8 @@ use crate::wire::{
 
 /// A client for the Suno library API, owning the account's [`ClerkAuth`].
 ///
-/// Holds the [`Clock`] so [`api_request`](Self::api_request) can back off on a
-/// `429` or transient failure, and an [`AdaptiveLimiter`] that paces reactively:
+/// Holds the [`Clock`] so `api_request` can back off on a
+/// `429` or transient failure, and an `AdaptiveLimiter` that paces reactively:
 /// it waits nowhere until a `429`, then halves the rate and ramps it back on
 /// sustained success.
 pub struct SunoClient<C> {
@@ -61,11 +61,11 @@ impl<C: Clock> SunoClient<C> {
     /// List clips across the whole library, or only liked clips.
     ///
     /// Walks the cursor-paginated `POST /api/feed/v3` feed, hard-capped at
-    /// [`MAX_PAGES`], truncating to `limit` when set.
+    /// `MAX_PAGES`, truncating to `limit` when set.
     ///
     /// The `complete` flag is `true` only when paging ended on a server-reported
     /// `has_more == false`; any other stop (missing `has_more`, no usable cursor,
-    /// `limit`, [`MAX_PAGES`], transport error) yields `false` so the caller
+    /// `limit`, `MAX_PAGES`, transport error) yields `false` so the caller
     /// never treats a truncated listing as authoritative for deletion.
     /// `any_filtered` is `true` when the downloadable filter dropped any clip,
     /// which likewise denies deletion authority since it may have hidden a
@@ -209,7 +209,7 @@ impl<C: Clock> SunoClient<C> {
     /// Batch-fetch clips by id via `GET /api/clips/get_songs_by_ids?ids=…&ids=…`.
     ///
     /// The pure batch primitive: deduplicated ids are split into
-    /// [`GET_SONGS_CHUNK`] chunks and matched back by id, preserving input order.
+    /// `GET_SONGS_CHUNK` chunks and matched back by id, preserving input order.
     /// Ids the batch does not return are left for the caller to fill.
     ///
     /// The endpoint is undocumented and may be unavailable: a chunk it cannot
@@ -276,7 +276,7 @@ impl<C: Clock> SunoClient<C> {
     /// Fetch a clip's immediate parent, or `None` when the clip is a root.
     ///
     /// A root's parent comes back as `200` with a bodiless, id-less clip (not a
-    /// `404`); [`parse_clip`] gates on a non-empty id so that maps to `Ok(None)`.
+    /// `404`); `parse_clip` gates on a non-empty id so that maps to `Ok(None)`.
     /// The `404` arm is a fallback for the alternative encoding. Any other
     /// failure propagates rather than being mistaken for a root.
     pub async fn get_clip_parent(&self, http: &impl Http, id: &str) -> Result<Option<Clip>> {
@@ -291,7 +291,7 @@ impl<C: Clock> SunoClient<C> {
     /// List the account's own playlists, paging `/api/playlist/me`.
     ///
     /// Trashed and share-list playlists are excluded by query. Paging stops on
-    /// the first empty page, is hard-capped at [`MAX_PAGES`], and de-duplicates
+    /// the first empty page, is hard-capped at `MAX_PAGES`, and de-duplicates
     /// by id so a server that ignores the page parameter cannot loop or inflate
     /// the set.
     ///
@@ -354,7 +354,7 @@ impl<C: Clock> SunoClient<C> {
     /// The `complete` flag is `true` only when the page count came back and every
     /// page drained after at least one stem was seen. An empty listing
     /// (`pages == 0` or a `400`/`404` on the page-count endpoint), a transport
-    /// failure, a partial drain, or a count above [`MAX_PAGES`] all yield
+    /// failure, a partial drain, or a count above `MAX_PAGES` all yield
     /// `false`, so the caller KEEPS existing local stems rather than reading the
     /// absence as "no stems".
     pub async fn list_stems(&self, http: &impl Http, clip_id: &str) -> Result<(Vec<Stem>, bool)> {

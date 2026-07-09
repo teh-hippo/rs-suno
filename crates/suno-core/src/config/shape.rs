@@ -18,7 +18,7 @@ use super::label_to_env;
 /// The overridable settings block, shared verbatim by every precedence tier.
 ///
 /// A new knob is added here once and every tier that flattens it ([`Defaults`],
-/// [`AccountConfig`], [`SourceConfig`], and the CLI [`FlagOverrides`]) gains it,
+/// [`AccountConfig`], [`SourceConfig`], and the CLI [`FlagOverrides`](crate::config::FlagOverrides)) gains it,
 /// rather than being mirrored where forgetting one would silently drop it.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -33,7 +33,7 @@ pub struct Settings {
     /// The command whose stdout mints a token. Resolved from the
     /// `SUNO_[<LABEL>_]TOKEN_COMMAND` env tiers then the config keys. There is
     /// deliberately no `--token-command` flag, so it is never read from
-    /// [`FlagOverrides`]; set it in config or the environment.
+    /// `FlagOverrides`; set it in config or the environment.
     pub token_command: Option<String>,
     pub animated_covers: Option<bool>,
     pub video_cover_retention: Option<VideoCoverRetention>,

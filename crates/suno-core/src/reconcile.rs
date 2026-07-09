@@ -25,11 +25,11 @@
 //!   clip is kept.
 //!
 //! Every `Delete`, whether for a trashed clip or an absent orphan, flows through
-//! one guard ([`delete_action`]): a manifest entry must exist with a non-empty,
+//! one guard (`delete_action`): a manifest entry must exist with a non-empty,
 //! non-preserved path, deletion must be allowed for the run, and the clip must
 //! not be copy-held or private in the current selection. Two final passes guard
 //! path collisions: one suppresses any `Delete` whose path a write also targets
-//! this run, and one ([`suppress_target_clobber`]) suppresses any write, rename,
+//! this run, and one (`suppress_target_clobber`) suppresses any write, rename,
 //! or move that would land on a path another clip's file still holds, so a
 //! rename can never delete a protected file by overwriting it.
 

@@ -199,7 +199,7 @@ pub(crate) fn cdn_audio_url(url: &str, id: &str) -> String {
 /// Carries only what playlist reconciliation needs: the stable id (the state
 /// key), the display name (drives the `.m3u8` file name and `#PLAYLIST` line),
 /// and the member count for reporting. The ordered members are fetched
-/// separately with [`SunoClient::get_playlist_clips`].
+/// separately with [`SunoClient::get_playlist_clips`](crate::SunoClient::get_playlist_clips).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Playlist {
     /// The playlist's stable Suno id.
