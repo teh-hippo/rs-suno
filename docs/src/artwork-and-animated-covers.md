@@ -59,6 +59,12 @@ displays it cleanly. (The enhanced "A2" per-word format is parsed by only a few
 karaoke players and shows as literal text in the rest, so it is not used; the
 per-word timing is carried in the MP3 `SYLT` frame instead.)
 
+Structural section labels such as `[Chorus]` and `[Verse 1]` are omitted from the
+timed `.lrc` and the `SYLT` frame: nothing is sung at those markers, so a timed
+stamp would highlight a non-lyric line. They are kept in the plain lyrics (the
+`.lyrics.txt` sidecar and the embedded `USLT`/`LYRICS` tags), which mirror the
+song's own lyric text.
+
 The `.lrc` is the primary synced-lyrics artefact and is written for every
 format (MP3, FLAC and WAV). For **MP3 and WAV**, an ID3 `SYLT` (synchronised
 lyrics) frame is also embedded in the file with word-level timing, so players

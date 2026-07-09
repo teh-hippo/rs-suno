@@ -116,7 +116,7 @@ fn write_webp_settings(hasher: &mut fnv::FnvHasher, settings: &WebpEncodeSetting
 /// rendered `.lrc` format changes so existing sidecars are rewritten on the next
 /// run (their stored hash then no longer matches, exactly as edited content
 /// would move a [`content_hash`]).
-pub const SYNCED_LRC_VERSION: u32 = 2;
+pub const SYNCED_LRC_VERSION: u32 = 3;
 
 /// A stable per-clip source sentinel for the synced `.lrc` sidecar.
 ///
