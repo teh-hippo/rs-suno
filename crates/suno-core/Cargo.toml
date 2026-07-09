@@ -11,6 +11,9 @@ keywords = ["suno", "music", "download", "sync", "audio"]
 categories = ["multimedia::audio", "api-bindings"]
 readme = "../../README.md"
 
+[lints]
+workspace = true
+
 [dependencies]
 base64 = "0.22.1"
 fnv = "1"

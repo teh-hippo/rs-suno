@@ -9,6 +9,18 @@ rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/teh-hippo/rs-suno"
 
+# Curated lint policy. CI runs `cargo clippy -- -D warnings`, so every `warn`
+# below is a hard gate there while staying non-fatal for local `cargo clippy`.
+# Deliberately a small, high-value subset of the pedantic/nursery groups rather
+# than the whole surface: each lint is either already clean or fixed by a purely
+# mechanical, non-behavioural change. See issue #373.
+[workspace.lints.clippy]
+uninlined_format_args = "warn"
+semicolon_if_nothing_returned = "warn"
+manual_string_new = "warn"
+unnested_or_patterns = "warn"
+ignored_unit_patterns = "warn"
+
 # Whole-program optimisation for the shipped binary: fat LTO with a single
 # codegen unit lets the linker inline and drop unreachable code across crates,
 # and stripping removes symbols. Trims the release binary substantially with no

@@ -534,7 +534,7 @@ fn attribution_edges_same_owner_is_fail_closed() {
     assert!(attribution_edges(&matched)[0].same_owner);
 
     let clip_blank = Clip {
-        handle: "".into(),
+        handle: String::new(),
         clip_roots: vec![clip_root("r", "me")],
         ..Default::default()
     };

@@ -857,7 +857,7 @@ fn needs_aggregation(desired: &[Desired]) -> bool {
 fn modes_are_canonical(modes: &[SourceMode]) -> bool {
     matches!(
         modes,
-        [] | [SourceMode::Mirror] | [SourceMode::Copy] | [SourceMode::Mirror, SourceMode::Copy]
+        [] | [SourceMode::Mirror | SourceMode::Copy] | [SourceMode::Mirror, SourceMode::Copy]
     )
 }
 
