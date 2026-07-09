@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.10](https://github.com/teh-hippo/rs-suno/compare/v0.36.9...v0.36.10) (2026-07-09)
+
+
+### Bug Fixes
+
+* resolve five audited behaviour gaps (aligned .lyrics.txt, scoped .m3u8, flag-override note, docs) ([#357](https://github.com/teh-hippo/rs-suno/issues/357)) ([423ca62](https://github.com/teh-hippo/rs-suno/commit/423ca6262d43d3ae13c3f30b543fc04a283acf6d))
+
 ## [0.36.9](https://github.com/teh-hippo/rs-suno/compare/v0.36.8...v0.36.9) (2026-07-09)
 
 
