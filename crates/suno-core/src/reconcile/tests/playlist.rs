@@ -168,6 +168,37 @@ fn playlist_stale_removed_only_under_full_gate() {
 }
 
 #[test]
+fn copy_run_writes_m3u8_but_emits_no_delete() {
+    // F4 (#357): decoupling the scoped WRITE gate from `members_intact` must not
+    // leak into deletes. On a copy run (`can_delete = false`) a selected playlist
+    // is still written (hash drift or a missing file), while a stale stored
+    // playlist is NOT deleted -- the delete gate stays independent and closed.
+    let desired = vec![pl_desired("keep", "Keep", "Keep.m3u8", "h-new")];
+    let stored = pl_store(&[
+        ("keep", pl_state("Keep", "Keep.m3u8", "h-old")),
+        ("gone", pl_state("Gone", "Gone.m3u8", "h1")),
+    ]);
+    let actions = plan_playlist_artifacts(&desired, &stored, false, true, &HashMap::new());
+
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::WriteArtifact {
+                kind: ArtifactKind::Playlist,
+                ..
+            }
+        )),
+        "the selected playlist is still written on a copy run"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::DeleteArtifact { .. })),
+        "a copy run emits no playlist delete, even alongside a write"
+    );
+}
+
+#[test]
 fn b2_failed_list_emits_zero_writes_and_zero_deletes() {
     // B2 BLOCKER: when the /api/playlist/me listing fails, the caller passes
     // an empty desired and list_fully_enumerated=false. Even with a

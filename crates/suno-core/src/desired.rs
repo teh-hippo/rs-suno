@@ -5,11 +5,10 @@ use std::path::{Component, Path};
 
 use crate::extras::{M3u8Entry, render_clip_details, render_m3u8};
 use crate::hash::{
-    art_hash, art_url_hash, content_hash, embedded_art_hash, meta_hash, synced_lrc_source_hash,
-    webp_art_hash,
+    art_hash, art_url_hash, content_hash, embedded_art_hash, lyrics_txt_source_hash, meta_hash,
+    synced_lrc_source_hash, webp_art_hash,
 };
 use crate::lineage::LineageContext;
-use crate::lyrics::render_clip_lyrics;
 use crate::model::Clip;
 use crate::model::Stem;
 use crate::naming::{
@@ -217,12 +216,13 @@ pub fn clip_stems(
 ///
 /// Text sidecars carry their body inline plus a `content_hash`, so an edit
 /// rewrites them even when `meta_hash` is unchanged. `DetailsTxt` is emitted
-/// whenever `toggles.details` is set; `LyricsTxt` only when the clip has lyrics,
-/// so no empty file is written. `Lrc` is emitted for every clip under
-/// `toggles.lrc` (alignment is knowable only from the endpoint, not the feed)
-/// with no inline body, resolved just before execution; a clip with neither
-/// alignment nor lyrics writes nothing, its emptiness cached so it is not
-/// re-fetched.
+/// whenever `toggles.details` is set, with its body inline. `LyricsTxt` and
+/// `Lrc` are both emitted for every clip under their toggle with no inline body
+/// and a stable placeholder hash, resolved just before execution from the
+/// fetched alignment (the `.lyrics.txt` from `clip.lyrics` else the aligned
+/// plain text, the `.lrc` from the timed alignment): the sung words are knowable
+/// only from the endpoint, not the v2 feed. A clip with neither alignment nor
+/// lyrics writes neither, its emptiness cached so it is not re-fetched.
 fn clip_artifacts(
     clip: &Clip,
     base: &str,
@@ -249,15 +249,13 @@ fn clip_artifacts(
             content: Some(text),
         });
     }
-    if toggles.lyrics
-        && let Some(text) = render_clip_lyrics(clip)
-    {
+    if toggles.lyrics {
         artifacts.push(DesiredArtifact {
             kind: ArtifactKind::LyricsTxt,
             path: sidecar_path(base, ArtifactKind::LyricsTxt),
             source_url: String::new(),
-            hash: content_hash(&text),
-            content: Some(text),
+            hash: lyrics_txt_source_hash(&clip.id),
+            content: None,
         });
     }
     if toggles.lrc {

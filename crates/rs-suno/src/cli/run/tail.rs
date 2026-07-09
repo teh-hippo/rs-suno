@@ -16,7 +16,7 @@ pub(super) async fn dry_run_report(
         &mut assembled.desired,
         &manifest,
         wallclock::now_secs(),
-        ctx.settings.lrc_sidecar,
+        ctx.settings.lrc_sidecar || ctx.settings.lyrics_sidecar,
     );
     let plan =
         execute::reconcile_run(&assembled.reconcile_inputs(&manifest, ctx.dest, &store.albums))
@@ -65,15 +65,17 @@ pub(super) async fn execute_run(
     // Resolve this run's synced lyrics before reconcile: fetch Suno's alignment
     // for the clips that need it (gated by the per-clip marker, so a steady-state
     // re-sync fetches nothing and the feature being off fetches nothing), and
-    // fill each clip's `.lrc` artifact with its content-hashed body. Reconcile
-    // then plans the `.lrc` writes from the ACTUAL body, and the executor embeds
-    // the same alignment as MP3 `SYLT`/plain-lyric tags.
+    // fill each clip's `.lrc` and deferred `.lyrics.txt` artifacts with their
+    // content-hashed bodies. The gate is `lrc_sidecar || lyrics_sidecar` so a
+    // lyrics-only user still fetches alignment to populate `.lyrics.txt`.
+    // Reconcile then plans the sidecar writes from the ACTUAL body, and the
+    // executor embeds the same alignment as MP3 `SYLT`/plain-lyric tags.
     let (synced, pending_checks) = synced_lyrics::resolve_synced_lyrics(
         &mut assembled.desired,
         &manifest,
         ctx.client,
         ctx.http,
-        settings.lrc_sidecar,
+        settings.lrc_sidecar || settings.lyrics_sidecar,
         verbosity,
         settings.concurrency,
     )

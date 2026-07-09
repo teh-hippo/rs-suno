@@ -75,6 +75,20 @@ impl EffectiveSettings {
     }
 }
 
+/// Whether an explicit `--animated-covers` request was silently overridden by a
+/// `video_cover_retention` that keeps no animated WebP cover.
+///
+/// `--animated-covers` maps to `flag == Some(true)` (it is never `Some(false)`);
+/// when `video_cover_retention` is unset the flag value survives resolution, so a
+/// resolved `effective_animated == false` alongside `Some(true)` can only mean a
+/// `neither`/`mp4` retention dropped it. Pure, so the rule is unit-tested beside
+/// the resolver rather than in the CLI; the CLI only decides whether to print the
+/// note. The documented precedence is unchanged: this reports the override, it
+/// does not reverse it.
+pub fn animated_covers_flag_overridden(flag: Option<bool>, effective_animated: bool) -> bool {
+    flag == Some(true) && !effective_animated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +153,28 @@ mod tests {
         );
         eff.animated_covers = false;
         assert!(!eff.requires_ffmpeg(), "mp3 + raw mp4 only = no ffmpeg");
+    }
+
+    #[test]
+    fn flag_override_detected_for_neither_and_mp4() {
+        // `--animated-covers` was passed (`Some(true)`) but a `neither`/`mp4`
+        // retention keeps no animated WebP, so the resolver dropped it to
+        // `false`: the flag was silently overridden.
+        assert!(animated_covers_flag_overridden(Some(true), false));
+    }
+
+    #[test]
+    fn no_override_for_webp_or_both() {
+        // `webp`/`both` keep the animated cover, so the resolved value is `true`
+        // and the flag was honoured: no note.
+        assert!(!animated_covers_flag_overridden(Some(true), true));
+    }
+
+    #[test]
+    fn no_override_when_flag_absent() {
+        // No `--animated-covers`: never a flag override, whatever the retention
+        // resolved the effective value to.
+        assert!(!animated_covers_flag_overridden(None, false));
+        assert!(!animated_covers_flag_overridden(None, true));
     }
 }

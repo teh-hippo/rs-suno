@@ -18,7 +18,7 @@ mod schema;
 #[cfg(test)]
 mod fixtures;
 
-pub use effective::{EffectiveSettings, FlagOverrides};
+pub use effective::{EffectiveSettings, FlagOverrides, animated_covers_flag_overridden};
 #[cfg(feature = "schema")]
 pub use schema::config_schema_json;
 pub use shape::{AccountConfig, AreaMode, AreasConfig, Config, Defaults, Settings, SourceConfig};

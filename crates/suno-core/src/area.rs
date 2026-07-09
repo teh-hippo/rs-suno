@@ -178,11 +178,16 @@ pub fn playlists_enumerated(areas: &[AreaListing], force_copy: bool, members_int
 }
 
 /// Build the `.m3u8` desired state for an area-scoped run (no authoritative
-/// Library). Only the playlist and liked areas that fully enumerated their
-/// members are rendered, and only when `members_intact` (the union was not
-/// truncated by `--limit`/`--since`, so `desired` still holds every member);
-/// every other stored playlist id is protected so no `.m3u8` is rewritten or
-/// deleted from a partial view (B2/D3).
+/// Library). Every playlist and liked area that fully enumerated its members
+/// (`area_enumerated`) is rendered, so a scoped additive run (`copy --playlist X`,
+/// a bare `sync --playlist X`, a config-driven `playlists = "copy"`, or
+/// `--library=off --playlist X`) still writes its `.m3u8`; a member missing from
+/// the narrowed union renders as a `# (not in library)` comment, never a dangling
+/// path. An area that did NOT fully enumerate (a truncated or failed listing) is
+/// not rendered and its id is protected, so no `.m3u8` is rewritten from a partial
+/// view. Deletion is a separate, stricter gate: the returned flag also requires
+/// `members_intact` (the union was not truncated by `--limit`/`--since`), so a
+/// scoped write never authorises a playlist delete from a partial set (B2/D3).
 pub fn build_scoped_playlist_desired(
     areas: &[AreaListing],
     desired: &[Desired],
@@ -195,14 +200,14 @@ pub fn build_scoped_playlist_desired(
     for area in areas {
         match &area.kind {
             AreaKind::Playlist { id, name } => {
-                if members_intact && !id.is_empty() && area_enumerated(area, force_copy) {
+                if !id.is_empty() && area_enumerated(area, force_copy) {
                     owned.push((id.clone(), name.clone(), area.clips.clone()));
                 } else if !id.is_empty() {
                     protected.insert(id.clone());
                 }
             }
             AreaKind::Liked => {
-                if members_intact && area_enumerated(area, force_copy) {
+                if area_enumerated(area, force_copy) {
                     owned.push((
                         LIKED_PLAYLIST_ID.to_owned(),
                         "Liked Songs".to_owned(),
@@ -721,5 +726,237 @@ mod tests {
         ));
         assert!(playlists_enumerated(&[], false, true));
         assert!(!playlists_enumerated(&[], false, false));
+    }
+
+    // ---- F4 (#357): the scoped `.m3u8` write gate decoupled from the delete gate ----
+
+    /// Build a real `desired` audio set for `clips`, so a rendered `.m3u8`
+    /// resolves each present member to its relative path (and a missing one to a
+    /// `# (not in library)` comment).
+    fn desired_for(clips: &[&Clip]) -> Vec<Desired> {
+        let modes: HashMap<String, Vec<SourceMode>> = clips
+            .iter()
+            .map(|c| (c.id.clone(), vec![SourceMode::Copy]))
+            .collect();
+        build_desired(
+            clips,
+            AudioFormat::Flac,
+            &modes,
+            &HashMap::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            ArtifactToggles::default(),
+            &NamingConfig::default(),
+        )
+    }
+
+    fn pl_area_named(
+        id: &str,
+        name: &str,
+        mode: SourceMode,
+        ids: &[&str],
+        authoritative: bool,
+    ) -> AreaListing {
+        area(
+            AreaKind::Playlist {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            },
+            mode,
+            ids,
+            authoritative,
+        )
+    }
+
+    #[test]
+    fn additive_scoped_run_renders_selected_playlist() {
+        // An additive scoped run has `members_intact == false` (no armed mirror,
+        // no authoritative library), yet a fully-enumerated Copy playlist area
+        // must still WRITE its `.m3u8`. Before the fix the write was wrongly gated
+        // on `members_intact`, so `copy --playlist X` never created `X.m3u8`.
+        let ca = tclip("a");
+        let desired = desired_for(&[&ca]);
+        let areas = [pl_area_named(
+            "holiday",
+            "Holiday",
+            SourceMode::Copy,
+            &["a"],
+            true,
+        )];
+        let store = LineageStore::default();
+        let mut protected = BTreeSet::new();
+        let (rendered, delete_gate) =
+            build_scoped_playlist_desired(&areas, &desired, &store, &mut protected, false, false);
+
+        assert_eq!(rendered.len(), 1, "the selected playlist is rendered");
+        assert_eq!(rendered[0].id, "holiday");
+        assert!(!protected.contains("holiday"), "it is owned, not protected");
+        assert!(
+            !delete_gate,
+            "the delete gate still tracks members_intact (false here)"
+        );
+    }
+
+    #[test]
+    fn narrowed_scoped_run_still_protects_playlist() {
+        // A genuinely narrowed run (`--limit`/`--since`) sets the area's
+        // `narrowed` flag, so `area_enumerated` is false and the playlist is
+        // protected, never rendered from a partial member set. This is the safety
+        // the write gate now relies on instead of `members_intact`.
+        let ca = tclip("a");
+        let desired = desired_for(&[&ca]);
+        let narrowed = pl_area_named(
+            "holiday",
+            "Holiday",
+            SourceMode::Copy,
+            &["a"],
+            area_authoritative(true, false, true),
+        );
+        let store = LineageStore::default();
+        let mut protected = BTreeSet::new();
+        let (rendered, _) = build_scoped_playlist_desired(
+            &[narrowed],
+            &desired,
+            &store,
+            &mut protected,
+            false,
+            false,
+        );
+        assert!(rendered.is_empty(), "a narrowed area is not rendered");
+        assert!(protected.contains("holiday"), "and its id is protected");
+    }
+
+    #[test]
+    fn failed_member_listing_still_protects() {
+        // A failed/partial member listing is never rendered from a partial view.
+        let ca = tclip("a");
+        let desired = desired_for(&[&ca]);
+        let store = LineageStore::default();
+
+        // An unresolved playlist (empty id, non-authoritative) renders nothing.
+        let mut protected = BTreeSet::new();
+        let (rendered, _) = build_scoped_playlist_desired(
+            &[AreaListing::unresolved_playlist(SourceMode::Copy)],
+            &desired,
+            &store,
+            &mut protected,
+            false,
+            false,
+        );
+        assert!(rendered.is_empty(), "an unresolved listing renders nothing");
+
+        // A named but failed listing is protected, not rendered.
+        let mut protected = BTreeSet::new();
+        let failed = AreaListing::failed(
+            AreaKind::Playlist {
+                id: "holiday".to_owned(),
+                name: "Holiday".to_owned(),
+            },
+            SourceMode::Copy,
+        );
+        let (rendered, _) = build_scoped_playlist_desired(
+            &[failed],
+            &desired,
+            &store,
+            &mut protected,
+            false,
+            false,
+        );
+        assert!(rendered.is_empty());
+        assert!(
+            protected.contains("holiday"),
+            "a failed listing is protected"
+        );
+    }
+
+    #[test]
+    fn liked_area_follows_the_same_rule() {
+        // The Liked area follows the identical write rule: an enumerated Liked
+        // area renders its `.m3u8` even when `members_intact == false`, and a
+        // failed listing is protected instead.
+        let ca = tclip("a");
+        let desired = desired_for(&[&ca]);
+        let store = LineageStore::default();
+
+        let liked = area(AreaKind::Liked, SourceMode::Copy, &["a"], true);
+        let mut protected = BTreeSet::new();
+        let (rendered, _) =
+            build_scoped_playlist_desired(&[liked], &desired, &store, &mut protected, false, false);
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].id, LIKED_PLAYLIST_ID);
+        assert!(!protected.contains(LIKED_PLAYLIST_ID));
+
+        let failed = AreaListing::failed(AreaKind::Liked, SourceMode::Copy);
+        let mut protected = BTreeSet::new();
+        let (rendered, _) = build_scoped_playlist_desired(
+            &[failed],
+            &desired,
+            &store,
+            &mut protected,
+            false,
+            false,
+        );
+        assert!(rendered.is_empty());
+        assert!(protected.contains(LIKED_PLAYLIST_ID));
+    }
+
+    #[test]
+    fn scoped_render_shows_missing_member_as_comment() {
+        // A member not downloaded this run renders as a `# (not in library)`
+        // comment, never a dangling path, so a partial `desired` never corrupts
+        // the `.m3u8`.
+        let ca = tclip("a");
+        let desired = desired_for(&[&ca]); // only "a" is in the library
+        let areas = [pl_area_named(
+            "holiday",
+            "Holiday",
+            SourceMode::Copy,
+            &["a", "b"],
+            true,
+        )];
+        let store = LineageStore::default();
+        let mut protected = BTreeSet::new();
+        let (rendered, _) =
+            build_scoped_playlist_desired(&areas, &desired, &store, &mut protected, false, false);
+
+        assert_eq!(rendered.len(), 1);
+        let content = &rendered[0].content;
+        assert!(
+            content.contains("# (not in library)"),
+            "a missing member is a comment, not a dangling path"
+        );
+        assert!(
+            content.contains(&desired[0].path),
+            "the present member keeps its audio path"
+        );
+    }
+
+    #[test]
+    fn scoped_write_gate_decoupled_from_delete_gate() {
+        // The write gate (rendering) is decoupled from `members_intact`, but the
+        // DELETE gate (the returned flag) still tracks it: a non-intact run
+        // renders yet authorises no delete; an intact, enumerated run does both.
+        let ca = tclip("a");
+        let desired = desired_for(&[&ca]);
+        let areas = [pl_area_named(
+            "holiday",
+            "Holiday",
+            SourceMode::Copy,
+            &["a"],
+            true,
+        )];
+        let store = LineageStore::default();
+
+        let mut protected = BTreeSet::new();
+        let (rendered, gate) =
+            build_scoped_playlist_desired(&areas, &desired, &store, &mut protected, false, false);
+        assert_eq!(rendered.len(), 1, "writes with members_intact = false");
+        assert!(!gate, "but authorises no delete");
+
+        let mut protected = BTreeSet::new();
+        let (rendered, gate) =
+            build_scoped_playlist_desired(&areas, &desired, &store, &mut protected, false, true);
+        assert_eq!(rendered.len(), 1);
+        assert!(gate, "an intact, enumerated run authorises deletes");
     }
 }

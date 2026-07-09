@@ -97,6 +97,19 @@ audio files under an "untracked audio file(s)" note so you can see them; move
 each back into place (matching the layout `check` would use) or delete it, then
 re-sync. Let the tool own the file layout to avoid this.
 
+### A song's title changed only in letter case or accents, but the file was not renamed
+
+When a clip's title changes only by letter case (for example `Foo` to `FOO`) or
+by Unicode normalisation (an accented character written a different but equivalent
+way), `rs-suno` intentionally keeps the existing file name. It treats two paths
+that differ only by case or normalisation as the same path, because that is how
+the Windows and macOS filesystems treat them, and the same rule underpins
+deletion safety so a rename can never clobber a protected clip. The engine does
+no disk IO and cannot safely tell whether your filesystem is case-sensitive, so
+it does not force a case-only rename that would be a no-op or a self-clobber on
+those platforms. On Linux or WSL2 the file keeps its earlier-case name, which is
+fully valid and openable.
+
 ## FAQ
 
 ### What is the difference between sync and copy?

@@ -65,7 +65,7 @@ pub use clock::Clock;
 pub use config::config_schema_json;
 pub use config::{
     AccountConfig, AreaMode, AreasConfig, Config, Defaults, EffectiveSettings, FlagOverrides,
-    Settings, SourceConfig,
+    Settings, SourceConfig, animated_covers_flag_overridden,
 };
 pub use desired::{
     ArtifactToggles, LIKED_PLAYLIST_ID, PlaylistInput, album_desired, build_desired,
@@ -81,7 +81,8 @@ pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind};
 pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
 pub use graph::{CacheEntry, LineageStore, Node, StoredEdge};
 pub use hash::{
-    SYNCED_LRC_VERSION, art_hash, art_url_hash, content_hash, meta_hash, synced_lrc_source_hash,
+    SYNCED_LRC_VERSION, art_hash, art_url_hash, content_hash, lyrics_txt_source_hash, meta_hash,
+    synced_lrc_source_hash,
 };
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use identity::{AdoptDecision, Owner, OwnerGate, adopt_decision, owner_gate};

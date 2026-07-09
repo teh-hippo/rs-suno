@@ -66,12 +66,14 @@ pub(crate) async fn resolve_synced_lyrics(
     (synced, pending)
 }
 
-/// Record the synced-lyrics resolution markers after this run's `.lrc` writes.
+/// Record the synced-lyrics resolution markers after this run's sidecar writes.
 ///
 /// An instrumental (empty) clip is marked unconditionally so it is not re-fetched
-/// every run; a clip that produced a body is marked only once its `.lrc` slot
-/// reflects that body's hash, so an interrupted or failed write leaves no marker
-/// and is re-resolved next run rather than skipped.
+/// every run. A clip that produced one or more bodies is marked only once EVERY
+/// slot its fetch wrote (the `.lrc` and/or the `.lyrics.txt`) reflects that body's
+/// hash, so a partial write (one slot ok, another failed or interrupted) leaves
+/// no marker and is re-resolved next run rather than skipped. The missing slot
+/// also re-targets the clip, so the two guards agree.
 pub(crate) fn record_synced_lyrics_checks(
     manifest: &mut Manifest,
     pending: &[suno_core::PendingCheck],
@@ -80,13 +82,21 @@ pub(crate) fn record_synced_lyrics_checks(
     for check in pending {
         let durable = if check.empty {
             true
+        } else if let Some(entry) = manifest.get(&check.clip_id) {
+            // Durable only once EVERY written slot has landed. Match the kind
+            // explicitly so a future artifact kind fails loud rather than
+            // silently anchoring on the `.lyrics.txt` slot.
+            !check.written_slots.is_empty()
+                && check.written_slots.iter().all(|(kind, hash)| {
+                    let slot = match kind {
+                        suno_core::ArtifactKind::Lrc => entry.lrc.as_ref(),
+                        suno_core::ArtifactKind::LyricsTxt => entry.lyrics_txt.as_ref(),
+                        _ => None,
+                    };
+                    slot.map(|slot| &slot.hash) == Some(hash)
+                })
         } else {
-            match (&check.body_hash, manifest.get(&check.clip_id)) {
-                (Some(hash), Some(entry)) => {
-                    entry.lrc.as_ref().map(|slot| &slot.hash) == Some(hash)
-                }
-                _ => false,
-            }
+            false
         };
         if !durable {
             continue;
@@ -105,6 +115,7 @@ pub(crate) fn record_synced_lyrics_checks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use suno_core::{ArtifactKind, ArtifactState, ManifestEntry, PendingCheck};
 
     #[test]
     fn synced_lyrics_fetch_warning_never_leaks_a_clip_id_or_url() {
@@ -116,5 +127,132 @@ mod tests {
         assert!(!msg.contains("aligned_lyrics"));
         assert!(!msg.contains('{'), "no interpolation placeholder");
         assert!(!msg.contains("http"));
+    }
+
+    #[test]
+    fn lyrics_only_marker_persists_on_lyrics_txt_slot() {
+        // A lyrics-only clip (no `.lrc`) whose body landed in the `.lyrics.txt`
+        // slot records its durable marker anchored on that slot, so it converges
+        // rather than re-resolving forever. Mirrors the `.lrc` durability.
+        let mut manifest = Manifest::new();
+        let entry = ManifestEntry {
+            lyrics_txt: Some(ArtifactState {
+                path: "a.lyrics.txt".to_string(),
+                hash: "body-hash".to_string(),
+            }),
+            ..Default::default()
+        };
+        manifest.insert("a", entry);
+
+        let pending = vec![PendingCheck {
+            clip_id: "a".to_string(),
+            empty: false,
+            timed: true,
+            written_slots: vec![(ArtifactKind::LyricsTxt, "body-hash".to_string())],
+        }];
+        record_synced_lyrics_checks(&mut manifest, &pending);
+
+        let check = manifest.get("a").unwrap().synced_lyrics.clone();
+        assert!(
+            check.is_some(),
+            "the marker persists off the `.lyrics.txt` slot"
+        );
+        assert!(check.unwrap().timed);
+    }
+
+    #[test]
+    fn lyrics_only_marker_skipped_when_lyrics_txt_slot_missing_the_body() {
+        // If the `.lyrics.txt` slot does not yet reflect the resolved body (an
+        // interrupted or failed write), no marker is recorded, so the clip is
+        // re-resolved next run rather than skipped with a stale sidecar.
+        let mut manifest = Manifest::new();
+        let entry = ManifestEntry {
+            lyrics_txt: Some(ArtifactState {
+                path: "a.lyrics.txt".to_string(),
+                hash: "OLD".to_string(),
+            }),
+            ..Default::default()
+        };
+        manifest.insert("a", entry);
+
+        let pending = vec![PendingCheck {
+            clip_id: "a".to_string(),
+            empty: false,
+            timed: true,
+            written_slots: vec![(ArtifactKind::LyricsTxt, "body-hash".to_string())],
+        }];
+        record_synced_lyrics_checks(&mut manifest, &pending);
+        assert!(
+            manifest.get("a").unwrap().synced_lyrics.is_none(),
+            "no marker until the slot reflects the body -> retried"
+        );
+    }
+
+    #[test]
+    fn lyrics_txt_write_failure_is_retried_when_lrc_succeeded() {
+        // Marker durability across both slots (#357 review): a both-sidecars fetch
+        // where the `.lrc` write landed but the `.lyrics.txt` write failed
+        // non-fatally. The marker lists BOTH slots, so it is durable only once
+        // BOTH land; with the `.lyrics.txt` slot absent, no marker is recorded and
+        // the clip is retried next run.
+        let mut manifest = Manifest::new();
+        let entry = ManifestEntry {
+            lrc: Some(ArtifactState {
+                path: "a.lrc".to_string(),
+                hash: "lrc-hash".to_string(),
+            }),
+            // the `.lyrics.txt` write failed: no slot recorded for it.
+            ..Default::default()
+        };
+        manifest.insert("a", entry);
+
+        let pending = vec![PendingCheck {
+            clip_id: "a".to_string(),
+            empty: false,
+            timed: true,
+            written_slots: vec![
+                (ArtifactKind::Lrc, "lrc-hash".to_string()),
+                (ArtifactKind::LyricsTxt, "txt-hash".to_string()),
+            ],
+        }];
+        record_synced_lyrics_checks(&mut manifest, &pending);
+        assert!(
+            manifest.get("a").unwrap().synced_lyrics.is_none(),
+            "a partial write (only the `.lrc` landed) records no marker -> retried"
+        );
+    }
+
+    #[test]
+    fn both_slots_landed_records_the_marker() {
+        // The convergent counterpart: once BOTH written slots reflect their body
+        // hash, the clip is marked resolved (so it stops being a fetch target).
+        let mut manifest = Manifest::new();
+        let entry = ManifestEntry {
+            lrc: Some(ArtifactState {
+                path: "a.lrc".to_string(),
+                hash: "lrc-hash".to_string(),
+            }),
+            lyrics_txt: Some(ArtifactState {
+                path: "a.lyrics.txt".to_string(),
+                hash: "txt-hash".to_string(),
+            }),
+            ..Default::default()
+        };
+        manifest.insert("a", entry);
+
+        let pending = vec![PendingCheck {
+            clip_id: "a".to_string(),
+            empty: false,
+            timed: true,
+            written_slots: vec![
+                (ArtifactKind::Lrc, "lrc-hash".to_string()),
+                (ArtifactKind::LyricsTxt, "txt-hash".to_string()),
+            ],
+        }];
+        record_synced_lyrics_checks(&mut manifest, &pending);
+        assert!(
+            manifest.get("a").unwrap().synced_lyrics.is_some(),
+            "both slots landed -> resolved (converges)"
+        );
     }
 }

@@ -147,7 +147,7 @@ manager (see [authentication](authentication.md)), or restrict the file yourself
 | `animated_cover_compression_level` | integer | `4` | Animated WebP compression effort (`0..4`, higher is smaller and slower). Capped at `4`: effort `6` costs many times the encode time for no size gain. |
 | `animated_cover_lossless` | boolean | `false` | Encode the animated cover losslessly (bit-exact to the source). Far larger than the embedded-cover size cap (a few seconds can be ~145 MB), so a lossless cover always overflows it and the track falls back to the static JPEG; leave it off for embedded covers. |
 | `details_sidecar` | bool | `false` | Also write a plain-text `<song>.details.txt` beside each audio file, dumping the same metadata that is embedded in the tags plus the song id, duration, and canonical `suno.com` URL. |
-| `lyrics_sidecar` | bool | `false` | Also write a plain-text `<song>.lyrics.txt` beside each audio file, holding the song's lyrics verbatim. A song with no lyrics gets no file. |
+| `lyrics_sidecar` | bool | `false` | Also write a plain-text `<song>.lyrics.txt` beside each audio file, holding the song's lyrics. When the feed omits inline lyrics for a song, the words are sourced from Suno's aligned lyrics instead, so enabling this fetches each song's alignment once. A song with no lyrics at all (an instrumental) gets no file. |
 | `lrc_sidecar` | bool | `false` | Also write a `<song>.lrc` beside each audio file. When Suno has word/line alignment for the song, the `.lrc` is synced line-level (a `[mm:ss.xx]` timestamp per line, the universally supported form) and, for MP3, an ID3 `SYLT` frame with per-word timing is embedded too; otherwise it falls back to the untimed lyrics. A song Suno cannot align (an instrumental) gets no file. Enabling this fetches each song's alignment once. |
 | `video_mp4` | bool | `false` | Also download the standalone `<song>.mp4` music video beside each audio file, when Suno provides one. A song with no video gets no file. Turning this off leaves existing videos in place; a video is only removed alongside its own audio. |
 | `download_stems` | bool | `false` | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder beside it. Download-only: it lists and downloads existing stems and **never** triggers separation or spends credits. A song with no stems gets no folder. Each stem is stored RAW (see `stem_format`), never transcoded to FLAC. Turning this off leaves existing stems in place; individual stems are only removed when Suno's authoritative listing no longer contains them, or alongside their own song. |
@@ -163,6 +163,14 @@ manager (see [authentication](authentication.md)), or restrict the file yourself
 Any per-run account key may also be set under `[defaults]` to apply to every
 account. Account-only tables and identity fields (`token`, `root`, `account_id`,
 `sources`, `areas`, `albums`, and `lead_tracks`) cannot be set in `[defaults]`.
+
+Each rendered path component is capped at 80 characters. A longer title is
+shortened to fit while the trailing `[id8]` is preserved, so shortened names stay
+unique and never collide; the cut is by character on a character boundary, so a
+long title can be trimmed mid-word. Raising this cap is a deferred, opt-in change:
+it would rename existing files and needs a byte budget to stay within the
+filesystem's per-component byte limit under UTF-8 (up to four bytes per
+character), so the cap is fixed at 80 for now.
 
 `token_command` and the other per-run settings also work in
 `[accounts.<label>.sources.<name>]`, so one source can override an account or
