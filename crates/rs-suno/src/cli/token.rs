@@ -146,66 +146,74 @@ mod tests {
     }
 
     #[test]
-    fn token_available_accepts_global_token_flag() {
-        let global = GlobalArgs {
-            token: Some("flag-token".to_owned()),
-            ..Default::default()
-        };
-        assert!(super::token_available(&global, &HashMap::new()));
-    }
-
-    #[test]
-    fn token_available_accepts_token_env() {
-        let global = GlobalArgs::default();
-        let env: HashMap<String, String> = [("SUNO_TOKEN".to_owned(), "env-token".to_owned())]
-            .into_iter()
-            .collect();
-        assert!(super::token_available(&global, &env));
-    }
-
-    #[test]
-    fn token_available_accepts_token_command_env() {
-        let global = GlobalArgs::default();
-        let env: HashMap<String, String> =
-            [("SUNO_TOKEN_COMMAND".to_owned(), "printf secret".to_owned())]
-                .into_iter()
+    fn token_available_detects_every_source() {
+        // A token is available from the global --token flag, SUNO_TOKEN or
+        // SUNO_TOKEN_COMMAND, or the resolved account's per-account TOKEN /
+        // TOKEN_COMMAND (the default account unless --account is given). Another
+        // account's env var does not count.
+        struct Row {
+            label: &'static str,
+            global: GlobalArgs,
+            env: &'static [(&'static str, &'static str)],
+            want: bool,
+        }
+        let rows = [
+            Row {
+                label: "global --token flag",
+                global: GlobalArgs {
+                    token: Some("flag-token".to_owned()),
+                    ..Default::default()
+                },
+                env: &[],
+                want: true,
+            },
+            Row {
+                label: "SUNO_TOKEN",
+                global: GlobalArgs::default(),
+                env: &[("SUNO_TOKEN", "env-token")],
+                want: true,
+            },
+            Row {
+                label: "SUNO_TOKEN_COMMAND",
+                global: GlobalArgs::default(),
+                env: &[("SUNO_TOKEN_COMMAND", "printf secret")],
+                want: true,
+            },
+            Row {
+                label: "default account SUNO_DEFAULT_TOKEN",
+                global: GlobalArgs::default(),
+                env: &[("SUNO_DEFAULT_TOKEN", "env-token")],
+                want: true,
+            },
+            Row {
+                label: "explicit account SUNO_MY_LIB_TOKEN_COMMAND",
+                global: GlobalArgs {
+                    account: Some("my-lib".to_owned()),
+                    ..Default::default()
+                },
+                env: &[("SUNO_MY_LIB_TOKEN_COMMAND", "printf secret")],
+                want: true,
+            },
+            Row {
+                label: "another account's token is ignored",
+                global: GlobalArgs::default(),
+                env: &[("SUNO_ALICE_TOKEN", "env-token")],
+                want: false,
+            },
+        ];
+        for Row {
+            label,
+            global,
+            env,
+            want,
+        } in rows
+        {
+            let env: HashMap<String, String> = env
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect();
-        assert!(super::token_available(&global, &env));
-    }
-
-    #[test]
-    fn token_available_accepts_default_account_env() {
-        let global = GlobalArgs::default();
-        let env: HashMap<String, String> =
-            [("SUNO_DEFAULT_TOKEN".to_owned(), "env-token".to_owned())]
-                .into_iter()
-                .collect();
-        assert!(super::token_available(&global, &env));
-    }
-
-    #[test]
-    fn token_available_accepts_explicit_account_command_env() {
-        let global = GlobalArgs {
-            account: Some("my-lib".to_owned()),
-            ..Default::default()
-        };
-        let env: HashMap<String, String> = [(
-            "SUNO_MY_LIB_TOKEN_COMMAND".to_owned(),
-            "printf secret".to_owned(),
-        )]
-        .into_iter()
-        .collect();
-        assert!(super::token_available(&global, &env));
-    }
-
-    #[test]
-    fn token_available_ignores_other_account_env() {
-        let global = GlobalArgs::default();
-        let env: HashMap<String, String> =
-            [("SUNO_ALICE_TOKEN".to_owned(), "env-token".to_owned())]
-                .into_iter()
-                .collect();
-        assert!(!super::token_available(&global, &env));
+            assert_eq!(super::token_available(&global, &env), want, "{label}");
+        }
     }
 
     #[tokio::test]
