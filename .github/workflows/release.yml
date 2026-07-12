@@ -36,17 +36,27 @@ jobs:
       cache: true
       cache-mode: max
       sbom: true
-      set-meta-labels: true
-      set-meta-annotations: true
       meta-images: ghcr.io/${{ github.repository }}
       meta-tags: |
         type=ref,event=tag
         type=semver,pattern={{version}}
         type=semver,pattern={{major}}.{{minor}}
+      labels: |
+        org.opencontainers.image.source=https://github.com/${{ github.repository }}
+        org.opencontainers.image.description=A download-only command-line tool for mirroring a Suno library.
+        org.opencontainers.image.licenses=MIT AND GPL-2.0-or-later AND LGPL-2.1-or-later
+        org.opencontainers.image.revision=${{ github.sha }}
+        org.opencontainers.image.version=${{ github.ref_name }}
+        org.opencontainers.image.title=rs-suno
+        org.opencontainers.image.url=https://github.com/${{ github.repository }}
       annotations: |
         org.opencontainers.image.source=https://github.com/${{ github.repository }}
         org.opencontainers.image.description=A download-only command-line tool for mirroring a Suno library.
         org.opencontainers.image.licenses=MIT AND GPL-2.0-or-later AND LGPL-2.1-or-later
+        org.opencontainers.image.revision=${{ github.sha }}
+        org.opencontainers.image.version=${{ github.ref_name }}
+        org.opencontainers.image.title=rs-suno
+        org.opencontainers.image.url=https://github.com/${{ github.repository }}
     secrets:
       registry-auths: |
         - registry: ghcr.io
