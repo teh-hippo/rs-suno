@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.2](https://github.com/teh-hippo/rs-suno/compare/v0.37.1...v0.37.2) (2026-07-12)
+
+
+### Bug Fixes
+
+* preserve OCI image metadata ([cd6eea9](https://github.com/teh-hippo/rs-suno/commit/cd6eea9b2ff3dabd921c2e07d0d844cd85f4fcd9))
+
 ## [0.37.1](https://github.com/teh-hippo/rs-suno/compare/v0.37.0...v0.37.1) (2026-07-12)
 
 
