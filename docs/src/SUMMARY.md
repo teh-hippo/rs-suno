@@ -3,6 +3,7 @@
 [Introduction](introduction.md)
 
 - [Installation and ffmpeg](installation-and-ffmpeg.md)
+- [Containers](containers.md)
 - [Authentication](authentication.md)
 - [Configuration](configuration.md)
 - [Commands reference](commands-reference.md)

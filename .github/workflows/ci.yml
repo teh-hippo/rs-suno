@@ -23,6 +23,29 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - run: docker build --tag rs-suno:ci .
+      - name: Smoke test the image
+        run: |
+          docker run --rm rs-suno:ci version | tee version.txt
+          grep -F 'x86_64-unknown-linux-musl' version.txt
+          grep -F 'config: /config/suno/config.toml' version.txt
+          grep -F 'ffmpeg:' version.txt
+          test "$(docker run --rm --entrypoint id rs-suno:ci -u)" = 10001
+          docker run --rm --entrypoint ffmpeg rs-suno:ci \
+            -hide_banner -encoders 2>/dev/null > encoders.txt
+          grep -E ' libwebp_anim ' encoders.txt
+          grep -E ' libwebp ' encoders.txt
+          grep -E ' alac ' encoders.txt
+          grep -E ' flac ' encoders.txt
   # Windows runtime behaviour (path canonicalisation, case-insensitive renames,
   # symlink privilege) can differ even though the code is OS-agnostic, so a
   # single x86_64 leg runs on every PR and on merges to main, gating PRs beside
