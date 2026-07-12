@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.0](https://github.com/teh-hippo/rs-suno/compare/v0.36.15...v0.37.0) (2026-07-12)
+
+
+### Features
+
+* publish OCI container image ([6dde36e](https://github.com/teh-hippo/rs-suno/commit/6dde36e08579de7dfb4efa5af22e8156590bc1be))
+
 ## [0.36.15](https://github.com/teh-hippo/rs-suno/compare/v0.36.14...v0.36.15) (2026-07-09)
 
 
