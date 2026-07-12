@@ -93,6 +93,15 @@ systemctl --user enable --now suno.timer
 `Persistent=true` catches up a run missed while the machine was off, which pairs
 well with `rs-suno` being resumable.
 
+### Containers
+
+Keep the image one-shot and let cron or a systemd timer invoke
+`podman run --rm`. This preserves the `suno` process exit code for the host
+scheduler and avoids running a second init system inside the image.
+
+The [container guide](containers.md) includes Podman, Docker, systemd, cron,
+and native Proxmox VE examples.
+
 ## After a run
 
 - The per-run summary reports counts and duration on stderr.

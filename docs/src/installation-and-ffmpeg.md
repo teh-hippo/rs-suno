@@ -34,6 +34,17 @@ attestation. The binaries are unsigned, so Windows may show a SmartScreen
 "unknown publisher" prompt on first run; verify the download against its
 `.sha256` and attestation if you want to confirm its integrity.
 
+### Container image
+
+The official Linux amd64 and arm64 image includes ffmpeg and CA certificates:
+
+```bash
+podman run --rm ghcr.io/teh-hippo/rs-suno:latest version
+```
+
+Read [Containers](containers.md) for persistent config and library mounts,
+token handling, host scheduling, and Proxmox VE deployment.
+
 ### Verify the install
 
 ```bash

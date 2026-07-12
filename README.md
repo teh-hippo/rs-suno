@@ -29,6 +29,16 @@ aarch64, native MSVC). The binaries are unsigned, so Windows may show a
 SmartScreen "unknown publisher" prompt; you can verify a download against its
 published `.sha256` checksum and build-provenance attestation.
 
+An amd64 and arm64 container image with ffmpeg included is published to
+`ghcr.io/teh-hippo/rs-suno`:
+
+```bash
+podman run --rm ghcr.io/teh-hippo/rs-suno:latest version
+```
+
+See the [container guide](https://teh-hippo.github.io/rs-suno/containers.html)
+for persistent mounts, secrets, scheduling, and Proxmox VE deployment.
+
 ## Quick start
 
 ```bash
