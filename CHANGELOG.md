@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.37.1](https://github.com/teh-hippo/rs-suno/compare/v0.37.0...v0.37.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* pass GITHUB_TOKEN to GHCR builder ([75d6525](https://github.com/teh-hippo/rs-suno/commit/75d6525b5e0b047e24f7a68a85738f16273065d1))
+* pin container base images independently ([1b09b25](https://github.com/teh-hippo/rs-suno/commit/1b09b25ed9ff2538d2807b1259101641436bce40))
+
 ## [0.37.0](https://github.com/teh-hippo/rs-suno/compare/v0.36.15...v0.37.0) (2026-07-12)
 
 
