@@ -1,9 +1,6 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 
-ARG RUST_VERSION=1.96
-ARG ALPINE_VERSION=3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
-
-FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS builder
+FROM rust:1.96-alpine3.24@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479 AS builder
 
 WORKDIR /build
 
@@ -12,7 +9,7 @@ COPY crates ./crates
 
 RUN cargo build --locked --release --package rs-suno --bin suno
 
-FROM alpine:${ALPINE_VERSION}
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 RUN apk add --no-cache ca-certificates ffmpeg \
     && addgroup -S -g 10001 suno \
