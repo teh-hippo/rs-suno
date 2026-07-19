@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.4](https://github.com/teh-hippo/rs-suno/compare/v0.37.3...v0.37.4) (2026-07-19)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate rustls to v0.23.42 ([d147128](https://github.com/teh-hippo/rs-suno/commit/d147128f45b3750f4c919d84b0499f655b1d48b4))
+
 ## [0.37.3](https://github.com/teh-hippo/rs-suno/compare/v0.37.2...v0.37.3) (2026-07-19)
 
 
