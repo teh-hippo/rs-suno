@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.6](https://github.com/teh-hippo/rs-suno/compare/v0.37.5...v0.37.6) (2026-07-19)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate tokio to v1.52.4 ([318a0ee](https://github.com/teh-hippo/rs-suno/commit/318a0ee9e76c8d82c9cfaf1150696232c17cc6dc))
+
 ## [0.37.5](https://github.com/teh-hippo/rs-suno/compare/v0.37.4...v0.37.5) (2026-07-19)
 
 
