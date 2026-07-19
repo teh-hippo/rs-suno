@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.5](https://github.com/teh-hippo/rs-suno/compare/v0.37.4...v0.37.5) (2026-07-19)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate toml to v1.1.3 ([92af2b0](https://github.com/teh-hippo/rs-suno/commit/92af2b09fbf8838aad67154300dedcf7dbbbabdc))
+
 ## [0.37.4](https://github.com/teh-hippo/rs-suno/compare/v0.37.3...v0.37.4) (2026-07-19)
 
 
