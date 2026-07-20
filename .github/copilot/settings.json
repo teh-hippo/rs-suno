@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "teh-hippo": {
+      "source": {
+        "source": "github",
+        "repo": "teh-hippo/common-repo-configs"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "rust-lsp@teh-hippo": true
+  }
+}
