@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.8](https://github.com/teh-hippo/rs-suno/compare/v0.37.7...v0.37.8) (2026-07-21)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate futures-util to v0.3.33 ([c0e910e](https://github.com/teh-hippo/rs-suno/commit/c0e910e70d6da2a7954a18a2fadb4b423d4f195b))
+
 ## [0.37.7](https://github.com/teh-hippo/rs-suno/compare/v0.37.6...v0.37.7) (2026-07-21)
 
 
