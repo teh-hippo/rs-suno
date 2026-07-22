@@ -4,10 +4,18 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - .github/copilot/settings.json
       - .github/workflows/copilot-setup-steps.yml
+      - .mise.toml
+      - Cargo.lock
+      - Cargo.toml
   pull_request:
     paths:
+      - .github/copilot/settings.json
       - .github/workflows/copilot-setup-steps.yml
+      - .mise.toml
+      - Cargo.lock
+      - Cargo.toml
 
 jobs:
   copilot-setup-steps:
@@ -19,8 +27,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
+      - name: Setup mise
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Verify Rust language server
+        run: mise exec -- rust-analyzer --version
       - name: Warm build and test caches
         run: cargo build --all-targets --all-features

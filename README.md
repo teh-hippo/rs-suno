@@ -81,6 +81,8 @@ It covers installation, authentication, configuration, every command, deletion
 safety, artwork, playlists, scheduling, and troubleshooting.
 
 Contributors should start with [AGENTS.md](AGENTS.md).
+Run `mise install` after cloning to install the project ffmpeg and
+rust-analyzer versions.
 
 ## Licence
 
