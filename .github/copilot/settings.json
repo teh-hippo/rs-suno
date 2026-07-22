@@ -8,6 +8,6 @@
     }
   },
   "enabledPlugins": {
-    "rust-lsp@teh-hippo": true
+    "project-rust-lsp@teh-hippo": true
   }
 }
