@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.0](https://github.com/teh-hippo/rs-suno/compare/v0.37.11...v0.38.0) (2026-07-22)
+
+
+### Features
+
+* **copilot:** provision project development tools ([85cb175](https://github.com/teh-hippo/rs-suno/commit/85cb175d6ccf9a78c4ee212999d2203e48116230))
+
 ## [0.37.11](https://github.com/teh-hippo/rs-suno/compare/v0.37.10...v0.37.11) (2026-07-22)
 
 
