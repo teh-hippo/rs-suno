@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.10](https://github.com/teh-hippo/rs-suno/compare/v0.37.9...v0.37.10) (2026-07-22)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate serde to v1.0.229 ([1958c7c](https://github.com/teh-hippo/rs-suno/commit/1958c7cb6bc0dd273024dd61190fb453e76eae5e))
+
 ## [0.37.9](https://github.com/teh-hippo/rs-suno/compare/v0.37.8...v0.37.9) (2026-07-22)
 
 
