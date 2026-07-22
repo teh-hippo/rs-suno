@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.11](https://github.com/teh-hippo/rs-suno/compare/v0.37.10...v0.37.11) (2026-07-22)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate thiserror to v2.0.19 ([518778d](https://github.com/teh-hippo/rs-suno/commit/518778d077ed7ec480e14fbf5d41695594872a5b))
+
 ## [0.37.10](https://github.com/teh-hippo/rs-suno/compare/v0.37.9...v0.37.10) (2026-07-22)
 
 
