@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/suno-core", "crates/rs-suno"]
 
 [workspace.package]
-version = "0.38.1"
+version = "0.38.2"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
