@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.1](https://github.com/teh-hippo/rs-suno/compare/v0.38.0...v0.38.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate serde_json to v1.0.151 ([7ab9f8f](https://github.com/teh-hippo/rs-suno/commit/7ab9f8fe5d77362c9078e8be276a818a60551b9b))
+
 ## [0.38.0](https://github.com/teh-hippo/rs-suno/compare/v0.37.11...v0.38.0) (2026-07-22)
 
 
