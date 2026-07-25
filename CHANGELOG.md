@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.0](https://github.com/teh-hippo/rs-suno/compare/v0.38.4...v0.39.0) (2026-07-25)
+
+
+### Features
+
+* raise the declared MSRV to 1.97 ([c9565f4](https://github.com/teh-hippo/rs-suno/commit/c9565f40197b81161b73fe4f2bce6c0d228e4d49))
+
 ## [0.38.4](https://github.com/teh-hippo/rs-suno/compare/v0.38.3...v0.38.4) (2026-07-25)
 
 
