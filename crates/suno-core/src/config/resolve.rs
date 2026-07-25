@@ -42,125 +42,149 @@ impl Config {
         };
 
         let format = resolve_enum(
-            flags.settings.format,
-            env_val("FORMAT"),
-            src.and_then(|s| s.settings.format),
-            acc.settings.format,
-            self.defaults.settings.format,
+            Layers {
+                flag: flags.settings.format,
+                env: env_val("FORMAT"),
+                src: src.and_then(|s| s.settings.format),
+                acc: acc.settings.format,
+                defaults: self.defaults.settings.format,
+                name: "FORMAT",
+            },
             None,
-            "FORMAT",
         )?
         .unwrap_or(AudioFormat::Flac);
 
         let concurrency = resolve_parsed(
-            flags.settings.concurrency,
-            env_val("CONCURRENCY"),
-            src.and_then(|s| s.settings.concurrency),
-            acc.settings.concurrency,
-            self.defaults.settings.concurrency,
+            Layers {
+                flag: flags.settings.concurrency,
+                env: env_val("CONCURRENCY"),
+                src: src.and_then(|s| s.settings.concurrency),
+                acc: acc.settings.concurrency,
+                defaults: self.defaults.settings.concurrency,
+                name: "CONCURRENCY",
+            },
             4,
-            "CONCURRENCY",
         )?;
 
         let retries = resolve_parsed(
-            flags.settings.retries,
-            env_val("RETRIES"),
-            src.and_then(|s| s.settings.retries),
-            acc.settings.retries,
-            self.defaults.settings.retries,
+            Layers {
+                flag: flags.settings.retries,
+                env: env_val("RETRIES"),
+                src: src.and_then(|s| s.settings.retries),
+                acc: acc.settings.retries,
+                defaults: self.defaults.settings.retries,
+                name: "RETRIES",
+            },
             3,
-            "RETRIES",
         )?;
 
         let min_newest = resolve_parsed(
-            flags.settings.min_newest,
-            env_val("MIN_NEWEST"),
-            src.and_then(|s| s.settings.min_newest),
-            acc.settings.min_newest,
-            self.defaults.settings.min_newest,
+            Layers {
+                flag: flags.settings.min_newest,
+                env: env_val("MIN_NEWEST"),
+                src: src.and_then(|s| s.settings.min_newest),
+                acc: acc.settings.min_newest,
+                defaults: self.defaults.settings.min_newest,
+                name: "MIN_NEWEST",
+            },
             1,
-            "MIN_NEWEST",
         )?;
 
         let animated_covers = resolve_parsed(
-            flags.settings.animated_covers,
-            env_val("ANIMATED_COVERS"),
-            src.and_then(|s| s.settings.animated_covers),
-            acc.settings.animated_covers,
-            self.defaults.settings.animated_covers,
+            Layers {
+                flag: flags.settings.animated_covers,
+                env: env_val("ANIMATED_COVERS"),
+                src: src.and_then(|s| s.settings.animated_covers),
+                acc: acc.settings.animated_covers,
+                defaults: self.defaults.settings.animated_covers,
+                name: "ANIMATED_COVERS",
+            },
             false,
-            "ANIMATED_COVERS",
         )?;
 
         let details_sidecar = resolve_parsed(
-            flags.settings.details_sidecar,
-            env_val("DETAILS_SIDECAR"),
-            src.and_then(|s| s.settings.details_sidecar),
-            acc.settings.details_sidecar,
-            self.defaults.settings.details_sidecar,
+            Layers {
+                flag: flags.settings.details_sidecar,
+                env: env_val("DETAILS_SIDECAR"),
+                src: src.and_then(|s| s.settings.details_sidecar),
+                acc: acc.settings.details_sidecar,
+                defaults: self.defaults.settings.details_sidecar,
+                name: "DETAILS_SIDECAR",
+            },
             false,
-            "DETAILS_SIDECAR",
         )?;
 
         let lyrics_sidecar = resolve_parsed(
-            flags.settings.lyrics_sidecar,
-            env_val("LYRICS_SIDECAR"),
-            src.and_then(|s| s.settings.lyrics_sidecar),
-            acc.settings.lyrics_sidecar,
-            self.defaults.settings.lyrics_sidecar,
+            Layers {
+                flag: flags.settings.lyrics_sidecar,
+                env: env_val("LYRICS_SIDECAR"),
+                src: src.and_then(|s| s.settings.lyrics_sidecar),
+                acc: acc.settings.lyrics_sidecar,
+                defaults: self.defaults.settings.lyrics_sidecar,
+                name: "LYRICS_SIDECAR",
+            },
             false,
-            "LYRICS_SIDECAR",
         )?;
 
         let lrc_sidecar = resolve_parsed(
-            flags.settings.lrc_sidecar,
-            env_val("LRC_SIDECAR"),
-            src.and_then(|s| s.settings.lrc_sidecar),
-            acc.settings.lrc_sidecar,
-            self.defaults.settings.lrc_sidecar,
+            Layers {
+                flag: flags.settings.lrc_sidecar,
+                env: env_val("LRC_SIDECAR"),
+                src: src.and_then(|s| s.settings.lrc_sidecar),
+                acc: acc.settings.lrc_sidecar,
+                defaults: self.defaults.settings.lrc_sidecar,
+                name: "LRC_SIDECAR",
+            },
             false,
-            "LRC_SIDECAR",
         )?;
 
         let video_mp4 = resolve_parsed(
-            flags.settings.video_mp4,
-            env_val("VIDEO_MP4"),
-            src.and_then(|s| s.settings.video_mp4),
-            acc.settings.video_mp4,
-            self.defaults.settings.video_mp4,
+            Layers {
+                flag: flags.settings.video_mp4,
+                env: env_val("VIDEO_MP4"),
+                src: src.and_then(|s| s.settings.video_mp4),
+                acc: acc.settings.video_mp4,
+                defaults: self.defaults.settings.video_mp4,
+                name: "VIDEO_MP4",
+            },
             false,
-            "VIDEO_MP4",
         )?;
 
         let download_stems = resolve_parsed(
-            flags.settings.download_stems,
-            env_val("DOWNLOAD_STEMS"),
-            src.and_then(|s| s.settings.download_stems),
-            acc.settings.download_stems,
-            self.defaults.settings.download_stems,
+            Layers {
+                flag: flags.settings.download_stems,
+                env: env_val("DOWNLOAD_STEMS"),
+                src: src.and_then(|s| s.settings.download_stems),
+                acc: acc.settings.download_stems,
+                defaults: self.defaults.settings.download_stems,
+                name: "DOWNLOAD_STEMS",
+            },
             false,
-            "DOWNLOAD_STEMS",
         )?;
 
         let stem_format = resolve_enum(
-            flags.settings.stem_format,
-            env_val("STEM_FORMAT"),
-            src.and_then(|s| s.settings.stem_format),
-            acc.settings.stem_format,
-            self.defaults.settings.stem_format,
+            Layers {
+                flag: flags.settings.stem_format,
+                env: env_val("STEM_FORMAT"),
+                src: src.and_then(|s| s.settings.stem_format),
+                acc: acc.settings.stem_format,
+                defaults: self.defaults.settings.stem_format,
+                name: "STEM_FORMAT",
+            },
             None,
-            "STEM_FORMAT",
         )?
         .unwrap_or_default();
 
         let video_cover_retention = resolve_enum(
-            flags.settings.video_cover_retention,
-            env_val("VIDEO_COVER_RETENTION"),
-            src.and_then(|s| s.settings.video_cover_retention),
-            acc.settings.video_cover_retention,
-            self.defaults.settings.video_cover_retention,
+            Layers {
+                flag: flags.settings.video_cover_retention,
+                env: env_val("VIDEO_COVER_RETENTION"),
+                src: src.and_then(|s| s.settings.video_cover_retention),
+                acc: acc.settings.video_cover_retention,
+                defaults: self.defaults.settings.video_cover_retention,
+                name: "VIDEO_COVER_RETENTION",
+            },
             None,
-            "VIDEO_COVER_RETENTION",
         )?;
         // `video_cover_retention` is the unified control for the album
         // video-cover artifacts: `webp`/`both` keep the transcoded `cover.webp`,
@@ -173,51 +197,61 @@ impl Config {
 
         let defaults_webp = WebpEncodeSettings::default();
         let animated_cover_quality = resolve_u8_ranged(
-            flags.settings.animated_cover_quality,
-            env_val("ANIMATED_COVER_QUALITY"),
-            src.and_then(|s| s.settings.animated_cover_quality),
-            acc.settings.animated_cover_quality,
-            self.defaults.settings.animated_cover_quality,
+            Layers {
+                flag: flags.settings.animated_cover_quality,
+                env: env_val("ANIMATED_COVER_QUALITY"),
+                src: src.and_then(|s| s.settings.animated_cover_quality),
+                acc: acc.settings.animated_cover_quality,
+                defaults: self.defaults.settings.animated_cover_quality,
+                name: "ANIMATED_COVER_QUALITY",
+            },
             defaults_webp.quality,
-            "ANIMATED_COVER_QUALITY",
             0..=100,
         )?;
         let animated_cover_max_fps = resolve_parsed(
-            flags.settings.animated_cover_max_fps,
-            env_val("ANIMATED_COVER_MAX_FPS"),
-            src.and_then(|s| s.settings.animated_cover_max_fps),
-            acc.settings.animated_cover_max_fps,
-            self.defaults.settings.animated_cover_max_fps,
+            Layers {
+                flag: flags.settings.animated_cover_max_fps,
+                env: env_val("ANIMATED_COVER_MAX_FPS"),
+                src: src.and_then(|s| s.settings.animated_cover_max_fps),
+                acc: acc.settings.animated_cover_max_fps,
+                defaults: self.defaults.settings.animated_cover_max_fps,
+                name: "ANIMATED_COVER_MAX_FPS",
+            },
             defaults_webp.max_fps,
-            "ANIMATED_COVER_MAX_FPS",
         )?;
         let animated_cover_max_width = resolve_parsed_opt(
-            flags.settings.animated_cover_max_width,
-            env_val("ANIMATED_COVER_MAX_WIDTH"),
-            src.and_then(|s| s.settings.animated_cover_max_width),
-            acc.settings.animated_cover_max_width,
-            self.defaults.settings.animated_cover_max_width,
+            Layers {
+                flag: flags.settings.animated_cover_max_width,
+                env: env_val("ANIMATED_COVER_MAX_WIDTH"),
+                src: src.and_then(|s| s.settings.animated_cover_max_width),
+                acc: acc.settings.animated_cover_max_width,
+                defaults: self.defaults.settings.animated_cover_max_width,
+                name: "ANIMATED_COVER_MAX_WIDTH",
+            },
             defaults_webp.max_width,
-            "ANIMATED_COVER_MAX_WIDTH",
         )?;
         let animated_cover_compression_level = resolve_u8_ranged(
-            flags.settings.animated_cover_compression_level,
-            env_val("ANIMATED_COVER_COMPRESSION_LEVEL"),
-            src.and_then(|s| s.settings.animated_cover_compression_level),
-            acc.settings.animated_cover_compression_level,
-            self.defaults.settings.animated_cover_compression_level,
+            Layers {
+                flag: flags.settings.animated_cover_compression_level,
+                env: env_val("ANIMATED_COVER_COMPRESSION_LEVEL"),
+                src: src.and_then(|s| s.settings.animated_cover_compression_level),
+                acc: acc.settings.animated_cover_compression_level,
+                defaults: self.defaults.settings.animated_cover_compression_level,
+                name: "ANIMATED_COVER_COMPRESSION_LEVEL",
+            },
             defaults_webp.compression_level,
-            "ANIMATED_COVER_COMPRESSION_LEVEL",
             0..=4,
         )?;
         let animated_cover_lossless = resolve_parsed(
-            flags.settings.animated_cover_lossless,
-            env_val("ANIMATED_COVER_LOSSLESS"),
-            src.and_then(|s| s.settings.animated_cover_lossless),
-            acc.settings.animated_cover_lossless,
-            self.defaults.settings.animated_cover_lossless,
+            Layers {
+                flag: flags.settings.animated_cover_lossless,
+                env: env_val("ANIMATED_COVER_LOSSLESS"),
+                src: src.and_then(|s| s.settings.animated_cover_lossless),
+                acc: acc.settings.animated_cover_lossless,
+                defaults: self.defaults.settings.animated_cover_lossless,
+                name: "ANIMATED_COVER_LOSSLESS",
+            },
             defaults_webp.lossless,
-            "ANIMATED_COVER_LOSSLESS",
         )?;
 
         let naming_template = resolve_owned(
@@ -230,24 +264,28 @@ impl Config {
         .unwrap_or_else(|| crate::naming::DEFAULT_TEMPLATE.to_owned());
 
         let character_set = resolve_enum(
-            flags.settings.character_set,
-            env_val("CHARACTER_SET"),
-            src.and_then(|s| s.settings.character_set),
-            acc.settings.character_set,
-            self.defaults.settings.character_set,
+            Layers {
+                flag: flags.settings.character_set,
+                env: env_val("CHARACTER_SET"),
+                src: src.and_then(|s| s.settings.character_set),
+                acc: acc.settings.character_set,
+                defaults: self.defaults.settings.character_set,
+                name: "CHARACTER_SET",
+            },
             None,
-            "CHARACTER_SET",
         )?
         .unwrap_or(CharacterSet::Unicode);
 
         let number_singletons = resolve_parsed(
-            flags.settings.number_singletons,
-            env_val("NUMBER_SINGLETONS"),
-            src.and_then(|s| s.settings.number_singletons),
-            acc.settings.number_singletons,
-            self.defaults.settings.number_singletons,
+            Layers {
+                flag: flags.settings.number_singletons,
+                env: env_val("NUMBER_SINGLETONS"),
+                src: src.and_then(|s| s.settings.number_singletons),
+                acc: acc.settings.number_singletons,
+                defaults: self.defaults.settings.number_singletons,
+                name: "NUMBER_SINGLETONS",
+            },
             true,
-            "NUMBER_SINGLETONS",
         )?;
 
         let token = flags
@@ -317,44 +355,52 @@ impl Config {
     }
 }
 
-fn resolve_parsed<T>(
+/// The layered sources for one setting, in precedence order: a CLI flag beats
+/// the environment, which beats the `[sources.*]` table, which beats the
+/// account, which beats `[defaults]`. `name` labels the knob in error messages
+/// and is also its environment-variable suffix.
+///
+/// Grouped into a struct rather than passed positionally because the five tiers
+/// are adjacent same-typed `Option`s: transposing `src` and `acc` in a call
+/// compiles cleanly and silently inverts the precedence. Naming them at the call
+/// site makes that class of mistake visible. The compiled fallback stays a
+/// separate argument because its type varies by resolver (`T`, `Option<T>`, `u8`).
+struct Layers<'a, T> {
     flag: Option<T>,
-    env_str: Option<&str>,
+    env: Option<&'a str>,
     src: Option<T>,
     acc: Option<T>,
     defaults: Option<T>,
-    compiled: T,
-    name: &str,
-) -> Result<T>
+    name: &'a str,
+}
+
+fn resolve_parsed<T>(layers: Layers<'_, T>, compiled: T) -> Result<T>
 where
     T: FromStr + Copy,
 {
-    Ok(
-        resolve_parsed_opt(flag, env_str, src, acc, defaults, Some(compiled), name)?
-            .unwrap_or(compiled),
-    )
+    Ok(resolve_parsed_opt(layers, Some(compiled))?.unwrap_or(compiled))
 }
 
 /// Like [`resolve_parsed`], but the value stays optional at every tier including
 /// the compiled default, so an unset knob resolves to `None` rather than a
 /// scalar fallback. Used where "unset" is itself meaningful (e.g. a native width
 /// with no cap).
-fn resolve_parsed_opt<T>(
-    flag: Option<T>,
-    env_str: Option<&str>,
-    src: Option<T>,
-    acc: Option<T>,
-    defaults: Option<T>,
-    compiled: Option<T>,
-    name: &str,
-) -> Result<Option<T>>
+fn resolve_parsed_opt<T>(layers: Layers<'_, T>, compiled: Option<T>) -> Result<Option<T>>
 where
     T: FromStr + Copy,
 {
+    let Layers {
+        flag,
+        env,
+        src,
+        acc,
+        defaults,
+        name,
+    } = layers;
     if let Some(v) = flag {
         return Ok(Some(v));
     }
-    if let Some(s) = env_str {
+    if let Some(s) = env {
         return s
             .parse()
             .map(Some)
@@ -363,20 +409,22 @@ where
     Ok(src.or(acc).or(defaults).or(compiled))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_u8_ranged(
-    flag: Option<u8>,
-    env_str: Option<&str>,
-    src: Option<u8>,
-    acc: Option<u8>,
-    defaults: Option<u8>,
+    layers: Layers<'_, u8>,
     compiled: u8,
-    name: &str,
     range: std::ops::RangeInclusive<u8>,
 ) -> Result<u8> {
+    let Layers {
+        flag,
+        env,
+        src,
+        acc,
+        defaults,
+        name,
+    } = layers;
     let value = if let Some(v) = flag {
         v
-    } else if let Some(s) = env_str {
+    } else if let Some(s) = env {
         s.parse()
             .map_err(|_| Error::Config(format!("invalid {name}: '{s}' (expected integer)")))?
     } else {
@@ -393,22 +441,22 @@ fn resolve_u8_ranged(
     }
 }
 
-fn resolve_enum<T>(
-    flag: Option<T>,
-    env_str: Option<&str>,
-    src: Option<T>,
-    acc: Option<T>,
-    defaults: Option<T>,
-    compiled: Option<T>,
-    name: &str,
-) -> Result<Option<T>>
+fn resolve_enum<T>(layers: Layers<'_, T>, compiled: Option<T>) -> Result<Option<T>>
 where
     T: FromStr<Err = Error> + Copy,
 {
+    let Layers {
+        flag,
+        env,
+        src,
+        acc,
+        defaults,
+        name,
+    } = layers;
     if let Some(v) = flag {
         return Ok(Some(v));
     }
-    if let Some(s) = env_str {
+    if let Some(s) = env {
         return s
             .parse()
             .map(Some)
