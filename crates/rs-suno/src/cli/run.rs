@@ -147,14 +147,16 @@ async fn run(
         let flags = config_load::flag_overrides(global, args);
         for target in targets {
             let code = run_one(
-                verb,
-                global,
-                args,
+                Invocation {
+                    verb,
+                    global,
+                    args,
+                    config: config.as_ref(),
+                    env: &env,
+                    exit_code,
+                },
                 &target,
-                config.as_ref(),
                 &flags,
-                &env,
-                exit_code,
             )
             .await?;
             worst = worse(worst, code);
@@ -198,14 +200,16 @@ async fn run(
                 task_output::capture_task_stderr();
                 let flags = config_load::flag_overrides(&g, &a);
                 let result = rt.block_on(run_one(
-                    verb,
-                    &g,
-                    &a,
+                    Invocation {
+                        verb,
+                        global: &g,
+                        args: &a,
+                        config: (*c).as_ref(),
+                        env: &e,
+                        exit_code,
+                    },
                     &target,
-                    (*c).as_ref(),
                     &flags,
-                    &e,
-                    exit_code,
                 ));
                 let lines = task_output::flush_task_stderr();
                 result.map(|code| (code, lines))
@@ -224,17 +228,31 @@ async fn run(
     Ok(worst)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_one(
+/// The parts of one sync/copy/check invocation that are constant across every
+/// account it runs. `target` and `flags` stay separate arguments because they
+/// are what the multi-account fan-out varies per thread.
+struct Invocation<'a> {
     verb: Verb,
-    global: &GlobalArgs,
-    args: &SyncArgs,
-    target: &account::TargetSpec,
-    config: Option<&Config>,
-    flags: &FlagOverrides,
-    env: &HashMap<String, String>,
+    global: &'a GlobalArgs,
+    args: &'a SyncArgs,
+    config: Option<&'a Config>,
+    env: &'a HashMap<String, String>,
     exit_code: bool,
+}
+
+async fn run_one(
+    inv: Invocation<'_>,
+    target: &account::TargetSpec,
+    flags: &FlagOverrides,
 ) -> Result<ExitCode> {
+    let Invocation {
+        verb,
+        global,
+        args,
+        config,
+        env,
+        exit_code,
+    } = inv;
     let verbosity = global.verbosity();
 
     // Re-pinning is a destructive-intent override that only makes sense on an
@@ -568,14 +586,16 @@ mod tests {
         let flags = FlagOverrides::default();
         let env = HashMap::new();
         let code = run_one(
-            Verb::Check,
-            &global,
-            &args,
+            Invocation {
+                verb: Verb::Check,
+                global: &global,
+                args: &args,
+                config: None,
+                env: &env,
+                exit_code: false,
+            },
             &target,
-            None,
             &flags,
-            &env,
-            false,
         )
         .await
         .unwrap();
@@ -601,14 +621,16 @@ mod tests {
         let flags = FlagOverrides::default();
         let env = HashMap::new();
         let code = run_one(
-            Verb::Sync,
-            &global,
-            &args,
+            Invocation {
+                verb: Verb::Sync,
+                global: &global,
+                args: &args,
+                config: None,
+                env: &env,
+                exit_code: false,
+            },
             &target,
-            None,
             &flags,
-            &env,
-            false,
         )
         .await
         .unwrap();
