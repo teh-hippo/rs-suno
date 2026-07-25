@@ -1,9 +1,26 @@
 name: Release
 
+# A tag push runs the whole pipeline: binaries and crates.io, then the container.
+#
+# The container leg depends on Docker Hub (it cosign-verifies the buildkit,
+# syft-scanner and binfmt images), so a registry outage can fail it alone and
+# leave a release with binaries published but no image — the tags meta-action
+# also owns `latest`, so `latest` then stays on the previous version. The
+# workflow_dispatch trigger below republishes the container for an already
+# released tag without re-attempting the binary and crates.io legs, which are
+# not idempotent.
+#
+#   gh workflow run release.yml --ref vX.Y.Z
+#
+# Caveat: workflow_dispatch resolves this file from the ref it is dispatched
+# against, so a tag cut before this trigger existed cannot be dispatched. Fall
+# back to re-running the original run's failed jobs
+# (`gh run rerun <run-id> --failed`) for those.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -11,6 +28,9 @@ concurrency:
 
 jobs:
   release:
+    # Tag push only: re-publishing binaries and crates.io for an existing
+    # version is not idempotent, so a dispatch skips straight to the container.
+    if: ${{ github.event_name == 'push' }}
     uses: teh-hippo/common-repo-configs/.github/workflows/rust-release.yml@3d8fb0045df6c146324d6e8ac6485c6116782a05  # v3.1.0
     permissions:
       contents: write
@@ -23,6 +43,10 @@ jobs:
 
   container:
     needs: release
+    # `needs` alone would skip this leg whenever `release` is skipped, which is
+    # exactly the dispatch case, so state the condition explicitly: run unless
+    # the release leg actually failed.
+    if: ${{ !cancelled() && needs.release.result != 'failure' }}
     uses: docker/github-builder/.github/workflows/build.yml@3415a188caae9a0da7fba83bc06985776e0b1790 # v1
     permissions:
       contents: read
