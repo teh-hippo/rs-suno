@@ -345,6 +345,11 @@ async fn stat_manifest(
     // byte-identical even if a clip-id key ever equalled a path key.
     let mut stated: Vec<(usize, String, LocalFile)> = stream::iter(to_stat.into_iter().enumerate())
         .map(|(idx, (key, path))| async move {
+            // The closure discards the `metadata` error and has no panic path,
+            // and the task is never aborted, so the join cannot fail. Assert it
+            // rather than substituting a default: a fabricated `exists: false`
+            // would silently misreport a present file as missing.
+            #[allow(clippy::expect_used)]
             let local = tokio::task::spawn_blocking(move || {
                 let meta = std::fs::metadata(&path).ok();
                 LocalFile {

@@ -106,6 +106,9 @@ impl Identity {
                 ),
             },
             OwnerGate::AbortMismatch => {
+                // The gate only yields `AbortMismatch` after comparing the
+                // authenticated account against a pinned owner, so one exists.
+                #[allow(clippy::expect_used)]
                 let pinned = store.owner().expect("mismatch implies a pinned owner");
                 IdentityOutcome::Abort {
                     code: ExitCode::Safety,

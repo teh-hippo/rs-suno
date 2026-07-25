@@ -70,6 +70,8 @@ pub fn plan_targets(
 
     match config {
         Some(cfg) if cfg.accounts.len() == 1 => {
+            // Guarded by the `len() == 1` arm above.
+            #[allow(clippy::expect_used)]
             let label = cfg.accounts.keys().next().expect("one account").clone();
             let dest = dest_for(cfg, &label, sel.dest)?;
             Ok(vec![TargetSpec {
@@ -176,6 +178,8 @@ pub(crate) fn single_account(
     } else {
         match config {
             Some(cfg) if cfg.accounts.len() == 1 => (
+                // Guarded by the `len() == 1` arm above.
+                #[allow(clippy::expect_used)]
                 cfg.accounts.keys().next().expect("one account").clone(),
                 false,
             ),
@@ -201,6 +205,8 @@ pub(crate) fn single_account(
     let settings = if implicit {
         synthetic_config().resolve("default", None, env, flags)
     } else {
+        // `implicit` is only false on a branch that read a label from a config.
+        #[allow(clippy::expect_used)]
         config
             .expect("non-implicit account has config")
             .resolve(&label, None, env, flags)
