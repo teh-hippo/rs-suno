@@ -1,5 +1,14 @@
-use super::lifecycle::Relocate;
+use super::lifecycle::{MoveSpec, PathGuard, Relocate};
 use super::*;
+
+/// Identifies one stem slot: the owning clip, the slot key, and the stem's own
+/// id and container. Mirrors the identity half of `Action::MoveStem`.
+pub(crate) struct StemRef<'a> {
+    pub(crate) clip_id: &'a str,
+    pub(crate) key: &'a str,
+    pub(crate) stem_id: &'a str,
+    pub(crate) format: StemFormat,
+}
 
 impl<H, F, G, C> Ctx<'_, H, F, G, C>
 where
@@ -20,8 +29,7 @@ where
         &self,
         manifest: &mut Manifest,
         prepared: PreparedStem,
-        tracked_paths: &mut HashMap<String, u32>,
-        committed: &BTreeSet<String>,
+        guard: &mut PathGuard<'_>,
     ) -> Result<Effect, Fail> {
         let PreparedStem {
             clip_id,
@@ -38,14 +46,7 @@ where
             .and_then(|e| e.stems.get(&key))
             .map(|s| s.path.clone());
         self.write_verify(&clip_id, &path, &bytes)?;
-        self.remove_superseded(
-            &clip_id,
-            old_path.as_deref(),
-            &path,
-            tracked_paths,
-            committed,
-            "stem",
-        )?;
+        self.remove_superseded(&clip_id, old_path.as_deref(), &path, guard, "stem")?;
         if let Some(entry) = manifest.entries.get_mut(&clip_id) {
             set_manifest_stem(
                 entry,
@@ -70,29 +71,33 @@ where
     /// no committed write this run already holds it); otherwise the
     /// fetch-and-write fallback re-fetches the correct bytes at `to`, so a
     /// co-referenced shared stem is never renamed away with mismatched content.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn move_stem(
         &self,
         client_lock: &ClientLock<'_, C>,
         manifest: &mut Manifest,
-        clip_id: &str,
-        key: &str,
-        stem_id: &str,
-        from: &str,
-        to: &str,
-        source_url: &str,
-        format: StemFormat,
-        hash: &str,
-        tracked_paths: &mut HashMap<String, u32>,
-        committed: &BTreeSet<String>,
+        stem: StemRef<'_>,
+        mv: MoveSpec<'_>,
+        guard: &mut PathGuard<'_>,
     ) -> Result<Effect, Fail> {
+        let StemRef {
+            clip_id,
+            key,
+            stem_id,
+            format,
+        } = stem;
+        let MoveSpec {
+            from,
+            to,
+            source_url,
+            hash,
+        } = mv;
         if manifest.get(clip_id).is_none() {
             return Ok(Effect::Skipped);
         }
         // Try the in-place rename shared with `move_artifact`; on a fall-through
         // the fetch-and-write fallback re-fetches the correct bytes at `to`, so a
         // co-referenced shared stem is never renamed away with mismatched content.
-        match self.try_relocate(from, to, tracked_paths, committed) {
+        match self.try_relocate(from, to, guard) {
             Relocate::Renamed => {
                 if let Some(entry) = manifest.entries.get_mut(clip_id) {
                     set_manifest_stem(
@@ -123,8 +128,7 @@ where
                 hash: hash.to_owned(),
                 bytes,
             },
-            tracked_paths,
-            committed,
+            guard,
         )
     }
 

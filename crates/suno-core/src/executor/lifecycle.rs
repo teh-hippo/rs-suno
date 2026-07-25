@@ -30,6 +30,29 @@ pub(super) enum Relocate {
     Refetch,
 }
 
+/// The path bookkeeping that makes a write or relocation safe: how many tracked
+/// slots still reference each path (#76), and which paths a committed write this
+/// run has already claimed (#142).
+///
+/// The two always travel together, because every guard below consults both and
+/// honouring one without the other is precisely the deletion bug the cross-slot
+/// and committed-this-run rules exist to prevent. Passing them as one value
+/// keeps a call site from supplying half the guard.
+pub(crate) struct PathGuard<'a> {
+    pub(crate) tracked_paths: &'a mut HashMap<String, u32>,
+    pub(crate) committed: &'a BTreeSet<String>,
+}
+
+/// Where a relocation is going, and how to rebuild it if the in-place rename is
+/// refused: the destination pair plus the refetch source and the expected hash.
+/// Mirrors the payload of `Action::MoveArtifact` and `Action::MoveStem`.
+pub(crate) struct MoveSpec<'a> {
+    pub(crate) from: &'a str,
+    pub(crate) to: &'a str,
+    pub(crate) source_url: &'a str,
+    pub(crate) hash: &'a str,
+}
+
 impl<H, F, G, C> Ctx<'_, H, F, G, C>
 where
     H: Http,
@@ -60,22 +83,22 @@ where
         id: &str,
         old: Option<&str>,
         new: &str,
-        tracked_paths: &mut HashMap<String, u32>,
-        committed: &BTreeSet<String>,
+        guard: &mut PathGuard<'_>,
         label: &str,
     ) -> Result<(), Fail> {
         if let Some(old) = old
             && !old.is_empty()
             && old != new
         {
-            let still_referenced = tracked_paths
+            let still_referenced = guard
+                .tracked_paths
                 .get_mut(old)
                 .map(|count| {
                     *count = count.saturating_sub(1);
                     *count > 0
                 })
                 .unwrap_or(false);
-            if !still_referenced && !committed.contains(old) {
+            if !still_referenced && !guard.committed.contains(old) {
                 self.fs.remove(old).map_err(|err| {
                     disk_or_permanent(
                         id,
@@ -102,19 +125,16 @@ where
     /// falls through to [`Relocate::Refetch`], where the caller fetches fresh
     /// bytes and writes at `to` (running the gated old-path cleanup), so a swap
     /// or co-reference is handled exactly as before.
-    pub(super) fn try_relocate(
-        &self,
-        from: &str,
-        to: &str,
-        tracked_paths: &mut HashMap<String, u32>,
-        committed: &BTreeSet<String>,
-    ) -> Relocate {
-        let exclusive =
-            tracked_paths.get(from).is_none_or(|count| *count <= 1) && !committed.contains(from);
+    pub(super) fn try_relocate(&self, from: &str, to: &str, guard: &mut PathGuard<'_>) -> Relocate {
+        let exclusive = guard
+            .tracked_paths
+            .get(from)
+            .is_none_or(|count| *count <= 1)
+            && !guard.committed.contains(from);
         if from != to && exclusive {
             match self.fs.rename(from, to) {
                 Ok(()) => {
-                    if let Some(count) = tracked_paths.get_mut(from) {
+                    if let Some(count) = guard.tracked_paths.get_mut(from) {
                         *count = count.saturating_sub(1);
                     }
                     return Relocate::Renamed;
