@@ -1,10 +1,21 @@
-# A manual, on-demand macOS verification (build and test only). The project is
-# OS-agnostic but has no macOS CI evidence; this proves the suite on Darwin when
-# run by hand. It is deliberately NOT wired into push, pull_request, schedule,
-# or any release/CD yet: workflow_dispatch is the only trigger.
+# macOS verification (build and test only). The project is OS-agnostic and the
+# Linux and Windows legs gate every pull request, but Darwin had no CI evidence
+# at all, so a macOS-only regression could only surface in a user's install.
+#
+# This runs weekly rather than per pull request. The suite is deterministic, with
+# no network or disk dependency, so a macOS-only break is far more likely to
+# arrive with a toolchain or dependency update than with a given change; a weekly
+# run catches that without adding macOS runner minutes, which bill at a premium
+# multiplier, to every pull request. workflow_dispatch is kept for checking a
+# suspect change on demand.
+#
+# The cron is offset from supply-chain.yml's Monday 06:23 slot so the two do not
+# contend for runners.
 name: macOS
 
 on:
+  schedule:
+    - cron: "47 7 * * 1"
   workflow_dispatch:
 
 permissions: {}
