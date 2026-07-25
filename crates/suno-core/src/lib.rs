@@ -87,12 +87,12 @@ pub use config::{
     Settings, SourceConfig, animated_covers_flag_overridden,
 };
 pub use desired::{
-    ArtifactToggles, LIKED_PLAYLIST_ID, PlaylistInput, album_desired, build_desired,
+    ArtifactToggles, LIKED_PLAYLIST_ID, NamingScope, PlaylistInput, album_desired, build_desired,
     build_playlist_desired, clip_stems,
 };
 pub use downloadable::is_downloadable;
 pub use error::{Error, Result};
-pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, execute};
+pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, Stores, execute};
 pub use extras::{
     INDEX_SCHEMA_VERSION, M3u8Entry, render_clip_details, render_library_index, render_m3u8,
 };

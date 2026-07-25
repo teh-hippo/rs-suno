@@ -98,9 +98,11 @@ fn download_mp3_embeds_sylt_and_lyrics_from_synced_map() {
     let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
     let outcome = pollster::block_on(execute(
         &plan,
-        &mut manifest,
-        &mut albums,
-        &mut playlists,
+        Stores {
+            manifest: &mut manifest,
+            albums: &mut albums,
+            playlists: &mut playlists,
+        },
         &[d],
         &synced,
         Ports {
@@ -154,9 +156,11 @@ fn download_mp3_embeds_no_sylt_when_synced_map_empty() {
     let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
     let outcome = pollster::block_on(execute(
         &plan,
-        &mut manifest,
-        &mut albums,
-        &mut playlists,
+        Stores {
+            manifest: &mut manifest,
+            albums: &mut albums,
+            playlists: &mut playlists,
+        },
         &[d],
         &HashMap::new(),
         Ports {

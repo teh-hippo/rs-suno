@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crate::auth::ClerkAuth;
 use crate::client::SunoClient;
-use crate::executor::{ExecOptions, ExecOutcome, Ports, execute};
+use crate::executor::{ExecOptions, ExecOutcome, Ports, Stores, execute};
 use crate::fs::Filesystem;
 use crate::hash::{art_hash, meta_hash};
 use crate::lineage::LineageContext;
@@ -291,9 +291,11 @@ pub(super) fn drive(
     let synced = std::collections::HashMap::new();
     pollster::block_on(execute(
         plan,
-        manifest,
-        &mut albums,
-        &mut playlists,
+        Stores {
+            manifest,
+            albums: &mut albums,
+            playlists: &mut playlists,
+        },
         desired,
         &synced,
         Ports {
