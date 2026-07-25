@@ -64,16 +64,20 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo test --workspace --all-features --target x86_64-pc-windows-msvc
-  # MSRV floor. The manifest declares rust-version = "1.96"; this leg keeps that
+  # MSRV floor. The manifest declares rust-version = "1.97"; this leg keeps that
   # promise honest by building the workspace on exactly that toolchain, so a
-  # newer-than-1.96 API slipping in is caught before it breaks a 1.96 consumer.
+  # newer-than-1.97 API slipping in is caught before it breaks a 1.97 consumer.
+  # The pin below and `rust-version` are deliberately the same literal string:
+  # when they drift, this leg silently stops testing the advertised floor. rustup
+  # resolves "1.97" to the newest 1.97.x, so the floor holds at minor granularity,
+  # which is how Cargo reads `rust-version`.
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.97"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
