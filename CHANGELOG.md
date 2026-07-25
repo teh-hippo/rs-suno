@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.4](https://github.com/teh-hippo/rs-suno/compare/v0.38.3...v0.38.4) (2026-07-25)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate clap to v4.6.4 ([84c65c1](https://github.com/teh-hippo/rs-suno/commit/84c65c146e98e8c14ab48fbd4abe77a5589d9987))
+
 ## [0.38.3](https://github.com/teh-hippo/rs-suno/compare/v0.38.2...v0.38.3) (2026-07-24)
 
 
