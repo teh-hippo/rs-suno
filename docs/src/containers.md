@@ -181,6 +181,33 @@ uses:
 - a host systemd service that starts the CT, runs `suno` with `pct exec`, and
   stops the CT afterwards.
 
+Create the container before attaching its mount points. The image ships a
+`/config` directory, and Proxmox cannot extract an OCI rootfs onto a path that a
+bind mount already occupies, so passing the config mount to `pct create` fails
+while the extractor sets ownership on that directory:
+
+```text
+Error while extracting OCI image: ... failed to set ownerships to
+uid=10001, gid=10001 for `/var/lib/lxc/<vmid>/rootfs/config`:
+Operation not permitted (os error 1)
+```
+
+Give `pct create` the rootfs and network only, then attach the mount points and
+override the entrypoint. Mount points are applied when the container starts
+rather than when it is created, so the order costs nothing:
+
+```bash
+pct create 106 local:vztmpl/rs-suno-0.40.0.tar \
+  --arch amd64 --ostype unmanaged --hostname rs-suno \
+  --memory 1024 --swap 256 --cores 2 \
+  --rootfs local-lvm:2 --unprivileged 1 \
+  --net0 name=eth0,bridge=vmbr0,ip=dhcp --onboot 0
+
+pct set 106 --mp0 /srv/suno/library,mp=/library,backup=0
+pct set 106 --mp1 /srv/suno/config,mp=/config,backup=0,ro=1
+pct set 106 --entrypoint "/bin/sleep infinity"
+```
+
 Running `suno` through `pct exec` preserves its exit code for the host service
 and monitoring. The CT should remain stopped between runs and should not be
 treated as an always-on network service.
@@ -196,10 +223,17 @@ Pull or import the new version, run `suno version`, and perform a dry run before
 changing the scheduled version:
 
 ```bash
-podman pull ghcr.io/teh-hippo/rs-suno:0.37.0
-podman run --rm ghcr.io/teh-hippo/rs-suno:0.37.0 version
+podman pull ghcr.io/teh-hippo/rs-suno:0.40.0
+podman run --rm ghcr.io/teh-hippo/rs-suno:0.40.0 version
 ```
 
 Pinning the exact version keeps unattended runs reproducible. The `latest` and
 minor-version tags are convenient for manual testing and controlled update
 workflows.
+
+On Proxmox, every durable thing lives on the `/library` and `/config` mount
+points, so the container's rootfs holds nothing worth keeping and an upgrade is
+a recreate: import the new image, recreate the container, and reattach the
+mounts as above. Keep the previous template and a copy of the container config
+until the first run has succeeded, which makes a rollback a recreate rather than
+a rebuild.
