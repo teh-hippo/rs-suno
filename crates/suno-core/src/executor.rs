@@ -64,7 +64,10 @@ mod lifecycle;
 mod stem;
 mod tag;
 
+use artifact::ArtifactRef;
 use classify::*;
+use lifecycle::{MoveSpec, PathGuard};
+use stem::StemRef;
 
 /// The shared Suno client behind an async mutex, so concurrent audio work can
 /// serialise its order-sensitive API calls (JWT refresh, adaptive limiter)
@@ -397,12 +400,19 @@ where
                     albums,
                     playlists,
                     prepared,
-                    &mut tracked_paths,
-                    &committed,
+                    &mut PathGuard {
+                        tracked_paths: &mut tracked_paths,
+                        committed: &committed,
+                    },
                 ),
-                Some(Ok(Prepared::Stem(prepared))) => {
-                    ctx.commit_stem(manifest, prepared, &mut tracked_paths, &committed)
-                }
+                Some(Ok(Prepared::Stem(prepared))) => ctx.commit_stem(
+                    manifest,
+                    prepared,
+                    &mut PathGuard {
+                        tracked_paths: &mut tracked_paths,
+                        committed: &committed,
+                    },
+                ),
                 Some(Err(fail)) => Err(fail),
                 // Buffered fan-out yields exactly one result per prepareable action.
                 #[allow(clippy::unreachable)]
@@ -415,8 +425,10 @@ where
                 manifest,
                 albums,
                 playlists,
-                &mut tracked_paths,
-                &committed,
+                &mut PathGuard {
+                    tracked_paths: &mut tracked_paths,
+                    committed: &committed,
+                },
             )
             .await
         };
@@ -673,7 +685,6 @@ where
     /// [`WriteStem`](Action::WriteStem) actions reach here only when their owning
     /// clip was NOT in the manifest at plan start (new clips); those for existing
     /// clips are prepared concurrently and commit through the stream path.
-    #[allow(clippy::too_many_arguments)]
     async fn apply(
         &self,
         client_lock: &ClientLock<'_, C>,
@@ -681,8 +692,7 @@ where
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
         playlists: &mut BTreeMap<String, PlaylistState>,
-        tracked_paths: &mut HashMap<String, u32>,
-        committed: &BTreeSet<String>,
+        guard: &mut PathGuard<'_>,
     ) -> Result<Effect, Fail> {
         match action {
             // Audio actions are prepared concurrently, never routed through apply().
@@ -738,8 +748,7 @@ where
                         owner_id: owner_id.clone(),
                         bytes,
                     },
-                    tracked_paths,
-                    committed,
+                    guard,
                 )
             }
             Action::DeleteArtifact {
@@ -759,14 +768,17 @@ where
                     manifest,
                     albums,
                     playlists,
-                    *kind,
-                    from,
-                    to,
-                    source_url,
-                    hash,
-                    owner_id,
-                    tracked_paths,
-                    committed,
+                    ArtifactRef {
+                        kind: *kind,
+                        owner_id,
+                    },
+                    MoveSpec {
+                        from,
+                        to,
+                        source_url,
+                        hash,
+                    },
+                    guard,
                 )
                 .await
             }
@@ -799,8 +811,7 @@ where
                         hash: hash.clone(),
                         bytes,
                     },
-                    tracked_paths,
-                    committed,
+                    guard,
                 )
             }
             Action::DeleteStem { clip_id, key, path } => {
@@ -819,16 +830,19 @@ where
                 self.move_stem(
                     client_lock,
                     manifest,
-                    clip_id,
-                    key,
-                    stem_id,
-                    from,
-                    to,
-                    source_url,
-                    *format,
-                    hash,
-                    tracked_paths,
-                    committed,
+                    StemRef {
+                        clip_id,
+                        key,
+                        stem_id,
+                        format: *format,
+                    },
+                    MoveSpec {
+                        from,
+                        to,
+                        source_url,
+                        hash,
+                    },
+                    guard,
                 )
                 .await
             }

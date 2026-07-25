@@ -1,5 +1,12 @@
-use super::lifecycle::Relocate;
+use super::lifecycle::{MoveSpec, PathGuard, Relocate};
 use super::*;
+
+/// Identifies one sidecar slot: which artifact kind, and the clip, album, or
+/// playlist that owns it. Mirrors the identity half of `Action::MoveArtifact`.
+pub(crate) struct ArtifactRef<'a> {
+    pub(crate) kind: ArtifactKind,
+    pub(crate) owner_id: &'a str,
+}
 
 impl<H, F, G, C> Ctx<'_, H, F, G, C>
 where
@@ -81,8 +88,7 @@ where
         albums: &mut BTreeMap<String, AlbumArt>,
         playlists: &mut BTreeMap<String, PlaylistState>,
         prepared: PreparedArtifact,
-        tracked_paths: &mut HashMap<String, u32>,
-        committed: &BTreeSet<String>,
+        guard: &mut PathGuard<'_>,
     ) -> Result<Effect, Fail> {
         let PreparedArtifact {
             kind,
@@ -106,14 +112,7 @@ where
                 .map(|s| s.path.clone())
         };
         self.write_verify(&owner_id, &path, &bytes)?;
-        self.remove_superseded(
-            &owner_id,
-            old_path.as_deref(),
-            &path,
-            tracked_paths,
-            committed,
-            "sidecar",
-        )?;
+        self.remove_superseded(&owner_id, old_path.as_deref(), &path, guard, "sidecar")?;
         if is_album_kind(kind) {
             set_album_artifact(
                 albums,
@@ -158,21 +157,22 @@ where
     /// placed a file there); otherwise, or if the rename fails, fresh bytes are
     /// fetched and [`commit_artifact`](Self::commit_artifact) runs the gated
     /// old-path cleanup, so a swap or co-reference is handled exactly as before.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn move_artifact(
         &self,
         manifest: &mut Manifest,
         albums: &mut BTreeMap<String, AlbumArt>,
         playlists: &mut BTreeMap<String, PlaylistState>,
-        kind: ArtifactKind,
-        from: &str,
-        to: &str,
-        source_url: &str,
-        hash: &str,
-        owner_id: &str,
-        tracked_paths: &mut HashMap<String, u32>,
-        committed: &BTreeSet<String>,
+        art: ArtifactRef<'_>,
+        mv: MoveSpec<'_>,
+        guard: &mut PathGuard<'_>,
     ) -> Result<Effect, Fail> {
+        let ArtifactRef { kind, owner_id } = art;
+        let MoveSpec {
+            from,
+            to,
+            source_url,
+            hash,
+        } = mv;
         // A per-clip sidecar needs its owning clip's audio present.
         if kind.is_per_clip() && manifest.get(owner_id).is_none() {
             return Ok(Effect::Skipped);
@@ -180,7 +180,7 @@ where
         // Try the in-place rename shared with `move_stem`; on a fall-through the
         // fetch-and-write fallback copies fresh bytes and runs the gated old-path
         // cleanup, so a swap or co-reference is handled exactly as before.
-        match self.try_relocate(from, to, tracked_paths, committed) {
+        match self.try_relocate(from, to, guard) {
             Relocate::Renamed => {
                 if let Some(entry) = manifest.entries.get_mut(owner_id) {
                     set_manifest_artifact(
@@ -214,8 +214,7 @@ where
                 owner_id: owner_id.to_owned(),
                 bytes,
             },
-            tracked_paths,
-            committed,
+            guard,
         )
     }
 
