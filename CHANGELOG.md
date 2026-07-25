@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.40.0](https://github.com/teh-hippo/rs-suno/compare/v0.39.0...v0.40.0) (2026-07-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* suno_core::execute and suno_core::build_desired take Stores and NamingScope respectively. Both new types are exported from the crate root.
+
+### Code Refactoring
+
+* bundle the executor stores and the naming scope ([52fc8c6](https://github.com/teh-hippo/rs-suno/commit/52fc8c603c1455bf93bfc89aac3fef54de26cba3))
+
 ## [0.39.0](https://github.com/teh-hippo/rs-suno/compare/v0.38.4...v0.39.0) (2026-07-25)
 
 
