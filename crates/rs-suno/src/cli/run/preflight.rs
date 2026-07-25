@@ -18,6 +18,8 @@ pub(super) async fn preflight(
         let resolved = if target.implicit {
             account::synthetic_config().resolve("default", None, env, flags)
         } else {
+            // A non-implicit target is only ever built from a config entry.
+            #[allow(clippy::expect_used)]
             config
                 .expect("non-implicit target has config")
                 .resolve(&target.label, None, env, flags)

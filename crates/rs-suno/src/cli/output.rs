@@ -96,6 +96,9 @@ impl<'a> ClipJson<'a> {
 }
 
 /// Serialise one clip as a single NDJSON line (no trailing newline).
+// `ClipJson` is a flat struct of string and numeric fields with no map keys and
+// no custom `Serialize`, so serialisation to a `String` has no failure mode.
+#[allow(clippy::expect_used)]
 pub fn lsjson_line(clip: &Clip) -> String {
     serde_json::to_string(&ClipJson::from_clip(clip)).expect("clip JSON serialises")
 }

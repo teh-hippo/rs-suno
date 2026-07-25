@@ -185,14 +185,17 @@ async fn run(
             let permit = Arc::clone(&sem)
                 .acquire_owned()
                 .await
-                .expect("semaphore closed");
+                .context("account concurrency semaphore closed")?;
             handles.push(std::thread::spawn(move || {
                 let _permit = permit;
-                task_output::capture_task_stderr();
+                // Built before stderr capture is installed so a build failure
+                // reports through the normal error path rather than into a
+                // buffer this thread would never flush.
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .expect("tokio runtime");
+                    .context("failed to build the per-account tokio runtime")?;
+                task_output::capture_task_stderr();
                 let flags = config_load::flag_overrides(&g, &a);
                 let result = rt.block_on(run_one(
                     verb,
