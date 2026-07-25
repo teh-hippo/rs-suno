@@ -169,6 +169,19 @@ impl ExecOutcome {
     }
 }
 
+/// The durable library state one run mutates: the per-clip manifest, plus the
+/// album and playlist art state that folder-level writes record against instead
+/// of the manifest.
+///
+/// Grouped for the same reason as [`Ports`] and [`ExecOptions`]: the three
+/// always travel together through the commit path, so one value threads them
+/// through rather than three adjacent `&mut` arguments.
+pub struct Stores<'a> {
+    pub manifest: &'a mut Manifest,
+    pub albums: &'a mut BTreeMap<String, AlbumArt>,
+    pub playlists: &'a mut BTreeMap<String, PlaylistState>,
+}
+
 /// The IO ports the executor drives, grouped so one value threads them through.
 ///
 /// `client` performs the authenticated WAV render flow. The rest are shared
@@ -225,12 +238,9 @@ pub struct Ports<'a, H, F, G, C> {
 /// run with the feature off) is tagged exactly as before. The synced `.lrc`
 /// sidecar itself is a generated artifact whose body the caller has already
 /// resolved into the plan, so it is written like any other text sidecar.
-#[allow(clippy::too_many_arguments)]
 pub async fn execute<H, F, G, C>(
     plan: &Plan,
-    manifest: &mut Manifest,
-    albums: &mut BTreeMap<String, AlbumArt>,
-    playlists: &mut BTreeMap<String, PlaylistState>,
+    stores: Stores<'_>,
     desired: &[Desired],
     synced: &HashMap<String, AlignedLyrics>,
     ports: Ports<'_, H, F, G, C>,
@@ -242,6 +252,11 @@ where
     G: Ffmpeg,
     C: Clock,
 {
+    let Stores {
+        manifest,
+        albums,
+        playlists,
+    } = stores;
     let Ports {
         client,
         http,

@@ -46,6 +46,23 @@ pub struct PlaylistInput<'a> {
     pub members: &'a [Clip],
 }
 
+/// How clip names are rendered: the template configuration plus the two
+/// archive-wide collision sets that disambiguate it.
+///
+/// The three always travel together — [`render_clip_names`] takes exactly this
+/// trio — and two of them are same-typed `&BTreeSet<String>` sitting adjacent,
+/// which is transposable in a positional call and would silently disambiguate
+/// the wrong axis.
+pub struct NamingScope<'a> {
+    pub config: &'a NamingConfig,
+    /// Root titles shared by more than one root; a clip under one is folded into
+    /// a `[{root_id8}]`-suffixed folder so two roots never share a directory.
+    pub colliding_albums: &'a BTreeSet<String>,
+    /// Clip ids sharing an `{id8}` with another distinct clip archive-wide; a
+    /// clip in the set gets a stable full-id suffix regardless of the batch (#356).
+    pub colliding_ids: &'a BTreeSet<String>,
+}
+
 /// Build the desired target state for a union of selected clips.
 ///
 /// Naming is rendered as a batch so collisions are disambiguated globally. Each
@@ -57,23 +74,22 @@ pub struct PlaylistInput<'a> {
 ///
 /// `contexts` supplies each clip's resolved [`LineageContext`] (album, lineage
 /// tags, change hash), falling back to a self-rooted context when absent.
-/// `colliding_albums` is the set of root titles shared by more than one root; a
-/// clip in that set is folded into a `[{root_id8}]`-suffixed folder so two roots
-/// never share one. `colliding_ids` is the file-name counterpart: the set of
-/// clip ids sharing an `{id8}` with another distinct clip archive-wide, so a
-/// clip in it gets a stable full-id suffix regardless of the batch (#356).
-/// `toggles` gates the per-song sidecars in `clip_artifacts`.
-#[allow(clippy::too_many_arguments)]
+/// `naming` carries the template configuration and the two archive-wide
+/// collision sets that disambiguate it (see [`NamingScope`]). `toggles` gates
+/// the per-song sidecars in `clip_artifacts`.
 pub fn build_desired(
     clips: &[&Clip],
     format: AudioFormat,
     modes_by_id: &HashMap<String, Vec<SourceMode>>,
     contexts: &HashMap<String, LineageContext>,
-    colliding_albums: &BTreeSet<String>,
-    colliding_ids: &BTreeSet<String>,
+    naming: NamingScope<'_>,
     toggles: ArtifactToggles,
-    naming: &NamingConfig,
 ) -> Vec<Desired> {
+    let NamingScope {
+        config: naming,
+        colliding_albums,
+        colliding_ids,
+    } = naming;
     let lineages: Vec<LineageContext> = clips
         .iter()
         .map(|clip| {

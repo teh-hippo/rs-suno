@@ -54,10 +54,12 @@ fn nested_manifest_path_reconciles_without_rename_or_delete() {
         AudioFormat::Flac,
         &modes,
         &HashMap::new(),
-        &BTreeSet::new(),
-        &BTreeSet::new(),
+        crate::desired::NamingScope {
+            config: &crate::naming::NamingConfig::default(),
+            colliding_albums: &BTreeSet::new(),
+            colliding_ids: &BTreeSet::new(),
+        },
         crate::desired::ArtifactToggles::default(),
-        &crate::naming::NamingConfig::default(),
     );
     let d = &desired[0];
 
@@ -777,10 +779,12 @@ fn removing_a_twin_yields_no_rename_for_the_kept_clip() {
         .into_iter()
         .collect(),
         &HashMap::new(),
-        &colliding_albums,
-        &colliding_ids,
+        crate::desired::NamingScope {
+            config: &crate::naming::NamingConfig::default(),
+            colliding_albums: &colliding_albums,
+            colliding_ids: &colliding_ids,
+        },
         crate::desired::ArtifactToggles::default(),
-        &crate::naming::NamingConfig::default(),
     );
     let a1 = run1.iter().find(|d| d.clip.id == "abcd1234-a").unwrap();
     assert!(
@@ -811,10 +815,12 @@ fn removing_a_twin_yields_no_rename_for_the_kept_clip() {
             .into_iter()
             .collect(),
         &HashMap::new(),
-        &colliding_albums,
-        &colliding_ids,
+        crate::desired::NamingScope {
+            config: &crate::naming::NamingConfig::default(),
+            colliding_albums: &colliding_albums,
+            colliding_ids: &colliding_ids,
+        },
         crate::desired::ArtifactToggles::default(),
-        &crate::naming::NamingConfig::default(),
     );
 
     let local: HashMap<String, LocalFile> = [("abcd1234-a".to_owned(), present(100))]

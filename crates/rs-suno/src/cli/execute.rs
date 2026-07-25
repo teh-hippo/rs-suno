@@ -103,7 +103,18 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
             clock: &clock,
         };
         tokio::select! {
-            out = suno_core::execute(&plan, &mut manifest, &mut store.albums, &mut store.playlists, desired, &synced, ports, &opts) => Some(out),
+            out = suno_core::execute(
+                &plan,
+                suno_core::Stores {
+                    manifest: &mut manifest,
+                    albums: &mut store.albums,
+                    playlists: &mut store.playlists,
+                },
+                desired,
+                &synced,
+                ports,
+                &opts,
+            ) => Some(out),
             () = signal::wait_for_signal() => None,
         }
     };

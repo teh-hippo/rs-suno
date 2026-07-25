@@ -65,10 +65,12 @@ fn build_desired_uses_supplied_lineage_context() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &contexts,
-        &no_collisions(),
-        &no_collisions(),
+        NamingScope {
+            config: &NamingConfig::default(),
+            colliding_albums: &no_collisions(),
+            colliding_ids: &no_collisions(),
+        },
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert!(
         desired[0].path.contains("/Original/"),
@@ -136,10 +138,12 @@ fn lineage_is_stable_when_a_later_resolution_fails() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &contexts_of(&store),
-        &store.colliding_root_titles(),
-        &store.colliding_clip_ids(),
+        NamingScope {
+            config: &NamingConfig::default(),
+            colliding_albums: &store.colliding_root_titles(),
+            colliding_ids: &store.colliding_clip_ids(),
+        },
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     let child1 = cycle1.iter().find(|d| d.clip.id == "child-remix").unwrap();
     assert!(
@@ -153,10 +157,12 @@ fn lineage_is_stable_when_a_later_resolution_fails() {
         AudioFormat::Flac,
         &modes_for(&clips, SourceMode::Mirror),
         &contexts_of(&store),
-        &store.colliding_root_titles(),
-        &store.colliding_clip_ids(),
+        NamingScope {
+            config: &NamingConfig::default(),
+            colliding_albums: &store.colliding_root_titles(),
+            colliding_ids: &store.colliding_clip_ids(),
+        },
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     for (a, b) in cycle1.iter().zip(&cycle2) {
         assert_eq!(a.path, b.path, "album path drifted for {}", a.clip.id);
@@ -297,10 +303,12 @@ fn build_desired_one_pass_disambiguates_and_stamps_modes() {
         AudioFormat::Flac,
         &modes,
         &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        NamingScope {
+            config: &NamingConfig::default(),
+            colliding_albums: &no_collisions(),
+            colliding_ids: &no_collisions(),
+        },
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     assert_eq!(desired.len(), 2);
     assert_ne!(desired[0].path, desired[1].path);
@@ -323,10 +331,12 @@ fn build_desired_respects_custom_naming_config() {
         AudioFormat::Flac,
         &HashMap::from([("abcdefgh-1234".to_owned(), vec![SourceMode::Mirror])]),
         &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        NamingScope {
+            config: &custom,
+            colliding_albums: &no_collisions(),
+            colliding_ids: &no_collisions(),
+        },
         ArtifactToggles::default(),
-        &custom,
     );
     assert!(
         desired[0].path.starts_with("Song A/"),
@@ -381,10 +391,12 @@ fn id8_twin_path_is_stable_when_a_twin_leaves_the_selection() {
         AudioFormat::Flac,
         &modes_for(&both, SourceMode::Mirror),
         &no_contexts(),
-        &store.colliding_root_titles(),
-        &colliding_ids,
+        NamingScope {
+            config: &NamingConfig::default(),
+            colliding_albums: &store.colliding_root_titles(),
+            colliding_ids: &colliding_ids,
+        },
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     let a_with_twin = with_twin
         .iter()
@@ -402,10 +414,12 @@ fn id8_twin_path_is_stable_when_a_twin_leaves_the_selection() {
         AudioFormat::Flac,
         &modes_for(&alone, SourceMode::Mirror),
         &no_contexts(),
-        &store.colliding_root_titles(),
-        &colliding_ids,
+        NamingScope {
+            config: &NamingConfig::default(),
+            colliding_albums: &store.colliding_root_titles(),
+            colliding_ids: &colliding_ids,
+        },
         ArtifactToggles::default(),
-        &NamingConfig::default(),
     );
     let a_alone = without_twin
         .iter()

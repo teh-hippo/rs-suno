@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
     AlbumArt, ArtifactToggles, ClerkAuth, Config, FlagOverrides, LineageContext, NamingConfig,
-    OwnerGate, PlaylistState, ResolveOpts, SourceMode, SunoClient, adopt_decision,
+    NamingScope, OwnerGate, PlaylistState, ResolveOpts, SourceMode, SunoClient, adopt_decision,
     adoption_enumerated, album_desired, animated_covers_flag_overridden, assign_track_numbers,
     build_desired, build_modes_by_id, build_scoped_playlist_desired, clip_stems, deletion_allowed,
     library_authoritative, narrows_downloads, owner_gate, resolve_lead_ids, resolve_roots,
@@ -718,10 +718,12 @@ mod tests {
             suno_core::AudioFormat::Flac,
             &modes,
             &HashMap::new(),
-            &BTreeSet::new(),
-            &BTreeSet::new(),
+            NamingScope {
+                config: &suno_core::NamingConfig::default(),
+                colliding_albums: &BTreeSet::new(),
+                colliding_ids: &BTreeSet::new(),
+            },
             ArtifactToggles::default(),
-            &suno_core::NamingConfig::default(),
         );
 
         // Manifest: the three known clips plus a playlist-exclusive orphan that is

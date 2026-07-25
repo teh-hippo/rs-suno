@@ -134,9 +134,11 @@ fn run_full<G: Ffmpeg>(
     let synced = HashMap::new();
     pollster::block_on(execute(
         plan,
-        manifest,
-        albums,
-        playlists,
+        Stores {
+            manifest,
+            albums,
+            playlists,
+        },
         desired,
         &synced,
         Ports {
@@ -167,9 +169,11 @@ fn run_with_synced<G: Ffmpeg>(
     let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
     pollster::block_on(execute(
         plan,
-        manifest,
-        &mut albums,
-        &mut playlists,
+        Stores {
+            manifest,
+            albums: &mut albums,
+            playlists: &mut playlists,
+        },
         desired,
         synced,
         Ports {

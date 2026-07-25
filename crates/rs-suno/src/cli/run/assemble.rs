@@ -104,8 +104,15 @@ pub(super) async fn assemble(
         settings.format,
         &modes_by_id,
         &contexts,
-        &colliding_albums,
-        &colliding_ids,
+        NamingScope {
+            config: &NamingConfig {
+                template: settings.naming_template.clone(),
+                character_set: settings.character_set,
+                ..NamingConfig::default()
+            },
+            colliding_albums: &colliding_albums,
+            colliding_ids: &colliding_ids,
+        },
         ArtifactToggles {
             animated_covers: settings.animated_covers,
             details: settings.details_sidecar,
@@ -113,11 +120,6 @@ pub(super) async fn assemble(
             lrc: settings.lrc_sidecar,
             video: settings.video_mp4,
             webp: settings.animated_cover_webp,
-        },
-        &NamingConfig {
-            template: settings.naming_template.clone(),
-            character_set: settings.character_set,
-            ..NamingConfig::default()
         },
     );
     // Stems (#100): existing stems are a per-clip keyed set that needs a network

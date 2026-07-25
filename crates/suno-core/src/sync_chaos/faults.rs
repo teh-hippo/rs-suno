@@ -17,7 +17,7 @@ use super::harness::{
 };
 use crate::auth::ClerkAuth;
 use crate::client::SunoClient;
-use crate::executor::{ExecOptions, ExecOutcome, Ports, execute};
+use crate::executor::{ExecOptions, ExecOutcome, Ports, Stores, execute};
 use crate::manifest::Manifest;
 use crate::reconcile::{Desired, Plan, reconcile};
 use crate::testutil::{ChaosHttp, MemFs, Outcome, RecordingClock, StubFfmpeg};
@@ -52,9 +52,11 @@ fn drive_capturing(
     let synced = std::collections::HashMap::new();
     let outcome = pollster::block_on(execute(
         plan,
-        manifest,
-        &mut albums,
-        &mut playlists,
+        Stores {
+            manifest,
+            albums: &mut albums,
+            playlists: &mut playlists,
+        },
         desired,
         &synced,
         Ports {

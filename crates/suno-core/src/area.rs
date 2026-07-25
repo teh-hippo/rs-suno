@@ -284,7 +284,7 @@ mod tests {
     use super::*;
     use crate::{
         Action, ArtifactToggles, AudioFormat, LocalFile, Manifest, ManifestEntry, NamingConfig,
-        build_desired, narrows_downloads, reconcile,
+        NamingScope, build_desired, narrows_downloads, reconcile,
     };
 
     fn tclip(id: &str) -> Clip {
@@ -605,10 +605,12 @@ mod tests {
             AudioFormat::Flac,
             &modes,
             &HashMap::new(),
-            &BTreeSet::new(),
-            &BTreeSet::new(),
+            NamingScope {
+                config: &NamingConfig::default(),
+                colliding_albums: &BTreeSet::new(),
+                colliding_ids: &BTreeSet::new(),
+            },
             ArtifactToggles::default(),
-            &NamingConfig::default(),
         );
 
         let mut manifest = Manifest::new();
@@ -743,10 +745,12 @@ mod tests {
             AudioFormat::Flac,
             &modes,
             &HashMap::new(),
-            &BTreeSet::new(),
-            &BTreeSet::new(),
+            NamingScope {
+                config: &NamingConfig::default(),
+                colliding_albums: &BTreeSet::new(),
+                colliding_ids: &BTreeSet::new(),
+            },
             ArtifactToggles::default(),
-            &NamingConfig::default(),
         )
     }
 

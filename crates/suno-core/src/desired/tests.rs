@@ -49,10 +49,12 @@ fn desired_of(
         format,
         &modes_for(clips, mode),
         &no_contexts(),
-        &no_collisions(),
-        &no_collisions(),
+        NamingScope {
+            config: &NamingConfig::default(),
+            colliding_albums: &no_collisions(),
+            colliding_ids: &no_collisions(),
+        },
         toggles,
-        &NamingConfig::default(),
     )
 }
 

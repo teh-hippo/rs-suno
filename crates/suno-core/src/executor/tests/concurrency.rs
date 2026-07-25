@@ -134,9 +134,11 @@ fn run_gated_fs(
     let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
     pollster::block_on(execute(
         plan,
-        manifest,
-        &mut albums,
-        &mut playlists,
+        Stores {
+            manifest,
+            albums: &mut albums,
+            playlists: &mut playlists,
+        },
         desired,
         &HashMap::new(),
         Ports {
@@ -342,9 +344,11 @@ fn limiter_records_a_rate_limit_under_concurrent_calls() {
 
     let outcome = pollster::block_on(execute(
         &plan,
-        &mut manifest,
-        &mut albums,
-        &mut playlists,
+        Stores {
+            manifest: &mut manifest,
+            albums: &mut albums,
+            playlists: &mut playlists,
+        },
         &desireds,
         &HashMap::new(),
         Ports {
@@ -649,9 +653,11 @@ fn rendered_payloads_in_memory_stay_bounded_by_concurrency() {
 
     let outcome = pollster::block_on(execute(
         &plan,
-        &mut manifest,
-        &mut albums,
-        &mut playlists,
+        Stores {
+            manifest: &mut manifest,
+            albums: &mut albums,
+            playlists: &mut playlists,
+        },
         &desireds,
         &HashMap::new(),
         Ports {
@@ -920,9 +926,11 @@ fn both_folder_covers_fetch_video_cover_once_under_concurrency() {
     let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
     pollster::block_on(execute(
         &plan,
-        &mut manifest,
-        &mut albums,
-        &mut playlists,
+        Stores {
+            manifest: &mut manifest,
+            albums: &mut albums,
+            playlists: &mut playlists,
+        },
         &desireds,
         &HashMap::new(),
         Ports {
