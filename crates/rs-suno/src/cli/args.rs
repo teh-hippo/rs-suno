@@ -291,7 +291,8 @@ pub struct SyncArgs {
     #[arg(long, value_enum, value_name = "FORMAT")]
     pub stem_format: Option<StemFmt>,
     /// Relative path template for naming downloaded files.
-    /// Placeholders: {creator}, {handle}, {album}, {title}, {id}, {id8}, {root_id8}.
+    /// Placeholders: {creator}, {handle}, {album}, {title}, {id}, {id8},
+    /// {root_id8}, {track} (album track number), {track2} (zero-padded).
     #[arg(long, value_name = "TEMPLATE")]
     pub naming_template: Option<String>,
     /// Character set for filename sanitisation: unicode or ascii.
