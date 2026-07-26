@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.1](https://github.com/teh-hippo/rs-suno/compare/v0.40.0...v0.40.1) (2026-07-26)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate base64 to 0.23.0 ([bcf0c23](https://github.com/teh-hippo/rs-suno/commit/bcf0c2348e9fbd649df35cc2463ae7dff3c929ab))
+
 ## [0.40.0](https://github.com/teh-hippo/rs-suno/compare/v0.39.0...v0.40.0) (2026-07-25)
 
 
