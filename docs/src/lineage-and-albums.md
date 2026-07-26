@@ -49,6 +49,12 @@ order, and it also prefixes the file name (`07 - …`) via the default template'
 album is numbered `1` of `1` by default; set `number_singletons = false` to
 leave lone songs unnumbered (and unprefixed).
 
+Because the number is part of the file name, a newly generated sibling can
+renumber an album and rename every file in it. That is harmless on disk, and the
+`.m3u8` sidecars are rewritten to match, but it can confuse a media server that
+tracks playlist membership by file. See
+[media servers](playlists.md#media-servers) for a stable-naming recipe.
+
 ### Setting a lead track
 
 Sometimes the version you think of as "song 1" was not made first, for example

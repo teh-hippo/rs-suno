@@ -86,7 +86,7 @@ configured `root` is used.
 | `--video-mp4` | off | Also download the standalone `.mp4` music video beside each song, when available. |
 | `--download-stems` | off | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder. Download-only: it lists and downloads existing stems and never triggers separation or spends credits. |
 | `--stem-format <wav\|mp3>` | `wav` | Container for downloaded stems. Stems are stored RAW and are never transcoded to FLAC. |
-| `--naming-template <TEMPLATE>` | `{creator}/{album}/{creator}-{title} [{id8}]` | Relative path template. Placeholders: `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, `{root_id8}`. |
+| `--naming-template <TEMPLATE>` | `{creator}/{album}/{track2} - {creator}-{title} [{id8}]` | Relative path template. Placeholders: `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, `{root_id8}`, `{track}` (album track number, e.g. `7`), `{track2}` (zero-padded to two digits, e.g. `07`). |
 | `--character-set <unicode\|ascii>` | `unicode` | Character set for filename sanitisation. |
 
 When `sync` would delete files and `--yes` was not passed, it lists them and
