@@ -1,21 +1,26 @@
 name: "Copilot Setup Steps"
 
+# Validate the setup steps when they change, and allow manual runs from the
+# Actions tab. Cargo.lock and Cargo.toml are deliberately excluded: ci.yml
+# already runs `cargo check --locked` on every push and pull request, so
+# listing them here only duplicates that work on every Renovate PR.
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - .github/copilot/settings.json
       - .github/workflows/copilot-setup-steps.yml
       - .mise.toml
-      - Cargo.lock
-      - Cargo.toml
   pull_request:
     paths:
       - .github/copilot/settings.json
       - .github/workflows/copilot-setup-steps.yml
       - .mise.toml
-      - Cargo.lock
-      - Cargo.toml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   copilot-setup-steps:
