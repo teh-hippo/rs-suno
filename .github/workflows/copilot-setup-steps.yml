@@ -11,12 +11,12 @@ on:
     paths:
       - .github/copilot/settings.json
       - .github/workflows/copilot-setup-steps.yml
-      - .mise.toml
+      - mise.toml
   pull_request:
     paths:
       - .github/copilot/settings.json
       - .github/workflows/copilot-setup-steps.yml
-      - .mise.toml
+      - mise.toml
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
