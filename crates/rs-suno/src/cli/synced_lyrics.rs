@@ -1,5 +1,5 @@
-//! Synced-lyrics orchestration: fetch Suno's alignment, fill each clip's `.lrc`,
-//! and record the resolution markers.
+//! Lyric orchestration: fetch Suno's alignment for baseline audio metadata and
+//! optional sidecars, then record the durable sidecar markers.
 //!
 //! Pure decisions (which clips to fetch, how to map a result onto the desired
 //! artifact) live in `suno-core`; this module is only the IO glue. A fetch
@@ -20,47 +20,45 @@ use crate::http::ReqwestHttp;
 /// NO clip id, request URL, or error detail: a reqwest transport error's text
 /// can include the full `/api/gen/{id}/...` URL, so the raw error is never
 /// interpolated into any message (the clip id must not leak).
-const SYNCED_LYRICS_FETCH_WARNING: &str = "could not fetch synced lyrics for a clip; its synced lyrics are skipped this run and retried next run";
+const LYRICS_FETCH_WARNING: &str = "could not fetch lyrics for one or more clips; existing tags are unchanged, new audio may omit lyrics, and the lookup will be retried next run";
 
-/// Resolve this run's synced lyrics: fetch Suno's word/line alignment for the
-/// clips that need it, fill each clip's `.lrc` artifact with its content-hashed
-/// body, and return the per-clip alignment (for the executor's `SYLT`/plain
-/// tags) plus the resolution checks to record after the writes land.
+/// Resolve this run's lyrics: fetch Suno's word/line alignment for clips missing
+/// plain embedded lyrics or needing a sidecar, fill generated sidecar bodies,
+/// and return the alignment plus checks to record after writes land.
 ///
 /// The pure [`synced_lyrics_targets`](suno_core::synced_lyrics_targets) decides
-/// which clips to fetch (empty when the feature is off, and skipping clips
-/// already resolved at this render version), and [`apply_synced_lrc`](suno_core::apply_synced_lrc)
-/// maps each result onto the desired artifact; this function is only the IO glue.
-/// A fetch failure keeps the clip's existing `.lrc`/tags untouched (no downgrade)
-/// and is retried next run; its warning never prints the clip id, URL, or token.
+/// which clips to fetch, and
+/// [`apply_synced_lrc`](suno_core::apply_synced_lrc) maps each result onto audio
+/// intent and desired artifacts. A failure keeps existing tags and sidecars
+/// untouched and is retried next run; its warning prints no id, URL, or token.
 pub(crate) async fn resolve_synced_lyrics(
     desired: &mut [suno_core::Desired],
     manifest: &Manifest,
     client: &SunoClient<TokioClock>,
     http: &ReqwestHttp,
-    enabled: bool,
     verbosity: i8,
     concurrency: u32,
 ) -> (HashMap<String, AlignedLyrics>, Vec<suno_core::PendingCheck>) {
     let mut synced: HashMap<String, AlignedLyrics> = HashMap::new();
-    let targets =
-        suno_core::synced_lyrics_targets(desired, manifest, wallclock::now_secs(), enabled);
+    let targets = suno_core::synced_lyrics_targets(desired, manifest, wallclock::now_secs());
     let fetched = stream::iter(targets.iter())
         .map(|id| async move { (id.clone(), client.aligned_lyrics(http, id).await) })
         .buffered(concurrency.max(1) as usize)
         .collect::<Vec<_>>()
         .await;
+    let mut failed = 0usize;
     for (id, result) in fetched {
         match result {
             Ok(aligned) => {
                 synced.insert(id, aligned);
             }
             Err(_) => {
-                if verbosity >= -1 {
-                    eprint_t!("warning: {SYNCED_LYRICS_FETCH_WARNING}");
-                }
+                failed += 1;
             }
         }
+    }
+    if failed > 0 && verbosity >= -1 {
+        eprint_t!("warning: {LYRICS_FETCH_WARNING} ({failed} failed)");
     }
     let pending = suno_core::apply_synced_lrc(desired, manifest, &synced);
     (synced, pending)
@@ -68,12 +66,10 @@ pub(crate) async fn resolve_synced_lyrics(
 
 /// Record the synced-lyrics resolution markers after this run's sidecar writes.
 ///
-/// An instrumental (empty) clip is marked unconditionally so it is not re-fetched
-/// every run. A clip that produced one or more bodies is marked only once EVERY
-/// slot its fetch wrote (the `.lrc` and/or the `.lyrics.txt`) reflects that body's
-/// hash, so a partial write (one slot ok, another failed or interrupted) leaves
-/// no marker and is re-resolved next run rather than skipped. The missing slot
-/// also re-targets the clip, so the two guards agree.
+/// An empty result is marked unconditionally so a no-fetch preview knows the
+/// last executing run found no lyrics. Executing runs still probe a missing
+/// plain embed every time. A clip that produced sidecar bodies is marked only
+/// once every slot reflects the expected hash, so a partial write is retried.
 pub(crate) fn record_synced_lyrics_checks(
     manifest: &mut Manifest,
     pending: &[suno_core::PendingCheck],
@@ -122,7 +118,7 @@ mod tests {
         // The fetch-failure warning must not carry the request URL or clip id: a
         // reqwest transport error's text can include `/api/gen/{id}/...`, so the
         // raw error is never interpolated. This guards that redaction.
-        let msg = SYNCED_LYRICS_FETCH_WARNING;
+        let msg = LYRICS_FETCH_WARNING;
         assert!(!msg.contains("/api/gen/"));
         assert!(!msg.contains("aligned_lyrics"));
         assert!(!msg.contains('{'), "no interpolation placeholder");
@@ -158,6 +154,24 @@ mod tests {
             "the marker persists off the `.lyrics.txt` slot"
         );
         assert!(check.unwrap().timed);
+    }
+
+    #[test]
+    fn embed_only_empty_probe_records_a_preview_marker() {
+        let mut manifest = Manifest::new();
+        manifest.insert("a", ManifestEntry::default());
+        let pending = vec![PendingCheck {
+            clip_id: "a".to_string(),
+            empty: true,
+            timed: false,
+            written_slots: Vec::new(),
+        }];
+
+        record_synced_lyrics_checks(&mut manifest, &pending);
+
+        let check = manifest.get("a").unwrap().synced_lyrics.as_ref().unwrap();
+        assert!(check.empty);
+        assert!(!check.timed);
     }
 
     #[test]

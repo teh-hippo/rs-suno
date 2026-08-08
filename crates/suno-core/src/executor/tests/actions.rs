@@ -499,6 +499,10 @@ fn backfill_refetches_and_embeds_uslt_and_sylt() {
     );
     let mut d = desired(c.clone(), AudioFormat::Mp3);
     d.embedded_lyrics_hash = "L".to_owned();
+    let opts = ExecOptions {
+        embed_synced_lyrics: true,
+        ..ExecOptions::default()
+    };
 
     let outcome = run_with_synced(
         &retag_plan(&c, "bk.mp3"),
@@ -509,7 +513,7 @@ fn backfill_refetches_and_embeds_uslt_and_sylt() {
         &fs,
         &StubFfmpeg::flac(),
         &RecordingClock::new(),
-        &ExecOptions::default(),
+        &opts,
     );
 
     assert_eq!(outcome.retagged, 1, "exactly one back-fill retag");
@@ -525,6 +529,123 @@ fn backfill_refetches_and_embeds_uslt_and_sylt() {
         manifest.get("bk").unwrap().embedded_lyrics_hash,
         "L",
         "the sentinel is stamped so reconcile settles"
+    );
+}
+
+#[test]
+fn missing_mp3_uslt_backfills_without_any_sidecar() {
+    let c = clip("plain");
+    let meta = TrackMetadata::from_clip(&c, &LineageContext::own_root(&c));
+    let existing = tag_mp3(b"audio", &meta, None, None).unwrap();
+    let fs = MemFs::new().with_file("plain.mp3", existing.clone());
+
+    let mut manifest = Manifest::new();
+    let mut old = backfill_entry("plain.mp3", AudioFormat::Mp3, "", existing.len() as u64);
+    old.lrc = None;
+    manifest.insert("plain", old);
+    let mut d = desired(c.clone(), AudioFormat::Mp3);
+    assert!(d.artifacts.is_empty());
+    let synced = synced_of("plain");
+    crate::synced::apply_synced_lrc(std::slice::from_mut(&mut d), &manifest, &synced);
+    assert_eq!(
+        d.embedded_lyrics_hash,
+        crate::content_hash(&backfill_alignment().plain_text())
+    );
+
+    let outcome = run_with_synced(
+        &retag_plan(&c, "plain.mp3"),
+        &mut manifest,
+        &[d],
+        &synced,
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &ExecOptions::default(),
+    );
+
+    assert_eq!(outcome.retagged, 1);
+    let written = fs.read_file("plain.mp3").unwrap();
+    let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
+    assert_eq!(
+        tag.lyrics().next().map(|frame| frame.text.as_str()),
+        Some(backfill_alignment().plain_text().as_str())
+    );
+    assert_eq!(tag.synchronised_lyrics().count(), 0);
+    assert!(
+        !manifest
+            .get("plain")
+            .unwrap()
+            .embedded_lyrics_hash
+            .is_empty()
+    );
+}
+
+#[test]
+fn enabling_lrc_backfills_sylt_into_existing_mp3() {
+    let c = clip("timed");
+    let alignment = backfill_alignment();
+    let mut meta = TrackMetadata::from_clip(&c, &LineageContext::own_root(&c));
+    meta.lyrics = alignment.plain_text();
+    let existing = tag_mp3(b"audio", &meta, None, None).unwrap();
+    let fs = MemFs::new().with_file("timed.mp3", existing.clone());
+
+    let mut manifest = Manifest::new();
+    let mut old = backfill_entry("timed.mp3", AudioFormat::Mp3, "", existing.len() as u64);
+    old.lrc = None;
+    old.embedded_lyrics_hash = crate::content_hash(&alignment.plain_text());
+    manifest.insert("timed", old);
+
+    let mut d = desired(c.clone(), AudioFormat::Mp3);
+    d.artifacts.push(DesiredArtifact {
+        kind: ArtifactKind::Lrc,
+        path: "timed.lrc".to_owned(),
+        source_url: String::new(),
+        hash: crate::synced_lrc_source_hash("timed"),
+        content: None,
+    });
+    let synced = HashMap::from([("timed".to_owned(), alignment)]);
+    crate::synced::apply_synced_lrc(std::slice::from_mut(&mut d), &manifest, &synced);
+    assert!(!d.embedded_timed_lyrics_hash.is_empty());
+
+    let local = HashMap::from([(
+        "timed".to_owned(),
+        crate::reconcile::LocalFile {
+            exists: true,
+            size: existing.len() as u64,
+        },
+    )]);
+    let plan =
+        crate::reconcile::reconcile(&manifest, std::slice::from_ref(&d), &local, &mirror_ok());
+    assert_eq!(plan.retags(), 1);
+    assert_eq!(plan.artifact_writes(), 1);
+
+    let opts = ExecOptions {
+        embed_synced_lyrics: true,
+        ..ExecOptions::default()
+    };
+    let outcome = run_with_synced(
+        &plan,
+        &mut manifest,
+        &[d],
+        &synced,
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &opts,
+    );
+
+    assert_eq!(outcome.retagged, 1);
+    let written = fs.read_file("timed.mp3").unwrap();
+    let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
+    assert_eq!(tag.synchronised_lyrics().count(), 1);
+    assert!(
+        !manifest
+            .get("timed")
+            .unwrap()
+            .embedded_timed_lyrics_hash
+            .is_empty()
     );
 }
 
@@ -584,6 +705,10 @@ fn backfill_wav_embeds_uslt_and_sylt() {
     );
     let mut d = desired(c.clone(), AudioFormat::Wav);
     d.embedded_lyrics_hash = "L".to_owned();
+    let opts = ExecOptions {
+        embed_synced_lyrics: true,
+        ..ExecOptions::default()
+    };
 
     let outcome = run_with_synced(
         &retag_plan(&c, "bw.wav"),
@@ -594,7 +719,7 @@ fn backfill_wav_embeds_uslt_and_sylt() {
         &fs,
         &StubFfmpeg::flac(),
         &RecordingClock::new(),
-        &ExecOptions::default(),
+        &opts,
     );
 
     assert_eq!(outcome.retagged, 1);
@@ -759,19 +884,16 @@ fn backfill_fetch_failure_no_retag_no_stamp_retries() {
     );
 
     // Still a fetch target next run, so the back-fill is retried, not masked.
-    let targets =
-        crate::synced::synced_lyrics_targets(std::slice::from_ref(&d), &manifest, 2_000, true);
+    let targets = crate::synced::synced_lyrics_targets(std::slice::from_ref(&d), &manifest, 2_000);
     assert!(targets.contains("bx"), "the back-fill is retried next run");
 }
 
 #[test]
 fn lrc_disabled_after_embed_carries_forward_and_does_not_retag() {
     // Tripwire for the carry-forward-above-`continue` ordering (#354 loop-freedom).
-    // A clip previously embedded (embedded_lyrics_hash = "H") whose `.lrc` sidecar
-    // is now OFF (no desired `.lrc` artifact) and which is not fetched this run must
-    // keep its persisted sentinel and not retag. If the baseline in `apply_synced_lrc`
-    // moved below the `.lrc`-artifact `continue`, the sentinel would drift to the
-    // default and this clip would spuriously retag with an empty synced map.
+    // A clip previously embedded (embedded_lyrics_hash = "H") whose `.lrc`
+    // sidecar is now off and which is not fetched this run must keep its
+    // persisted sentinel and not retag.
     let c = clip("off");
     let mut manifest = Manifest::new();
     let mut e = backfill_entry("off.flac", AudioFormat::Flac, "H", 100);
@@ -792,8 +914,7 @@ fn lrc_disabled_after_embed_carries_forward_and_does_not_retag() {
 
     // Never a fetch target (no desired `.lrc`) and never a retag (sentinels match).
     assert!(
-        crate::synced::synced_lyrics_targets(std::slice::from_ref(&d), &manifest, 2_000, true)
-            .is_empty(),
+        crate::synced::synced_lyrics_targets(std::slice::from_ref(&d), &manifest, 2_000).is_empty(),
         "a clip with no desired `.lrc` is never fetched"
     );
     let plan = crate::reconcile::reconcile(
@@ -838,6 +959,10 @@ fn reformat_and_retitle_with_stale_embed_backfills() {
         }],
     };
     let http = ScriptedHttp::new().route("gg.mp3", Reply::ok(b"mp3-body".to_vec()));
+    let opts = ExecOptions {
+        embed_synced_lyrics: true,
+        ..ExecOptions::default()
+    };
 
     let outcome = run_with_synced(
         &plan,
@@ -848,7 +973,7 @@ fn reformat_and_retitle_with_stale_embed_backfills() {
         &fs,
         &StubFfmpeg::flac(),
         &RecordingClock::new(),
-        &ExecOptions::default(),
+        &opts,
     );
 
     assert_eq!(outcome.reformatted, 1);
@@ -868,10 +993,9 @@ fn reformat_and_retitle_with_stale_embed_backfills() {
 
 #[test]
 fn reformat_on_migrated_clip_refetches_and_reembeds() {
-    // Residual B: an already-migrated clip (embed == lrc.hash == H, FLAC) with a
-    // pending FLAC->MP3 reformat and no other drift. The reformat drops the embed
-    // as it re-encodes, so the clip must become a fetch target and re-embed; the
-    // sentinel is (re)stamped, not silently dropped.
+    // An already-migrated FLAC with both a plain embed fingerprint and an `.lrc`
+    // has a pending FLAC->MP3 reformat. Re-encoding drops the old container, so
+    // the clip must become a fetch target and recreate the lyrics.
     let c = clip("mig");
     let fs = MemFs::new().with_file("mig.flac", b"OLD-FLAC".to_vec());
 
@@ -899,7 +1023,7 @@ fn reformat_on_migrated_clip_refetches_and_reembeds() {
 
     // The reformat re-embed trigger makes the migrated clip a fetch target.
     assert!(
-        crate::synced::synced_lyrics_targets(std::slice::from_ref(&d), &manifest, 2_000, true)
+        crate::synced::synced_lyrics_targets(std::slice::from_ref(&d), &manifest, 2_000)
             .contains("mig"),
         "a pending reformat re-embeds a migrated clip"
     );
@@ -914,6 +1038,10 @@ fn reformat_on_migrated_clip_refetches_and_reembeds() {
         }],
     };
     let http = ScriptedHttp::new().route("mig.mp3", Reply::ok(b"mp3-body".to_vec()));
+    let opts = ExecOptions {
+        embed_synced_lyrics: true,
+        ..ExecOptions::default()
+    };
 
     let outcome = run_with_synced(
         &plan,
@@ -924,7 +1052,7 @@ fn reformat_on_migrated_clip_refetches_and_reembeds() {
         &fs,
         &StubFfmpeg::flac(),
         &RecordingClock::new(),
-        &ExecOptions::default(),
+        &opts,
     );
 
     assert_eq!(outcome.reformatted, 1);
@@ -952,6 +1080,7 @@ fn migrated_clip_without_reformat_is_not_a_target_and_never_retags() {
     let mut manifest = Manifest::new();
     let mut migrated = backfill_entry("st.mp3", AudioFormat::Mp3, "H", 100);
     migrated.embedded_lyrics_hash = "H".to_owned();
+    migrated.embedded_timed_lyrics_hash = "H".to_owned();
     migrated.synced_lyrics = Some(crate::manifest::SyncedLyricsCheck {
         version: crate::hash::SYNCED_LRC_VERSION,
         checked_unix: 1_000,
@@ -962,6 +1091,7 @@ fn migrated_clip_without_reformat_is_not_a_target_and_never_retags() {
 
     let mut d = desired(c.clone(), AudioFormat::Mp3);
     d.embedded_lyrics_hash = "H".to_owned();
+    d.embedded_timed_lyrics_hash = "H".to_owned();
     d.artifacts = vec![DesiredArtifact {
         kind: ArtifactKind::Lrc,
         path: "st.mp3.lrc".to_owned(),
@@ -971,8 +1101,7 @@ fn migrated_clip_without_reformat_is_not_a_target_and_never_retags() {
     }];
 
     assert!(
-        crate::synced::synced_lyrics_targets(std::slice::from_ref(&d), &manifest, 2_000, true)
-            .is_empty(),
+        crate::synced::synced_lyrics_targets(std::slice::from_ref(&d), &manifest, 2_000).is_empty(),
         "no reformat, no back-fill -> no fetch"
     );
     let plan = crate::reconcile::reconcile(

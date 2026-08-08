@@ -225,6 +225,7 @@ where
         format: AudioFormat,
     ) -> Result<Vec<u8>, Fail> {
         let (meta, synced) = self.track_meta(clip, lineage);
+        let timed = self.opts.embed_synced_lyrics.then_some(synced).flatten();
         match format {
             AudioFormat::Mp3 => {
                 let url = clip.mp3_url();
@@ -237,7 +238,7 @@ where
                     &audio,
                     &meta,
                     cover.as_ref().map(EmbedCover::as_cover),
-                    synced,
+                    timed,
                 )
                 .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
@@ -267,13 +268,8 @@ where
             AudioFormat::Wav => {
                 let wav = self.fetch_wav(client_lock, clip).await?;
                 let cover = self.resolve_cover(clip, format).await?;
-                tag_wav(
-                    &wav,
-                    &meta,
-                    cover.as_ref().map(EmbedCover::as_cover),
-                    synced,
-                )
-                .map_err(|err| permanent_fail(&clip.id, err.to_string()))
+                tag_wav(&wav, &meta, cover.as_ref().map(EmbedCover::as_cover), timed)
+                    .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
         }
     }

@@ -29,6 +29,8 @@ fn desired(clip: Clip, format: AudioFormat) -> Desired {
         meta_hash: "m".to_owned(),
         art_hash: "art".to_owned(),
         embedded_lyrics_hash: String::new(),
+        embedded_timed_lyrics_hash: String::new(),
+        lyrics_reencode_safe: true,
         modes: vec![SourceMode::Mirror],
         trashed: false,
         private: false,
@@ -195,6 +197,7 @@ fn small_poll() -> ExecOptions {
         concurrency: 4,
         embed_animated_cover: false,
         cover_webp: WebpEncodeSettings::default(),
+        embed_synced_lyrics: false,
     }
 }
 

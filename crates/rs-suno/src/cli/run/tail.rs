@@ -4,8 +4,8 @@ use super::*;
 
 /// The dry-run / check tail: report the plan without touching disk. No lock is
 /// taken and the destination is not created; a missing manifest reads as empty.
-/// The synced `.lrc` preview reflects which clips would be written, with no
-/// network fetch. `check --exit-code` returns [`ExitCode::General`] on changes.
+/// Lyric sidecars are previewed without fetching alignment. `check --exit-code`
+/// returns [`ExitCode::General`] on changes.
 pub(super) async fn dry_run_report(
     ctx: &RunCtx<'_>,
     assembled: &mut Assembled,
@@ -64,20 +64,15 @@ pub(super) async fn execute_run(
     let _lock = logs::acquire_lock(dest)?;
     let manifest = logs::load_manifest(dest)?;
     apply_effective_audio_targets(ctx, &mut assembled, &manifest, store).await;
-    // Resolve this run's synced lyrics before reconcile: fetch Suno's alignment
-    // for the clips that need it (gated by the per-clip marker, so a steady-state
-    // re-sync fetches nothing and the feature being off fetches nothing), and
-    // fill each clip's `.lrc` and deferred `.lyrics.txt` artifacts with their
-    // content-hashed bodies. The gate is `lrc_sidecar || lyrics_sidecar` so a
-    // lyrics-only user still fetches alignment to populate `.lyrics.txt`.
-    // Reconcile then plans the sidecar writes from the ACTUAL body, and the
-    // executor embeds the same alignment as MP3 `SYLT`/plain-lyric tags.
+    // Resolve this run's lyrics before reconcile. Missing plain audio metadata
+    // is always checked; optional `.lrc` and `.lyrics.txt` slots are resolved
+    // from the same response. Reconcile therefore sees the actual body/hash,
+    // while the executor separately gates timed ID3 `SYLT` on `lrc_sidecar`.
     let (synced, pending_checks) = synced_lyrics::resolve_synced_lyrics(
         &mut assembled.desired,
         &manifest,
         ctx.client,
         ctx.http,
-        settings.lrc_sidecar || settings.lyrics_sidecar,
         verbosity,
         settings.concurrency,
     )

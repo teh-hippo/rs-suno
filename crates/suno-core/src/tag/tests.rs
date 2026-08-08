@@ -275,6 +275,29 @@ fn sample_aligned() -> AlignedLyrics {
 }
 
 #[test]
+fn aligned_text_fills_only_missing_inline_lyrics() {
+    let aligned = sample_aligned();
+    let empty = Clip::default();
+    let fallback = TrackMetadata::from_clip_with_alignment(
+        &empty,
+        &LineageContext::own_root(&empty),
+        Some(&aligned),
+    );
+    assert_eq!(fallback.lyrics, aligned.plain_text());
+
+    let inline = Clip {
+        lyrics: "authoritative inline words".to_owned(),
+        ..Clip::default()
+    };
+    let preferred = TrackMetadata::from_clip_with_alignment(
+        &inline,
+        &LineageContext::own_root(&inline),
+        Some(&aligned),
+    );
+    assert_eq!(preferred.lyrics, "authoritative inline words");
+}
+
+#[test]
 fn build_sylt_produces_ms_word_entries() {
     let sylt = build_sylt(&sample_aligned()).unwrap();
     assert_eq!(sylt.timestamp_format, TimestampFormat::Ms);

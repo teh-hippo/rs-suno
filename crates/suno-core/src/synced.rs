@@ -7,14 +7,12 @@
 //! choice, the "keep existing on failure" rule, and the instrumental "checked"
 //! marker are unit-tested without a network.
 //!
-//! Suno's forced alignment for a clip is immutable in practice (the audio and
-//! its lyrics are fixed once generated), so a clip is fetched at most once per
-//! render [`SYNCED_LRC_VERSION`] — recorded by [`SyncedLyricsCheck`] on the
-//! manifest — except that a clip that resolved to no lyrics (an instrumental) or
-//! to an untimed plain-text fallback is re-checked after [`SYNCED_LRC_RECHECK_SECS`]
-//! to pick up alignment Suno may compute after generation, and a clip whose audio
-//! is renamed is re-fetched so its sidecar moves with it. A version bump
-//! re-resolves everything.
+//! The audio embed and optional timed sidecar have separate refresh rules. A
+//! track with no inline lyrics and no aligned fallback fingerprint is checked on
+//! every run until words appear. Once plain lyrics are embedded, the fingerprint
+//! converges. Separately, a clip with inline plain lyrics but no timing is
+//! re-checked after [`SYNCED_LRC_RECHECK_SECS`] when `.lrc` is enabled, so later
+//! alignment can upgrade the sidecar and `SYLT`.
 //!
 //! The `.lyrics.txt` sidecar (F1, #357) is resolved here too: its body is
 //! `clip.lyrics` when the feed carries them, else the aligned plain text, so a
@@ -29,13 +27,10 @@
 //! the clip converges (fetched once, then skipped) instead of re-fetching
 //! forever.
 //!
-//! Known limitation (tracked follow-up, not fixed here): #354's embedded-lyrics
-//! back-fill is keyed on the `.lrc` artifact hash (`embedded_lyrics_hash`), so a
-//! lyrics-only clip gets an aligned `.lyrics.txt` on disk but its MP3
-//! `LYRICS`/`USLT` tag is NOT back-filled (the embed sentinel only runs when a
-//! `.lrc` is desired). This does not regress today's behaviour (the tag was
-//! empty for these clips before too); decoupling the embed from the `.lrc` is
-//! #354's seam, tracked separately.
+//! Plain lyrics embedded in audio are resolved independently of either sidecar.
+//! A real-feed clip whose inline `clip.lyrics` is empty is fetched whenever its
+//! manifest has no aligned fallback fingerprint, so a later-available lyric is
+//! back-filled on the next run even when both sidecar features are off.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -48,9 +43,9 @@ use crate::model::Clip;
 use crate::reconcile::Desired;
 use crate::vocab::ArtifactKind;
 
-/// How long a clip that resolved to no lyrics (instrumental) or to an untimed
-/// plain-text fallback is trusted before its alignment is re-checked (14 days).
-/// Bounds the re-fetch to catch alignment Suno may compute after generation.
+/// How long an untimed sidecar fallback is trusted before checking for timing
+/// again (14 days). Tracks missing plain embedded lyrics bypass this window and
+/// are checked every run.
 pub const SYNCED_LRC_RECHECK_SECS: u64 = 14 * 24 * 60 * 60;
 
 /// One clip's synced-lyrics outcome this run, for the caller to record as a
@@ -60,8 +55,8 @@ pub const SYNCED_LRC_RECHECK_SECS: u64 = 14 * 24 * 60 * 60;
 pub struct PendingCheck {
     /// The clip this outcome concerns.
     pub clip_id: String,
-    /// Whether the clip resolved to no lyrics (an instrumental). An instrumental
-    /// writes no sidecar and is marked unconditionally.
+    /// Whether the clip resolved to no lyrics. No sidecar is written; the audio
+    /// embed gate still retries while its fingerprint remains empty.
     pub empty: bool,
     /// Whether the fetched alignment was timed (as opposed to an untimed
     /// plain-text fallback). Only meaningful when `empty` is false; a timed clip
@@ -130,17 +125,6 @@ fn needs_fetch(
     let Some(entry) = entry else {
         return true; // never downloaded -> resolve on first sight
     };
-    // One-time back-fill (#354): a persisted `.lrc` exists but the audio tag's
-    // embed is missing or stale relative to it. Fetching re-embeds; once the
-    // embed stamps `embedded_lyrics_hash = lrc.hash` this is false again, so the
-    // back-fill is bounded to one run per drift. This clause is `.lrc`-keyed by
-    // design (see the module note on the lyrics-only embed limitation): a clip
-    // with no `.lrc` slot has both sides empty and never triggers it.
-    if let Some(slot) = entry.lrc.as_ref()
-        && slot.hash != entry.embedded_lyrics_hash
-    {
-        return true;
-    }
     let Some(check) = entry.synced_lyrics.as_ref() else {
         return true; // never resolved (e.g. downloaded before the feature)
     };
@@ -179,47 +163,87 @@ fn needs_fetch(
     }
 }
 
+/// Whether the audio file needs Suno's aligned lyrics as a plain-text fallback.
+///
+/// Inline `clip.lyrics` already travels through `meta_hash`, so it needs no
+/// alignment lookup. Otherwise a new or unfilled track is probed every run until
+/// a successful audio write stamps `embedded_lyrics_hash`. A format change also
+/// re-fetches a prior fallback because the new container must recreate the text.
+fn embed_needs_fetch(d: &Desired, entry: Option<&ManifestEntry>) -> bool {
+    if !d.clip.lyrics.trim().is_empty() {
+        return false;
+    }
+    match entry {
+        None => true,
+        Some(entry) => entry.embedded_lyrics_hash.is_empty() || entry.format != d.format,
+    }
+}
+
+/// Whether this desired audio format and sidecar set writes an ID3 `SYLT`.
+fn wants_timed_embed(d: &Desired) -> bool {
+    matches!(
+        d.format,
+        crate::vocab::AudioFormat::Mp3 | crate::vocab::AudioFormat::Wav
+    ) && d.artifacts.iter().any(|a| a.kind == ArtifactKind::Lrc)
+}
+
+/// Whether timed lyrics need fetching for an MP3/WAV embed.
+///
+/// A format change must recreate the frame. The second clause is the additive
+/// manifest migration: old files with a timed sidecar marker predate the
+/// dedicated `embedded_timed_lyrics_hash`, so they get one bounded back-fill.
+fn timed_embed_needs_fetch(d: &Desired, entry: Option<&ManifestEntry>) -> bool {
+    if !wants_timed_embed(d) {
+        return false;
+    }
+    match entry {
+        None => true,
+        Some(entry) => {
+            entry.format != d.format
+                || (entry.embedded_timed_lyrics_hash.is_empty()
+                    && entry
+                        .synced_lyrics
+                        .as_ref()
+                        .is_some_and(|check| check.timed))
+        }
+    }
+}
+
+/// Whether a manifest entry is expected to carry an existing `SYLT`.
+fn entry_has_timed_embed(entry: &ManifestEntry) -> bool {
+    !entry.embedded_timed_lyrics_hash.is_empty()
+        || (matches!(
+            entry.format,
+            crate::vocab::AudioFormat::Mp3 | crate::vocab::AudioFormat::Wav
+        ) && entry.lrc.is_some()
+            && entry
+                .synced_lyrics
+                .as_ref()
+                .is_some_and(|check| check.timed))
+}
+
 /// The clip ids whose alignment must be fetched this run, in a stable order.
 ///
-/// Empty when `enabled` is false, so the synced-lyrics feature being off means
-/// zero alignment fetches. Only clips carrying a desired lyric artifact (a `.lrc`
-/// or a deferred `.lyrics.txt`) are considered; such a clip is a target when ANY
-/// of its desired lyric slots still needs a fetch (see `needs_fetch`), so
-/// enabling one sidecar on a library whose other sidecar has long converged still
-/// back-fills the new one. Each slot is fetched at most once per render version.
+/// A clip is a target when its audio still lacks an aligned plain-text fallback
+/// or when ANY desired lyric sidecar slot needs resolution. The embed check is
+/// independent of sidecar settings and retries a lyric-less result every run;
+/// sidecars retain their own version, path, and timed-upgrade rules.
 pub fn synced_lyrics_targets(
     desired: &[Desired],
     manifest: &Manifest,
     now_unix: u64,
-    enabled: bool,
 ) -> BTreeSet<String> {
-    if !enabled {
-        return BTreeSet::new();
-    }
     let mut out = BTreeSet::new();
     for d in desired {
-        // Only a clip that desires at least one lyric sidecar is ever fetched.
-        let mut lyric_slots = d
+        let entry = manifest.get(&d.clip.id);
+        let embed_needs = embed_needs_fetch(d, entry);
+        let timed_embed_needs = timed_embed_needs_fetch(d, entry);
+        let any_slot_needs = d
             .artifacts
             .iter()
             .filter(|a| matches!(a.kind, ArtifactKind::Lrc | ArtifactKind::LyricsTxt))
-            .peekable();
-        if lyric_slots.peek().is_none() {
-            continue;
-        }
-        let entry = manifest.get(&d.clip.id);
-        // Reformat re-embed (#354): a format change re-encodes the audio and
-        // drops any embedded lyrics, so re-fetch when the format will change AND
-        // a persisted `.lrc` is worth re-embedding (an already-migrated clip is
-        // neither a back-fill nor a rename target, so nothing else would refetch
-        // it). Pure and bounded: after the Reformat commits `entry.format ==
-        // d.format`, so it fires once. A clip with no `.lrc` never fetches here.
-        let reformat_reembed = entry.is_some_and(|e| e.format != d.format && e.lrc.is_some());
-        // Fetch when ANY desired lyric slot is unresolved: the per-slot decision
-        // makes each sidecar an independent trigger.
-        let any_slot_needs =
-            lyric_slots.any(|a| needs_fetch(entry, a.path.as_str(), a.kind, now_unix));
-        if reformat_reembed || any_slot_needs {
+            .any(|a| needs_fetch(entry, a.path.as_str(), a.kind, now_unix));
+        if embed_needs || timed_embed_needs || any_slot_needs {
             out.insert(d.clip.id.clone());
         }
     }
@@ -257,33 +281,89 @@ pub fn apply_synced_lrc(
 ) -> Vec<PendingCheck> {
     let mut pending = Vec::new();
     for d in desired.iter_mut() {
-        // Carry-forward baseline (#354, the loop-freedom crux): every clip keeps
-        // its persisted embed fingerprint unless it is actually fetched this run
-        // (the `.lrc` override below). So a lyrics-driven `Retag` can only fire
-        // when alignment was fetched, never stamping a matching hash over an
-        // empty write. This assignment MUST stay ABOVE the per-slot resolution:
-        // a clip with no desired `.lrc` (the sidecar off, an instrumental, or a
-        // lyrics-only clip) must still carry its value forward, otherwise its
-        // sentinel would drift to the default and it would spuriously retag with
-        // an empty `synced` map.
-        d.embedded_lyrics_hash = manifest
-            .get(&d.clip.id)
+        let entry = manifest.get(&d.clip.id);
+        // Carry forward the persisted embed fingerprint unless this run fetched
+        // usable fallback text. A failed or empty lookup never invents a
+        // successful state and therefore remains eligible for the next run.
+        d.embedded_lyrics_hash = entry
             .map(|e| e.embedded_lyrics_hash.clone())
+            .unwrap_or_default();
+        d.embedded_timed_lyrics_hash = entry
+            .map(|e| e.embedded_timed_lyrics_hash.clone())
             .unwrap_or_default();
 
         let aligned = successes.get(&d.clip.id);
+        let plain_fallback = aligned_plain_fallback(&d.clip, aligned);
+        if let Some(text) = &plain_fallback {
+            d.embedded_lyrics_hash = content_hash(text);
+        }
+        // Re-encoding starts from fresh audio bytes. If the current file carries
+        // aligned fallback lyrics but this run could not recover their text,
+        // keep the old container rather than silently dropping the embed.
+        let format_changes = entry.is_some_and(|entry| entry.format != d.format);
+        if format_changes
+            && (!matches!(
+                d.format,
+                crate::vocab::AudioFormat::Mp3 | crate::vocab::AudioFormat::Wav
+            ) || !wants_timed_embed(d))
+        {
+            d.embedded_timed_lyrics_hash = String::new();
+        }
+        let plain_reencode_unsafe = entry.is_some_and(|entry| {
+            format_changes
+                && d.clip.lyrics.trim().is_empty()
+                && !entry.embedded_lyrics_hash.is_empty()
+                && plain_fallback.is_none()
+        });
+
         // Resolve BOTH lyric sidecars from the same fetched alignment, each on
-        // its own slot. The `.lrc` also drives the #354 embed (its resolution
-        // stamps `embedded_lyrics_hash`); the `.lyrics.txt` carries no embed. The
-        // two outcomes fold into a single durable marker that lists every slot
-        // written, so back-filling one sidecar never masks an unwritten other.
+        // its own slot. The audio embed is independent and was resolved above.
+        // The two sidecar outcomes fold into one durable marker that lists every
+        // slot written, so back-filling one never masks an unwritten other.
         let lrc = apply_lrc_slot(d, manifest, aligned);
         let lyrics_txt = apply_lyrics_txt_slot(d, manifest, aligned);
+        if wants_timed_embed(d)
+            && aligned.is_some_and(|aligned| !aligned.is_empty())
+            && let SlotOutcome::Wrote(hash) = &lrc
+        {
+            d.embedded_timed_lyrics_hash = hash.clone();
+        }
+        let timed_reencode_unsafe = entry.is_some_and(|entry| {
+            format_changes
+                && wants_timed_embed(d)
+                && entry_has_timed_embed(entry)
+                && aligned.is_none_or(AlignedLyrics::is_empty)
+        });
+        d.lyrics_reencode_safe = !(plain_reencode_unsafe || timed_reencode_unsafe);
         if let Some(check) = build_pending_check(&d.clip.id, aligned, &lrc, &lyrics_txt) {
             pending.push(check);
+        } else if d.clip.lyrics.trim().is_empty()
+            && entry.is_none_or(|entry| entry.embedded_lyrics_hash.is_empty())
+            && aligned.is_some_and(AlignedLyrics::is_empty)
+        {
+            // Embed-only negative result: persist the fact that an executing run
+            // checked and found no lyrics. Execution still probes again next run,
+            // but no-fetch `check` can avoid reporting a permanent false-positive
+            // retag for known instrumentals.
+            pending.push(PendingCheck {
+                clip_id: d.clip.id.clone(),
+                empty: true,
+                timed: false,
+                written_slots: Vec::new(),
+            });
         }
     }
     pending
+}
+
+/// Aligned plain text for the audio-tag fallback, only when inline lyrics are
+/// absent and the fetched alignment carries non-whitespace content.
+fn aligned_plain_fallback(clip: &Clip, aligned: Option<&AlignedLyrics>) -> Option<String> {
+    if !clip.lyrics.trim().is_empty() {
+        return None;
+    }
+    let text = aligned?.plain_text();
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Fold a clip's per-slot resolution outcomes into the single durable marker to
@@ -330,7 +410,6 @@ fn build_pending_check(
 /// the stored slot on a miss). Returns the slot's [`SlotOutcome`]: `Inert` when
 /// the clip has no `.lrc` desired or was not fetched, `Wrote(hash)` when a body
 /// was rendered, `Instrumental` when the fetch resolved to no lyrics. Also stamps
-/// the #354 embed fingerprint from the same body.
 fn apply_lrc_slot(
     d: &mut Desired,
     manifest: &Manifest,
@@ -371,17 +450,12 @@ fn apply_lrc_slot(
     match body {
         Some(text) => {
             let hash = content_hash(&text);
-            // The embed is rendered from this same fetched alignment, so its
-            // fingerprint moves in lock-step with the `.lrc` body.
-            d.embedded_lyrics_hash = hash.clone();
             let artifact = &mut d.artifacts[idx];
             artifact.hash = hash.clone();
             artifact.content = Some(text);
             SlotOutcome::Wrote(hash)
         }
         None => {
-            // Fetched but the clip is an instrumental: nothing embedded.
-            d.embedded_lyrics_hash = String::new();
             d.artifacts.remove(idx);
             SlotOutcome::Instrumental
         }
@@ -393,8 +467,7 @@ fn apply_lrc_slot(
 /// Returns the slot's [`SlotOutcome`]: `Inert` when the clip has no `.lyrics.txt`
 /// desired or was not fetched, `Wrote(hash)` when a body was rendered,
 /// `Instrumental` when neither source yields lyrics. The `.lyrics.txt` carries no
-/// embed, so it never touches `embedded_lyrics_hash` (#354's back-fill stays
-/// `.lrc`-keyed; see the module note on the lyrics-only embed limitation).
+/// embed, which is resolved independently before either sidecar.
 fn apply_lyrics_txt_slot(
     d: &mut Desired,
     manifest: &Manifest,
@@ -439,17 +512,15 @@ fn apply_lyrics_txt_slot(
     }
 }
 
-/// Adjust each clip's desired `.lrc` and deferred `.lyrics.txt` artifacts for a
-/// dry run, without any fetch.
+/// Adjust embedded-lyric fingerprints and optional sidecars for a dry run,
+/// without fetching alignment.
 ///
-/// Each desired lyric slot is previewed on its OWN fetch decision (mirroring
-/// `needs_fetch`): a slot that WOULD be (re)fetched keeps a distinct pending
-/// source hash so the previewed plan reports the write; a slot already resolved
-/// reuses its stored slot hash (so it shows as skipped) or is dropped when it is
-/// a known instrumental. Per-slot (not clip-level) so a back-fill clip previews
-/// its converged `.lrc` as skipped while its missing `.lyrics.txt` shows as a
-/// write. The preview is an upper bound on synced sidecar writes (it cannot know
-/// which targets will turn out to be instrumentals).
+/// Unknown plain or timed embeds receive stable placeholder hashes so `check`
+/// reports the potential retag. A prior empty result suppresses the plain
+/// placeholder, preventing known instrumentals from making every preview dirty;
+/// executing runs still probe them again. Sidecar slots follow their own fetch
+/// decisions and use pending source hashes. The result is an upper bound because
+/// a no-fetch preview cannot know whether Suno will return empty alignment.
 pub fn preview_synced_lrc(
     desired: &mut [Desired],
     manifest: &Manifest,
@@ -458,28 +529,44 @@ pub fn preview_synced_lrc(
 ) {
     for d in desired.iter_mut() {
         let entry = manifest.get(&d.clip.id);
-        // Carry-forward baseline (#354): mirror `apply_synced_lrc`. This MUST run
-        // for every clip (including one with no desired `.lrc`: the sidecar off,
-        // a lyrics-only clip, or an instrumental) so it keeps its persisted embed
-        // fingerprint and previews as skipped, rather than drifting to the default
-        // and reporting a spurious retag.
+        // Carry forward durable state before adding preview-only placeholders.
         d.embedded_lyrics_hash = entry
             .map(|e| e.embedded_lyrics_hash.clone())
             .unwrap_or_default();
+        d.embedded_timed_lyrics_hash = entry
+            .map(|e| e.embedded_timed_lyrics_hash.clone())
+            .unwrap_or_default();
+        if d.clip.lyrics.trim().is_empty()
+            && entry.is_some_and(|entry| {
+                entry.embedded_lyrics_hash.is_empty()
+                    && entry
+                        .synced_lyrics
+                        .as_ref()
+                        .is_none_or(|check| !check.empty)
+            })
+        {
+            d.embedded_lyrics_hash =
+                content_hash(&format!("embedded-lyrics-preview/{}", d.clip.id));
+        }
+        let timed_sidecar_needs = d
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ArtifactKind::Lrc)
+            .is_some_and(|artifact| {
+                needs_fetch(entry, &artifact.path, ArtifactKind::Lrc, now_unix)
+            });
+        if entry.is_some()
+            && wants_timed_embed(d)
+            && (timed_embed_needs_fetch(d, entry) || timed_sidecar_needs)
+        {
+            d.embedded_timed_lyrics_hash =
+                content_hash(&format!("timed-lyrics-preview/{}", d.clip.id));
+        }
 
-        // `.lrc` preview: the pending case also previews the expected post-fetch
-        // embed (the #354 back-fill), so it stays coupled to the `.lrc` slot.
+        // `.lrc` preview.
         if let Some(idx) = d.artifacts.iter().position(|a| a.kind == ArtifactKind::Lrc) {
             let path = d.artifacts[idx].path.clone();
             if enabled && needs_fetch(entry, &path, ArtifactKind::Lrc, now_unix) {
-                // A fetch target previews the expected post-fetch embed: the
-                // persisted `.lrc` slot hash, so a pending back-fill reports drift
-                // (not "up to date"). It converges to the apply value once
-                // alignment is fetched.
-                d.embedded_lyrics_hash = entry
-                    .and_then(|e| e.lrc.as_ref())
-                    .map(|s| s.hash.clone())
-                    .unwrap_or_default();
                 d.artifacts[idx].hash = synced_lrc_source_hash(&d.clip.id);
             } else {
                 match entry.and_then(|e| e.lrc.as_ref()) {
@@ -552,6 +639,8 @@ mod tests {
             meta_hash: "m".to_string(),
             art_hash: "a".to_string(),
             embedded_lyrics_hash: String::new(),
+            embedded_timed_lyrics_hash: String::new(),
+            lyrics_reencode_safe: true,
             modes: vec![crate::vocab::SourceMode::Mirror],
             trashed: false,
             private: false,
@@ -629,10 +718,11 @@ mod tests {
     }
 
     #[test]
-    fn targets_empty_when_feature_off() {
-        let d = vec![desired("a", "")];
+    fn targets_missing_embed_without_sidecars() {
+        let mut d = vec![desired("a", "")];
+        d[0].artifacts.clear();
         let manifest = Manifest::new();
-        assert!(synced_lyrics_targets(&d, &manifest, 0, false).is_empty());
+        assert!(synced_lyrics_targets(&d, &manifest, 0).contains("a"));
     }
 
     #[test]
@@ -655,13 +745,13 @@ mod tests {
                 }),
             ),
         );
-        let targets = synced_lyrics_targets(&d, &manifest, 2_000, true);
+        let targets = synced_lyrics_targets(&d, &manifest, 2_000);
         assert!(targets.contains("new"));
         assert!(!targets.contains("done"));
     }
 
     #[test]
-    fn instrumental_is_rechecked_only_after_the_window() {
+    fn missing_plain_lyrics_are_rechecked_every_run() {
         let d = vec![desired("instr", "")];
         let mut manifest = Manifest::new();
         manifest.insert(
@@ -676,12 +766,11 @@ mod tests {
                 }),
             ),
         );
-        // Within the window: not re-fetched (this is the fix for forever-refetch).
+        // Missing plain lyrics ignore the timed-sidecar re-check window.
         let soon = 1_000 + SYNCED_LRC_RECHECK_SECS;
-        assert!(synced_lyrics_targets(&d, &manifest, soon, true).is_empty());
-        // Past the window: re-checked, to pick up late alignment.
+        assert!(synced_lyrics_targets(&d, &manifest, soon).contains("instr"));
         let later = 1_001 + SYNCED_LRC_RECHECK_SECS;
-        assert!(synced_lyrics_targets(&d, &manifest, later, true).contains("instr"));
+        assert!(synced_lyrics_targets(&d, &manifest, later).contains("instr"));
     }
 
     #[test]
@@ -708,10 +797,10 @@ mod tests {
         );
         // Within the window: no re-fetch (avoids churn on every run).
         let soon = 1_000 + SYNCED_LRC_RECHECK_SECS;
-        assert!(synced_lyrics_targets(&d, &manifest, soon, true).is_empty());
+        assert!(synced_lyrics_targets(&d, &manifest, soon).is_empty());
         // Past the window: re-checked, to upgrade to timed if alignment arrived.
         let later = 1_001 + SYNCED_LRC_RECHECK_SECS;
-        assert!(synced_lyrics_targets(&d, &manifest, later, true).contains("a"));
+        assert!(synced_lyrics_targets(&d, &manifest, later).contains("a"));
     }
 
     #[test]
@@ -737,7 +826,7 @@ mod tests {
         );
         // Even long after the window: still not re-fetched.
         let very_late = 2 * SYNCED_LRC_RECHECK_SECS;
-        assert!(synced_lyrics_targets(&d, &manifest, very_late, true).is_empty());
+        assert!(synced_lyrics_targets(&d, &manifest, very_late).is_empty());
     }
 
     #[test]
@@ -759,7 +848,7 @@ mod tests {
                 }),
             ),
         );
-        assert!(synced_lyrics_targets(&d, &manifest, 2_000, true).contains("done"));
+        assert!(synced_lyrics_targets(&d, &manifest, 2_000).contains("done"));
     }
 
     #[test]
@@ -783,7 +872,7 @@ mod tests {
                 }),
             ),
         );
-        assert!(synced_lyrics_targets(&d, &manifest, 2_000, true).contains("a"));
+        assert!(synced_lyrics_targets(&d, &manifest, 2_000).contains("a"));
     }
 
     #[test]
@@ -840,6 +929,25 @@ mod tests {
                 empty: true,
                 timed: false,
                 written_slots: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn embed_only_empty_probe_is_recorded_for_future_preview() {
+        let mut d = vec![desired("instr", "")];
+        d[0].artifacts.clear();
+        let successes = HashMap::from([("instr".to_string(), AlignedLyrics::default())]);
+
+        let pending = apply_synced_lrc(&mut d, &Manifest::new(), &successes);
+
+        assert_eq!(
+            pending,
+            vec![PendingCheck {
+                clip_id: "instr".to_string(),
+                empty: true,
+                timed: false,
+                written_slots: Vec::new(),
             }]
         );
     }
@@ -971,19 +1079,21 @@ mod tests {
     }
 
     #[test]
-    fn needs_fetch_backfills_when_embed_missing() {
-        // A timed, resolved clip whose `.lrc` slot has a hash but whose persisted
-        // embed is empty is a one-time back-fill target.
+    fn embed_target_backfills_without_lrc_coupling() {
         let mut e = entry(slot("a.lrc", "H"), Some(timed_check()));
         e.embedded_lyrics_hash = String::new();
-        assert!(needs_fetch(Some(&e), "a.lrc", ArtifactKind::Lrc, 2_000));
+        let mut d = desired("a", "");
+        d.artifacts.clear();
+        assert!(embed_needs_fetch(&d, Some(&e)));
     }
 
     #[test]
-    fn needs_fetch_skips_when_embed_matches_lrc() {
-        // Already back-filled: the embed matches the `.lrc` slot, so no re-fetch.
-        let mut e = entry(slot("a.lrc", "H"), Some(timed_check()));
-        e.embedded_lyrics_hash = "H".to_string();
+    fn embed_target_skips_any_nonempty_fingerprint() {
+        let mut e = entry(slot("a.lrc", "sidecar"), Some(timed_check()));
+        e.embedded_lyrics_hash = "plain-text".to_string();
+        let mut d = desired("a", "");
+        d.artifacts.clear();
+        assert!(!embed_needs_fetch(&d, Some(&e)));
         assert!(!needs_fetch(Some(&e), "a.lrc", ArtifactKind::Lrc, 2_000));
     }
 
@@ -1011,24 +1121,72 @@ mod tests {
     }
 
     #[test]
-    fn apply_sets_embedded_lyrics_hash_from_body() {
-        // A timed fetch stamps the sentinel with the `.lrc` body content hash,
-        // equal to the resolved `.lrc` artifact hash (lock-step with the embed).
+    fn apply_hashes_exact_plain_embed_independently_of_lrc() {
         let mut d = vec![desired("a", "")];
         let mut successes = HashMap::new();
         successes.insert("a".to_string(), one_line_alignment());
         apply_synced_lrc(&mut d, &Manifest::new(), &successes);
 
         let art = &d[0].artifacts[0];
-        let body = art.content.as_deref().unwrap();
-        assert_eq!(d[0].embedded_lyrics_hash, content_hash(body));
-        assert_eq!(d[0].embedded_lyrics_hash, art.hash);
+        assert_eq!(d[0].embedded_lyrics_hash, content_hash("hi there"));
+        assert_ne!(d[0].embedded_lyrics_hash, art.hash);
     }
 
     #[test]
-    fn apply_clears_embedded_lyrics_hash_for_instrumental() {
-        // A previously-embedded clip that resolves to no lyrics this run drops the
-        // artifact and clears the sentinel to "" (nothing embedded now).
+    fn apply_hashes_timed_embed_for_mp3_with_lrc_enabled() {
+        let mut d = vec![desired("a", "")];
+        d[0].format = AudioFormat::Mp3;
+        let successes = HashMap::from([("a".to_string(), one_line_alignment())]);
+
+        apply_synced_lrc(&mut d, &Manifest::new(), &successes);
+
+        let lrc = d[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ArtifactKind::Lrc)
+            .unwrap();
+        assert_eq!(d[0].embedded_timed_lyrics_hash, lrc.hash);
+    }
+
+    #[test]
+    fn timed_embed_migration_targets_existing_mp3_once() {
+        let mut d = vec![desired("a", "")];
+        d[0].format = AudioFormat::Mp3;
+        let mut manifest = Manifest::new();
+        let mut e = entry(slot("a.lrc", "timed"), Some(timed_check()));
+        e.format = AudioFormat::Mp3;
+        e.embedded_lyrics_hash = "plain".to_string();
+        manifest.insert("a", e);
+
+        assert!(synced_lyrics_targets(&d, &manifest, 2_000).contains("a"));
+
+        manifest
+            .entries
+            .get_mut("a")
+            .unwrap()
+            .embedded_timed_lyrics_hash = "timed".to_string();
+        assert!(synced_lyrics_targets(&d, &manifest, 2_000).is_empty());
+    }
+
+    #[test]
+    fn disabling_lrc_carries_existing_timed_embed() {
+        let mut d = vec![desired("a", "")];
+        d[0].format = AudioFormat::Mp3;
+        d[0].artifacts.clear();
+        let mut manifest = Manifest::new();
+        let mut e = entry(None, None);
+        e.format = AudioFormat::Mp3;
+        e.embedded_lyrics_hash = "plain".to_string();
+        e.embedded_timed_lyrics_hash = "timed".to_string();
+        manifest.insert("a", e);
+
+        apply_synced_lrc(&mut d, &manifest, &HashMap::new());
+
+        assert_eq!(d[0].embedded_timed_lyrics_hash, "timed");
+    }
+
+    #[test]
+    fn apply_preserves_existing_embed_on_empty_regression() {
         let mut d = vec![desired("instr", "")];
         let mut manifest = Manifest::new();
         let mut e = entry(slot("instr.lrc", "H"), Some(timed_check()));
@@ -1039,7 +1197,7 @@ mod tests {
         apply_synced_lrc(&mut d, &manifest, &successes);
 
         assert!(d[0].artifacts.iter().all(|a| a.kind != ArtifactKind::Lrc));
-        assert_eq!(d[0].embedded_lyrics_hash, "");
+        assert_eq!(d[0].embedded_lyrics_hash, "H");
     }
 
     #[test]
@@ -1078,11 +1236,60 @@ mod tests {
     }
 
     #[test]
-    fn preview_marks_backfill_target_as_pending() {
-        // A stale-embed clip (lrc.hash = H, embed = "") previews the expected
-        // post-fetch value H so `check` reports drift; a resolved clip carries its
-        // value forward and matches the manifest (skipped).
-        let mut d = vec![desired("stale", ""), desired("done", "")];
+    fn failed_reformat_lookup_marks_existing_lyrics_unsafe_to_reencode() {
+        let mut d = vec![desired("a", "")];
+        d[0].format = AudioFormat::Mp3;
+        d[0].artifacts.clear();
+        let mut manifest = Manifest::new();
+        let mut e = entry(None, None);
+        e.embedded_lyrics_hash = "plain-hash".to_string();
+        manifest.insert("a", e);
+
+        apply_synced_lrc(&mut d, &manifest, &HashMap::new());
+
+        assert!(!d[0].lyrics_reencode_safe);
+        assert_eq!(d[0].embedded_lyrics_hash, "plain-hash");
+    }
+
+    #[test]
+    fn failed_timed_reformat_lookup_is_unsafe_even_with_inline_plain_lyrics() {
+        let mut d = vec![desired("a", "inline words")];
+        d[0].format = AudioFormat::Wav;
+        let mut manifest = Manifest::new();
+        let mut e = entry(slot("a.lrc", "timed"), Some(timed_check()));
+        e.format = AudioFormat::Mp3;
+        e.embedded_timed_lyrics_hash = "timed".to_string();
+        manifest.insert("a", e);
+
+        apply_synced_lrc(&mut d, &manifest, &HashMap::new());
+
+        assert!(!d[0].lyrics_reencode_safe);
+    }
+
+    #[test]
+    fn successful_reformat_lookup_is_safe_and_refreshes_the_hash() {
+        let mut d = vec![desired("a", "")];
+        d[0].format = AudioFormat::Mp3;
+        d[0].artifacts.clear();
+        let mut manifest = Manifest::new();
+        let mut e = entry(None, None);
+        e.embedded_lyrics_hash = "old-hash".to_string();
+        manifest.insert("a", e);
+        let successes = HashMap::from([("a".to_string(), one_line_alignment())]);
+
+        apply_synced_lrc(&mut d, &manifest, &successes);
+
+        assert!(d[0].lyrics_reencode_safe);
+        assert_eq!(d[0].embedded_lyrics_hash, content_hash("hi there"));
+    }
+
+    #[test]
+    fn preview_marks_unknown_embed_but_settles_known_empty() {
+        let mut d = vec![
+            desired("stale", ""),
+            desired("done", ""),
+            desired("instrumental", ""),
+        ];
         let mut manifest = Manifest::new();
         let mut stale = entry(slot("stale.lrc", "H"), Some(timed_check()));
         stale.embedded_lyrics_hash = String::new();
@@ -1090,27 +1297,49 @@ mod tests {
         let mut done = entry(slot("done.lrc", "D"), Some(timed_check()));
         done.embedded_lyrics_hash = "D".to_string();
         manifest.insert("done", done);
+        manifest.insert(
+            "instrumental",
+            entry(
+                None,
+                Some(SyncedLyricsCheck {
+                    empty: true,
+                    timed: false,
+                    ..timed_check()
+                }),
+            ),
+        );
 
         preview_synced_lrc(&mut d, &manifest, 2_000, true);
-        assert_eq!(
-            d[0].embedded_lyrics_hash, "H",
-            "target previews the back-fill"
-        );
-        assert_ne!(
-            d[0].embedded_lyrics_hash, "",
-            "differs from the manifest embed -> drift reported"
-        );
+        assert!(!d[0].embedded_lyrics_hash.is_empty());
         assert_eq!(
             d[1].embedded_lyrics_hash, "D",
             "resolved clip carries forward"
         );
+        assert_eq!(
+            d[2].embedded_lyrics_hash, "",
+            "a known empty result does not keep check permanently dirty"
+        );
+    }
+
+    #[test]
+    fn preview_marks_timed_embed_when_lrc_is_enabled_later() {
+        let mut d = vec![desired("a", "inline words")];
+        d[0].format = AudioFormat::Mp3;
+        let mut manifest = Manifest::new();
+        let mut e = entry(None, None);
+        e.format = AudioFormat::Mp3;
+        manifest.insert("a", e);
+
+        preview_synced_lrc(&mut d, &manifest, 2_000, true);
+
+        assert!(!d[0].embedded_timed_lyrics_hash.is_empty());
     }
 
     #[test]
     fn reformat_makes_migrated_clip_a_target() {
-        // An already-migrated clip (embed == lrc.hash == H, entry.format = FLAC) is
-        // neither a back-fill nor a rename target, but a pending FLAC->MP3 reformat
-        // re-encodes and drops the embed, so the reformat re-embed trigger fires.
+        // An already-migrated FLAC with a non-empty embed fingerprint is neither
+        // a back-fill nor a rename target, but a pending MP3 reformat must
+        // recreate its plain lyrics.
         let mut manifest = Manifest::new();
         let mut e = entry(slot("a.lrc", "H"), Some(timed_check()));
         e.embedded_lyrics_hash = "H".to_string(); // entry.format is FLAC (helper)
@@ -1119,19 +1348,19 @@ mod tests {
         let mut reformat = vec![desired("a", "")];
         reformat[0].format = AudioFormat::Mp3;
         assert!(
-            synced_lyrics_targets(&reformat, &manifest, 2_000, true).contains("a"),
+            synced_lyrics_targets(&reformat, &manifest, 2_000).contains("a"),
             "a format change re-embeds a migrated clip"
         );
 
         // No format change: the same stable clip is not a target.
         let stable = vec![desired("a", "")]; // FLAC == entry.format
         assert!(
-            synced_lyrics_targets(&stable, &manifest, 2_000, true).is_empty(),
+            synced_lyrics_targets(&stable, &manifest, 2_000).is_empty(),
             "no reformat, no back-fill -> no fetch"
         );
 
-        // A clip with no persisted `.lrc` and a format change is not a target
-        // (nothing to re-embed).
+        // A clip with no persisted `.lrc` and no embedded fallback is still a
+        // target because the plain audio metadata is missing.
         let mut no_lrc = Manifest::new();
         no_lrc.insert(
             "a",
@@ -1147,8 +1376,8 @@ mod tests {
         let mut reformat_no_lrc = vec![desired("a", "")];
         reformat_no_lrc[0].format = AudioFormat::Mp3;
         assert!(
-            synced_lyrics_targets(&reformat_no_lrc, &no_lrc, 2_000, true).is_empty(),
-            "no `.lrc` to re-embed -> not a target despite the reformat"
+            synced_lyrics_targets(&reformat_no_lrc, &no_lrc, 2_000).contains("a"),
+            "missing plain lyrics are independent of `.lrc`"
         );
     }
 
@@ -1281,7 +1510,7 @@ mod tests {
         // a first-sight alignment-fetch target, so its body can be resolved.
         let d = vec![desired_lyrics_only("a", "")];
         assert!(
-            synced_lyrics_targets(&d, &Manifest::new(), 1_000, true).contains("a"),
+            synced_lyrics_targets(&d, &Manifest::new(), 1_000).contains("a"),
             "a fresh lyrics-only clip is fetched"
         );
     }
@@ -1296,7 +1525,7 @@ mod tests {
 
         // First run: unseen clip -> a target.
         assert!(
-            synced_lyrics_targets(&d, &Manifest::new(), 1_000, true).contains("a"),
+            synced_lyrics_targets(&d, &Manifest::new(), 1_000).contains("a"),
             "fetched once"
         );
 
@@ -1307,9 +1536,10 @@ mod tests {
             path: "a.lyrics.txt".to_string(),
             hash: "body-hash".to_string(),
         });
+        e.embedded_lyrics_hash = content_hash("hi there");
         manifest.insert("a", e);
         assert!(
-            synced_lyrics_targets(&d, &manifest, 2_000, true).is_empty(),
+            synced_lyrics_targets(&d, &manifest, 2_000).is_empty(),
             "a resolved lyrics-only clip converges (no forever re-fetch)"
         );
 
@@ -1317,7 +1547,7 @@ mod tests {
         let mut renamed = d.clone();
         renamed[0].artifacts[0].path = "new/a.lyrics.txt".to_string();
         assert!(
-            synced_lyrics_targets(&renamed, &manifest, 2_000, true).contains("a"),
+            synced_lyrics_targets(&renamed, &manifest, 2_000).contains("a"),
             "a rename re-fetches so the sidecar moves with the audio"
         );
     }
@@ -1415,7 +1645,7 @@ mod tests {
         // the converged `.lrc`. Then a second run converges to no re-fetch.
         let mut manifest = Manifest::new();
         let mut e = entry(slot("a.lrc", "H"), Some(timed_check()));
-        e.embedded_lyrics_hash = "H".to_string(); // the `.lrc` is fully back-filled
+        e.embedded_lyrics_hash = "H".to_string(); // the audio embed is complete
         // ...but there is no `.lyrics.txt` slot yet.
         manifest.insert("a", e);
 
@@ -1423,7 +1653,7 @@ mod tests {
 
         // 1) The clip IS a target despite the converged `.lrc`.
         assert!(
-            synced_lyrics_targets(&d, &manifest, 2_000, true).contains("a"),
+            synced_lyrics_targets(&d, &manifest, 2_000).contains("a"),
             "an unresolved `.lyrics.txt` re-targets even when the `.lrc` converged"
         );
 
@@ -1458,7 +1688,7 @@ mod tests {
         });
         converged.insert("a", e2);
         assert!(
-            synced_lyrics_targets(&d, &converged, 3_000, true).is_empty(),
+            synced_lyrics_targets(&d, &converged, 3_000).is_empty(),
             "both slots resolved -> converged (no re-fetch loop)"
         );
     }
@@ -1472,8 +1702,7 @@ mod tests {
         // `.lyrics.txt` from the inline lyrics.
         let d0 = desired_both("a", "hello world");
         assert!(
-            synced_lyrics_targets(std::slice::from_ref(&d0), &Manifest::new(), 1_000, true)
-                .contains("a"),
+            synced_lyrics_targets(std::slice::from_ref(&d0), &Manifest::new(), 1_000).contains("a"),
             "a fresh clip with both sidecars is a fetch target"
         );
 

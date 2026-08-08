@@ -819,6 +819,8 @@ fn aggregate_desired(desired: &[Desired]) -> Vec<Desired> {
                     acc.meta_hash = d.meta_hash.clone();
                     acc.art_hash = d.art_hash.clone();
                     acc.embedded_lyrics_hash = d.embedded_lyrics_hash.clone();
+                    acc.embedded_timed_lyrics_hash = d.embedded_timed_lyrics_hash.clone();
+                    acc.lyrics_reencode_safe = d.lyrics_reencode_safe;
                     acc.artifacts = d.artifacts.clone();
                     acc.stems = d.stems.clone();
                 }
@@ -1083,6 +1085,12 @@ fn plan_desired(
     }
 
     if d.format != entry.format {
+        if !d.lyrics_reencode_safe {
+            out.push(Action::Skip {
+                clip_id: clip_id.to_string(),
+            });
+            return;
+        }
         // Replace via re-encode; never pre-delete the existing file. The old
         // file lives at a different extension, so carry it for cleanup.
         out.push(Action::Reformat {
@@ -1126,13 +1134,13 @@ fn plan_desired(
 }
 
 /// Whether any tag-bearing input differs from the manifest: metadata, cover art,
-/// or the embedded aligned lyrics. Each has its own sentinel, so a drift in one
-/// re-tags without depending on the others (the lyrics clause back-fills Suno's
-/// fetched alignment into the tag, #354).
+/// plain aligned lyrics, or timed ID3 lyrics. Each has its own sentinel, so a
+/// drift in one re-tags without depending on the others.
 fn meta_art_or_lyrics_changed(d: &Desired, entry: &ManifestEntry) -> bool {
     d.meta_hash != entry.meta_hash
         || d.art_hash != entry.art_hash
         || d.embedded_lyrics_hash != entry.embedded_lyrics_hash
+        || d.embedded_timed_lyrics_hash != entry.embedded_timed_lyrics_hash
 }
 
 #[cfg(test)]

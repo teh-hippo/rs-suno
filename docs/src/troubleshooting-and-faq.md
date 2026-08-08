@@ -152,8 +152,8 @@ itself is shown by `suno version`.
 FLAC (the default) is lossless and carries full metadata and embedded art. ALAC
 is lossless too and is the Apple-friendly choice (`.m4a`, plays natively on Apple
 devices and Apple Music), carrying the same tags and cover. MP3 is smaller and
-widely compatible. WAV is lossless but carries limited metadata, so lyrics and
-embedded art are omitted.
+widely compatible. WAV is uncompressed and carries full ID3v2.4 metadata,
+including lyrics and embedded art, in a RIFF `id3 ` chunk.
 
 ### Why did a lossless run use MP3?
 

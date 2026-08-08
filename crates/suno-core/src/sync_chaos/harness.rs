@@ -146,6 +146,8 @@ pub(super) fn desired_of(spec: &ClipSpec) -> Desired {
         meta_hash: meta_hash(&clip, &lineage),
         art_hash: art_hash(&clip),
         embedded_lyrics_hash: String::new(),
+        embedded_timed_lyrics_hash: String::new(),
+        lyrics_reencode_safe: true,
         modes: spec.modes.clone(),
         trashed: spec.trashed,
         private: spec.private,
@@ -243,6 +245,7 @@ pub(super) fn fast_opts() -> ExecOptions {
         concurrency: 4,
         embed_animated_cover: false,
         cover_webp: WebpEncodeSettings::default(),
+        embed_synced_lyrics: false,
     }
 }
 

@@ -251,7 +251,8 @@ pub struct SyncArgs {
     /// Also write a plain-text `.details.txt` sidecar next to each song.
     #[arg(long)]
     pub details_sidecar: bool,
-    /// Also write a plain-text `.lyrics.txt` sidecar next to each song.
+    /// Also write a plain-text `.lyrics.txt` sidecar next to each song. Plain
+    /// lyrics embedded in the audio are automatic.
     #[arg(long)]
     pub lyrics_sidecar: bool,
     /// Select the mode for scoped areas: `mirror` arms deletion, `copy` stays
@@ -273,8 +274,8 @@ pub struct SyncArgs {
     #[arg(long, value_name = "ID_OR_NAME")]
     pub playlist: Vec<String>,
     /// Also write a synced `.lrc` sidecar next to each song (word/line-level
-    /// timed lyrics when Suno has them, plus an MP3 SYLT frame; untimed
-    /// fallback otherwise). Instrumentals get no file.
+    /// timed lyrics when Suno has them, plus MP3/WAV SYLT; untimed fallback
+    /// otherwise). Instrumentals get no file.
     #[arg(long)]
     pub lrc_sidecar: bool,
     /// Also download the standalone `.mp4` music video next to each song, when

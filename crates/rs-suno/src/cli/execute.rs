@@ -100,6 +100,7 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
         concurrency: settings.concurrency,
         embed_animated_cover: settings.animated_covers,
         cover_webp: settings.animated_cover_webp,
+        embed_synced_lyrics: settings.lrc_sidecar,
     };
     let started = std::time::Instant::now();
 

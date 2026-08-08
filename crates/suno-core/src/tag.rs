@@ -141,6 +141,29 @@ impl TrackMetadata {
         }
     }
 
+    /// Map a clip to its tag set, filling otherwise-missing plain lyrics from
+    /// Suno's aligned-lyrics response.
+    ///
+    /// Inline clip lyrics remain authoritative when present. Alignment is only
+    /// a fallback for real-feed clips whose top-level `lyrics` field is empty;
+    /// its timing is handled separately by the ID3 `SYLT` path.
+    pub fn from_clip_with_alignment(
+        clip: &Clip,
+        lineage: &LineageContext,
+        aligned: Option<&AlignedLyrics>,
+    ) -> TrackMetadata {
+        let mut meta = Self::from_clip(clip, lineage);
+        if meta.lyrics.trim().is_empty()
+            && let Some(aligned) = aligned
+        {
+            let text = aligned.plain_text();
+            if !text.trim().is_empty() {
+                meta.lyrics = text;
+            }
+        }
+        meta
+    }
+
     /// The standard metadata fields, paired with their Vorbis comment key.
     ///
     /// The FLAC path writes these (chained with [`suno_fields`](Self::suno_fields))

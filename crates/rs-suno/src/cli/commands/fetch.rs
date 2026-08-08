@@ -1,5 +1,6 @@
 //! `fetch`: download one clip by ID or URL into a chosen file or directory,
-//! tagging MP3/FLAC output. Shares token and format resolution with the engine.
+//! tagging every supported output. Shares token and format resolution with the
+//! engine.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use suno_core::{
     AudioFormat, ClerkAuth, Clock, Cover, Error as CoreError, Ffmpeg, Filesystem, FlagOverrides,
     LineageContext, LosslessAccess, Settings, SunoClient, TrackMetadata, tag_alac, tag_flac,
-    tag_mp3,
+    tag_mp3, tag_wav,
 };
 
 use crate::cli::account;
@@ -26,6 +27,7 @@ use crate::http::ReqwestHttp;
 
 const WAV_POLL_ATTEMPTS: u32 = 24;
 const WAV_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const LYRICS_FETCH_WARNING: &str = "could not fetch lyrics; the audio will be written without them";
 
 /// Run `fetch`.
 pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode> {
@@ -109,7 +111,20 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     // A single-clip fetch has no resolution universe, so the clip stands as its
     // own root: album folders under its own title and no lineage tags.
     let lineage = LineageContext::own_root(&clip);
-    let meta = TrackMetadata::from_clip(&clip, &lineage);
+    let aligned = if clip.lyrics.trim().is_empty() {
+        match client.aligned_lyrics(&http, &id).await {
+            Ok(aligned) => Some(aligned),
+            Err(_) => {
+                if global.verbosity() >= -1 {
+                    eprintln!("warning: {LYRICS_FETCH_WARNING}");
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let meta = TrackMetadata::from_clip_with_alignment(&clip, &lineage, aligned.as_ref());
     let cover = download::cover(&http, &clip).await;
 
     let fs = FsAdapter::new(&root);
@@ -137,11 +152,6 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             }
         }
     }
-    if output_format == AudioFormat::Wav && global.verbosity() >= -1 {
-        eprintln!(
-            "warning: WAV carries limited metadata; lyrics and album art will be omitted (use flac, alac, or mp3 for full tags)"
-        );
-    }
     let bytes = match output_format {
         AudioFormat::Mp3 => tagged_mp3(&http, &clip, &meta, cover.as_deref()).await?,
         AudioFormat::Flac => {
@@ -168,9 +178,10 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             let wav_url = wav_url
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("lossless WAV URL was not resolved"))?;
-            download::get_bytes(&http, wav_url)
+            let wav = download::get_bytes(&http, wav_url)
                 .await
-                .context("could not download the WAV")?
+                .context("could not download the WAV")?;
+            tag_wav(&wav, &meta, cover.as_deref().map(Cover::jpeg), None)?
         }
     };
     let (_, filename) = fetch_destination(
