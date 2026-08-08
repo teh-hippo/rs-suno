@@ -29,6 +29,7 @@ pub fn tag_alac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) ->
     let mut file = Cursor::new(audio.to_vec());
     let mut tag = Tag::read_from(&mut file)
         .map_err(|err| Error::Tag(format!("could not read MP4 metadata: {err}")))?;
+    let existing_lyrics = tag.lyrics().map(str::to_owned);
 
     // Start from a clean slate: ffmpeg copies the source WAV's metadata into the
     // transcoded MP4 by default, so drop every existing atom before writing ours
@@ -61,6 +62,8 @@ pub fn tag_alac(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) ->
     }
     if !meta.lyrics.is_empty() {
         tag.set_lyrics(meta.lyrics.clone());
+    } else if let Some(existing_lyrics) = existing_lyrics {
+        tag.set_lyrics(existing_lyrics);
     }
 
     set_freeform(&mut tag, "DATE", &meta.date);
@@ -166,7 +169,7 @@ mod tests {
         let cover = b"\xff\xd8\xff\xe0jpeg-bytes".to_vec();
         let tagged = tag_alac(&audio, &meta, Some(Cover::jpeg(&cover))).unwrap();
 
-        let tag = Tag::read_from(&mut Cursor::new(tagged)).unwrap();
+        let tag = Tag::read_from(&mut Cursor::new(tagged.as_slice())).unwrap();
         assert_eq!(tag.title(), Some("Neon Horizon"));
         assert_eq!(tag.artist(), Some("Alice"));
         assert_eq!(tag.album(), Some("Nights"));
@@ -178,6 +181,16 @@ mod tests {
         let date = FreeformIdent::new_static(APPLE_ITUNES_MEAN, "DATE");
         assert_eq!(tag.strings_of(&date).next(), Some("2026-07-05"));
         assert!(tag.artwork().is_some());
+
+        let mut retag_meta = meta;
+        retag_meta.lyrics.clear();
+        let retagged = tag_alac(&tagged, &retag_meta, None).unwrap();
+        let retag = Tag::read_from(&mut Cursor::new(retagged)).unwrap();
+        assert_eq!(
+            retag.lyrics(),
+            Some("la la la"),
+            "an unrelated retag preserves existing lyrics"
+        );
 
         let _ = std::fs::remove_file(&src);
     }

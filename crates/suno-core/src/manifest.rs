@@ -27,13 +27,11 @@ pub struct ArtifactState {
     pub hash: String,
 }
 
-/// The record that a clip's synced lyrics were resolved (fetched) this run.
+/// The record that a clip's optional lyric sidecars were resolved this run.
 ///
-/// Suno's forced alignment for a clip is immutable in practice, so once a clip's
-/// alignment has been fetched it need not be fetched again until the render
-/// [`version`](Self::version) bumps. Instrumentals and untimed-fallback clips
-/// are re-checked after [`checked_unix`](Self::checked_unix) ages past the
-/// re-check window, to pick up alignment Suno may compute after generation.
+/// This marker gates `.lrc` and `.lyrics.txt` refreshes. The independent audio
+/// embed gate uses `embedded_lyrics_hash`: a track still missing plain embedded
+/// lyrics is checked every run even when this sidecar marker exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncedLyricsCheck {
@@ -42,8 +40,7 @@ pub struct SyncedLyricsCheck {
     pub version: u32,
     /// Unix seconds of the last alignment fetch, for the bounded re-check.
     pub checked_unix: u64,
-    /// Whether the clip resolved to no lyrics (an instrumental): no `.lrc` was
-    /// written.
+    /// Whether the clip resolved to no lyrics, so no sidecar was written.
     pub empty: bool,
     /// Whether the written `.lrc` carries timed (word/line) alignment, as
     /// opposed to an untimed plain-text fallback. Untimed clips are re-checked
@@ -65,16 +62,20 @@ pub struct ManifestEntry {
     pub meta_hash: String,
     /// Hash of the embedded cover art, for detecting art drift.
     pub art_hash: String,
-    /// Fingerprint of the aligned lyrics currently embedded in the audio tag
-    /// (the FLAC `LYRICS` / MP3 `USLT` / ALAC `©lyr` frame), or empty when none
-    /// are embedded. Tracked separately from [`meta_hash`](Self::meta_hash)
-    /// because the embedded text is Suno's fetched alignment, not `clip.lyrics`,
-    /// so a drift here re-tags to back-fill the embed (#354). Its value is the
-    /// content hash of the `.lrc` body the embed was rendered from, mirroring how
-    /// [`lrc`](Self::lrc) tracks the sidecar. Additive: old manifests load with
-    /// `""` and the common no-embed case is omitted from the serialised object.
+    /// Fingerprint of aligned fallback lyrics currently embedded in the audio
+    /// tag (FLAC `LYRICS`, MP3/WAV `USLT`, or ALAC `©lyr`), or empty when no
+    /// fallback has been embedded. Tracked separately from
+    /// [`meta_hash`](Self::meta_hash) because this text comes from Suno's
+    /// aligned-lyrics endpoint rather than `clip.lyrics`. A blank value keeps a
+    /// lyric-less local track eligible for another probe; a successful audio
+    /// write stamps the hash of the exact plain text. Additive: old manifests
+    /// load with `""` and the common no-fallback case is omitted.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub embedded_lyrics_hash: String,
+    /// Fingerprint of word-level ID3 `SYLT` currently embedded in MP3/WAV, or
+    /// empty when no timed frame has been written. Additive for old manifests.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub embedded_timed_lyrics_hash: String,
     /// Size of the file in bytes when last written.
     pub size: u64,
     /// When set, this clip is held by a copy or archive source, or is private,
@@ -512,14 +513,13 @@ mod tests {
     }
 
     #[test]
-    fn embedded_lyrics_hash_defaults_and_roundtrips() {
-        // A pre-field manifest loads with an empty embed fingerprint (additive
-        // growth), an empty value is omitted from the serialised object (so the
-        // on-disk manifest is byte-identical for the no-embed majority), and a
-        // populated value round-trips.
+    fn embedded_lyrics_hashes_default_and_roundtrip() {
+        // A pre-field manifest loads with empty plain and timed fingerprints,
+        // and empty values are omitted from the serialised object.
         let json = r#"{"clip1":{"path":"a.flac","format":"flac","meta_hash":"m","art_hash":"a","size":1}}"#;
         let m: Manifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.get("clip1").unwrap().embedded_lyrics_hash, "");
+        assert_eq!(m.get("clip1").unwrap().embedded_timed_lyrics_hash, "");
         let value: serde_json::Value = serde_json::to_value(&m).unwrap();
         assert!(
             value
@@ -529,18 +529,31 @@ mod tests {
                 .is_none(),
             "an empty embed hash is omitted from the manifest"
         );
+        assert!(
+            value
+                .get("clip1")
+                .unwrap()
+                .get("embedded_timed_lyrics_hash")
+                .is_none()
+        );
 
         let mut e = entry("a.flac", AudioFormat::Flac);
-        e.embedded_lyrics_hash = "lrc-content-hash".to_string();
+        e.embedded_lyrics_hash = "plain-content-hash".to_string();
+        e.embedded_timed_lyrics_hash = "timed-content-hash".to_string();
         let mut m2 = Manifest::new();
         m2.insert("a", e);
         let serialised = serde_json::to_string(&m2).unwrap();
         assert!(serialised.contains("embedded_lyrics_hash"));
+        assert!(serialised.contains("embedded_timed_lyrics_hash"));
         let back: Manifest = serde_json::from_str(&serialised).unwrap();
         assert_eq!(m2, back);
         assert_eq!(
             back.get("a").unwrap().embedded_lyrics_hash,
-            "lrc-content-hash"
+            "plain-content-hash"
+        );
+        assert_eq!(
+            back.get("a").unwrap().embedded_timed_lyrics_hash,
+            "timed-content-hash"
         );
     }
 }

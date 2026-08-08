@@ -96,6 +96,10 @@ fn download_mp3_embeds_sylt_and_lyrics_from_synced_map() {
         },
     );
     let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
+    let opts = ExecOptions {
+        embed_synced_lyrics: true,
+        ..ExecOptions::default()
+    };
     let outcome = pollster::block_on(execute(
         &plan,
         Stores {
@@ -112,7 +116,7 @@ fn download_mp3_embeds_sylt_and_lyrics_from_synced_map() {
             ffmpeg: &ffmpeg,
             clock: &clock,
         },
-        &ExecOptions::default(),
+        &opts,
     ));
 
     assert_eq!(outcome.downloaded, 1);
@@ -131,11 +135,12 @@ fn download_mp3_embeds_sylt_and_lyrics_from_synced_map() {
 }
 
 #[test]
-fn download_mp3_embeds_no_sylt_when_synced_map_empty() {
-    // The synced map is empty when the feature is off (no alignment fetched),
-    // so no SYLT frame and no lyric text are embedded.
+fn download_mp3_embeds_plain_lyrics_without_sylt_when_timing_is_disabled() {
+    // Baseline alignment supplies USLT even with no `.lrc` feature, but must not
+    // silently enable word-level SYLT.
     let c = art_clip("a");
-    let d = desired(c.clone(), AudioFormat::Mp3);
+    let mut d = desired(c.clone(), AudioFormat::Mp3);
+    d.embedded_lyrics_hash = crate::content_hash("plain words");
     let plan = Plan {
         actions: vec![Action::Download {
             clip: c.clone(),
@@ -153,6 +158,19 @@ fn download_mp3_embeds_no_sylt_when_synced_map_empty() {
     let mut manifest = Manifest::new();
     let mut albums = BTreeMap::new();
     let mut playlists = BTreeMap::new();
+    let synced = HashMap::from([(
+        "a".to_string(),
+        AlignedLyrics {
+            lines: vec![AlignedLine {
+                text: "plain words".to_owned(),
+                start_s: 0.5,
+                end_s: 1.2,
+                section: String::new(),
+                words: Vec::new(),
+            }],
+            ..Default::default()
+        },
+    )]);
     let client = SunoClient::new(ClerkAuth::new("eyJtoken"), RecordingClock::new());
     let outcome = pollster::block_on(execute(
         &plan,
@@ -162,7 +180,7 @@ fn download_mp3_embeds_no_sylt_when_synced_map_empty() {
             playlists: &mut playlists,
         },
         &[d],
-        &HashMap::new(),
+        &synced,
         Ports {
             client: &client,
             http: &http,
@@ -176,7 +194,14 @@ fn download_mp3_embeds_no_sylt_when_synced_map_empty() {
     let written = fs.read_file("a.mp3").unwrap();
     let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
     assert_eq!(tag.synchronised_lyrics().count(), 0);
-    assert_eq!(tag.lyrics().count(), 0);
+    assert_eq!(
+        tag.lyrics().next().map(|frame| frame.text.as_str()),
+        Some("plain words")
+    );
+    assert_eq!(
+        manifest.get("a").unwrap().embedded_lyrics_hash,
+        crate::content_hash("plain words")
+    );
 }
 
 #[test]
@@ -351,8 +376,8 @@ fn flac_transcode_failure_is_recorded_and_skipped() {
 
 #[test]
 fn entitlement_refusal_falls_back_to_native_mp3_and_is_not_a_failure() {
-    let (_c1, d1, a1) = download("e1", AudioFormat::Flac);
-    let (_c2, d2, a2) = download("e2", AudioFormat::Flac);
+    let (_c1, mut d1, a1) = download("e1", AudioFormat::Flac);
+    let (_c2, mut d2, a2) = download("e2", AudioFormat::Flac);
     let plan = Plan {
         actions: vec![a1, a2],
     };
@@ -365,11 +390,29 @@ fn entitlement_refusal_falls_back_to_native_mp3_and_is_not_a_failure() {
     let mut manifest = Manifest::new();
     let mut opts = small_poll();
     opts.concurrency = 1;
+    let alignment = AlignedLyrics {
+        lines: vec![AlignedLine {
+            text: "fallback words".to_owned(),
+            start_s: 0.0,
+            end_s: 1.0,
+            section: String::new(),
+            words: Vec::new(),
+        }],
+        ..Default::default()
+    };
+    let synced = HashMap::from([
+        ("e1".to_string(), alignment.clone()),
+        ("e2".to_string(), alignment),
+    ]);
+    let lyrics_hash = crate::content_hash("fallback words");
+    d1.embedded_lyrics_hash = lyrics_hash.clone();
+    d2.embedded_lyrics_hash = lyrics_hash;
 
-    let outcome = run(
+    let outcome = run_with_synced(
         &plan,
         &mut manifest,
         &[d1, d2],
+        &synced,
         &http,
         &fs,
         &StubFfmpeg::flac(),
@@ -391,6 +434,13 @@ fn entitlement_refusal_falls_back_to_native_mp3_and_is_not_a_failure() {
     assert!(!fs.exists("e1.flac"));
     assert_eq!(manifest.get("e1").unwrap().format, AudioFormat::Mp3);
     assert_eq!(manifest.get("e1").unwrap().path, "e1.mp3");
+    let written = fs.read_file("e1.mp3").unwrap();
+    let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
+    assert_eq!(
+        tag.lyrics().next().map(|frame| frame.text.as_str()),
+        Some("fallback words")
+    );
+    assert_eq!(tag.synchronised_lyrics().count(), 0);
     assert_eq!(
         http.count("/wav_file/"),
         2,

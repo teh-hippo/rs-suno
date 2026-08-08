@@ -96,6 +96,9 @@ pub struct ExecOptions {
     pub embed_animated_cover: bool,
     /// Settings used for animated WebP cover transcodes.
     pub cover_webp: WebpEncodeSettings,
+    /// Embed word-level ID3 `SYLT` timing from fetched alignment. Plain embedded
+    /// lyrics are independent and always flow through `TrackMetadata`.
+    pub embed_synced_lyrics: bool,
 }
 
 impl Default for ExecOptions {
@@ -107,6 +110,7 @@ impl Default for ExecOptions {
             concurrency: 4,
             embed_animated_cover: false,
             cover_webp: WebpEncodeSettings::default(),
+            embed_synced_lyrics: false,
         }
     }
 }
@@ -274,13 +278,11 @@ pub struct Ports<'a, H, F, G, C> {
 /// per-clip failure is recorded and the run continues; only an auth failure or a
 /// full disk aborts, and it does so promptly by stopping further concurrent work.
 ///
-/// `synced` carries this run's fetched aligned (synced) lyrics keyed by clip id;
-/// it is the caller's IO result, not part of the pure plan. Audio tagging embeds
-/// a clip's entry as an MP3 `SYLT` frame and as the plain `USLT`/`LYRICS` text
-/// (FLAC), so a clip absent from the map (an instrumental, a WAV target, or a
-/// run with the feature off) is tagged exactly as before. The synced `.lrc`
-/// sidecar itself is a generated artifact whose body the caller has already
-/// resolved into the plan, so it is written like any other text sidecar.
+/// `synced` carries this run's fetched aligned lyrics keyed by clip id; it is the
+/// caller's IO result, not part of the pure plan. Its plain text fills otherwise
+/// missing `USLT`/`LYRICS`/`©lyr` metadata. Word-level `SYLT` is added only when
+/// [`ExecOptions::embed_synced_lyrics`] is enabled. The `.lrc` sidecar itself is
+/// a generated artifact whose body the caller already resolved into the plan.
 pub async fn execute<H, F, G, C>(
     plan: &Plan,
     stores: Stores<'_>,
@@ -726,10 +728,9 @@ struct Ctx<'a, H, F, G, C> {
     opts: &'a ExecOptions,
     by_id: &'a HashMap<&'a str, &'a Desired>,
     by_path: &'a HashMap<&'a str, &'a Desired>,
-    /// This run's fetched aligned (synced) lyrics, keyed by clip id. Audio
-    /// tagging reads a clip's entry to embed an MP3 `SYLT` frame and the plain
-    /// lyric text; a clip absent here is tagged exactly as before. Populated by
-    /// the caller (the fetch is IO), so the engine stays free of direct IO.
+    /// This run's fetched aligned lyrics, keyed by clip id. Audio tagging reads
+    /// a clip's entry for plain fallback text and, when enabled, ID3 `SYLT`.
+    /// Populated by the caller, so the engine stays free of direct IO.
     synced: &'a HashMap<String, AlignedLyrics>,
     /// Static cover art the audio producer already fetched to embed in the tag,
     /// keyed by CDN URL, so the matching per-song `.jpg` sidecar reuses it rather
@@ -1094,6 +1095,7 @@ fn manifest_entry(d: &Desired, size: u64) -> ManifestEntry {
         meta_hash: d.meta_hash.clone(),
         art_hash: d.art_hash.clone(),
         embedded_lyrics_hash: d.embedded_lyrics_hash.clone(),
+        embedded_timed_lyrics_hash: d.embedded_timed_lyrics_hash.clone(),
         size,
         preserve: preserve_for(d),
         ..Default::default()

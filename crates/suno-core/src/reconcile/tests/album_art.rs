@@ -86,6 +86,8 @@ fn album_member(clip: Clip, root_id: &str, path: &str) -> Desired {
         meta_hash: "m".to_string(),
         art_hash: "a".to_string(),
         embedded_lyrics_hash: String::new(),
+        embedded_timed_lyrics_hash: String::new(),
+        lyrics_reencode_safe: true,
         modes: vec![SourceMode::Mirror],
         trashed: false,
         private: false,

@@ -26,15 +26,27 @@ pub struct Desired {
     pub meta_hash: String,
     /// Hash of the clip's cover art.
     pub art_hash: String,
-    /// Fingerprint of the aligned lyrics this run intends to have embedded in the
-    /// audio tag, or empty when none. Compared against
+    /// Fingerprint of the aligned plain-text fallback this run intends to have
+    /// embedded in the audio tag, or empty when none. Compared against
     /// [`ManifestEntry::embedded_lyrics_hash`](crate::manifest::ManifestEntry::embedded_lyrics_hash)
-    /// to drive a back-fill retag when Suno's fetched alignment is missing or
-    /// stale in the tag (#354). Populated at the synced-lyrics resolve seam: the
-    /// content hash of the fetched `.lrc` body on a fetch, otherwise the
-    /// persisted value carried forward (so a retag only ever fires when alignment
-    /// was actually fetched this run).
+    /// to drive a back-fill retag. Populated at the lyric-resolution seam with
+    /// the hash of the exact fallback text, otherwise carried forward from the
+    /// manifest so a failed lookup never stamps a false success.
     pub embedded_lyrics_hash: String,
+    /// Fingerprint of word-level timed lyrics embedded as ID3 `SYLT`, or empty
+    /// when the target format/feature carries no timed frame.
+    ///
+    /// Separate from [`embedded_lyrics_hash`](Self::embedded_lyrics_hash) so
+    /// enabling `lrc_sidecar` can back-fill `SYLT` into an existing MP3/WAV
+    /// without changing the already-correct plain `USLT`.
+    pub embedded_timed_lyrics_hash: String,
+    /// Whether a format change may safely recreate this track's lyric metadata.
+    ///
+    /// `false` only when the existing file carries aligned fallback lyrics but
+    /// this run could not resolve the text needed to write them into a new
+    /// container. Reconcile then keeps the existing file and retries next run
+    /// rather than silently dropping lyrics during re-encoding.
+    pub lyrics_reencode_safe: bool,
     /// Every selected source that currently holds this clip.
     pub modes: Vec<SourceMode>,
     /// True when the clip is trashed in Suno (removed from the source).

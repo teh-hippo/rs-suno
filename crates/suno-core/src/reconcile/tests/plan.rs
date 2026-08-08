@@ -310,9 +310,9 @@ fn rename_with_lyrics_drift_also_retags() {
 
 #[test]
 fn retag_loop_regression_stable_after_backfill() {
-    // After a back-fill retag, the entry is stamped embedded_lyrics_hash = "L"
-    // (== lrc.hash) and the desired carries "L" with a matching `.lrc` artifact,
-    // so the next reconcile is a Skip: no retag loop, no artifact churn.
+    // After a back-fill retag, the entry and desired carry the same plain-lyrics
+    // fingerprint while the `.lrc` slot also matches, so the next reconcile is a
+    // Skip: no retag loop and no artifact churn.
     let mut manifest = Manifest::new();
     let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
     e.embedded_lyrics_hash = "L".to_string();
@@ -450,6 +450,26 @@ fn format_change_reformats() {
             from_path: "a.flac".to_string(),
             from: AudioFormat::Flac,
             to: AudioFormat::Mp3,
+        }]
+    );
+}
+
+#[test]
+fn format_change_keeps_existing_file_when_lyrics_cannot_be_recreated() {
+    let mut manifest = Manifest::new();
+    let mut e = entry("a.flac", AudioFormat::Flac, "m", "art");
+    e.embedded_lyrics_hash = "plain-hash".to_string();
+    manifest.insert("a", e);
+    let mut d = desired("a", "a.mp3", AudioFormat::Mp3, "m", "art");
+    d.embedded_lyrics_hash = "plain-hash".to_string();
+    d.lyrics_reencode_safe = false;
+
+    let plan = reconcile(&manifest, &[d], &local_present("a"), &mirror_ok());
+
+    assert_eq!(
+        plan.actions,
+        vec![Action::Skip {
+            clip_id: "a".to_string()
         }]
     );
 }

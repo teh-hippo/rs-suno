@@ -11,14 +11,14 @@ is `rs-suno`, so you install it with `cargo install rs-suno` and then run `suno`
 ## What it does
 
 - Downloads your whole library, plus liked songs and playlists, as tagged audio
-  files (MP3, FLAC, or WAV).
+  files (MP3, FLAC, ALAC, or WAV).
 - Mirrors changes on every run: it downloads new clips, updates tags and
   artwork, renames or re-encodes files that changed, and, with `sync`, removes
   local files whose clips have left your library.
 - Embeds rich metadata: core tags (title, artist, album, date) plus Suno details
   (style, model, creator, and remix lineage), a front cover, and lyrics,
-  including optional synced (timed) lyrics as an `.lrc` sidecar and an
-  MP3 `SYLT` frame.
+  including optional synced (timed) lyrics as an `.lrc` sidecar and MP3/WAV
+  `SYLT` frames.
 - Groups remixes and edits into lineage albums and writes M3U8 playlists,
   including a synthetic "Liked Songs" list.
 - Is safe to run unattended from cron or a systemd timer, with careful deletion

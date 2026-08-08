@@ -299,6 +299,8 @@ fn build_desired(
         meta_hash,
         art_hash,
         embedded_lyrics_hash: String::new(),
+        embedded_timed_lyrics_hash: String::new(),
+        lyrics_reencode_safe: true,
         modes,
         trashed,
         private,

@@ -81,8 +81,8 @@ configured `root` is used.
 | `--animated-cover-lossless` | off | Encode the animated cover losslessly (bit-exact). Far larger than the embedded-cover size cap (a few seconds can be ~145 MB), so a lossless cover always falls back to the static JPEG; leave it off. |
 | `--allow-account-change` | off | Re-pin this library to the authenticated account. The run is additive and deletes nothing. |
 | `--details-sidecar` | off | Also write a plain-text `.details.txt` sidecar next to each song. |
-| `--lyrics-sidecar` | off | Also write a plain-text `.lyrics.txt` sidecar next to each song. |
-| `--lrc-sidecar` | off | Also write a synced `.lrc` sidecar next to each song. MP3 also gets a timed `SYLT` frame when Suno has alignment. |
+| `--lyrics-sidecar` | off | Also write a plain-text `.lyrics.txt` sidecar next to each song. Plain lyrics inside the audio are automatic. |
+| `--lrc-sidecar` | off | Also write a synced `.lrc` sidecar next to each song. MP3 and WAV also get a timed `SYLT` frame when Suno has alignment. |
 | `--video-mp4` | off | Also download the standalone `.mp4` music video beside each song, when available. |
 | `--download-stems` | off | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder. Download-only: it lists and downloads existing stems and never triggers separation or spends credits. |
 | `--stem-format <wav\|mp3>` | `wav` | Container for downloaded stems. Stems are stored RAW and are never transcoded to FLAC. |
@@ -273,6 +273,11 @@ FLAC, ALAC, and WAV require Suno's paid WAV-render entitlement. If the account
 cannot currently use that entitlement, an auto-named fetch falls back to native
 MP3 and reports the `.mp3` path. An explicit file path, including `--output`,
 remains strict and fails rather than writing MP3 bytes under a lossless name.
+
+Every format receives its normal embedded tags, including plain lyrics. When
+the clip payload omits lyrics, `fetch` checks Suno's aligned-lyrics endpoint and
+uses its plain text. A temporary lookup failure warns but does not fail the
+audio download.
 
 | Flag | Short | Default | Description |
 |---|---|---|---|

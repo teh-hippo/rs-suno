@@ -228,7 +228,7 @@ off:
   ambiguous (the feature is off, the song is an instrumental, or a fetch failed)
   and it opts out of removal the same way covers do. Turning `lrc_sidecar` off
   leaves existing `.lrc` files in place. When alignment is available the file
-  carries line-level timestamps (and MP3 gains a word-level `SYLT` frame);
+  carries line-level timestamps (and MP3/WAV gain a word-level `SYLT` frame);
   otherwise it falls back to the untimed lyrics. An instrumental writes no file.
 - **Music video (`.mp4`).** The standalone video is a large binary and its source
   URL can be transiently absent, so it opts out of removal the same way covers do.

@@ -146,6 +146,8 @@ pub fn build_desired(
                 // (`apply_synced_lrc`/`preview_synced_lrc`) before reconcile; the
                 // empty default only matters for this struct literal itself.
                 embedded_lyrics_hash: String::new(),
+                embedded_timed_lyrics_hash: String::new(),
+                lyrics_reencode_safe: true,
                 modes,
                 trashed: clip.is_trashed,
                 private: false,

@@ -24,6 +24,7 @@ where
 
         if format == AudioFormat::Wav {
             let (meta, synced) = self.track_meta(clip, lineage);
+            let timed = self.opts.embed_synced_lyrics.then_some(synced).flatten();
             let cover = self.resolve_cover(clip, format).await?;
             let existing = self.fs.read(path).map_err(|err| {
                 permanent_fail(&clip.id, format!("could not read for retag: {err}"))
@@ -32,7 +33,7 @@ where
                 &existing,
                 &meta,
                 cover.as_ref().map(EmbedCover::as_cover),
-                synced,
+                timed,
             )
             .map_err(|err| permanent_fail(&clip.id, err.to_string()))?;
             let size = self.write_verify(&clip.id, path, &tagged)?;
@@ -41,6 +42,7 @@ where
         }
 
         let (meta, synced) = self.track_meta(clip, lineage);
+        let timed = self.opts.embed_synced_lyrics.then_some(synced).flatten();
         let cover = self.resolve_cover(clip, format).await?;
         let cover = cover.as_ref().map(EmbedCover::as_cover);
         let existing = self
@@ -48,7 +50,7 @@ where
             .read(path)
             .map_err(|err| permanent_fail(&clip.id, format!("could not read for retag: {err}")))?;
         let tagged = match format {
-            AudioFormat::Mp3 => tag_mp3(&existing, &meta, cover, synced),
+            AudioFormat::Mp3 => tag_mp3(&existing, &meta, cover, timed),
             AudioFormat::Flac => tag_flac(&existing, &meta, cover),
             AudioFormat::Alac => tag_alac(&existing, &meta, cover),
             // WAV is rendered before this match, so it never reaches the tag arm.
@@ -63,20 +65,16 @@ where
 
     /// The track metadata for a clip, paired with its synced lyrics (if any).
     ///
-    /// The feed omits per-clip lyrics, so when this run fetched aligned lyrics
-    /// for the clip the plain text is folded into `lyrics` here, which the MP3
-    /// `USLT` and FLAC `LYRICS` tags then carry. The returned [`AlignedLyrics`]
-    /// is passed on to [`tag_mp3`] for the word-level `SYLT` frame.
+    /// Inline clip lyrics are preferred; when they are absent, this run's
+    /// alignment fills the plain tag text. The returned alignment is separately
+    /// gated before it reaches the word-level ID3 `SYLT` writer.
     pub(crate) fn track_meta<'m>(
         &'m self,
         clip: &Clip,
         lineage: &LineageContext,
     ) -> (TrackMetadata, Option<&'m AlignedLyrics>) {
         let synced = self.synced_for(&clip.id);
-        let mut meta = TrackMetadata::from_clip(clip, lineage);
-        if let Some(aligned) = synced {
-            meta.lyrics = aligned.plain_text();
-        }
+        let meta = TrackMetadata::from_clip_with_alignment(clip, lineage, synced);
         (meta, synced)
     }
 
@@ -95,6 +93,7 @@ where
                 entry.meta_hash = d.meta_hash.clone();
                 entry.art_hash = d.art_hash.clone();
                 entry.embedded_lyrics_hash = d.embedded_lyrics_hash.clone();
+                entry.embedded_timed_lyrics_hash = d.embedded_timed_lyrics_hash.clone();
                 entry.preserve = preserve_for(d);
             }
             if let Some(size) = size {
