@@ -348,3 +348,133 @@ fn flac_transcode_failure_is_recorded_and_skipped() {
     assert!(!fs.exists("t.flac"));
     assert!(manifest.get("t").is_none());
 }
+
+#[test]
+fn entitlement_refusal_falls_back_to_native_mp3_and_is_not_a_failure() {
+    let (_c1, d1, a1) = download("e1", AudioFormat::Flac);
+    let (_c2, d2, a2) = download("e2", AudioFormat::Flac);
+    let plan = Plan {
+        actions: vec![a1, a2],
+    };
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route("/wav_file/", Reply::status(403))
+        .route("e1.mp3", Reply::ok(b"one".to_vec()))
+        .route("e2.mp3", Reply::ok(b"two".to_vec()));
+    let fs = MemFs::new();
+    let mut manifest = Manifest::new();
+    let mut opts = small_poll();
+    opts.concurrency = 1;
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d1, d2],
+        &http,
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &opts,
+    );
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert!(outcome.failures.is_empty());
+    assert_eq!(outcome.fallbacks.len(), 2);
+    assert!(
+        outcome.fallbacks[0]
+            .reason
+            .contains("entitlement unavailable")
+    );
+    assert_eq!(outcome.downloaded, 2);
+    assert!(fs.exists("e1.mp3"));
+    assert!(fs.exists("e2.mp3"));
+    assert!(!fs.exists("e1.flac"));
+    assert_eq!(manifest.get("e1").unwrap().format, AudioFormat::Mp3);
+    assert_eq!(manifest.get("e1").unwrap().path, "e1.mp3");
+    assert_eq!(
+        http.count("/wav_file/"),
+        2,
+        "the first refusal refreshes once; later clips use the cached fallback"
+    );
+}
+
+#[test]
+fn entitlement_refusal_preserves_an_existing_lossless_reformat_source() {
+    let c = clip("keep");
+    let d = desired(c.clone(), AudioFormat::Alac);
+    let plan = Plan {
+        actions: vec![Action::Reformat {
+            clip: c,
+            path: "keep.m4a".to_owned(),
+            from_path: "keep.flac".to_owned(),
+            from: AudioFormat::Flac,
+            to: AudioFormat::Alac,
+        }],
+    };
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route("/wav_file/", Reply::status(403));
+    let fs = MemFs::new().with_file("keep.flac", b"LOSSLESS".to_vec());
+    let mut manifest = Manifest::new();
+    let before = entry("keep.flac", AudioFormat::Flac);
+    manifest.insert("keep", before.clone());
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d],
+        &http,
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &small_poll(),
+    );
+
+    assert!(outcome.failures.is_empty());
+    assert_eq!(outcome.fallbacks.len(), 1);
+    assert_eq!(outcome.skipped, 1);
+    assert!(fs.exists("keep.flac"));
+    assert!(!fs.exists("keep.m4a"));
+    assert!(!fs.exists("keep.mp3"));
+    assert_eq!(manifest.get("keep"), Some(&before));
+}
+
+#[test]
+fn entitlement_refusal_keeps_prior_fallback_mp3_as_the_upgrade_baseline() {
+    let c = clip("upgrade");
+    let d = desired(c.clone(), AudioFormat::Flac);
+    let plan = Plan {
+        actions: vec![Action::Reformat {
+            clip: c,
+            path: "upgrade.flac".to_owned(),
+            from_path: "upgrade.mp3".to_owned(),
+            from: AudioFormat::Mp3,
+            to: AudioFormat::Flac,
+        }],
+    };
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route("/wav_file/", Reply::status(403))
+        .route("upgrade.mp3", Reply::ok(b"mp3".to_vec()));
+    let fs = MemFs::new().with_file("upgrade.mp3", b"OLD".to_vec());
+    let mut manifest = Manifest::new();
+    manifest.insert("upgrade", entry("upgrade.mp3", AudioFormat::Mp3));
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d],
+        &http,
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &small_poll(),
+    );
+
+    assert!(outcome.failures.is_empty());
+    assert_eq!(outcome.fallbacks.len(), 1);
+    assert!(fs.exists("upgrade.mp3"));
+    assert!(!fs.exists("upgrade.flac"));
+    assert_eq!(manifest.get("upgrade").unwrap().format, AudioFormat::Mp3);
+    assert_eq!(manifest.get("upgrade").unwrap().path, "upgrade.mp3");
+}

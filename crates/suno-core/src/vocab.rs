@@ -126,6 +126,11 @@ impl AudioFormat {
         }
     }
 
+    /// Whether producing this format requires Suno's authenticated WAV render.
+    pub fn requires_wav_render(self) -> bool {
+        !matches!(self, Self::Mp3)
+    }
+
     /// Whether an animated WebP can be embedded as this format's front cover.
     ///
     /// FLAC, MP3, and WAV embed an `image/webp` picture; ALAC (`mp4ameta` `covr`)

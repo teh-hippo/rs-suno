@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use suno_core::{
-    AudioFormat, ClerkAuth, Clock, Cover, Ffmpeg, Filesystem, FlagOverrides, LineageContext,
-    Settings, SunoClient, TrackMetadata, tag_alac, tag_flac, tag_mp3,
+    AudioFormat, ClerkAuth, Clock, Cover, Error as CoreError, Ffmpeg, Filesystem, FlagOverrides,
+    LineageContext, LosslessAccess, Settings, SunoClient, TrackMetadata, tag_alac, tag_flac,
+    tag_mp3,
 };
 
 use crate::cli::account;
@@ -63,11 +64,13 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     };
 
     let id = parse_clip_id(&args.id);
-    let (root, filename) = fetch_destination(
+    let configured_format = settings.format;
+    let explicit_file = explicit_file_destination(args.output.as_deref(), args.dest.as_deref());
+    let (root, _) = fetch_destination(
         args.output.as_deref(),
         args.dest.as_deref(),
         &id,
-        settings.format,
+        configured_format,
     );
 
     let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
@@ -77,6 +80,27 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     }
     crate::cli::expiry::warn_token_expiry(&label, &auth, global.verbosity());
     let client = SunoClient::new(auth, TokioClock);
+    let lossless_access = if configured_format.requires_wav_render() {
+        match client.get_billing_info(&http).await {
+            Ok(billing) => billing.lossless_access(),
+            Err(_) => LosslessAccess::Unknown,
+        }
+    } else {
+        LosslessAccess::Available
+    };
+    let mut warned = false;
+    let mut output_format = configured_format;
+    if let LosslessAccess::Unavailable(reason) = lossless_access {
+        if explicit_file {
+            eprintln!(
+                "error: lossless output is unavailable ({reason}); an explicit output file cannot be changed to MP3"
+            );
+            return Ok(ExitCode::General);
+        }
+        output_format = AudioFormat::Mp3;
+        warn_fetch_fallback(global.verbosity(), &reason.to_string());
+        warned = true;
+    }
 
     let clip = client
         .get_clip(&http, &id)
@@ -90,56 +114,118 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
 
     let fs = FsAdapter::new(&root);
     let ffmpeg = FfmpegAdapter::new(&root);
-
-    match settings.format {
-        AudioFormat::Mp3 => {
-            let url = clip.mp3_url();
-            let audio = download::get_bytes(&http, &url)
-                .await
-                .context("could not download the MP3")?;
-            let tagged = tag_mp3(&audio, &meta, cover.as_deref().map(Cover::jpeg), None)?;
-            fs.write_atomic(&filename, &tagged)?;
+    let mut wav_url = None;
+    if output_format.requires_wav_render() {
+        let clock = TokioClock;
+        match ensure_wav_url(&client, &http, &clock, &id).await {
+            Ok(url) => wav_url = Some(url),
+            Err(err) => {
+                let Some(reason) = entitlement_error(&err) else {
+                    return Err(err);
+                };
+                let reason = describe_fetch_entitlement(&client, &http, reason).await;
+                if explicit_file {
+                    eprintln!(
+                        "error: lossless output is unavailable ({reason}); an explicit output file cannot be changed to MP3"
+                    );
+                    return Ok(ExitCode::General);
+                }
+                output_format = AudioFormat::Mp3;
+                if !warned {
+                    warn_fetch_fallback(global.verbosity(), &reason);
+                }
+            }
         }
+    }
+    if output_format == AudioFormat::Wav && global.verbosity() >= -1 {
+        eprintln!(
+            "warning: WAV carries limited metadata; lyrics and album art will be omitted (use flac, alac, or mp3 for full tags)"
+        );
+    }
+    let bytes = match output_format {
+        AudioFormat::Mp3 => tagged_mp3(&http, &clip, &meta, cover.as_deref()).await?,
         AudioFormat::Flac => {
-            let clock = TokioClock;
-            let wav_url = ensure_wav_url(&client, &http, &clock, &id).await?;
-            let wav = download::get_bytes(&http, &wav_url)
+            let wav_url = wav_url
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("lossless WAV URL was not resolved"))?;
+            let wav = download::get_bytes(&http, wav_url)
                 .await
                 .context("could not download the WAV")?;
             let flac = ffmpeg.wav_to_lossless(&wav, AudioFormat::Flac).await?;
-            let tagged = tag_flac(&flac, &meta, cover.as_deref().map(Cover::jpeg))?;
-            fs.write_atomic(&filename, &tagged)?;
+            tag_flac(&flac, &meta, cover.as_deref().map(Cover::jpeg))?
         }
         AudioFormat::Alac => {
-            let clock = TokioClock;
-            let wav_url = ensure_wav_url(&client, &http, &clock, &id).await?;
-            let wav = download::get_bytes(&http, &wav_url)
+            let wav_url = wav_url
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("lossless WAV URL was not resolved"))?;
+            let wav = download::get_bytes(&http, wav_url)
                 .await
                 .context("could not download the WAV")?;
             let alac = ffmpeg.wav_to_lossless(&wav, AudioFormat::Alac).await?;
-            let tagged = tag_alac(&alac, &meta, cover.as_deref().map(Cover::jpeg))?;
-            fs.write_atomic(&filename, &tagged)?;
+            tag_alac(&alac, &meta, cover.as_deref().map(Cover::jpeg))?
         }
         AudioFormat::Wav => {
-            if global.verbosity() >= -1 {
-                eprintln!(
-                    "warning: WAV carries limited metadata; lyrics and album art will be omitted (use flac, alac, or mp3 for full tags)"
-                );
-            }
-            let clock = TokioClock;
-            let wav_url = ensure_wav_url(&client, &http, &clock, &id).await?;
-            let wav = download::get_bytes(&http, &wav_url)
+            let wav_url = wav_url
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("lossless WAV URL was not resolved"))?;
+            download::get_bytes(&http, wav_url)
                 .await
-                .context("could not download the WAV")?;
-            fs.write_atomic(&filename, &wav)?;
+                .context("could not download the WAV")?
         }
-    }
+    };
+    let (_, filename) = fetch_destination(
+        args.output.as_deref(),
+        args.dest.as_deref(),
+        &id,
+        output_format,
+    );
+    fs.write_atomic(&filename, &bytes)?;
 
     if global.verbosity() >= -1 {
         eprintln!("{} ({id})", clip.title);
     }
     println!("{}", root.join(&filename).display());
     Ok(ExitCode::Ok)
+}
+
+async fn tagged_mp3(
+    http: &ReqwestHttp,
+    clip: &suno_core::Clip,
+    meta: &TrackMetadata,
+    cover: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let url = clip.mp3_url();
+    let audio = download::get_bytes(http, &url)
+        .await
+        .context("could not download the MP3")?;
+    Ok(tag_mp3(&audio, meta, cover.map(Cover::jpeg), None)?)
+}
+
+fn entitlement_error(err: &anyhow::Error) -> Option<&str> {
+    err.downcast_ref::<CoreError>().and_then(|err| match err {
+        CoreError::Entitlement(reason) => Some(reason.as_str()),
+        _ => None,
+    })
+}
+
+fn warn_fetch_fallback(verbosity: i8, reason: &str) {
+    if verbosity >= -1 {
+        eprintln!("warning: lossless output is unavailable ({reason}); using native MP3");
+    }
+}
+
+async fn describe_fetch_entitlement(
+    client: &SunoClient<TokioClock>,
+    http: &ReqwestHttp,
+    fallback: &str,
+) -> String {
+    match client.get_billing_info(http).await {
+        Ok(billing) => match billing.lossless_access() {
+            LosslessAccess::Unavailable(reason) => reason.to_string(),
+            LosslessAccess::Available | LosslessAccess::Unknown => fallback.to_owned(),
+        },
+        Err(_) => fallback.to_owned(),
+    }
 }
 
 /// Resolve the output directory and bare file name for a fetch.
@@ -190,6 +276,10 @@ fn looks_like_dir(dest: &Path) -> bool {
     dest.extension().is_none()
 }
 
+fn explicit_file_destination(output: Option<&Path>, dest: Option<&Path>) -> bool {
+    output.is_some() || dest.is_some_and(|path| !looks_like_dir(path))
+}
+
 /// Resolve the rendered WAV URL, requesting a render and polling if needed.
 async fn ensure_wav_url(
     client: &SunoClient<TokioClock>,
@@ -200,10 +290,7 @@ async fn ensure_wav_url(
     if let Some(url) = client.wav_url(http, id).await? {
         return Ok(url);
     }
-    client
-        .request_wav(http, id)
-        .await
-        .context("could not request a WAV render")?;
+    client.request_wav(http, id).await?;
     for _ in 0..WAV_POLL_ATTEMPTS {
         clock.sleep(WAV_POLL_INTERVAL).await;
         if let Some(url) = client.wav_url(http, id).await? {
@@ -305,5 +392,26 @@ mod tests {
         );
         assert_eq!(root, PathBuf::from("."));
         assert_eq!(name, "track.flac");
+    }
+
+    #[test]
+    fn fallback_auto_name_uses_mp3_extension() {
+        let (root, name) =
+            fetch_destination(None, Some(Path::new("music")), "abc", AudioFormat::Mp3);
+        assert_eq!(root, PathBuf::from("music"));
+        assert_eq!(name, "abc.mp3");
+    }
+
+    #[test]
+    fn explicit_file_detection_covers_output_and_file_like_destinations() {
+        assert!(explicit_file_destination(
+            Some(Path::new("track.flac")),
+            None
+        ));
+        assert!(explicit_file_destination(
+            None,
+            Some(Path::new("track.flac"))
+        ));
+        assert!(!explicit_file_destination(None, Some(Path::new("music"))));
     }
 }

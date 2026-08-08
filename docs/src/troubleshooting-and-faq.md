@@ -155,6 +155,15 @@ devices and Apple Music), carrying the same tags and cover. MP3 is smaller and
 widely compatible. WAV is lossless but carries limited metadata, so lyrics and
 embedded art are omitted.
 
+### Why did a lossless run use MP3?
+
+Suno supplies FLAC and ALAC indirectly: `suno` downloads Suno's authenticated
+WAV render, then converts it locally. A paused, inactive, past-due, or
+non-entitled plan cannot request that WAV. In that state `suno` warns once and
+uses Suno's native MP3 for new work instead. It never converts MP3 into a
+lossless container, never replaces an existing lossless file with MP3, and
+automatically upgrades the temporary MP3 after lossless access returns.
+
 ### Is it safe to run on a schedule?
 
 Yes. Runs are incremental and resumable, an exclusive lock prevents overlap, and

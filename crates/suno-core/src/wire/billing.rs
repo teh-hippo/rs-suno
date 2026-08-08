@@ -25,12 +25,11 @@ pub(crate) fn parse_billing_info(body: &[u8]) -> Result<BillingInfo> {
 /// `plan.usage_plan_features[].name`.
 fn from_billing_json(data: &Value) -> BillingInfo {
     let plan = data.get("plan");
+    let accessible_features = data.get("accessible_features");
+    let plan_features = plan.and_then(|plan| plan.get("usage_plan_features"));
     let mut features = BTreeSet::new();
-    collect_feature_names(data.get("accessible_features"), &mut features);
-    collect_feature_names(
-        plan.and_then(|plan| plan.get("usage_plan_features")),
-        &mut features,
-    );
+    collect_feature_names(accessible_features, &mut features);
+    collect_feature_names(plan_features, &mut features);
     BillingInfo {
         total_credits_left: data.get("total_credits_left").and_then(json_i64),
         monthly_limit: data.get("monthly_limit").and_then(json_i64),
@@ -48,6 +47,8 @@ fn from_billing_json(data: &Value) -> BillingInfo {
         plan_name: json_string(plan.and_then(|plan| plan.get("name"))),
         plan_level: plan.and_then(|plan| plan.get("level")).and_then(json_i64),
         features,
+        features_known: accessible_features.is_some_and(Value::is_array)
+            || plan_features.is_some_and(Value::is_array),
     }
 }
 
@@ -115,6 +116,7 @@ fn json_string(value: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{LosslessAccess, LosslessUnavailableReason};
 
     #[test]
     fn parse_billing_info_reads_full_real_body() {
@@ -277,6 +279,48 @@ mod tests {
         assert!(billing.can_convert_audio());
         // Empty and malformed feature entries are ignored.
         assert_eq!(billing.features.len(), 2);
+    }
+
+    #[test]
+    fn lossless_access_uses_status_and_known_entitlements() {
+        for (body, expected) in [
+            (
+                r#"{"is_paused":true,"accessible_features":[{"name":"convert_audio"}]}"#,
+                LosslessAccess::Unavailable(LosslessUnavailableReason::Paused),
+            ),
+            (
+                r#"{"is_past_due":true,"accessible_features":[{"name":"convert_audio"}]}"#,
+                LosslessAccess::Unavailable(LosslessUnavailableReason::PastDue),
+            ),
+            (
+                r#"{"is_active":false,"accessible_features":[{"name":"convert_audio"}]}"#,
+                LosslessAccess::Unavailable(LosslessUnavailableReason::Inactive),
+            ),
+            (
+                r#"{"is_active":true,"accessible_features":[]}"#,
+                LosslessAccess::Unavailable(LosslessUnavailableReason::NotIncluded),
+            ),
+            (
+                r#"{"is_active":true,"accessible_features":[{"name":"convert_audio"}]}"#,
+                LosslessAccess::Available,
+            ),
+        ] {
+            let billing = parse_billing_info(body.as_bytes()).unwrap();
+            assert_eq!(billing.lossless_access(), expected, "{body}");
+        }
+    }
+
+    #[test]
+    fn missing_or_malformed_feature_data_leaves_lossless_access_unknown() {
+        for body in [
+            r#"{"is_active":true}"#,
+            r#"{"is_active":true,"accessible_features":"unexpected"}"#,
+            "null",
+        ] {
+            let billing = parse_billing_info(body.as_bytes()).unwrap();
+            assert_eq!(billing.lossless_access(), LosslessAccess::Unknown, "{body}");
+            assert!(!billing.features_known);
+        }
     }
 
     /// The anonymised full 43-field `GET /api/billing/info/` body, used as a

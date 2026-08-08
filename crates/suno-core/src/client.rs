@@ -131,8 +131,14 @@ impl<C: Clock> SunoClient<C> {
     /// Ask Suno to render a clip to lossless WAV (server-side, asynchronous).
     pub async fn request_wav(&self, http: &impl Http, id: &str) -> Result<()> {
         let path = format!("/api/gen/{id}/convert_wav/");
-        self.api_request(http, Method::Post, &path, Vec::new())
-            .await?;
+        self.api_request_with_forbidden(
+            http,
+            Method::Post,
+            &path,
+            Vec::new(),
+            ForbiddenClass::Entitlement,
+        )
+        .await?;
         Ok(())
     }
 
@@ -142,7 +148,10 @@ impl<C: Clock> SunoClient<C> {
     /// so the caller's poll loop owns that budget.
     pub async fn wav_url(&self, http: &impl Http, id: &str) -> Result<Option<String>> {
         let path = format!("/api/gen/{id}/wav_file/");
-        let body = match self.api_get(http, &path).await {
+        let body = match self
+            .api_get_with_forbidden(http, &path, ForbiddenClass::Entitlement)
+            .await
+        {
             Ok(body) => body,
             Err(Error::NotFound(_)) => return Ok(None),
             Err(err) => return Err(err),
@@ -424,9 +433,15 @@ impl<C: Clock> SunoClient<C> {
             .ok_or_else(|| Error::Api(format!("clip {id} not found in the library")))
     }
 
-    /// Perform an authenticated GET, refreshing the JWT once on a 401/403.
-    async fn api_get(&self, http: &impl Http, path: &str) -> Result<Vec<u8>> {
-        self.api_request(http, Method::Get, path, Vec::new()).await
+    /// Perform an authenticated GET with endpoint-specific repeated-403 handling.
+    async fn api_get_with_forbidden(
+        &self,
+        http: &impl Http,
+        path: &str,
+        forbidden: ForbiddenClass,
+    ) -> Result<Vec<u8>> {
+        self.api_request_with_forbidden(http, Method::Get, path, Vec::new(), forbidden)
+            .await
     }
 
     /// A retrying GET: [`api_send_retrying`](Self::api_send_retrying) with no body.
@@ -443,7 +458,7 @@ impl<C: Clock> SunoClient<C> {
     ///
     /// Pacing lives at this single per-request layer so it composes with any
     /// paged walk. The WAV render flow instead uses the plain
-    /// [`api_get`](Self::api_get) so the executor owns that retry budget.
+    /// non-retrying GET path so the executor owns that retry budget.
     async fn api_send_retrying(
         &self,
         http: &impl Http,
@@ -483,6 +498,21 @@ impl<C: Clock> SunoClient<C> {
         path: &str,
         body: Vec<u8>,
     ) -> Result<Vec<u8>> {
+        self.api_request_with_forbidden(http, method, path, body, ForbiddenClass::Auth)
+            .await
+    }
+
+    /// Perform an authenticated request with endpoint-specific repeated-403
+    /// handling. Every endpoint refreshes the JWT once; only the lossless WAV
+    /// endpoints may classify the second `403` as entitlement rather than auth.
+    async fn api_request_with_forbidden(
+        &self,
+        http: &impl Http,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+        forbidden: ForbiddenClass,
+    ) -> Result<Vec<u8>> {
         // Crate-wide POST allow-list: every mutating request funnels through
         // here, so a destructive or credit-spending endpoint can never be sent.
         // GETs are free and unrestricted.
@@ -515,11 +545,21 @@ impl<C: Clock> SunoClient<C> {
                     self.auth.invalidate_jwt();
                     auth_refreshed = true;
                 }
-                401 | 403 => {
+                401 => {
                     return Err(Error::Auth(format!(
                         "Suno API auth failed with status {}",
                         response.status
                     )));
+                }
+                403 if forbidden == ForbiddenClass::Entitlement => {
+                    return Err(Error::Entitlement(
+                        "Suno refused the lossless WAV render with status 403".to_owned(),
+                    ));
+                }
+                403 => {
+                    return Err(Error::Auth(
+                        "Suno API auth failed with status 403".to_owned(),
+                    ));
                 }
                 429 => {
                     self.locked_limiter().on_rate_limit();
@@ -549,6 +589,12 @@ impl<C: Clock> SunoClient<C> {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForbiddenClass {
+    Auth,
+    Entitlement,
 }
 
 /// Whether a Suno API path may be the target of a POST (the crate-wide POST

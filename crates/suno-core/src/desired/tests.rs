@@ -75,5 +75,6 @@ fn path_of<'a>(desired: &'a [Desired], id: &str) -> &'a str {
 
 mod album;
 mod build;
+mod fallback;
 mod playlist;
 mod sidecars;

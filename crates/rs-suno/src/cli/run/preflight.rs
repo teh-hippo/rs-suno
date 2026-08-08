@@ -55,22 +55,6 @@ pub(super) async fn preflight(
         }
     };
 
-    if settings.requires_ffmpeg() && version::ffmpeg_version().is_none() {
-        eprint_t!(
-            "error: ffmpeg is required for {} output{} but was not found on PATH; \
-             install ffmpeg or switch to mp3 format",
-            settings.format,
-            if settings.animated_covers && !settings.raw_animated_cover {
-                " and animated WebP covers"
-            } else if settings.animated_covers {
-                " and animated covers"
-            } else {
-                ""
-            }
-        );
-        return Ok(Err(ExitCode::Config));
-    }
-
     let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
     let dest = &target.dest;
     let auth = ClerkAuth::new(&token);
@@ -89,6 +73,24 @@ pub(super) async fn preflight(
         );
         return Ok(Err(ExitCode::Auth));
     };
+    let client = SunoClient::new(auth, TokioClock);
+    let lossless_access = if settings.format.requires_wav_render() {
+        match client.get_billing_info(&http).await {
+            Ok(billing) => billing.lossless_access(),
+            Err(_) => LosslessAccess::Unknown,
+        }
+    } else {
+        LosslessAccess::Available
+    };
+
+    if effective_requires_ffmpeg(&settings, lossless_access) && version::ffmpeg_version().is_none()
+    {
+        eprint_t!(
+            "error: ffmpeg is required for {} but was not found on PATH; install ffmpeg or disable that output",
+            ffmpeg_requirement(&settings, lossless_access)
+        );
+        return Ok(Err(ExitCode::Config));
+    }
 
     // Load the durable store up front so the identity guard can compare the
     // authenticated account against the account this library is pinned to,
@@ -105,7 +107,6 @@ pub(super) async fn preflight(
     // and disambiguation all reflect the preferred name from one source.
     store.set_album_overrides(settings.album_overrides.clone());
 
-    let client = SunoClient::new(auth, TokioClock);
     Ok(Ok(Preflight {
         settings,
         http,
@@ -113,7 +114,35 @@ pub(super) async fn preflight(
         store,
         user_id,
         account,
+        lossless_access,
     }))
+}
+
+fn effective_requires_ffmpeg(
+    settings: &suno_core::EffectiveSettings,
+    access: LosslessAccess,
+) -> bool {
+    settings.animated_covers
+        || (matches!(
+            settings.format,
+            suno_core::AudioFormat::Flac | suno_core::AudioFormat::Alac
+        ) && !matches!(access, LosslessAccess::Unavailable(_)))
+}
+
+fn ffmpeg_requirement(
+    settings: &suno_core::EffectiveSettings,
+    access: LosslessAccess,
+) -> &'static str {
+    let audio = matches!(
+        settings.format,
+        suno_core::AudioFormat::Flac | suno_core::AudioFormat::Alac
+    ) && !matches!(access, LosslessAccess::Unavailable(_));
+    match (audio, settings.animated_covers) {
+        (true, true) => "lossless audio and animated WebP covers",
+        (true, false) => "lossless audio",
+        (false, true) => "animated WebP covers",
+        (false, false) => "the selected output",
+    }
 }
 
 /// Print a one-line note when an explicit `--animated-covers` was silently

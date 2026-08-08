@@ -75,3 +75,15 @@ fn api_request_refuses_a_post_off_the_allow_list() {
     .unwrap_err();
     assert!(matches!(err, Error::Refused(_)));
 }
+
+#[test]
+fn ordinary_api_repeated_403_remains_authentication_failure() {
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route(BILLING_INFO_PATH, Reply::status(403));
+    let client = scripted_client(&http, RecordingClock::new());
+
+    let err = pollster::block_on(client.get_billing_info(&http)).unwrap_err();
+    assert!(matches!(err, Error::Auth(_)));
+    assert_eq!(http.count(BILLING_INFO_PATH), 2);
+}

@@ -277,6 +277,11 @@ Failures are classified so one bad clip never derails a whole run:
 
 - **Authentication failure** stops that account cleanly and re-authenticates on
   the next run.
+- **Lossless entitlement unavailable** uses native MP3 for clips that do not
+  already have a lossless file. Existing FLAC, ALAC, and WAV files are preserved,
+  playlists are still written, and the run exits successfully with one warning.
+  The configured lossless format remains the target, so a later run upgrades the
+  temporary MP3 when the entitlement returns.
 - **Transient failure** (a timeout, a `5xx`, a rate limit) is retried up to
   `--retries` times, then recorded and skipped.
 - **A single clip's failure never aborts the run.** Other clips still download,

@@ -8,6 +8,9 @@ pub enum Error {
     /// The token was rejected, or no session or JWT could be obtained.
     #[error("authentication failed: {0}")]
     Auth(String),
+    /// The authenticated account is not entitled to the requested operation.
+    #[error("entitlement unavailable: {0}")]
+    Entitlement(String),
     /// A transport failure talking to Clerk or the Suno API.
     #[error("could not connect: {0}")]
     Connection(String),

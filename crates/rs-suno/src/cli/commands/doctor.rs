@@ -227,23 +227,10 @@ fn format_credits_line(billing: &BillingInfo) -> String {
         let period = billing.period.as_deref().unwrap_or("period");
         write!(line, " ({usage} of {limit} used this {period})").ok();
     }
-    if let Some(status) = account_status_hint(billing) {
+    if let Some(status) = billing.account_status_hint() {
         write!(line, "; {status}").ok();
     }
     line
-}
-
-/// A short account-health hint, or `None` when the account looks healthy.
-fn account_status_hint(billing: &BillingInfo) -> Option<&'static str> {
-    if billing.is_past_due == Some(true) {
-        Some("past due")
-    } else if billing.is_paused == Some(true) {
-        Some("paused")
-    } else if billing.is_active == Some(false) {
-        Some("inactive")
-    } else {
-        None
-    }
 }
 
 fn render_env_section(out: &mut String, env: &HashMap<String, String>) {
