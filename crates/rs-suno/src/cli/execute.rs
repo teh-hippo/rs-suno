@@ -389,7 +389,7 @@ pub(crate) struct ReconcileInputs<'a> {
 /// sees each `.lrc`'s real content hash. Statting absent files is harmless, so
 /// this never creates the destination directory. The folder-art actions share
 /// the run's single deletion verdict ([`deletion_allowed`]) so album art is
-/// never removed on an incomplete listing, and they land on the same [`Plan`](suno_core::Plan) so
+/// never removed on an incomplete listing, and they land on the same [`Plan`] so
 /// the mass-delete cap and the confirmation prompt already cover them.
 ///
 /// Playlists carry a second, independent gate: `playlists_enumerated` is true
