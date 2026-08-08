@@ -13,6 +13,9 @@ pub(super) enum Class {
     /// beats skipping every remaining clip (each of which would first burn a
     /// server-side WAV-render budget before failing the same way).
     Disk,
+    /// The authenticated account cannot use the requested paid operation.
+    /// Audio preparation may recover with a native MP3 fallback.
+    Entitlement,
     /// Retry a bounded number of times, then record and skip.
     Transient,
     /// Record and skip immediately.
@@ -32,7 +35,7 @@ pub(super) fn abort_status(class: Class) -> Option<RunStatus> {
     match class {
         Class::Auth => Some(RunStatus::AuthAborted),
         Class::Disk => Some(RunStatus::DiskFull),
-        Class::Transient | Class::Permanent => None,
+        Class::Entitlement | Class::Transient | Class::Permanent => None,
     }
 }
 
@@ -55,6 +58,14 @@ pub(super) fn transient_fail(clip_id: impl Into<String>, reason: impl Into<Strin
 pub(super) fn permanent_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail {
     Fail {
         class: Class::Permanent,
+        clip_id: clip_id.into(),
+        reason: reason.into(),
+    }
+}
+
+pub(super) fn entitlement_fail(clip_id: impl Into<String>, reason: impl Into<String>) -> Fail {
+    Fail {
+        class: Class::Entitlement,
         clip_id: clip_id.into(),
         reason: reason.into(),
     }
@@ -174,6 +185,7 @@ pub(super) fn classify_core(id: &str, err: Error) -> Fail {
     let reason = err.to_string();
     match err {
         Error::Auth(_) => auth_fail(id, reason),
+        Error::Entitlement(_) => entitlement_fail(id, reason),
         Error::RateLimited { .. } | Error::Connection(_) => transient_fail(id, reason),
         Error::Api(_)
         | Error::BadRequest(_)

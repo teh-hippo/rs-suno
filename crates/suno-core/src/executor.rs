@@ -34,6 +34,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use futures_util::lock::Mutex as AsyncMutex;
@@ -46,11 +47,13 @@ use crate::clock::Clock;
 use crate::error::Error;
 use crate::ffmpeg::Ffmpeg;
 use crate::fs::Filesystem;
+use crate::hash::embedded_art_hash;
 use crate::http::{Http, HttpRequest};
 use crate::lineage::LineageContext;
 use crate::lyrics::AlignedLyrics;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
+use crate::pathkey::same_fs_path;
 use crate::reconcile::{Action, Desired, Plan, set_manifest_artifact, set_manifest_stem};
 use crate::tag::{Cover, TrackMetadata, flac_picture_data_budget, tag_flac, tag_mp3, tag_wav};
 use crate::tag_alac::tag_alac;
@@ -130,6 +133,17 @@ pub struct Failure {
     pub reason: String,
 }
 
+/// One audio action that used a temporary format because lossless entitlement
+/// was unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioFallback {
+    pub clip_id: String,
+    pub requested_path: String,
+    pub actual_path: String,
+    pub format: AudioFormat,
+    pub reason: String,
+}
+
 /// The result of applying a [`Plan`]: per-action counts and the failure list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecOutcome {
@@ -145,6 +159,8 @@ pub struct ExecOutcome {
     /// permanent). The run continued past each one unless it was an auth or
     /// disk-full abort.
     pub failures: Vec<Failure>,
+    /// Successful temporary format fallbacks. These are warnings, not failures.
+    pub fallbacks: Vec<AudioFallback>,
     /// How the run ended.
     pub status: RunStatus,
 }
@@ -153,6 +169,23 @@ impl ExecOutcome {
     /// Number of failed actions.
     pub fn failed(&self) -> usize {
         self.failures.len()
+    }
+
+    /// Merge a later execution phase into this outcome.
+    pub fn merge(&mut self, mut other: Self) {
+        self.downloaded += other.downloaded;
+        self.reformatted += other.reformatted;
+        self.retagged += other.retagged;
+        self.renamed += other.renamed;
+        self.deleted += other.deleted;
+        self.skipped += other.skipped;
+        self.artifacts_written += other.artifacts_written;
+        self.artifacts_deleted += other.artifacts_deleted;
+        self.failures.append(&mut other.failures);
+        self.fallbacks.append(&mut other.fallbacks);
+        if self.status == RunStatus::Completed {
+            self.status = other.status;
+        }
     }
 
     fn record(&mut self, effect: Effect) {
@@ -165,6 +198,16 @@ impl ExecOutcome {
             Effect::Skipped => self.skipped += 1,
             Effect::ArtifactWritten => self.artifacts_written += 1,
             Effect::ArtifactDeleted => self.artifacts_deleted += 1,
+            Effect::AudioFallback {
+                effect, fallback, ..
+            } => {
+                match effect {
+                    AudioEffect::Downloaded => self.downloaded += 1,
+                    AudioEffect::Reformatted => self.reformatted += 1,
+                    AudioEffect::Skipped => self.skipped += 1,
+                }
+                self.fallbacks.push(fallback);
+            }
         }
     }
 }
@@ -314,6 +357,7 @@ where
         })
         .collect();
     let cover_cache: Mutex<HashMap<String, Vec<u8>>> = Mutex::new(HashMap::new());
+    let lossless_unavailable = AtomicBool::new(false);
     // The `both` video-cover retention keeps `cover.webp` (transcoded) and
     // `cover.mp4` (raw) for an album from the SAME `video_cover_url`. Cache that
     // source on its first fetch so the second folder artifact drains it rather
@@ -347,6 +391,7 @@ where
         cover_cache: &cover_cache,
         cover_wanted: &cover_wanted,
         shared_cover_urls: &shared_cover_urls,
+        lossless_unavailable: &lossless_unavailable,
     };
 
     let mut outcome = ExecOutcome::default();
@@ -449,14 +494,23 @@ where
         };
         match result {
             Ok(effect) => {
+                let committed_path = match &effect {
+                    Effect::AudioFallback {
+                        fallback,
+                        wrote: true,
+                        ..
+                    } => Some(fallback.actual_path.clone()),
+                    Effect::AudioFallback { wrote: false, .. } => None,
+                    _ => written_path(action).map(str::to_owned),
+                };
                 outcome.record(effect);
                 // Record this action's destination now that its write succeeded.
                 // A later action vacating a path removes it only when no
                 // *committed* write also targets it; commit is strictly serial in
                 // plan order, so a planned-but-failed or not-yet-run write never
                 // protects a stale file from cleanup (#142).
-                if let Some(dest) = written_path(action) {
-                    committed.insert(dest.to_owned());
+                if let Some(dest) = committed_path {
+                    committed.insert(dest);
                 }
             }
             Err(fail) => {
@@ -559,8 +613,9 @@ struct RenderedAudio {
     /// The superseded file to remove after the new one lands (a [`Reformat`]),
     /// or `None` for a plain [`Download`].
     from_path: Option<String>,
-    effect: Effect,
-    bytes: Vec<u8>,
+    effect: AudioEffect,
+    bytes: Option<Vec<u8>>,
+    fallback: Option<AudioFallback>,
 }
 
 /// A fetched-but-uncommitted artifact result: bytes for one
@@ -620,6 +675,18 @@ enum Effect {
     Skipped,
     ArtifactWritten,
     ArtifactDeleted,
+    AudioFallback {
+        effect: AudioEffect,
+        fallback: AudioFallback,
+        wrote: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AudioEffect {
+    Downloaded,
+    Reformatted,
+    Skipped,
 }
 
 /// Whether an artifact kind is album-scoped folder art (owned by a root id and
@@ -683,6 +750,9 @@ struct Ctx<'a, H, F, G, C> {
     /// reuses the #89 fetch-once path). `FolderWebp` sorts before `FolderMp4`, so
     /// the raw source is always cached before the raw sidecar reads it.
     shared_cover_urls: &'a HashSet<&'a str>,
+    /// Set after the first entitlement refusal so later audio producers use
+    /// native MP3 without attempting another WAV render.
+    lossless_unavailable: &'a AtomicBool,
 }
 
 impl<H, F, G, C> Ctx<'_, H, F, G, C>
@@ -993,7 +1063,19 @@ where
     /// Build the manifest entry for a freshly written file.
     fn entry(&self, clip_id: &str, path: &str, format: AudioFormat, size: u64) -> ManifestEntry {
         match self.by_id.get(clip_id) {
-            Some(d) => manifest_entry(d, size),
+            Some(d) => {
+                let mut entry = manifest_entry(d, size);
+                entry.path = path.to_owned();
+                entry.format = format;
+                if format != d.format {
+                    entry.art_hash = embedded_art_hash(
+                        &d.clip,
+                        self.opts.embed_animated_cover && format.embeds_animated_cover(),
+                        &self.opts.cover_webp,
+                    );
+                }
+                entry
+            }
             None => ManifestEntry {
                 path: path.to_owned(),
                 format,

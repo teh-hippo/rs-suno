@@ -47,6 +47,22 @@ fn request_wav_accepts_a_2xx_status() {
 }
 
 #[test]
+fn request_wav_repeated_403_is_entitlement_not_authentication() {
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route("/convert_wav/", Reply::status(403));
+    let client = scripted_client(&http, RecordingClock::new());
+
+    let err = pollster::block_on(client.request_wav(&http, "z")).unwrap_err();
+    assert!(matches!(err, Error::Entitlement(_)));
+    assert_eq!(
+        http.count("/convert_wav/"),
+        2,
+        "one JWT refresh is attempted"
+    );
+}
+
+#[test]
 fn wav_url_reads_the_ready_url() {
     let mut rules = auth_rules();
     rules.push(Rule::new(

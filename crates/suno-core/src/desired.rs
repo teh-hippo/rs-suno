@@ -9,12 +9,14 @@ use crate::hash::{
     synced_lrc_source_hash, webp_art_hash,
 };
 use crate::lineage::LineageContext;
-use crate::model::Clip;
-use crate::model::Stem;
+use crate::manifest::Manifest;
+use crate::model::{Clip, LosslessAccess, Stem};
 use crate::naming::{
     CharacterSet, NamingConfig, NamingRequest, render_clip_names, sanitise_name, stem_file_path,
 };
-use crate::reconcile::{AlbumDesired, Desired, DesiredArtifact, DesiredStem, PlaylistDesired};
+use crate::reconcile::{
+    AlbumDesired, Desired, DesiredArtifact, DesiredStem, LocalFile, PlaylistDesired,
+};
 use crate::vocab::{ArtifactKind, AudioFormat, SourceMode, StemFormat, WebpEncodeSettings};
 
 /// The synthetic playlist id for the liked feed, rendered as "Liked Songs".
@@ -155,6 +157,91 @@ pub fn build_desired(
             }
         })
         .collect()
+}
+
+/// Apply a known lossless-entitlement outage to this run's desired audio state.
+///
+/// The configured settings remain untouched. A present, non-empty lossless file
+/// keeps its current format, while every other requested lossless target becomes
+/// native MP3 for this run. The returned path map rewrites already-rendered
+/// playlists from their configured target path to the effective path.
+pub fn apply_lossless_fallback(
+    desired: &mut [Desired],
+    manifest: &Manifest,
+    local: &HashMap<String, LocalFile>,
+    access: LosslessAccess,
+    toggles: ArtifactToggles,
+) -> HashMap<String, String> {
+    if !matches!(access, LosslessAccess::Unavailable(_)) {
+        return HashMap::new();
+    }
+
+    let mut path_changes = HashMap::new();
+    for d in desired {
+        if !d.format.requires_wav_render() {
+            continue;
+        }
+        let effective = manifest
+            .get(&d.clip.id)
+            .filter(|entry| {
+                entry.format.requires_wav_render()
+                    && local
+                        .get(&d.clip.id)
+                        .is_some_and(|file| file.exists && file.size > 0)
+            })
+            .map_or(AudioFormat::Mp3, |entry| entry.format);
+        let old_path = d.path.clone();
+        retarget_audio_format(d, effective, toggles);
+        if d.path != old_path {
+            path_changes.insert(old_path, d.path.clone());
+        }
+    }
+    path_changes
+}
+
+/// Rewrite exact playlist path lines after effective audio paths change.
+pub fn rewrite_playlist_paths(
+    playlists: &mut [PlaylistDesired],
+    path_changes: &HashMap<String, String>,
+) {
+    if path_changes.is_empty() {
+        return;
+    }
+    for playlist in playlists {
+        let mut changed = false;
+        let mut content = String::with_capacity(playlist.content.len());
+        for segment in playlist.content.split_inclusive('\n') {
+            let (line, newline) = segment
+                .strip_suffix('\n')
+                .map_or((segment, ""), |line| (line, "\n"));
+            if let Some(path) = path_changes.get(line) {
+                content.push_str(path);
+                changed = true;
+            } else {
+                content.push_str(line);
+            }
+            content.push_str(newline);
+        }
+        if changed {
+            playlist.hash = content_hash(&content);
+            playlist.content = content;
+        }
+    }
+}
+
+fn retarget_audio_format(d: &mut Desired, format: AudioFormat, toggles: ArtifactToggles) {
+    if d.format == format {
+        return;
+    }
+    let suffix = format!(".{}", d.format.ext());
+    let base = d.path.strip_suffix(&suffix).unwrap_or(&d.path);
+    d.path = format!("{base}.{}", format.ext());
+    d.format = format;
+    d.art_hash = embedded_art_hash(
+        &d.clip,
+        toggles.animated_covers && format.embeds_animated_cover(),
+        &toggles.webp,
+    );
 }
 
 /// Build the authoritative desired stem set for one clip from its listed stems.

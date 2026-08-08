@@ -269,6 +269,11 @@ suno fetch [OPTIONS] <ID_OR_URL> [DEST]
 `ID_OR_URL` is a clip UUID or a Suno URL containing it. `DEST` defaults to the
 current directory; when it is a directory the file is named `<id>.<ext>`.
 
+FLAC, ALAC, and WAV require Suno's paid WAV-render entitlement. If the account
+cannot currently use that entitlement, an auto-named fetch falls back to native
+MP3 and reports the `.mp3` path. An explicit file path, including `--output`,
+remains strict and fails rather than writing MP3 bytes under a lossless name.
+
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--format <mp3\|flac\|alac\|wav>` | | `flac` | Audio format. |

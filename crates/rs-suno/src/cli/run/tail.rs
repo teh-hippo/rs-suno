@@ -12,6 +12,7 @@ pub(super) async fn dry_run_report(
     store: &suno_core::LineageStore,
 ) -> Result<ExitCode> {
     let manifest = logs::load_manifest(ctx.dest)?;
+    apply_effective_audio_targets(ctx, assembled, &manifest, store).await;
     suno_core::preview_synced_lrc(
         &mut assembled.desired,
         &manifest,
@@ -62,6 +63,7 @@ pub(super) async fn execute_run(
         .with_context(|| format!("could not create {}", dest.display()))?;
     let _lock = logs::acquire_lock(dest)?;
     let manifest = logs::load_manifest(dest)?;
+    apply_effective_audio_targets(ctx, &mut assembled, &manifest, store).await;
     // Resolve this run's synced lyrics before reconcile: fetch Suno's alignment
     // for the clips that need it (gated by the per-clip marker, so a steady-state
     // re-sync fetches nothing and the feature being off fetches nothing), and
@@ -170,6 +172,45 @@ pub(super) async fn execute_run(
         account: ctx.account,
         verbosity,
         library_authoritative: assembled.library_authoritative,
+        playlist_desired: &assembled.playlist_desired,
+        stored_playlists: &assembled.stored_playlists,
+        sources: &assembled.sources,
+        playlists_enumerated: assembled.playlists_enumerated,
     })
     .await
+}
+
+async fn apply_effective_audio_targets(
+    ctx: &RunCtx<'_>,
+    assembled: &mut Assembled,
+    manifest: &suno_core::Manifest,
+    store: &suno_core::LineageStore,
+) {
+    if !matches!(ctx.lossless_access, LosslessAccess::Unavailable(_))
+        || !ctx.settings.format.requires_wav_render()
+    {
+        return;
+    }
+    let local = execute::stat_manifest(
+        ctx.dest,
+        manifest,
+        &store.albums,
+        &assembled.stored_playlists,
+    )
+    .await;
+    let path_changes = suno_core::apply_lossless_fallback(
+        &mut assembled.desired,
+        manifest,
+        &local,
+        ctx.lossless_access,
+        ArtifactToggles {
+            animated_covers: ctx.settings.animated_covers,
+            details: ctx.settings.details_sidecar,
+            lyrics: ctx.settings.lyrics_sidecar,
+            lrc: ctx.settings.lrc_sidecar,
+            video: ctx.settings.video_mp4,
+            webp: ctx.settings.animated_cover_webp,
+        },
+    );
+    suno_core::rewrite_playlist_paths(&mut assembled.playlist_desired, &path_changes);
 }

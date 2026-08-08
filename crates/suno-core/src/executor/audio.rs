@@ -1,4 +1,7 @@
 use super::*;
+use std::sync::atomic::Ordering;
+
+const CACHED_ENTITLEMENT_REASON: &str = "lossless entitlement unavailable for this run";
 
 impl<H, F, G, C> Ctx<'_, H, F, G, C>
 where
@@ -27,23 +30,48 @@ where
                 path,
                 format,
             } => {
-                let bytes = self
-                    .produce_audio(client_lock, clip, lineage, *format)
-                    .await?;
+                let result = if format.requires_wav_render()
+                    && self.lossless_unavailable.load(Ordering::Acquire)
+                {
+                    Err(entitlement_fail(&clip.id, CACHED_ENTITLEMENT_REASON))
+                } else {
+                    self.produce_audio(client_lock, clip, lineage, *format)
+                        .await
+                };
+                let (bytes, actual_path, actual_format, fallback) = match result {
+                    Ok(bytes) => (Some(bytes), path.clone(), *format, None),
+                    Err(fail) if matches!(fail.class, Class::Entitlement) => {
+                        self.lossless_unavailable.store(true, Ordering::Release);
+                        let actual_path = audio_path_with_format(path, *format, AudioFormat::Mp3);
+                        let bytes = self
+                            .produce_audio(client_lock, clip, lineage, AudioFormat::Mp3)
+                            .await?;
+                        let fallback = AudioFallback {
+                            clip_id: clip.id.clone(),
+                            requested_path: path.clone(),
+                            actual_path: actual_path.clone(),
+                            format: AudioFormat::Mp3,
+                            reason: fail.reason,
+                        };
+                        (Some(bytes), actual_path, AudioFormat::Mp3, Some(fallback))
+                    }
+                    Err(fail) => return Err(fail),
+                };
                 Ok(RenderedAudio {
                     clip_id: clip.id.clone(),
-                    path: path.clone(),
-                    format: *format,
+                    path: actual_path,
+                    format: actual_format,
                     from_path: None,
-                    effect: Effect::Downloaded,
+                    effect: AudioEffect::Downloaded,
                     bytes,
+                    fallback,
                 })
             }
             Action::Reformat {
                 clip,
                 path,
                 from_path,
-                from: _,
+                from,
                 to,
             } => {
                 // A Reformat action carries no lineage, so recover it from the
@@ -55,14 +83,77 @@ where
                     .get(clip.id.as_str())
                     .map(|d| d.lineage.clone())
                     .unwrap_or_else(|| LineageContext::own_root(clip));
-                let bytes = self.produce_audio(client_lock, clip, &lineage, *to).await?;
+                let result = if to.requires_wav_render()
+                    && self.lossless_unavailable.load(Ordering::Acquire)
+                {
+                    Err(entitlement_fail(&clip.id, CACHED_ENTITLEMENT_REASON))
+                } else {
+                    self.produce_audio(client_lock, clip, &lineage, *to).await
+                };
+                let (bytes, actual_path, actual_format, cleanup, effect, fallback) = match result {
+                    Ok(bytes) => (
+                        Some(bytes),
+                        path.clone(),
+                        *to,
+                        Some(from_path.clone()),
+                        AudioEffect::Reformatted,
+                        None,
+                    ),
+                    Err(fail)
+                        if matches!(fail.class, Class::Entitlement)
+                            && *from == AudioFormat::Mp3 =>
+                    {
+                        self.lossless_unavailable.store(true, Ordering::Release);
+                        let actual_path = audio_path_with_format(path, *to, AudioFormat::Mp3);
+                        let bytes = self
+                            .produce_audio(client_lock, clip, &lineage, AudioFormat::Mp3)
+                            .await?;
+                        let cleanup =
+                            (!same_fs_path(&actual_path, from_path)).then(|| from_path.clone());
+                        let fallback = AudioFallback {
+                            clip_id: clip.id.clone(),
+                            requested_path: path.clone(),
+                            actual_path: actual_path.clone(),
+                            format: AudioFormat::Mp3,
+                            reason: fail.reason,
+                        };
+                        (
+                            Some(bytes),
+                            actual_path,
+                            AudioFormat::Mp3,
+                            cleanup,
+                            AudioEffect::Reformatted,
+                            Some(fallback),
+                        )
+                    }
+                    Err(fail) if matches!(fail.class, Class::Entitlement) => {
+                        self.lossless_unavailable.store(true, Ordering::Release);
+                        let fallback = AudioFallback {
+                            clip_id: clip.id.clone(),
+                            requested_path: path.clone(),
+                            actual_path: from_path.clone(),
+                            format: *from,
+                            reason: fail.reason,
+                        };
+                        (
+                            None,
+                            from_path.clone(),
+                            *from,
+                            None,
+                            AudioEffect::Skipped,
+                            Some(fallback),
+                        )
+                    }
+                    Err(fail) => return Err(fail),
+                };
                 Ok(RenderedAudio {
                     clip_id: clip.id.clone(),
-                    path: path.clone(),
-                    format: *to,
-                    from_path: Some(from_path.clone()),
-                    effect: Effect::Reformatted,
+                    path: actual_path,
+                    format: actual_format,
+                    from_path: cleanup,
+                    effect,
                     bytes,
+                    fallback,
                 })
             }
             // prepare_audio() is only ever dispatched for audio actions.
@@ -90,21 +181,39 @@ where
             from_path,
             effect,
             bytes,
+            fallback,
         } = rendered;
-        let size = self.write_verify(&clip_id, &path, &bytes)?;
-        if let Some(from) = from_path {
-            // The new file is safely in place; only now drop the old rendering.
-            self.fs.remove(&from).map_err(|err| {
-                disk_or_permanent(
-                    &clip_id,
-                    err.is_out_of_space(),
-                    "disk full: no space left to remove old file",
-                    format!("could not remove old file: {err}"),
-                )
-            })?;
+        let wrote = if let Some(bytes) = bytes {
+            let size = self.write_verify(&clip_id, &path, &bytes)?;
+            if let Some(from) = from_path {
+                // The new file is safely in place; only now drop the old rendering.
+                self.fs.remove(&from).map_err(|err| {
+                    disk_or_permanent(
+                        &clip_id,
+                        err.is_out_of_space(),
+                        "disk full: no space left to remove old file",
+                        format!("could not remove old file: {err}"),
+                    )
+                })?;
+            }
+            manifest.insert(clip_id.clone(), self.entry(&clip_id, &path, format, size));
+            true
+        } else {
+            false
+        };
+        if let Some(fallback) = fallback {
+            Ok(Effect::AudioFallback {
+                effect,
+                fallback,
+                wrote,
+            })
+        } else {
+            Ok(match effect {
+                AudioEffect::Downloaded => Effect::Downloaded,
+                AudioEffect::Reformatted => Effect::Reformatted,
+                AudioEffect::Skipped => Effect::Skipped,
+            })
         }
-        manifest.insert(clip_id.clone(), self.entry(&clip_id, &path, format, size));
-        Ok(effect)
     }
 
     /// Download (and transcode/tag) the audio for `clip` in `format`.
@@ -132,6 +241,7 @@ where
                 )
                 .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
+
             AudioFormat::Flac | AudioFormat::Alac => {
                 let wav = self.fetch_wav(client_lock, clip).await?;
                 let audio = self
@@ -235,4 +345,10 @@ where
         })
         .await
     }
+}
+
+fn audio_path_with_format(path: &str, from: AudioFormat, to: AudioFormat) -> String {
+    let suffix = format!(".{}", from.ext());
+    let base = path.strip_suffix(&suffix).unwrap_or(path);
+    format!("{base}.{}", to.ext())
 }

@@ -4,6 +4,7 @@
 
 use crate::consts::CDN_BASE_URL;
 use std::collections::BTreeSet;
+use std::fmt;
 
 /// One finished Suno track, flattened from the API's nested response shape.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -253,6 +254,10 @@ pub struct BillingInfo {
     /// Entitlement flags, the union of `accessible_features[].name` and
     /// `plan.usage_plan_features[].name`.
     pub features: BTreeSet<String>,
+    /// Whether at least one recognised feature array was present in the billing
+    /// payload. An empty known array means no entitlements; an absent or
+    /// malformed array leaves entitlement state unknown.
+    pub features_known: bool,
 }
 
 impl BillingInfo {
@@ -269,6 +274,64 @@ impl BillingInfo {
     /// Whether the account may convert audio to lossless.
     pub fn can_convert_audio(&self) -> bool {
         self.has_feature("convert_audio")
+    }
+
+    /// A short account-health hint, or `None` when no unhealthy state is known.
+    pub fn account_status_hint(&self) -> Option<&'static str> {
+        if self.is_past_due == Some(true) {
+            Some("past due")
+        } else if self.is_paused == Some(true) {
+            Some("paused")
+        } else if self.is_active == Some(false) {
+            Some("inactive")
+        } else {
+            None
+        }
+    }
+
+    /// Whether Suno's authenticated WAV render is available to this account.
+    pub fn lossless_access(&self) -> LosslessAccess {
+        if self.is_past_due == Some(true) {
+            LosslessAccess::Unavailable(LosslessUnavailableReason::PastDue)
+        } else if self.is_paused == Some(true) {
+            LosslessAccess::Unavailable(LosslessUnavailableReason::Paused)
+        } else if self.is_active == Some(false) {
+            LosslessAccess::Unavailable(LosslessUnavailableReason::Inactive)
+        } else if self.can_convert_audio() {
+            LosslessAccess::Available
+        } else if self.features_known {
+            LosslessAccess::Unavailable(LosslessUnavailableReason::NotIncluded)
+        } else {
+            LosslessAccess::Unknown
+        }
+    }
+}
+
+/// Availability of Suno's authenticated WAV-render entitlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LosslessAccess {
+    Available,
+    Unavailable(LosslessUnavailableReason),
+    Unknown,
+}
+
+/// Why an account cannot currently use Suno's WAV render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LosslessUnavailableReason {
+    Paused,
+    PastDue,
+    Inactive,
+    NotIncluded,
+}
+
+impl fmt::Display for LosslessUnavailableReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Paused => "subscription paused",
+            Self::PastDue => "subscription payment is past due",
+            Self::Inactive => "subscription inactive",
+            Self::NotIncluded => "plan does not include lossless downloads",
+        })
     }
 }
 

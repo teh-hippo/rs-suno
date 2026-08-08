@@ -13,9 +13,10 @@ use std::time::Duration;
 use anyhow::Result;
 use futures_util::stream::{self, StreamExt};
 use suno_core::{
-    AlbumArt, AlbumDesired, AlignedLyrics, Clip, ExecOptions, Filesystem, LocalFile,
-    PlaylistDesired, PlaylistState, Ports, RunStatus, SourceStatus, SunoClient, deletion_allowed,
-    plan_album_artifacts, plan_playlist_artifacts, reconcile,
+    Action, AlbumArt, AlbumDesired, AlignedLyrics, ArtifactKind, Clip, ExecOptions, Filesystem,
+    LocalFile, LosslessAccess, Plan, PlaylistDesired, PlaylistState, Ports, RunStatus,
+    SourceStatus, SunoClient, deletion_allowed, plan_album_artifacts, plan_playlist_artifacts,
+    reconcile,
 };
 
 use crate::cli::desired::{ExitCode, run_exit_code};
@@ -59,6 +60,10 @@ pub(crate) struct ExecutePlan<'a> {
     pub account: &'a str,
     pub verbosity: i8,
     pub library_authoritative: bool,
+    pub playlist_desired: &'a [PlaylistDesired],
+    pub stored_playlists: &'a BTreeMap<String, PlaylistState>,
+    pub sources: &'a [SourceStatus],
+    pub playlists_enumerated: bool,
 }
 
 /// Run the reconciled plan, then persist the manifest, graph, logs, and
@@ -66,7 +71,7 @@ pub(crate) struct ExecutePlan<'a> {
 pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
     let ExecutePlan {
         summary_label,
-        plan,
+        mut plan,
         desired,
         mut manifest,
         synced,
@@ -79,6 +84,10 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
         account,
         verbosity,
         library_authoritative,
+        playlist_desired,
+        stored_playlists,
+        sources,
+        playlists_enumerated,
     } = inputs;
     cleanup_stale_parts(dest);
     let fs = FsAdapter::new(dest);
@@ -94,45 +103,65 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
     };
     let started = std::time::Instant::now();
 
-    let outcome = {
-        let ports = Ports {
-            client,
-            http,
-            fs: &fs,
-            ffmpeg: &ffmpeg,
-            clock: &clock,
-        };
-        tokio::select! {
-            out = suno_core::execute(
-                &plan,
-                suno_core::Stores {
-                    manifest: &mut manifest,
-                    albums: &mut store.albums,
-                    playlists: &mut store.playlists,
-                },
-                desired,
-                &synced,
-                ports,
-                &opts,
-            ) => Some(out),
-            () = signal::wait_for_signal() => None,
-        }
+    let primary_plan = Plan {
+        actions: plan
+            .actions
+            .iter()
+            .filter(|action| !is_playlist_action(action))
+            .cloned()
+            .collect(),
+    };
+    let Some(mut outcome) = execute_phase(
+        &primary_plan,
+        &mut manifest,
+        store,
+        desired,
+        &synced,
+        client,
+        http,
+        &fs,
+        &ffmpeg,
+        &clock,
+        &opts,
+    )
+    .await
+    else {
+        return interrupted(dest, &manifest, store, &fs);
     };
 
-    let Some(outcome) = outcome else {
-        logs::save_manifest(dest, &manifest)?;
-        // Folder art may have been written before the interrupt; persist the
-        // album-art store so those sidecars are tracked on the next run.
-        logs::save_graph(dest, store)?;
-        // A signal cancels the executor mid-flight, before its own end-of-run
-        // prune; tidy any directories emptied by moves/deletes so far. The
-        // completed path is already pruned inside `execute`.
-        let _ = fs.prune_empty_dirs("");
-        eprint_t!(
-            "warning: interrupted -- partial run saved\n  Progress so far is recorded in the manifest; re-run to continue."
-        );
-        return Ok(ExitCode::Interrupted);
-    };
+    if outcome.status == RunStatus::Completed {
+        let final_playlists = playlists_after_fallbacks(playlist_desired, &outcome.fallbacks);
+        let local = stat_manifest(dest, &manifest, &store.albums, &store.playlists).await;
+        let playlist_plan = Plan {
+            actions: plan_playlist_artifacts(
+                &final_playlists,
+                stored_playlists,
+                deletion_allowed(sources),
+                playlists_enumerated,
+                &local,
+            ),
+        };
+        let Some(playlist_outcome) = execute_phase(
+            &playlist_plan,
+            &mut manifest,
+            store,
+            desired,
+            &synced,
+            client,
+            http,
+            &fs,
+            &ffmpeg,
+            &clock,
+            &opts,
+        )
+        .await
+        else {
+            return interrupted(dest, &manifest, store, &fs);
+        };
+        outcome.merge(playlist_outcome);
+        plan.actions.retain(|action| !is_playlist_action(action));
+        plan.actions.extend(playlist_plan.actions);
+    }
 
     if outcome.status == RunStatus::DiskFull {
         // A full disk aborts the run; persistence would only re-hit ENOSPC, so
@@ -216,6 +245,13 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
             dest.join(".suno-failures.log").display()
         );
     }
+    if !outcome.fallbacks.is_empty() && verbosity >= -1 {
+        let reason = describe_run_entitlement(client, http, &outcome.fallbacks[0].reason).await;
+        eprint_t!(
+            "warning: lossless output was refused ({}); used native MP3 where needed and preserved existing lossless files",
+            reason
+        );
+    }
     if verbosity >= -1 {
         eprint_t!(
             "{}",
@@ -229,6 +265,104 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
     }
 
     Ok(run_exit_code(&outcome))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_phase(
+    plan: &Plan,
+    manifest: &mut suno_core::Manifest,
+    store: &mut suno_core::LineageStore,
+    desired: &[suno_core::Desired],
+    synced: &HashMap<String, AlignedLyrics>,
+    client: &SunoClient<TokioClock>,
+    http: &ReqwestHttp,
+    fs: &FsAdapter,
+    ffmpeg: &FfmpegAdapter,
+    clock: &TokioClock,
+    opts: &ExecOptions,
+) -> Option<suno_core::ExecOutcome> {
+    let ports = Ports {
+        client,
+        http,
+        fs,
+        ffmpeg,
+        clock,
+    };
+    tokio::select! {
+        out = suno_core::execute(
+            plan,
+            suno_core::Stores {
+                manifest,
+                albums: &mut store.albums,
+                playlists: &mut store.playlists,
+            },
+            desired,
+            synced,
+            ports,
+            opts,
+        ) => Some(out),
+        () = signal::wait_for_signal() => None,
+    }
+}
+
+fn interrupted(
+    dest: &Path,
+    manifest: &suno_core::Manifest,
+    store: &suno_core::LineageStore,
+    fs: &FsAdapter,
+) -> Result<ExitCode> {
+    logs::save_manifest(dest, manifest)?;
+    logs::save_graph(dest, store)?;
+    let _ = fs.prune_empty_dirs("");
+    eprint_t!(
+        "warning: interrupted -- partial run saved\n  Progress so far is recorded in the manifest; re-run to continue."
+    );
+    Ok(ExitCode::Interrupted)
+}
+
+fn is_playlist_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::WriteArtifact {
+            kind: ArtifactKind::Playlist,
+            ..
+        } | Action::DeleteArtifact {
+            kind: ArtifactKind::Playlist,
+            ..
+        }
+    )
+}
+
+fn playlists_after_fallbacks(
+    desired: &[PlaylistDesired],
+    fallbacks: &[suno_core::AudioFallback],
+) -> Vec<PlaylistDesired> {
+    let mut playlists = desired.to_vec();
+    let path_changes = fallbacks
+        .iter()
+        .map(|fallback| {
+            (
+                fallback.requested_path.clone(),
+                fallback.actual_path.clone(),
+            )
+        })
+        .collect();
+    suno_core::rewrite_playlist_paths(&mut playlists, &path_changes);
+    playlists
+}
+
+async fn describe_run_entitlement(
+    client: &SunoClient<TokioClock>,
+    http: &ReqwestHttp,
+    fallback: &str,
+) -> String {
+    match client.get_billing_info(http).await {
+        Ok(billing) => match billing.lossless_access() {
+            LosslessAccess::Unavailable(reason) => reason.to_string(),
+            LosslessAccess::Available | LosslessAccess::Unknown => fallback.to_owned(),
+        },
+        Err(_) => fallback.to_owned(),
+    }
 }
 
 /// The inputs to [`reconcile_run`]: the loaded manifest and destination plus the
@@ -303,7 +437,7 @@ pub(crate) async fn reconcile_run(inputs: &ReconcileInputs<'_>) -> suno_core::Pl
 /// Returns a combined map keyed by both clip-id (for audio) and file path (for
 /// per-clip sidecars, folder art, and playlist files). Statting absent paths is
 /// harmless; the caller's destination directory need not exist yet.
-async fn stat_manifest(
+pub(crate) async fn stat_manifest(
     dest: &Path,
     manifest: &suno_core::Manifest,
     albums: &BTreeMap<String, AlbumArt>,
@@ -420,6 +554,30 @@ mod tests {
     use super::*;
     use crate::cli::wallclock;
     use suno_core::SourceMode;
+
+    #[test]
+    fn final_playlist_content_uses_reactive_fallback_path() {
+        let desired = vec![PlaylistDesired {
+            id: "pl".to_owned(),
+            name: "Mix".to_owned(),
+            path: "Mix.m3u8".to_owned(),
+            content: "#EXTM3U\n#EXTINF:1,Song\nSong.flac\n".to_owned(),
+            hash: "old".to_owned(),
+        }];
+        let fallbacks = vec![suno_core::AudioFallback {
+            clip_id: "song".to_owned(),
+            requested_path: "Song.flac".to_owned(),
+            actual_path: "Song.mp3".to_owned(),
+            format: suno_core::AudioFormat::Mp3,
+            reason: "subscription paused".to_owned(),
+        }];
+
+        let playlists = playlists_after_fallbacks(&desired, &fallbacks);
+
+        assert!(playlists[0].content.contains("Song.mp3"));
+        assert!(!playlists[0].content.contains("Song.flac"));
+        assert_ne!(playlists[0].hash, "old");
+    }
 
     #[tokio::test]
     async fn reconcile_run_reads_a_missing_destination_as_empty() {

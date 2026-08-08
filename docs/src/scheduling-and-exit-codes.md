@@ -19,6 +19,10 @@ correctly.
 | 8 | interrupted | The run received an interrupt; partial progress is preserved. |
 | 9 | disk full | The destination ran out of space; free space and re-run. The library is unchanged for the failing action. |
 
+A temporary MP3 fallback caused by unavailable lossless entitlement is a
+successful run, not a partial failure. It emits one warning but exits `0` when
+nothing else failed.
+
 `check --exit-code` is the exception to this table: it exits 1 to signal that
 changes are pending, and 0 when the destination is already up to date.
 

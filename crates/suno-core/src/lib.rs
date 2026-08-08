@@ -87,12 +87,15 @@ pub use config::{
     Settings, SourceConfig, animated_covers_flag_overridden,
 };
 pub use desired::{
-    ArtifactToggles, LIKED_PLAYLIST_ID, NamingScope, PlaylistInput, album_desired, build_desired,
-    build_playlist_desired, clip_stems,
+    ArtifactToggles, LIKED_PLAYLIST_ID, NamingScope, PlaylistInput, album_desired,
+    apply_lossless_fallback, build_desired, build_playlist_desired, clip_stems,
+    rewrite_playlist_paths,
 };
 pub use downloadable::is_downloadable;
 pub use error::{Error, Result};
-pub use executor::{ExecOptions, ExecOutcome, Failure, Ports, RunStatus, Stores, execute};
+pub use executor::{
+    AudioFallback, ExecOptions, ExecOutcome, Failure, Ports, RunStatus, Stores, execute,
+};
 pub use extras::{
     INDEX_SCHEMA_VERSION, M3u8Entry, render_clip_details, render_library_index, render_m3u8,
 };
@@ -114,7 +117,10 @@ pub use lyrics::{
     render_synced_lrc,
 };
 pub use manifest::{ArtifactState, Manifest, ManifestEntry, SyncedLyricsCheck};
-pub use model::{BillingInfo, Clip, ClipRoot, HistoryEntry, MediaUrl, Playlist, Stem};
+pub use model::{
+    BillingInfo, Clip, ClipRoot, HistoryEntry, LosslessAccess, LosslessUnavailableReason, MediaUrl,
+    Playlist, Stem,
+};
 pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,
     render_clip_names, sanitise_name, stem_file_path, stems_folder,
