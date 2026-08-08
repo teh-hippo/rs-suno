@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.6](https://github.com/teh-hippo/rs-suno/compare/v0.40.5...v0.40.6) (2026-08-08)
+
+
+### Bug Fixes
+
+* **lyrics:** back-fill embedded lyrics across formats ([d45ccdb](https://github.com/teh-hippo/rs-suno/commit/d45ccdb1e9d4b13df109856da83c11743c26cf5c)), closes [#530](https://github.com/teh-hippo/rs-suno/issues/530)
+
 ## [0.40.5](https://github.com/teh-hippo/rs-suno/compare/v0.40.4...v0.40.5) (2026-08-08)
 
 
