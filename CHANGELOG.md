@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.5](https://github.com/teh-hippo/rs-suno/compare/v0.40.4...v0.40.5) (2026-08-08)
+
+
+### Bug Fixes
+
+* fall back when lossless entitlement is unavailable ([bd8b48f](https://github.com/teh-hippo/rs-suno/commit/bd8b48ffa6af2c5f77bfbd87e7a55b9530a9fb7a)), closes [#526](https://github.com/teh-hippo/rs-suno/issues/526)
+
 ## [0.40.4](https://github.com/teh-hippo/rs-suno/compare/v0.40.3...v0.40.4) (2026-08-01)
 
 
