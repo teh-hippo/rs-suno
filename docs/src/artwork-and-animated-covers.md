@@ -47,8 +47,8 @@ lyrics inside the audio do not require it.
 **Synced (timed) lyrics**
 
 With `lrc_sidecar` enabled, `rs-suno` also writes a synced `<song>.lrc` beside
-each audio file. When Suno has word/line alignment for the clip, the `.lrc` is a
-standard line-level file carrying one `[mm:ss.xx]` timestamp per line:
+each audio file. The default `lyrics_timing = "line"` uses the standard form
+with one `[mm:ss.xx]` timestamp per line:
 
 ```text
 [ti:Neon Horizon]
@@ -60,10 +60,15 @@ standard line-level file carrying one `[mm:ss.xx]` timestamp per line:
 [00:15.30]Chasing the dawn
 ```
 
-Line-level is the universally supported LRC form, so every player syncs and
-displays it cleanly. (The enhanced "A2" per-word format is parsed by only a few
-karaoke players and shows as literal text in the rest, so it is not used; the
-per-word timing is carried in the MP3 `SYLT` frame instead.)
+Line timing is the broadly compatible form. Set `lyrics_timing = "word"` or
+pass `--lyrics-timing word` to write enhanced LRC with per-word timestamps:
+
+```text
+[00:12.52]<00:12.52>We <00:12.80>ride <00:13.10>the <00:13.32>neon
+```
+
+Enhanced LRC is supported by fewer players, so word timing is explicit rather
+than the default.
 
 Structural section labels such as `[Chorus]` and `[Verse 1]` are omitted from the
 timed `.lrc` and the `SYLT` frame: nothing is sung at those markers, so a timed
@@ -73,9 +78,8 @@ mirror the song's own lyric text.
 
 The `.lrc` is the primary synced-lyrics artefact and is written for every
 format (MP3, FLAC, ALAC and WAV). For **MP3 and WAV**, an ID3 `SYLT`
-(synchronised lyrics) frame is also embedded in the file with word-level
-timing, so players that read `SYLT` show karaoke-style per-word lyrics. FLAC and
-ALAC carry no `SYLT`; the line-level `.lrc` covers them.
+(synchronised lyrics) frame is also embedded with the selected line or word
+granularity. FLAC and ALAC carry no timed embed and use the `.lrc` sidecar.
 
 Once plain fallback lyrics are embedded, their manifest fingerprint prevents
 another lookup on an unchanged run. A song that still has no plain lyrics is
@@ -91,6 +95,12 @@ embeds no `SYLT`. If a lookup fails, existing lyrics and sidecars are left
 untouched and the lookup is retried next run. Turning `lrc_sidecar` off writes
 no `.lrc` and adds no new `SYLT`; it does not disable baseline plain lyrics, and
 it leaves existing `.lrc` files and timed frames in place.
+
+Files written before timing modes used line-level LRC with word-level `SYLT`.
+The first executing run after upgrading resolves those entries once and safely
+retags MP3/WAV to the line default. Later changes between line and word mode
+likewise update the sidecar and supported embedded frame. A failed fetch or
+write keeps the previous state and retries on the next run.
 
 ## Cover art
 
@@ -178,12 +188,13 @@ the default static covers. The raw `cover.mp4` needs no ffmpeg.
 
 ## WAV metadata
 
-WAV downloads carry full ID3v2.4 tags in a RIFF `id3 ` chunk — the same tag
+WAV downloads carry full ID3v2.4 tags in a RIFF `id3 ` chunk, using the same tag
 set as MP3: title, artist, album, date, lyrics (`USLT`), cover art (`APIC`),
-and all `SUNO_*` extended-text frames. Word-level synced lyrics (`SYLT`) are
-also embedded when `lrc_sidecar` is enabled and alignment is available. Choose
-FLAC (the default) for a lossless archive with Vorbis comments, MP3 for the
-smallest files, or WAV when you need uncompressed PCM with full metadata.
+and all `SUNO_*` extended-text frames. Selected line or word synced lyrics
+(`SYLT`) are also embedded when `lrc_sidecar` is enabled and alignment is
+available. Player support for ID3 metadata inside WAV is less consistent than
+for MP3. Choose FLAC (the default) for a lossless archive with Vorbis comments,
+MP3 for the smallest files, or WAV when you need uncompressed PCM.
 
 ## What lands on disk
 

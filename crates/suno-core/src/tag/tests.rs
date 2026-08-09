@@ -299,7 +299,7 @@ fn aligned_text_fills_only_missing_inline_lyrics() {
 
 #[test]
 fn build_sylt_produces_ms_word_entries() {
-    let sylt = build_sylt(&sample_aligned()).unwrap();
+    let sylt = build_sylt(&sample_aligned(), LyricsTiming::Word).unwrap();
     assert_eq!(sylt.timestamp_format, TimestampFormat::Ms);
     assert_eq!(sylt.content_type, SynchronisedLyricsType::Lyrics);
     assert_eq!(sylt.lang, "eng");
@@ -314,8 +314,20 @@ fn build_sylt_produces_ms_word_entries() {
 }
 
 #[test]
+fn build_sylt_produces_ms_line_entries() {
+    let sylt = build_sylt(&sample_aligned(), LyricsTiming::Line).unwrap();
+    assert_eq!(
+        sylt.content,
+        vec![
+            (500, "Hello world".to_owned()),
+            (61200, "\nagain".to_owned()),
+        ]
+    );
+}
+
+#[test]
 fn build_sylt_is_none_for_empty_alignment() {
-    assert!(build_sylt(&AlignedLyrics::default()).is_none());
+    assert!(build_sylt(&AlignedLyrics::default(), LyricsTiming::Line).is_none());
 }
 
 #[test]
@@ -329,8 +341,37 @@ fn mp3_embeds_sylt_when_synced_present() {
         .next()
         .expect("a SYLT frame is present");
     assert_eq!(sylt.timestamp_format, TimestampFormat::Ms);
-    assert_eq!(sylt.content.first(), Some(&(500, "Hello".to_owned())));
+    assert_eq!(sylt.content.first(), Some(&(500, "Hello world".to_owned())));
     assert!(tagged.ends_with(b"frames"));
+}
+
+#[test]
+fn mp3_embeds_word_sylt_when_requested() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let aligned = sample_aligned();
+    let tagged =
+        tag_mp3_with_timing(b"frames", &meta, None, Some(&aligned), LyricsTiming::Word).unwrap();
+    let tag = id3::Tag::read_from2(Cursor::new(tagged)).unwrap();
+    let sylt = tag.synchronised_lyrics().next().unwrap();
+    assert_eq!(sylt.content.first(), Some(&(500, "Hello".to_owned())));
+    assert_eq!(sylt.content.get(1), Some(&(1000, " world".to_owned())));
+}
+
+#[test]
+fn wav_embeds_selected_word_sylt() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let aligned = sample_aligned();
+    let tagged = tag_wav_with_timing(
+        &minimal_wav(),
+        &meta,
+        None,
+        Some(&aligned),
+        LyricsTiming::Word,
+    )
+    .unwrap();
+    let tag = id3::Tag::read_from2(Cursor::new(tagged)).unwrap();
+    let sylt = tag.synchronised_lyrics().next().unwrap();
+    assert_eq!(sylt.content.first(), Some(&(500, "Hello".to_owned())));
 }
 
 #[test]
@@ -373,6 +414,30 @@ fn mp3_retag_replaces_sylt_when_new_alignment_given() {
     let again = tag_mp3(&first, &meta, None, Some(&aligned)).unwrap();
     let tag = id3::Tag::read_from2(Cursor::new(&again)).unwrap();
     assert_eq!(tag.synchronised_lyrics().count(), 1);
+}
+
+#[test]
+fn mp3_retag_preserves_existing_cover_when_requested() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let cover = b"\xFF\xD8\xFFexisting-cover".to_vec();
+    let first = tag_mp3(b"frames", &meta, Some(Cover::jpeg(&cover)), None).unwrap();
+
+    let retagged =
+        retag_mp3_with_timing(&first, &meta, None, None, LyricsTiming::Line, true).unwrap();
+    let tag = id3::Tag::read_from2(Cursor::new(retagged)).unwrap();
+    assert_eq!(tag.pictures().next().unwrap().data, cover);
+}
+
+#[test]
+fn mp3_retag_removes_existing_cover_when_not_preserved() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let cover = b"\xFF\xD8\xFFexisting-cover".to_vec();
+    let first = tag_mp3(b"frames", &meta, Some(Cover::jpeg(&cover)), None).unwrap();
+
+    let retagged =
+        retag_mp3_with_timing(&first, &meta, None, None, LyricsTiming::Line, false).unwrap();
+    let tag = id3::Tag::read_from2(Cursor::new(retagged)).unwrap();
+    assert_eq!(tag.pictures().count(), 0);
 }
 
 #[test]
@@ -754,6 +819,18 @@ fn wav_retag_preserves_existing_uslt_without_new_lyrics() {
         Some("first embedded lyrics"),
         "USLT preserved on retag with no new lyrics"
     );
+}
+
+#[test]
+fn wav_retag_preserves_existing_cover_when_requested() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let cover = b"\xFF\xD8\xFFwav-existing-cover".to_vec();
+    let first = tag_wav(&minimal_wav(), &meta, Some(Cover::jpeg(&cover)), None).unwrap();
+
+    let retagged =
+        retag_wav_with_timing(&first, &meta, None, None, LyricsTiming::Line, true).unwrap();
+    let tag = id3::Tag::read_from2(Cursor::new(retagged)).unwrap();
+    assert_eq!(tag.pictures().next().unwrap().data, cover);
 }
 
 #[test]

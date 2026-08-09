@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use crate::error::{Error, Result};
 use crate::naming::CharacterSet;
-use crate::vocab::{AudioFormat, VideoCoverRetention, WebpEncodeSettings};
+use crate::vocab::{AudioFormat, LyricsTiming, VideoCoverRetention, WebpEncodeSettings};
 
 use super::effective::{EffectiveSettings, FlagOverrides};
 use super::label_to_env;
@@ -137,6 +137,19 @@ impl Config {
             },
             false,
         )?;
+
+        let lyrics_timing = resolve_enum(
+            Layers {
+                flag: flags.settings.lyrics_timing,
+                env: env_val("LYRICS_TIMING"),
+                src: src.and_then(|s| s.settings.lyrics_timing),
+                acc: acc.settings.lyrics_timing,
+                defaults: self.defaults.settings.lyrics_timing,
+                name: "LYRICS_TIMING",
+            },
+            None,
+        )?
+        .unwrap_or(LyricsTiming::Line);
 
         let video_mp4 = resolve_parsed(
             Layers {
@@ -329,6 +342,7 @@ impl Config {
             details_sidecar,
             lyrics_sidecar,
             lrc_sidecar,
+            lyrics_timing,
             video_mp4,
             download_stems,
             stem_format,

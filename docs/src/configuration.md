@@ -87,6 +87,7 @@ animated_cover_lossless = false # bit-exact, too large to embed in FLAC
 details_sidecar = false
 lyrics_sidecar = false
 lrc_sidecar = false
+lyrics_timing = "line" # line|word
 video_mp4 = false
 download_stems = false
 stem_format = "wav"
@@ -100,6 +101,7 @@ root = "/home/alice/music/suno"
 account_id = "user_abc123"
 lyrics_sidecar = true
 lrc_sidecar = true
+lyrics_timing = "word"
 
 [accounts.me.sources.liked]
 format = "mp3"
@@ -148,7 +150,8 @@ manager (see [authentication](authentication.md)), or restrict the file yourself
 | `animated_cover_lossless` | boolean | `false` | Encode the animated cover losslessly (bit-exact to the source). Far larger than the embedded-cover size cap (a few seconds can be ~145 MB), so a lossless cover always overflows it and the track falls back to the static JPEG; leave it off for embedded covers. |
 | `details_sidecar` | bool | `false` | Also write a plain-text `<song>.details.txt` beside each audio file, dumping the same metadata that is embedded in the tags plus the song id, duration, and canonical `suno.com` URL. |
 | `lyrics_sidecar` | bool | `false` | Also write a plain-text `<song>.lyrics.txt` beside each audio file, holding the same words embedded in the audio. Plain embedded lyrics are automatic; this setting controls only the extra file. A song with no lyrics gets no sidecar. |
-| `lrc_sidecar` | bool | `false` | Also write a `<song>.lrc` beside each audio file. When Suno has word/line alignment, the `.lrc` is synced line-level and MP3/WAV also receive an ID3 `SYLT` frame with per-word timing; otherwise the file falls back to untimed lyrics. Plain `USLT`/`LYRICS`/`©lyr` metadata remains automatic when this is off. |
+| `lrc_sidecar` | bool | `false` | Also write a `<song>.lrc` beside each audio file. When Suno has alignment, MP3/WAV also receive an ID3 `SYLT` frame; otherwise the file falls back to untimed lyrics. Plain `USLT`/`LYRICS`/`©lyr` metadata remains automatic when this is off. |
+| `lyrics_timing` | `line` \| `word` | `line` | Timed lyric granularity while `lrc_sidecar` is enabled. `line` writes one timestamp per line in both LRC and MP3/WAV `SYLT`. `word` writes enhanced per-word LRC and word-level `SYLT`. Changing the value updates existing timed outputs on the next executing run. |
 | `video_mp4` | bool | `false` | Also download the standalone `<song>.mp4` music video beside each audio file, when Suno provides one. A song with no video gets no file. Turning this off leaves existing videos in place; a video is only removed alongside its own audio. |
 | `download_stems` | bool | `false` | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder beside it. Download-only: it lists and downloads existing stems and **never** triggers separation or spends credits. A song with no stems gets no folder. Each stem is stored RAW (see `stem_format`), never transcoded to FLAC. Turning this off leaves existing stems in place; individual stems are only removed when Suno's authoritative listing no longer contains them, or alongside their own song. |
 | `stem_format` | string | `wav` | Container for downloaded stems: `wav` (lossless, fetched through the same free WAV render the FLAC pipeline uses) or `mp3` (the public CDN file). Stems are stored RAW in whichever container and are never re-encoded to FLAC, even when the song's own `format` is FLAC. |
@@ -329,6 +332,7 @@ account token:
 | `SUNO_DETAILS_SIDECAR` | `--details-sidecar` | `true` or `false`. |
 | `SUNO_LYRICS_SIDECAR` | `--lyrics-sidecar` | `true` or `false`. |
 | `SUNO_LRC_SIDECAR` | `--lrc-sidecar` | `true` or `false`. |
+| `SUNO_LYRICS_TIMING` | `--lyrics-timing` | `line` or `word`. |
 | `SUNO_VIDEO_MP4` | `--video-mp4` | `true` or `false`. |
 | `SUNO_DOWNLOAD_STEMS` | `--download-stems` | `true` or `false`. |
 | `SUNO_STEM_FORMAT` | `--stem-format` | `wav` or `mp3`. |

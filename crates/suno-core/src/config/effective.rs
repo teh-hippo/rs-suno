@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 use crate::naming::CharacterSet;
-use crate::vocab::{AudioFormat, StemFormat, VideoCoverRetention, WebpEncodeSettings};
+use crate::vocab::{
+    AudioFormat, LyricsTiming, StemFormat, VideoCoverRetention, WebpEncodeSettings,
+};
 
 use super::shape::{AreasConfig, Settings};
 
@@ -43,6 +45,7 @@ pub struct EffectiveSettings {
     pub details_sidecar: bool,
     pub lyrics_sidecar: bool,
     pub lrc_sidecar: bool,
+    pub lyrics_timing: LyricsTiming,
     pub video_mp4: bool,
     pub download_stems: bool,
     pub stem_format: StemFormat,

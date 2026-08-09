@@ -40,6 +40,7 @@ fn compiled_defaults_when_nothing_set() {
             details_sidecar: false,
             lyrics_sidecar: false,
             lrc_sidecar: false,
+            lyrics_timing: LyricsTiming::Line,
             video_mp4: false,
             download_stems: false,
             stem_format: StemFormat::Wav,
@@ -78,6 +79,7 @@ fn resolve_reflects_every_settings_field() {
         details_sidecar: Some(true),
         lyrics_sidecar: Some(true),
         lrc_sidecar: Some(true),
+        lyrics_timing: Some(LyricsTiming::Word),
         video_mp4: Some(true),
         download_stems: Some(true),
         stem_format: Some(StemFormat::Mp3),
@@ -109,12 +111,23 @@ fn resolve_reflects_every_settings_field() {
     assert!(eff.details_sidecar);
     assert!(eff.lyrics_sidecar);
     assert!(eff.lrc_sidecar);
+    assert_eq!(eff.lyrics_timing, LyricsTiming::Word);
     assert!(eff.video_mp4);
     assert!(eff.download_stems);
     assert_eq!(eff.stem_format, StemFormat::Mp3);
     assert_eq!(eff.naming_template, "SENTINEL/{id}");
     assert_eq!(eff.character_set, CharacterSet::Ascii);
     assert!(!eff.number_singletons);
+}
+
+#[test]
+fn lyrics_timing_resolves_from_environment() {
+    let cfg = Config::from_toml("[accounts.alice]\n").unwrap();
+    let env = HashMap::from([("SUNO_LYRICS_TIMING".to_owned(), "word".to_owned())]);
+    let eff = cfg
+        .resolve("alice", None, &env, &FlagOverrides::default())
+        .unwrap();
+    assert_eq!(eff.lyrics_timing, LyricsTiming::Word);
 }
 
 #[test]

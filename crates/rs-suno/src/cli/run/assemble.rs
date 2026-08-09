@@ -118,6 +118,7 @@ pub(super) async fn assemble(
             details: settings.details_sidecar,
             lyrics: settings.lyrics_sidecar,
             lrc: settings.lrc_sidecar,
+            lyrics_timing: settings.lyrics_timing,
             video: settings.video_mp4,
             webp: settings.animated_cover_webp,
         },

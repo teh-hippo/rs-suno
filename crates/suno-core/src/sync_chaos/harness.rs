@@ -246,6 +246,7 @@ pub(super) fn fast_opts() -> ExecOptions {
         embed_animated_cover: false,
         cover_webp: WebpEncodeSettings::default(),
         embed_synced_lyrics: false,
+        lyrics_timing: crate::LyricsTiming::Line,
     }
 }
 

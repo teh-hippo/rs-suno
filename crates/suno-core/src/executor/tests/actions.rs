@@ -1,6 +1,7 @@
 use super::*;
 use crate::lyrics::{AlignedLine, AlignedLineWord};
 use crate::reconcile::DesiredArtifact;
+use crate::{tag_mp3, tag_wav};
 
 #[test]
 fn preserve_is_set_for_copy_held_and_private_clips() {
@@ -97,7 +98,7 @@ fn reformat_writes_new_format_and_removes_old_file() {
 
 #[test]
 fn retag_rewrites_file_and_updates_hashes() {
-    let c = clip("o");
+    let c = art_clip("o");
     let mut d = desired(c.clone(), AudioFormat::Mp3);
     d.meta_hash = "new".to_owned();
     d.art_hash = "new-art".to_owned();
@@ -120,12 +121,13 @@ fn retag_rewrites_file_and_updates_hashes() {
             path: "o.mp3".to_owned(),
         }],
     };
+    let http = ScriptedHttp::new().route("o/large.jpg", Reply::ok(b"new-cover".to_vec()));
 
     let outcome = run(
         &plan,
         &mut manifest,
         &[d],
-        &ScriptedHttp::new(),
+        &http,
         &fs,
         &StubFfmpeg::flac(),
         &RecordingClock::new(),
@@ -136,7 +138,84 @@ fn retag_rewrites_file_and_updates_hashes() {
     let updated = manifest.get("o").unwrap();
     assert_eq!(updated.meta_hash, "new");
     assert_eq!(updated.art_hash, "new-art");
-    assert_eq!(&fs.read_file("o.mp3").unwrap()[..3], b"ID3");
+    let written = fs.read_file("o.mp3").unwrap();
+    assert_eq!(&written[..3], b"ID3");
+    let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
+    assert_eq!(tag.pictures().next().unwrap().data, b"new-cover");
+}
+
+#[test]
+fn retag_preserves_existing_cover_when_refetch_fails_and_art_is_current() {
+    let c = art_clip("cover-keep");
+    let mut d = desired(c.clone(), AudioFormat::Mp3);
+    d.meta_hash = "new".to_owned();
+    let cover = b"\xFF\xD8\xFFexisting-cover".to_vec();
+    let existing = tag_mp3(
+        b"audio",
+        &TrackMetadata::from_clip(&c, &LineageContext::own_root(&c)),
+        Some(Cover::jpeg(&cover)),
+        None,
+    )
+    .unwrap();
+    let fs = MemFs::new().with_file("cover-keep.mp3", existing);
+    let mut manifest = Manifest::new();
+    let mut start = entry("cover-keep.mp3", AudioFormat::Mp3);
+    start.meta_hash = "old".to_owned();
+    start.art_hash = d.art_hash.clone();
+    manifest.insert("cover-keep", start);
+
+    let outcome = run(
+        &retag_plan(&c, "cover-keep.mp3"),
+        &mut manifest,
+        &[d],
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &ExecOptions::default(),
+    );
+
+    assert_eq!(outcome.retagged, 1);
+    assert_eq!(outcome.failed(), 0);
+    let written = fs.read_file("cover-keep.mp3").unwrap();
+    let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
+    assert_eq!(tag.pictures().next().unwrap().data, cover);
+}
+
+#[test]
+fn retag_does_not_stamp_changed_art_when_replacement_fetch_fails() {
+    let c = art_clip("cover-change");
+    let mut d = desired(c.clone(), AudioFormat::Mp3);
+    d.art_hash = "new-art".to_owned();
+    let cover = b"\xFF\xD8\xFFold-cover".to_vec();
+    let existing = tag_mp3(
+        b"audio",
+        &TrackMetadata::from_clip(&c, &LineageContext::own_root(&c)),
+        Some(Cover::jpeg(&cover)),
+        None,
+    )
+    .unwrap();
+    let fs = MemFs::new().with_file("cover-change.mp3", existing.clone());
+    let mut manifest = Manifest::new();
+    let mut start = entry("cover-change.mp3", AudioFormat::Mp3);
+    start.art_hash = "old-art".to_owned();
+    manifest.insert("cover-change", start);
+
+    let outcome = run(
+        &retag_plan(&c, "cover-change.mp3"),
+        &mut manifest,
+        &[d],
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &ExecOptions::default(),
+    );
+
+    assert_eq!(outcome.retagged, 0);
+    assert_eq!(outcome.failed(), 1);
+    assert_eq!(manifest.get("cover-change").unwrap().art_hash, "old-art");
+    assert_eq!(fs.read_file("cover-change.mp3").unwrap(), existing);
 }
 
 #[test]
@@ -485,7 +564,7 @@ fn mirror_ok() -> Vec<crate::reconcile::SourceStatus> {
 fn backfill_refetches_and_embeds_uslt_and_sylt() {
     // #354 core case (MP3): a clip whose `.lrc` is resolved but whose embed was
     // never written back-fills on the next run. The fetched alignment is folded
-    // into USLT (plain text) and SYLT (word timings), and the sentinel is stamped
+    // into USLT (plain text) and SYLT (selected timing), and the sentinel is stamped
     // so reconcile settles.
     let c = clip("bk");
     let meta = TrackMetadata::from_clip(&c, &LineageContext::own_root(&c));
@@ -1007,6 +1086,8 @@ fn reformat_on_migrated_clip_refetches_and_reembeds() {
         checked_unix: 1_000,
         empty: false,
         timed: true,
+        timed_version: crate::hash::TIMED_LYRICS_VERSION,
+        timing: Some(crate::LyricsTiming::Line),
     });
     manifest.insert("mig", migrated);
 
@@ -1086,6 +1167,8 @@ fn migrated_clip_without_reformat_is_not_a_target_and_never_retags() {
         checked_unix: 1_000,
         empty: false,
         timed: true,
+        timed_version: crate::hash::TIMED_LYRICS_VERSION,
+        timing: Some(crate::LyricsTiming::Line),
     });
     manifest.insert("st", migrated);
 

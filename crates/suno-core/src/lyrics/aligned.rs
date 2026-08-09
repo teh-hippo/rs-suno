@@ -5,15 +5,16 @@
 //! word-level list plus a line-level list carrying section labels and nested
 //! per-word timing. Decoding the API body into it lives in
 //! `wire::parse_aligned_lyrics`; everything here is pure and free of direct IO,
-//! rendering the synced artefacts (the line-synced `.lrc` body, a word-level ID3
-//! `SYLT` table, and a plain-text fallback), so the formatting is unit tested
-//! without a network.
+//! rendering line- or word-synced `.lrc` and ID3 `SYLT` output plus a plain-text
+//! fallback, so the formatting is unit tested without a network.
 //!
 //! Instrumentals (and any clip Suno could not force-align) return `200` with
 //! empty arrays, so [`AlignedLyrics::is_empty`] is the signal to write no synced
 //! artefact for that clip, exactly as an empty cover URL writes no cover.
 
 use std::fmt::Write as _;
+
+use crate::vocab::LyricsTiming;
 
 /// One force-aligned word from the flat `aligned_words` list.
 ///
@@ -114,27 +115,35 @@ impl AlignedLyrics {
     /// [`plain_text`](Self::plain_text). The body is empty when there are no
     /// lines; callers treat that as "no `.lrc`".
     pub fn lrc_body(&self) -> String {
+        self.lrc_body_with_timing(LyricsTiming::Line)
+    }
+
+    /// The timed `.lrc` body at the requested line or word granularity.
+    pub fn lrc_body_with_timing(&self, timing: LyricsTiming) -> String {
         let mut out = String::new();
         for line in &self.lines {
             if is_section_label(line) {
                 continue;
             }
-            let text = if line.text.trim().is_empty() {
-                line.words
-                    .iter()
-                    .map(|w| w.text.trim())
-                    .filter(|t| !t.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            } else {
-                line.text.trim().to_owned()
-            };
-            let _ = writeln!(out, "[{}]{text}", lrc_stamp(line.start_s));
+            let text = line_text(line);
+            let words = emitted_words(line);
+            if timing == LyricsTiming::Line || words.is_empty() {
+                let _ = writeln!(out, "[{}]{text}", lrc_stamp(line.start_s));
+                continue;
+            }
+            let _ = write!(out, "[{}]", lrc_stamp(line.start_s));
+            for (index, word) in words.iter().enumerate() {
+                if index > 0 {
+                    out.push(' ');
+                }
+                let _ = write!(out, "<{}>{}", lrc_stamp(word.start_s), word.text.trim());
+            }
+            out.push('\n');
         }
         out
     }
 
-    /// Word-level `SYLT` content: `(offset_ms, text)` pairs in time order.
+    /// Default line-level `SYLT` content: `(offset_ms, text)` pairs in time order.
     ///
     /// Each new line's first word carries a leading newline so a player renders
     /// line breaks (the ID3v2 `SYLT` convention). Uses Suno's own line grouping;
@@ -144,20 +153,21 @@ impl AlignedLyrics {
     /// the first *emitted* segment, not the line index, so skipping a label at the
     /// start (or between lines) never leaves a stray or missing break.
     pub fn sylt_entries(&self) -> Vec<(u32, String)> {
+        self.sylt_entries_with_timing(LyricsTiming::Line)
+    }
+
+    /// ID3 `SYLT` content at the requested line or word granularity.
+    pub fn sylt_entries_with_timing(&self, timing: LyricsTiming) -> Vec<(u32, String)> {
         let mut entries = Vec::new();
         let mut first_emitted = true;
         for line in &self.lines {
             if is_section_label(line) {
                 continue;
             }
-            let words: Vec<&AlignedLineWord> = line
-                .words
-                .iter()
-                .filter(|w| !w.text.trim().is_empty())
-                .collect();
+            let words = emitted_words(line);
             let prefix = if first_emitted { "" } else { "\n" };
-            if words.is_empty() {
-                let text = line.text.trim();
+            if timing == LyricsTiming::Line || words.is_empty() {
+                let text = line_text(line);
                 if !text.is_empty() {
                     entries.push((to_ms(line.start_s), format!("{prefix}{text}")));
                     first_emitted = false;
@@ -176,6 +186,25 @@ impl AlignedLyrics {
             first_emitted = false;
         }
         entries
+    }
+}
+
+fn emitted_words(line: &AlignedLine) -> Vec<&AlignedLineWord> {
+    line.words
+        .iter()
+        .filter(|word| !word.text.trim().is_empty())
+        .collect()
+}
+
+fn line_text(line: &AlignedLine) -> String {
+    if line.text.trim().is_empty() {
+        emitted_words(line)
+            .into_iter()
+            .map(|word| word.text.trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        line.text.trim().to_owned()
     }
 }
 
@@ -315,7 +344,7 @@ mod tests {
         // The `[Chorus]` label is skipped; `again` still opens a new line, so it
         // carries the leading newline as the second *emitted* line.
         let aligned = sample_aligned();
-        let entries = aligned.sylt_entries();
+        let entries = aligned.sylt_entries_with_timing(LyricsTiming::Word);
         assert_eq!(
             entries,
             vec![
@@ -323,6 +352,28 @@ mod tests {
                 (1000, " world".to_owned()),
                 (61200, "\nagain".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn line_timing_uses_one_complete_entry_per_line() {
+        let aligned = sample_aligned();
+        assert_eq!(
+            aligned.sylt_entries_with_timing(LyricsTiming::Line),
+            vec![
+                (500, "Hello world".to_owned()),
+                (61200, "\nagain".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn word_timing_renders_enhanced_lrc() {
+        let aligned = sample_aligned();
+        assert_eq!(
+            aligned.lrc_body_with_timing(LyricsTiming::Word),
+            "[00:00.50]<00:00.50>Hello <00:01.00>world\n\
+             [01:01.20]<01:01.20>again\n"
         );
     }
 
@@ -396,7 +447,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            aligned.sylt_entries(),
+            aligned.sylt_entries_with_timing(LyricsTiming::Word),
             vec![(1000, "first".to_owned()), (1500, " line".to_owned())]
         );
     }
@@ -414,7 +465,7 @@ mod tests {
         ]);
         assert_eq!(aligned.lrc_body(), "[00:01.00]only line\n");
         assert_eq!(
-            aligned.sylt_entries(),
+            aligned.sylt_entries_with_timing(LyricsTiming::Word),
             vec![(1000, "only".to_owned()), (1500, " line".to_owned())]
         );
     }
@@ -438,7 +489,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            aligned.sylt_entries(),
+            aligned.sylt_entries_with_timing(LyricsTiming::Word),
             vec![
                 (1000, "line".to_owned()),
                 (1400, " one".to_owned()),
@@ -462,6 +513,9 @@ mod tests {
             vec![word("[laughs]", 2.0, 2.6)],
         )]);
         assert_eq!(aligned.lrc_body(), "[00:02.00][laughs]\n");
-        assert_eq!(aligned.sylt_entries(), vec![(2000, "[laughs]".to_owned())]);
+        assert_eq!(
+            aligned.sylt_entries_with_timing(LyricsTiming::Word),
+            vec![(2000, "[laughs]".to_owned())]
+        );
     }
 }

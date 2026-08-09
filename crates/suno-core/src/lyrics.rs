@@ -10,4 +10,6 @@ mod aligned;
 mod render;
 
 pub use aligned::{AlignedLine, AlignedLineWord, AlignedLyrics, AlignedWord};
-pub use render::{render_clip_lrc, render_clip_lyrics, render_synced_lrc};
+pub use render::{
+    render_clip_lrc, render_clip_lyrics, render_synced_lrc, render_synced_lrc_with_timing,
+};

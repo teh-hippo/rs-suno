@@ -78,6 +78,7 @@ pub(crate) fn flag_overrides(global: &GlobalArgs, args: &SyncArgs) -> FlagOverri
             details_sidecar: args.details_sidecar.then_some(true),
             lyrics_sidecar: args.lyrics_sidecar.then_some(true),
             lrc_sidecar: args.lrc_sidecar.then_some(true),
+            lyrics_timing: args.lyrics_timing.map(Into::into),
             video_mp4: args.video_mp4.then_some(true),
             download_stems: args.download_stems.then_some(true),
             stem_format: args.stem_format.map(Into::into),

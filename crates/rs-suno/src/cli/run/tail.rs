@@ -13,11 +13,12 @@ pub(super) async fn dry_run_report(
 ) -> Result<ExitCode> {
     let manifest = logs::load_manifest(ctx.dest)?;
     apply_effective_audio_targets(ctx, assembled, &manifest, store).await;
-    suno_core::preview_synced_lrc(
+    suno_core::preview_synced_lrc_with_timing(
         &mut assembled.desired,
         &manifest,
         wallclock::now_secs(),
         ctx.settings.lrc_sidecar || ctx.settings.lyrics_sidecar,
+        ctx.settings.lyrics_timing,
     );
     let plan =
         execute::reconcile_run(&assembled.reconcile_inputs(&manifest, ctx.dest, &store.albums))
@@ -75,6 +76,7 @@ pub(super) async fn execute_run(
         ctx.http,
         verbosity,
         settings.concurrency,
+        settings.lyrics_timing,
     )
     .await;
     let plan =
@@ -203,6 +205,7 @@ async fn apply_effective_audio_targets(
             details: ctx.settings.details_sidecar,
             lyrics: ctx.settings.lyrics_sidecar,
             lrc: ctx.settings.lrc_sidecar,
+            lyrics_timing: ctx.settings.lyrics_timing,
             video: ctx.settings.video_mp4,
             webp: ctx.settings.animated_cover_webp,
         },

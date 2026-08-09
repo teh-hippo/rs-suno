@@ -234,11 +234,12 @@ where
                     .await
                     .map_err(|err| err.attribute(&clip.id))?;
                 let cover = self.resolve_cover(clip, format).await?;
-                tag_mp3(
+                tag_mp3_with_timing(
                     &audio,
                     &meta,
                     cover.as_ref().map(EmbedCover::as_cover),
                     timed,
+                    self.opts.lyrics_timing,
                 )
                 .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
@@ -268,8 +269,14 @@ where
             AudioFormat::Wav => {
                 let wav = self.fetch_wav(client_lock, clip).await?;
                 let cover = self.resolve_cover(clip, format).await?;
-                tag_wav(&wav, &meta, cover.as_ref().map(EmbedCover::as_cover), timed)
-                    .map_err(|err| permanent_fail(&clip.id, err.to_string()))
+                tag_wav_with_timing(
+                    &wav,
+                    &meta,
+                    cover.as_ref().map(EmbedCover::as_cover),
+                    timed,
+                    self.opts.lyrics_timing,
+                )
+                .map_err(|err| permanent_fail(&clip.id, err.to_string()))
             }
         }
     }

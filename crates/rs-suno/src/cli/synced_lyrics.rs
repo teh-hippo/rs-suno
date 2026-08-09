@@ -38,9 +38,15 @@ pub(crate) async fn resolve_synced_lyrics(
     http: &ReqwestHttp,
     verbosity: i8,
     concurrency: u32,
+    timing: suno_core::LyricsTiming,
 ) -> (HashMap<String, AlignedLyrics>, Vec<suno_core::PendingCheck>) {
     let mut synced: HashMap<String, AlignedLyrics> = HashMap::new();
-    let targets = suno_core::synced_lyrics_targets(desired, manifest, wallclock::now_secs());
+    let targets = suno_core::synced_lyrics_targets_with_timing(
+        desired,
+        manifest,
+        wallclock::now_secs(),
+        timing,
+    );
     let fetched = stream::iter(targets.iter())
         .map(|id| async move { (id.clone(), client.aligned_lyrics(http, id).await) })
         .buffered(concurrency.max(1) as usize)
@@ -60,7 +66,7 @@ pub(crate) async fn resolve_synced_lyrics(
     if failed > 0 && verbosity >= -1 {
         eprint_t!("warning: {LYRICS_FETCH_WARNING} ({failed} failed)");
     }
-    let pending = suno_core::apply_synced_lrc(desired, manifest, &synced);
+    let pending = suno_core::apply_synced_lrc_with_timing(desired, manifest, &synced, timing);
     (synced, pending)
 }
 
@@ -76,7 +82,7 @@ pub(crate) fn record_synced_lyrics_checks(
 ) {
     let now = wallclock::now_secs();
     for check in pending {
-        let durable = if check.empty {
+        let slots_durable = if check.empty {
             true
         } else if let Some(entry) = manifest.get(&check.clip_id) {
             // Durable only once EVERY written slot has landed. Match the kind
@@ -94,15 +100,40 @@ pub(crate) fn record_synced_lyrics_checks(
         } else {
             false
         };
-        if !durable {
+        let timed_embed_durable = check.timed_embed_hash.as_ref().is_none_or(|hash| {
+            manifest
+                .get(&check.clip_id)
+                .is_some_and(|entry| &entry.embedded_timed_lyrics_hash == hash)
+        });
+        if !slots_durable || !timed_embed_durable {
             continue;
         }
         if let Some(entry) = manifest.entries.get_mut(&check.clip_id) {
+            let prior = entry.synced_lyrics.as_ref();
+            let preserve_timed_state = check.timing.is_none() && prior.is_some();
+            let prior_timed_version = prior.map(|state| state.timed_version).unwrap_or_default();
+            let prior_timing = prior.and_then(|state| state.timing);
+            let empty = if preserve_timed_state {
+                prior.is_some_and(|state| state.empty)
+            } else {
+                check.empty
+            };
+            let timed = if preserve_timed_state {
+                prior.is_some_and(|state| state.timed)
+            } else {
+                check.timed
+            };
             entry.synced_lyrics = Some(suno_core::SyncedLyricsCheck {
                 version: suno_core::SYNCED_LRC_VERSION,
                 checked_unix: now,
-                empty: check.empty,
-                timed: check.timed,
+                empty,
+                timed,
+                timed_version: if check.timing.is_some() {
+                    suno_core::TIMED_LYRICS_VERSION
+                } else {
+                    prior_timed_version
+                },
+                timing: check.timing.or(prior_timing),
             });
         }
     }
@@ -145,6 +176,8 @@ mod tests {
             empty: false,
             timed: true,
             written_slots: vec![(ArtifactKind::LyricsTxt, "body-hash".to_string())],
+            timing: None,
+            timed_embed_hash: None,
         }];
         record_synced_lyrics_checks(&mut manifest, &pending);
 
@@ -165,6 +198,8 @@ mod tests {
             empty: true,
             timed: false,
             written_slots: Vec::new(),
+            timing: None,
+            timed_embed_hash: None,
         }];
 
         record_synced_lyrics_checks(&mut manifest, &pending);
@@ -194,6 +229,8 @@ mod tests {
             empty: false,
             timed: true,
             written_slots: vec![(ArtifactKind::LyricsTxt, "body-hash".to_string())],
+            timing: None,
+            timed_embed_hash: None,
         }];
         record_synced_lyrics_checks(&mut manifest, &pending);
         assert!(
@@ -228,6 +265,8 @@ mod tests {
                 (ArtifactKind::Lrc, "lrc-hash".to_string()),
                 (ArtifactKind::LyricsTxt, "txt-hash".to_string()),
             ],
+            timing: Some(suno_core::LyricsTiming::Line),
+            timed_embed_hash: None,
         }];
         record_synced_lyrics_checks(&mut manifest, &pending);
         assert!(
@@ -262,11 +301,89 @@ mod tests {
                 (ArtifactKind::Lrc, "lrc-hash".to_string()),
                 (ArtifactKind::LyricsTxt, "txt-hash".to_string()),
             ],
+            timing: Some(suno_core::LyricsTiming::Line),
+            timed_embed_hash: None,
         }];
         record_synced_lyrics_checks(&mut manifest, &pending);
         assert!(
             manifest.get("a").unwrap().synced_lyrics.is_some(),
             "both slots landed -> resolved (converges)"
         );
+    }
+
+    #[test]
+    fn timed_mode_waits_for_the_audio_embed_to_land() {
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            ManifestEntry {
+                lrc: Some(ArtifactState {
+                    path: "a.lrc".to_owned(),
+                    hash: "lrc-hash".to_owned(),
+                }),
+                embedded_timed_lyrics_hash: "old".to_owned(),
+                ..Default::default()
+            },
+        );
+        let pending = vec![PendingCheck {
+            clip_id: "a".to_owned(),
+            empty: false,
+            timed: true,
+            written_slots: vec![(ArtifactKind::Lrc, "lrc-hash".to_owned())],
+            timing: Some(suno_core::LyricsTiming::Line),
+            timed_embed_hash: Some("new".to_owned()),
+        }];
+
+        record_synced_lyrics_checks(&mut manifest, &pending);
+        assert!(manifest.get("a").unwrap().synced_lyrics.is_none());
+
+        manifest
+            .entries
+            .get_mut("a")
+            .unwrap()
+            .embedded_timed_lyrics_hash = "new".to_owned();
+        record_synced_lyrics_checks(&mut manifest, &pending);
+        let state = manifest.get("a").unwrap().synced_lyrics.as_ref().unwrap();
+        assert_eq!(state.timing, Some(suno_core::LyricsTiming::Line));
+        assert_eq!(state.timed_version, suno_core::TIMED_LYRICS_VERSION);
+    }
+
+    #[test]
+    fn plain_sidecar_result_does_not_erase_prior_timed_state() {
+        let mut manifest = Manifest::new();
+        manifest.insert(
+            "a",
+            ManifestEntry {
+                lyrics_txt: Some(ArtifactState {
+                    path: "a.lyrics.txt".to_owned(),
+                    hash: "txt-hash".to_owned(),
+                }),
+                synced_lyrics: Some(suno_core::SyncedLyricsCheck {
+                    version: suno_core::SYNCED_LRC_VERSION,
+                    checked_unix: 1,
+                    empty: false,
+                    timed: true,
+                    timed_version: 0,
+                    timing: None,
+                }),
+                ..Default::default()
+            },
+        );
+        let pending = vec![PendingCheck {
+            clip_id: "a".to_owned(),
+            empty: false,
+            timed: false,
+            written_slots: vec![(ArtifactKind::LyricsTxt, "txt-hash".to_owned())],
+            timing: None,
+            timed_embed_hash: None,
+        }];
+
+        record_synced_lyrics_checks(&mut manifest, &pending);
+
+        let state = manifest.get("a").unwrap().synced_lyrics.as_ref().unwrap();
+        assert!(state.timed);
+        assert!(!state.empty);
+        assert_eq!(state.timed_version, 0);
+        assert_eq!(state.timing, None);
     }
 }

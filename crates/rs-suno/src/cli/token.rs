@@ -118,6 +118,7 @@ mod tests {
             details_sidecar: false,
             lyrics_sidecar: false,
             lrc_sidecar: false,
+            lyrics_timing: suno_core::LyricsTiming::Line,
             video_mp4: false,
             download_stems: false,
             stem_format: suno_core::StemFormat::Wav,

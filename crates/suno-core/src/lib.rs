@@ -103,8 +103,8 @@ pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind};
 pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
 pub use graph::{CacheEntry, LineageStore, Node, StoredEdge};
 pub use hash::{
-    SYNCED_LRC_VERSION, art_hash, art_url_hash, content_hash, lyrics_txt_source_hash, meta_hash,
-    synced_lrc_source_hash,
+    SYNCED_LRC_VERSION, TIMED_LYRICS_VERSION, art_hash, art_url_hash, content_hash,
+    lyrics_txt_source_hash, meta_hash, synced_lrc_source_hash, synced_lrc_source_hash_with_timing,
 };
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use identity::{AdoptDecision, Owner, OwnerGate, adopt_decision, owner_gate};
@@ -114,7 +114,7 @@ pub use lineage::{
 };
 pub use lyrics::{
     AlignedLine, AlignedLineWord, AlignedLyrics, AlignedWord, render_clip_lrc, render_clip_lyrics,
-    render_synced_lrc,
+    render_synced_lrc, render_synced_lrc_with_timing,
 };
 pub use manifest::{ArtifactState, Manifest, ManifestEntry, SyncedLyricsCheck};
 pub use model::{
@@ -133,12 +133,17 @@ pub use reconcile::{
 };
 pub use roots::{ResolveOpts, resolve_roots};
 pub use synced::{
-    PendingCheck, SYNCED_LRC_RECHECK_SECS, apply_synced_lrc, preview_synced_lrc,
-    synced_lyrics_targets,
+    PendingCheck, SYNCED_LRC_RECHECK_SECS, apply_synced_lrc, apply_synced_lrc_with_timing,
+    preview_synced_lrc, preview_synced_lrc_with_timing, synced_lyrics_targets,
+    synced_lyrics_targets_with_timing,
 };
-pub use tag::{Cover, TrackMetadata, flac_picture_data_budget, tag_flac, tag_mp3, tag_wav};
+pub use tag::{
+    Cover, TrackMetadata, flac_picture_data_budget, tag_flac, tag_mp3, tag_mp3_with_timing,
+    tag_wav, tag_wav_with_timing,
+};
 pub use tag_alac::tag_alac;
 pub use tracks::{LeadResolution, TrackAssignment, assign_track_numbers, resolve_lead_ids};
 pub use vocab::{
-    ArtifactKind, AudioFormat, SourceMode, StemFormat, VideoCoverRetention, WebpEncodeSettings,
+    ArtifactKind, AudioFormat, LyricsTiming, SourceMode, StemFormat, VideoCoverRetention,
+    WebpEncodeSettings,
 };

@@ -9,8 +9,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use suno_core::{
     AudioFormat, ClerkAuth, Clock, Cover, Error as CoreError, Ffmpeg, Filesystem, FlagOverrides,
-    LineageContext, LosslessAccess, Settings, SunoClient, TrackMetadata, tag_alac, tag_flac,
-    tag_mp3, tag_wav,
+    LineageContext, LosslessAccess, LyricsTiming, Settings, SunoClient, TrackMetadata,
+    render_clip_lrc, render_synced_lrc_with_timing, tag_alac, tag_flac, tag_mp3,
+    tag_mp3_with_timing, tag_wav, tag_wav_with_timing,
 };
 
 use crate::cli::account;
@@ -27,7 +28,8 @@ use crate::http::ReqwestHttp;
 
 const WAV_POLL_ATTEMPTS: u32 = 24;
 const WAV_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const LYRICS_FETCH_WARNING: &str = "could not fetch lyrics; the audio will be written without them";
+const LYRICS_FETCH_WARNING: &str =
+    "could not fetch aligned lyrics; continuing without aligned lyric output";
 
 /// Run `fetch`.
 pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode> {
@@ -66,6 +68,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     };
 
     let id = parse_clip_id(&args.id);
+    let lyrics_timing = args.lyrics_timing.map(Into::into);
     let configured_format = settings.format;
     let explicit_file = explicit_file_destination(args.output.as_deref(), args.dest.as_deref());
     let (root, _) = fetch_destination(
@@ -111,7 +114,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     // A single-clip fetch has no resolution universe, so the clip stands as its
     // own root: album folders under its own title and no lineage tags.
     let lineage = LineageContext::own_root(&clip);
-    let aligned = if clip.lyrics.trim().is_empty() {
+    let aligned = if lyrics_timing.is_some() || clip.lyrics.trim().is_empty() {
         match client.aligned_lyrics(&http, &id).await {
             Ok(aligned) => Some(aligned),
             Err(_) => {
@@ -152,8 +155,27 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             }
         }
     }
+    let (_, filename) = fetch_destination(
+        args.output.as_deref(),
+        args.dest.as_deref(),
+        &id,
+        output_format,
+    );
+    let lrc = fetch_lrc(&clip, &lineage, aligned.as_ref(), lyrics_timing)
+        .map(|body| lrc_output_filename(&filename).map(|name| (name, body)))
+        .transpose()?;
     let bytes = match output_format {
-        AudioFormat::Mp3 => tagged_mp3(&http, &clip, &meta, cover.as_deref()).await?,
+        AudioFormat::Mp3 => {
+            tagged_mp3(
+                &http,
+                &clip,
+                &meta,
+                cover.as_deref(),
+                aligned.as_ref(),
+                lyrics_timing,
+            )
+            .await?
+        }
         AudioFormat::Flac => {
             let wav_url = wav_url
                 .as_deref()
@@ -181,16 +203,22 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
             let wav = download::get_bytes(&http, wav_url)
                 .await
                 .context("could not download the WAV")?;
-            tag_wav(&wav, &meta, cover.as_deref().map(Cover::jpeg), None)?
+            match lyrics_timing {
+                Some(timing) => tag_wav_with_timing(
+                    &wav,
+                    &meta,
+                    cover.as_deref().map(Cover::jpeg),
+                    aligned.as_ref(),
+                    timing,
+                )?,
+                None => tag_wav(&wav, &meta, cover.as_deref().map(Cover::jpeg), None)?,
+            }
         }
     };
-    let (_, filename) = fetch_destination(
-        args.output.as_deref(),
-        args.dest.as_deref(),
-        &id,
-        output_format,
-    );
     fs.write_atomic(&filename, &bytes)?;
+    if let Some((lrc_filename, body)) = lrc {
+        fs.write_atomic(&lrc_filename, body.as_bytes())?;
+    }
 
     if global.verbosity() >= -1 {
         eprintln!("{} ({id})", clip.title);
@@ -204,12 +232,49 @@ async fn tagged_mp3(
     clip: &suno_core::Clip,
     meta: &TrackMetadata,
     cover: Option<&[u8]>,
+    aligned: Option<&suno_core::AlignedLyrics>,
+    timing: Option<LyricsTiming>,
 ) -> Result<Vec<u8>> {
     let url = clip.mp3_url();
     let audio = download::get_bytes(http, &url)
         .await
         .context("could not download the MP3")?;
-    Ok(tag_mp3(&audio, meta, cover.map(Cover::jpeg), None)?)
+    Ok(match timing {
+        Some(timing) => tag_mp3_with_timing(&audio, meta, cover.map(Cover::jpeg), aligned, timing)?,
+        None => tag_mp3(&audio, meta, cover.map(Cover::jpeg), None)?,
+    })
+}
+
+fn fetch_lrc(
+    clip: &suno_core::Clip,
+    lineage: &LineageContext,
+    aligned: Option<&suno_core::AlignedLyrics>,
+    timing: Option<LyricsTiming>,
+) -> Option<String> {
+    let timing = timing?;
+    let aligned = aligned?;
+    if aligned.is_empty() {
+        render_clip_lrc(clip, lineage)
+    } else {
+        render_synced_lrc_with_timing(clip, lineage, aligned, timing)
+    }
+}
+
+fn lrc_filename(audio_filename: &str) -> String {
+    Path::new(audio_filename)
+        .with_extension("lrc")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn lrc_output_filename(audio_filename: &str) -> Result<String> {
+    let sidecar = lrc_filename(audio_filename);
+    if sidecar.eq_ignore_ascii_case(audio_filename) {
+        bail!(
+            "timed lyrics sidecar would overwrite the audio output; choose an audio filename that does not end in .lrc"
+        );
+    }
+    Ok(sidecar)
 }
 
 fn entitlement_error(err: &anyhow::Error) -> Option<&str> {
@@ -424,5 +489,50 @@ mod tests {
             Some(Path::new("track.flac"))
         ));
         assert!(!explicit_file_destination(None, Some(Path::new("music"))));
+    }
+
+    #[test]
+    fn timed_fetch_sidecar_uses_final_audio_stem() {
+        assert_eq!(lrc_filename("track.mp3"), "track.lrc");
+        assert_eq!(lrc_filename("track.m4a"), "track.lrc");
+        assert!(lrc_output_filename("track.lrc").is_err());
+        assert!(lrc_output_filename("track.LRC").is_err());
+    }
+
+    #[test]
+    fn fetch_lrc_supports_line_and_word_modes() {
+        let clip = suno_core::Clip {
+            title: "Song".to_owned(),
+            lyrics: "hello world".to_owned(),
+            ..Default::default()
+        };
+        let lineage = LineageContext::own_root(&clip);
+        let aligned = suno_core::AlignedLyrics {
+            lines: vec![suno_core::AlignedLine {
+                text: "hello world".to_owned(),
+                start_s: 1.0,
+                end_s: 2.0,
+                section: String::new(),
+                words: vec![
+                    suno_core::AlignedLineWord {
+                        text: "hello".to_owned(),
+                        start_s: 1.0,
+                        end_s: 1.4,
+                    },
+                    suno_core::AlignedLineWord {
+                        text: "world".to_owned(),
+                        start_s: 1.5,
+                        end_s: 2.0,
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+
+        let line = fetch_lrc(&clip, &lineage, Some(&aligned), Some(LyricsTiming::Line)).unwrap();
+        assert!(line.contains("[00:01.00]hello world"));
+        let word = fetch_lrc(&clip, &lineage, Some(&aligned), Some(LyricsTiming::Word)).unwrap();
+        assert!(word.contains("[00:01.00]<00:01.00>hello <00:01.50>world"));
+        assert!(fetch_lrc(&clip, &lineage, Some(&aligned), None).is_none());
     }
 }

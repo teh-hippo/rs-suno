@@ -25,15 +25,21 @@ where
         if format == AudioFormat::Wav {
             let (meta, synced) = self.track_meta(clip, lineage);
             let timed = self.opts.embed_synced_lyrics.then_some(synced).flatten();
-            let cover = self.resolve_cover(clip, format).await?;
+            let (cover, preserve_existing_cover) = if format == AudioFormat::Mp3 {
+                self.resolve_retag_cover(manifest, clip, format).await?
+            } else {
+                (self.resolve_cover(clip, format).await?, false)
+            };
             let existing = self.fs.read(path).map_err(|err| {
                 permanent_fail(&clip.id, format!("could not read for retag: {err}"))
             })?;
-            let tagged = tag_wav(
+            let tagged = retag_wav_with_timing(
                 &existing,
                 &meta,
                 cover.as_ref().map(EmbedCover::as_cover),
                 timed,
+                self.opts.lyrics_timing,
+                preserve_existing_cover,
             )
             .map_err(|err| permanent_fail(&clip.id, err.to_string()))?;
             let size = self.write_verify(&clip.id, path, &tagged)?;
@@ -43,14 +49,22 @@ where
 
         let (meta, synced) = self.track_meta(clip, lineage);
         let timed = self.opts.embed_synced_lyrics.then_some(synced).flatten();
-        let cover = self.resolve_cover(clip, format).await?;
+        let (cover, preserve_existing_cover) =
+            self.resolve_retag_cover(manifest, clip, format).await?;
         let cover = cover.as_ref().map(EmbedCover::as_cover);
         let existing = self
             .fs
             .read(path)
             .map_err(|err| permanent_fail(&clip.id, format!("could not read for retag: {err}")))?;
         let tagged = match format {
-            AudioFormat::Mp3 => tag_mp3(&existing, &meta, cover, timed),
+            AudioFormat::Mp3 => retag_mp3_with_timing(
+                &existing,
+                &meta,
+                cover,
+                timed,
+                self.opts.lyrics_timing,
+                preserve_existing_cover,
+            ),
             AudioFormat::Flac => tag_flac(&existing, &meta, cover),
             AudioFormat::Alac => tag_alac(&existing, &meta, cover),
             // WAV is rendered before this match, so it never reaches the tag arm.
@@ -63,11 +77,42 @@ where
         Ok(Effect::Retagged)
     }
 
+    async fn resolve_retag_cover(
+        &self,
+        manifest: &Manifest,
+        clip: &Clip,
+        format: AudioFormat,
+    ) -> Result<(Option<EmbedCover>, bool), Fail> {
+        let cover = self.resolve_cover(clip, format).await?;
+        if cover.is_some() {
+            return Ok((cover, false));
+        }
+        let desired_art_hash = self
+            .by_id
+            .get(clip.id.as_str())
+            .map(|desired| desired.art_hash.as_str())
+            .unwrap_or_default();
+        if desired_art_hash.is_empty() {
+            return Ok((None, false));
+        }
+        let current_art_hash = manifest
+            .get(&clip.id)
+            .map(|entry| entry.art_hash.as_str())
+            .unwrap_or_default();
+        if current_art_hash == desired_art_hash {
+            return Ok((None, true));
+        }
+        Err(transient_fail(
+            &clip.id,
+            "cover art was unavailable for retag; keeping the existing file",
+        ))
+    }
+
     /// The track metadata for a clip, paired with its synced lyrics (if any).
     ///
     /// Inline clip lyrics are preferred; when they are absent, this run's
     /// alignment fills the plain tag text. The returned alignment is separately
-    /// gated before it reaches the word-level ID3 `SYLT` writer.
+    /// gated before it reaches the mode-aware ID3 `SYLT` writer.
     pub(crate) fn track_meta<'m>(
         &'m self,
         clip: &Clip,
