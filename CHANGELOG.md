@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.0](https://github.com/teh-hippo/rs-suno/compare/v0.40.6...v0.41.0) (2026-08-09)
+
+
+### Features
+
+* **lyrics:** add configurable timing granularity ([d4c5f61](https://github.com/teh-hippo/rs-suno/commit/d4c5f611c27673ca99bff831f31461e6667c4696))
+
 ## [0.40.6](https://github.com/teh-hippo/rs-suno/compare/v0.40.5...v0.40.6) (2026-08-08)
 
 
