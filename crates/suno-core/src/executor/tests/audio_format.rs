@@ -49,7 +49,7 @@ fn download_mp3_writes_tagged_file_and_records_manifest() {
 
 #[test]
 fn download_mp3_embeds_sylt_and_lyrics_from_synced_map() {
-    // A clip whose alignment was fetched this run gets a word-level SYLT frame
+    // A clip whose alignment was fetched this run gets the default line-level SYLT
     // and its plain lyric text embedded (USLT), end to end through execute.
     let c = art_clip("a");
     let d = desired(c.clone(), AudioFormat::Mp3);
@@ -122,11 +122,8 @@ fn download_mp3_embeds_sylt_and_lyrics_from_synced_map() {
     assert_eq!(outcome.downloaded, 1);
     let written = fs.read_file("a.mp3").unwrap();
     let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
-    assert_eq!(
-        tag.synchronised_lyrics().count(),
-        1,
-        "a SYLT frame is embedded"
-    );
+    let sylt = tag.synchronised_lyrics().next().unwrap();
+    assert_eq!(sylt.content, vec![(500, "hi there".to_owned())]);
     // The plain lyric text is populated from the alignment for the USLT frame.
     assert_eq!(
         tag.lyrics().next().map(|frame| frame.text.as_str()),
@@ -137,7 +134,7 @@ fn download_mp3_embeds_sylt_and_lyrics_from_synced_map() {
 #[test]
 fn download_mp3_embeds_plain_lyrics_without_sylt_when_timing_is_disabled() {
     // Baseline alignment supplies USLT even with no `.lrc` feature, but must not
-    // silently enable word-level SYLT.
+    // silently enable SYLT.
     let c = art_clip("a");
     let mut d = desired(c.clone(), AudioFormat::Mp3);
     d.embedded_lyrics_hash = crate::content_hash("plain words");

@@ -9,6 +9,7 @@ use crate::lineage::LineageContext;
 use crate::model::Clip;
 use crate::tag::TrackMetadata;
 use crate::textfmt::{format_duration, to_single_line};
+use crate::vocab::LyricsTiming;
 
 /// Render the plain-text lyrics sidecar for `clip`, or `None` when it has none.
 ///
@@ -51,7 +52,17 @@ pub fn render_synced_lrc(
     lineage: &LineageContext,
     aligned: &AlignedLyrics,
 ) -> Option<String> {
-    let body = aligned.lrc_body();
+    render_synced_lrc_with_timing(clip, lineage, aligned, LyricsTiming::Line)
+}
+
+/// Render synced lyrics at the selected line or enhanced-word granularity.
+pub fn render_synced_lrc_with_timing(
+    clip: &Clip,
+    lineage: &LineageContext,
+    aligned: &AlignedLyrics,
+    timing: LyricsTiming,
+) -> Option<String> {
+    let body = aligned.lrc_body_with_timing(timing);
     if body.is_empty() {
         return None;
     }
@@ -212,6 +223,18 @@ mod tests {
         [re:rs-suno]\n\
         [00:01.50]thunder rolls\n";
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn word_synced_lrc_has_enhanced_word_stamps() {
+        let rendered = render_synced_lrc_with_timing(
+            &full_clip(),
+            &full_lineage(),
+            &sample_aligned(),
+            LyricsTiming::Word,
+        )
+        .unwrap();
+        assert!(rendered.contains("[00:01.50]<00:01.50>thunder <00:02.10>rolls"));
     }
 
     #[test]

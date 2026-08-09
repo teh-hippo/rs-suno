@@ -308,6 +308,7 @@ fn render_resolved_settings(out: &mut String, settings: &EffectiveSettings) {
     writeln!(out, "    details_sidecar: {}", settings.details_sidecar).ok();
     writeln!(out, "    lyrics_sidecar: {}", settings.lyrics_sidecar).ok();
     writeln!(out, "    lrc_sidecar: {}", settings.lrc_sidecar).ok();
+    writeln!(out, "    lyrics_timing: {}", settings.lyrics_timing).ok();
     writeln!(out, "    video_mp4: {}", settings.video_mp4).ok();
     writeln!(out, "    download_stems: {}", settings.download_stems).ok();
     writeln!(out, "    stem_format: {}", settings.stem_format).ok();
@@ -380,6 +381,7 @@ mod tests {
             details_sidecar: false,
             lyrics_sidecar: true,
             lrc_sidecar: false,
+            lyrics_timing: suno_core::LyricsTiming::Word,
             video_mp4: true,
             download_stems: false,
             stem_format: suno_core::StemFormat::Wav,

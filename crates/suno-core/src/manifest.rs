@@ -12,7 +12,7 @@ use std::collections::btree_map::Iter;
 
 use serde::{Deserialize, Serialize};
 
-use crate::vocab::{ArtifactKind, AudioFormat};
+use crate::vocab::{ArtifactKind, AudioFormat, LyricsTiming};
 
 /// The prior known state of one external sidecar artifact for a clip.
 ///
@@ -48,6 +48,12 @@ pub struct SyncedLyricsCheck {
     /// alignment upgrades the `.lrc` and `SYLT`. Defaults to `false` so
     /// pre-existing manifests written before this field existed are re-checked.
     pub timed: bool,
+    /// Timed-output renderer version last applied to every requested timed
+    /// surface. Zero is the legacy mixed line-LRC/word-SYLT state.
+    pub timed_version: u32,
+    /// Granularity last applied to every requested timed surface. `None` is a
+    /// legacy or otherwise unresolved state.
+    pub timing: Option<LyricsTiming>,
 }
 
 /// One manifest record: the prior known state of a single downloaded clip.
@@ -72,8 +78,9 @@ pub struct ManifestEntry {
     /// load with `""` and the common no-fallback case is omitted.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub embedded_lyrics_hash: String,
-    /// Fingerprint of word-level ID3 `SYLT` currently embedded in MP3/WAV, or
-    /// empty when no timed frame has been written. Additive for old manifests.
+    /// Fingerprint of the selected ID3 `SYLT` timing currently embedded in
+    /// MP3/WAV, or empty when no timed frame has been written. Additive for old
+    /// manifests.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub embedded_timed_lyrics_hash: String,
     /// Size of the file in bytes when last written.
@@ -419,10 +426,20 @@ mod tests {
             checked_unix: 1_700_000_000,
             empty: true,
             timed: false,
+            timed_version: 0,
+            timing: None,
         });
         m.insert("a", e);
         let back: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(m, back);
+
+        let legacy: Manifest = serde_json::from_str(
+            r#"{"a":{"synced_lyrics":{"version":3,"checked_unix":1,"empty":false,"timed":true}}}"#,
+        )
+        .unwrap();
+        let state = legacy.get("a").unwrap().synced_lyrics.as_ref().unwrap();
+        assert_eq!(state.timed_version, 0);
+        assert_eq!(state.timing, None);
     }
 
     #[test]

@@ -55,9 +55,14 @@ use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
 use crate::pathkey::same_fs_path;
 use crate::reconcile::{Action, Desired, Plan, set_manifest_artifact, set_manifest_stem};
-use crate::tag::{Cover, TrackMetadata, flac_picture_data_budget, tag_flac, tag_mp3, tag_wav};
+use crate::tag::{
+    Cover, TrackMetadata, flac_picture_data_budget, retag_mp3_with_timing, retag_wav_with_timing,
+    tag_flac, tag_mp3_with_timing, tag_wav_with_timing,
+};
 use crate::tag_alac::tag_alac;
-use crate::vocab::{ArtifactKind, AudioFormat, SourceMode, StemFormat, WebpEncodeSettings};
+use crate::vocab::{
+    ArtifactKind, AudioFormat, LyricsTiming, SourceMode, StemFormat, WebpEncodeSettings,
+};
 
 mod artifact;
 mod audio;
@@ -96,9 +101,11 @@ pub struct ExecOptions {
     pub embed_animated_cover: bool,
     /// Settings used for animated WebP cover transcodes.
     pub cover_webp: WebpEncodeSettings,
-    /// Embed word-level ID3 `SYLT` timing from fetched alignment. Plain embedded
-    /// lyrics are independent and always flow through `TrackMetadata`.
+    /// Embed ID3 `SYLT` timing from fetched alignment. Plain embedded lyrics are
+    /// independent and always flow through `TrackMetadata`.
     pub embed_synced_lyrics: bool,
+    /// Granularity for synced `.lrc` and supported ID3 timing.
+    pub lyrics_timing: LyricsTiming,
 }
 
 impl Default for ExecOptions {
@@ -111,6 +118,7 @@ impl Default for ExecOptions {
             embed_animated_cover: false,
             cover_webp: WebpEncodeSettings::default(),
             embed_synced_lyrics: false,
+            lyrics_timing: LyricsTiming::Line,
         }
     }
 }

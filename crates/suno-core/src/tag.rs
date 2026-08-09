@@ -19,6 +19,7 @@ use crate::error::{Error, Result};
 use crate::lineage::{EdgeType, LineageContext};
 use crate::lyrics::AlignedLyrics;
 use crate::model::Clip;
+use crate::vocab::LyricsTiming;
 
 const LANG: &str = "eng";
 
@@ -203,9 +204,8 @@ impl TrackMetadata {
 ///
 /// Writes ID3v2.4 frames, replacing any existing ID3 tag, and embeds `cover`
 /// as a front-cover `APIC` frame when provided. When `synced` carries aligned
-/// lyrics, a word-level `SYLT` (synchronised lyrics) frame is added alongside
-/// the plain `USLT` lyrics, so a player can render karaoke-style timed lyrics;
-/// an empty (instrumental) `synced` adds no `SYLT`.
+/// lyrics, a line-level `SYLT` (synchronised lyrics) frame is added alongside
+/// the plain `USLT` lyrics; an empty (instrumental) `synced` adds no `SYLT`.
 ///
 /// Because the whole tag is rebuilt, any existing `SYLT`/`USLT` lyrics would be
 /// lost on a plain retag that carries no new lyrics. To avoid downgrading a good
@@ -217,17 +217,47 @@ pub fn tag_mp3(
     cover: Option<Cover<'_>>,
     synced: Option<&AlignedLyrics>,
 ) -> Result<Vec<u8>> {
-    tag_id3(audio, meta, cover, synced, "ID3 tag")
+    tag_mp3_with_timing(audio, meta, cover, synced, LyricsTiming::Line)
 }
 
-/// Build a word-level `SYLT` frame from `aligned`, or `None` when there is
-/// nothing to time (an instrumental with empty arrays).
+/// Tag an MP3, selecting line- or word-level `SYLT` timing.
+pub fn tag_mp3_with_timing(
+    audio: &[u8],
+    meta: &TrackMetadata,
+    cover: Option<Cover<'_>>,
+    synced: Option<&AlignedLyrics>,
+    timing: LyricsTiming,
+) -> Result<Vec<u8>> {
+    tag_id3(audio, meta, cover, synced, timing, false, "ID3 tag")
+}
+
+pub(crate) fn retag_mp3_with_timing(
+    audio: &[u8],
+    meta: &TrackMetadata,
+    cover: Option<Cover<'_>>,
+    synced: Option<&AlignedLyrics>,
+    timing: LyricsTiming,
+    preserve_existing_cover: bool,
+) -> Result<Vec<u8>> {
+    tag_id3(
+        audio,
+        meta,
+        cover,
+        synced,
+        timing,
+        preserve_existing_cover,
+        "ID3 tag",
+    )
+}
+
+/// Build a line- or word-level `SYLT` frame from `aligned`, or `None` when there
+/// is nothing to time (an instrumental with empty arrays).
 ///
 /// Timestamps are absolute milliseconds ([`TimestampFormat::Ms`]); the content
-/// is the word-level segments from [`AlignedLyrics::sylt_entries`], with a
-/// leading newline on each line's first word so a player renders line breaks.
-fn build_sylt(aligned: &AlignedLyrics) -> Option<SynchronisedLyrics> {
-    let content = aligned.sylt_entries();
+/// is selected from the aligned line grouping, with a leading newline on each
+/// line after the first so a player renders line breaks.
+fn build_sylt(aligned: &AlignedLyrics, timing: LyricsTiming) -> Option<SynchronisedLyrics> {
+    let content = aligned.sylt_entries_with_timing(timing);
     if content.is_empty() {
         return None;
     }
@@ -327,7 +357,7 @@ fn tag_flac_inner(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) 
 ///
 /// Writes an ID3v2.4 tag into the RIFF `id3 ` chunk, replacing any existing
 /// ID3 tag, and embeds `cover` as a front-cover `APIC` frame when provided.
-/// When `synced` carries aligned lyrics, a word-level `SYLT` frame is added
+/// When `synced` carries aligned lyrics, a line-level `SYLT` frame is added
 /// alongside the plain `USLT` frame.
 ///
 /// Existing `SYLT` frames are preserved when `synced` is `None`, and existing
@@ -339,7 +369,37 @@ pub fn tag_wav(
     cover: Option<Cover<'_>>,
     synced: Option<&AlignedLyrics>,
 ) -> Result<Vec<u8>> {
-    tag_id3(audio, meta, cover, synced, "WAV ID3 tag")
+    tag_wav_with_timing(audio, meta, cover, synced, LyricsTiming::Line)
+}
+
+/// Tag a WAV, selecting line- or word-level `SYLT` timing.
+pub fn tag_wav_with_timing(
+    audio: &[u8],
+    meta: &TrackMetadata,
+    cover: Option<Cover<'_>>,
+    synced: Option<&AlignedLyrics>,
+    timing: LyricsTiming,
+) -> Result<Vec<u8>> {
+    tag_id3(audio, meta, cover, synced, timing, false, "WAV ID3 tag")
+}
+
+pub(crate) fn retag_wav_with_timing(
+    audio: &[u8],
+    meta: &TrackMetadata,
+    cover: Option<Cover<'_>>,
+    synced: Option<&AlignedLyrics>,
+    timing: LyricsTiming,
+    preserve_existing_cover: bool,
+) -> Result<Vec<u8>> {
+    tag_id3(
+        audio,
+        meta,
+        cover,
+        synced,
+        timing,
+        preserve_existing_cover,
+        "WAV ID3 tag",
+    )
 }
 
 /// The shared ID3v2.4 tagging skeleton behind [`tag_mp3`] and [`tag_wav`], which
@@ -347,7 +407,7 @@ pub fn tag_wav(
 ///
 /// Reads any existing tag, rebuilds the frame set from `meta` (title, artist,
 /// album, recording/release dates, comment, lyrics, and the Suno `TXXX` fields),
-/// embeds `cover` as a front-cover `APIC`, and writes a word-level `SYLT` from
+/// embeds `cover` as a front-cover `APIC`, and writes the selected `SYLT` from
 /// `synced`. Because the tag is rebuilt, existing `USLT` lyrics are preserved
 /// when `meta` carries no lyrics text and existing `SYLT` frames are preserved
 /// when `synced` is `None`, so a plain retag never downgrades a timed file.
@@ -356,6 +416,8 @@ fn tag_id3(
     meta: &TrackMetadata,
     cover: Option<Cover<'_>>,
     synced: Option<&AlignedLyrics>,
+    timing: LyricsTiming,
+    preserve_existing_cover: bool,
     err_context: &str,
 ) -> Result<Vec<u8>> {
     let existing = id3::Tag::read_from2(Cursor::new(audio)).ok();
@@ -414,8 +476,12 @@ fn tag_id3(
             description: String::new(),
             data: cover.bytes.to_vec(),
         });
+    } else if preserve_existing_cover && let Some(existing) = &existing {
+        for picture in existing.pictures() {
+            tag.add_frame(picture.clone());
+        }
     }
-    match synced.and_then(build_sylt) {
+    match synced.and_then(|aligned| build_sylt(aligned, timing)) {
         Some(sylt) => {
             tag.add_frame(sylt);
         }

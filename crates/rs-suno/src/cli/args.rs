@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use suno_core::{AudioFormat, CharacterSet, StemFormat, VideoCoverRetention};
+use suno_core::{AudioFormat, CharacterSet, LyricsTiming, StemFormat, VideoCoverRetention};
 
 /// A download-only tool for mirroring your Suno.ai library.
 #[derive(Parser, Debug)]
@@ -103,6 +103,23 @@ impl From<AudioFmt> for AudioFormat {
             AudioFmt::Flac => AudioFormat::Flac,
             AudioFmt::Wav => AudioFormat::Wav,
             AudioFmt::Alac => AudioFormat::Alac,
+        }
+    }
+}
+
+/// Granularity for synced lyric output, mapped onto [`LyricsTiming`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum LyricsTimingArg {
+    Line,
+    Word,
+}
+
+impl From<LyricsTimingArg> for LyricsTiming {
+    fn from(value: LyricsTimingArg) -> Self {
+        match value {
+            LyricsTimingArg::Line => LyricsTiming::Line,
+            LyricsTimingArg::Word => LyricsTiming::Word,
         }
     }
 }
@@ -273,11 +290,14 @@ pub struct SyncArgs {
     /// library-exclusive files are never deleted.
     #[arg(long, value_name = "ID_OR_NAME")]
     pub playlist: Vec<String>,
-    /// Also write a synced `.lrc` sidecar next to each song (word/line-level
-    /// timed lyrics when Suno has them, plus MP3/WAV SYLT; untimed fallback
-    /// otherwise). Instrumentals get no file.
+    /// Also write a synced `.lrc` sidecar next to each song using the selected
+    /// timing granularity, plus matching MP3/WAV SYLT; falls back to untimed
+    /// lyrics when alignment is unavailable. Instrumentals get no file.
     #[arg(long)]
     pub lrc_sidecar: bool,
+    /// Timed lyric granularity while `.lrc` output is enabled.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub lyrics_timing: Option<LyricsTimingArg>,
     /// Also download the standalone `.mp4` music video next to each song, when
     /// Suno provides one.
     #[arg(long)]
@@ -343,6 +363,9 @@ pub struct FetchArgs {
     /// Explicit output file path, overriding DEST and auto-naming.
     #[arg(short = 'o', long, value_name = "PATH")]
     pub output: Option<PathBuf>,
+    /// Opt into timed lyrics and an adjacent `.lrc` at line or word granularity.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub lyrics_timing: Option<LyricsTimingArg>,
 }
 
 /// `config` and its subcommands.
@@ -565,6 +588,23 @@ mod tests {
                 assert!(!args.video_mp4);
             }
             _ => panic!("expected sync"),
+        }
+    }
+
+    #[test]
+    fn lyric_timing_parses_for_sync_and_fetch() {
+        let sync =
+            Cli::try_parse_from(["suno", "sync", "/music", "--lyrics-timing", "word"]).unwrap();
+        match sync.command {
+            Command::Sync(args) => assert_eq!(args.lyrics_timing, Some(LyricsTimingArg::Word)),
+            _ => panic!("expected sync"),
+        }
+
+        let fetch =
+            Cli::try_parse_from(["suno", "fetch", "clip-id", "--lyrics-timing", "line"]).unwrap();
+        match fetch.command {
+            Command::Fetch(args) => assert_eq!(args.lyrics_timing, Some(LyricsTimingArg::Line)),
+            _ => panic!("expected fetch"),
         }
     }
 

@@ -33,15 +33,19 @@
 //! back-filled on the next run even when both sidecar features are off.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write as _;
 
 use crate::hash::{
-    SYNCED_LRC_VERSION, content_hash, lyrics_txt_source_hash, synced_lrc_source_hash,
+    SYNCED_LRC_VERSION, TIMED_LYRICS_VERSION, content_hash, lyrics_txt_source_hash,
+    synced_lrc_source_hash_with_timing,
 };
-use crate::lyrics::{AlignedLyrics, render_clip_lrc, render_clip_lyrics, render_synced_lrc};
+use crate::lyrics::{
+    AlignedLyrics, render_clip_lrc, render_clip_lyrics, render_synced_lrc_with_timing,
+};
 use crate::manifest::{Manifest, ManifestEntry};
 use crate::model::Clip;
 use crate::reconcile::Desired;
-use crate::vocab::ArtifactKind;
+use crate::vocab::{ArtifactKind, LyricsTiming};
 
 /// How long an untimed sidecar fallback is trusted before checking for timing
 /// again (14 days). Tracks missing plain embedded lyrics bypass this window and
@@ -70,6 +74,21 @@ pub struct PendingCheck {
     /// Deterministically ordered ([`Lrc`](ArtifactKind::Lrc) before
     /// [`LyricsTxt`](ArtifactKind::LyricsTxt)).
     pub written_slots: Vec<(ArtifactKind, String)>,
+    /// Timed granularity resolved for this fetch when an LRC surface was
+    /// requested. `None` for plain `.lyrics.txt` or embed-only probes.
+    pub timing: Option<LyricsTiming>,
+    /// Exact timed embed fingerprint that must land before the mode/version can
+    /// be committed. Present only for timed MP3/WAV output.
+    pub timed_embed_hash: Option<String>,
+}
+
+fn entry_has_timed_surface(entry: &ManifestEntry) -> bool {
+    !entry.embedded_timed_lyrics_hash.is_empty()
+        || (entry.lrc.is_some()
+            && entry
+                .synced_lyrics
+                .as_ref()
+                .is_some_and(|check| check.timed))
 }
 
 /// The outcome of resolving one clip's desired lyric sidecar slot against a
@@ -121,6 +140,7 @@ fn needs_fetch(
     desired_path: &str,
     desired_kind: ArtifactKind,
     now_unix: u64,
+    timing: LyricsTiming,
 ) -> bool {
     let Some(entry) = entry else {
         return true; // never downloaded -> resolve on first sight
@@ -130,6 +150,11 @@ fn needs_fetch(
     };
     if check.version != SYNCED_LRC_VERSION {
         return true; // the render changed -> re-resolve and re-render
+    }
+    if desired_kind == ArtifactKind::Lrc
+        && (check.timed_version != TIMED_LYRICS_VERSION || check.timing != Some(timing))
+    {
+        return true;
     }
     if check.empty {
         // Instrumental: writing no sidecar IS the converged state, so an absent
@@ -192,7 +217,11 @@ fn wants_timed_embed(d: &Desired) -> bool {
 /// A format change must recreate the frame. The second clause is the additive
 /// manifest migration: old files with a timed sidecar marker predate the
 /// dedicated `embedded_timed_lyrics_hash`, so they get one bounded back-fill.
-fn timed_embed_needs_fetch(d: &Desired, entry: Option<&ManifestEntry>) -> bool {
+fn timed_embed_needs_fetch(
+    d: &Desired,
+    entry: Option<&ManifestEntry>,
+    timing: LyricsTiming,
+) -> bool {
     if !wants_timed_embed(d) {
         return false;
     }
@@ -200,6 +229,9 @@ fn timed_embed_needs_fetch(d: &Desired, entry: Option<&ManifestEntry>) -> bool {
         None => true,
         Some(entry) => {
             entry.format != d.format
+                || entry.synced_lyrics.as_ref().is_none_or(|check| {
+                    check.timed_version != TIMED_LYRICS_VERSION || check.timing != Some(timing)
+                })
                 || (entry.embedded_timed_lyrics_hash.is_empty()
                     && entry
                         .synced_lyrics
@@ -233,16 +265,26 @@ pub fn synced_lyrics_targets(
     manifest: &Manifest,
     now_unix: u64,
 ) -> BTreeSet<String> {
+    synced_lyrics_targets_with_timing(desired, manifest, now_unix, LyricsTiming::Line)
+}
+
+/// Mode-aware variant of [`synced_lyrics_targets`].
+pub fn synced_lyrics_targets_with_timing(
+    desired: &[Desired],
+    manifest: &Manifest,
+    now_unix: u64,
+    timing: LyricsTiming,
+) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for d in desired {
         let entry = manifest.get(&d.clip.id);
         let embed_needs = embed_needs_fetch(d, entry);
-        let timed_embed_needs = timed_embed_needs_fetch(d, entry);
+        let timed_embed_needs = timed_embed_needs_fetch(d, entry, timing);
         let any_slot_needs = d
             .artifacts
             .iter()
             .filter(|a| matches!(a.kind, ArtifactKind::Lrc | ArtifactKind::LyricsTxt))
-            .any(|a| needs_fetch(entry, a.path.as_str(), a.kind, now_unix));
+            .any(|a| needs_fetch(entry, a.path.as_str(), a.kind, now_unix, timing));
         if embed_needs || timed_embed_needs || any_slot_needs {
             out.insert(d.clip.id.clone());
         }
@@ -278,6 +320,16 @@ pub fn apply_synced_lrc(
     desired: &mut [Desired],
     manifest: &Manifest,
     successes: &HashMap<String, AlignedLyrics>,
+) -> Vec<PendingCheck> {
+    apply_synced_lrc_with_timing(desired, manifest, successes, LyricsTiming::Line)
+}
+
+/// Mode-aware variant of [`apply_synced_lrc`].
+pub fn apply_synced_lrc_with_timing(
+    desired: &mut [Desired],
+    manifest: &Manifest,
+    successes: &HashMap<String, AlignedLyrics>,
+    timing: LyricsTiming,
 ) -> Vec<PendingCheck> {
     let mut pending = Vec::new();
     for d in desired.iter_mut() {
@@ -320,13 +372,18 @@ pub fn apply_synced_lrc(
         // its own slot. The audio embed is independent and was resolved above.
         // The two sidecar outcomes fold into one durable marker that lists every
         // slot written, so back-filling one never masks an unwritten other.
-        let lrc = apply_lrc_slot(d, manifest, aligned);
+        let lrc_desired = d.artifacts.iter().any(|a| a.kind == ArtifactKind::Lrc);
+        let lrc = apply_lrc_slot(d, manifest, aligned, timing);
         let lyrics_txt = apply_lyrics_txt_slot(d, manifest, aligned);
+        let existing_timed_surface = entry.is_some_and(entry_has_timed_surface);
+        let mut timed_embed_hash = None;
         if wants_timed_embed(d)
-            && aligned.is_some_and(|aligned| !aligned.is_empty())
-            && let SlotOutcome::Wrote(hash) = &lrc
+            && matches!(lrc, SlotOutcome::Wrote(_))
+            && let Some(aligned) = aligned.filter(|aligned| !aligned.is_empty())
         {
+            let hash = timed_embed_fingerprint(aligned, timing);
             d.embedded_timed_lyrics_hash = hash.clone();
+            timed_embed_hash = Some(hash);
         }
         let timed_reencode_unsafe = entry.is_some_and(|entry| {
             format_changes
@@ -335,7 +392,16 @@ pub fn apply_synced_lrc(
                 && aligned.is_none_or(AlignedLyrics::is_empty)
         });
         d.lyrics_reencode_safe = !(plain_reencode_unsafe || timed_reencode_unsafe);
-        if let Some(check) = build_pending_check(&d.clip.id, aligned, &lrc, &lyrics_txt) {
+        if let Some(check) = build_pending_check(
+            &d.clip.id,
+            aligned,
+            &lrc,
+            &lyrics_txt,
+            (lrc_desired
+                && aligned.is_some_and(|aligned| !aligned.is_empty() || !existing_timed_surface))
+            .then_some(timing),
+            timed_embed_hash,
+        ) {
             pending.push(check);
         } else if d.clip.lyrics.trim().is_empty()
             && entry.is_none_or(|entry| entry.embedded_lyrics_hash.is_empty())
@@ -350,6 +416,8 @@ pub fn apply_synced_lrc(
                 empty: true,
                 timed: false,
                 written_slots: Vec::new(),
+                timing: None,
+                timed_embed_hash: None,
             });
         }
     }
@@ -382,6 +450,8 @@ fn build_pending_check(
     aligned: Option<&AlignedLyrics>,
     lrc: &SlotOutcome,
     lyrics_txt: &SlotOutcome,
+    timing: Option<LyricsTiming>,
+    timed_embed_hash: Option<String>,
 ) -> Option<PendingCheck> {
     // Only a fetched clip records a marker; a miss keeps its stored state.
     let aligned = aligned?;
@@ -403,6 +473,8 @@ fn build_pending_check(
         empty: written_slots.is_empty(),
         timed: !aligned.is_empty(),
         written_slots,
+        timing,
+        timed_embed_hash,
     })
 }
 
@@ -414,6 +486,7 @@ fn apply_lrc_slot(
     d: &mut Desired,
     manifest: &Manifest,
     aligned: Option<&AlignedLyrics>,
+    timing: LyricsTiming,
 ) -> SlotOutcome {
     let Some(idx) = d.artifacts.iter().position(|a| a.kind == ArtifactKind::Lrc) else {
         return SlotOutcome::Inert;
@@ -441,9 +514,20 @@ fn apply_lrc_slot(
         }
         return SlotOutcome::Inert;
     };
+    if aligned.is_empty()
+        && manifest
+            .get(&clip_id)
+            .is_some_and(|entry| entry.lrc.is_some() && entry_has_timed_surface(entry))
+        && let Some(hash) = slot_hash
+    {
+        let artifact = &mut d.artifacts[idx];
+        artifact.hash = hash;
+        artifact.content = None;
+        return SlotOutcome::Inert;
+    }
     let timed = !aligned.is_empty();
     let body = if timed {
-        render_synced_lrc(&d.clip, &d.lineage, aligned)
+        render_synced_lrc_with_timing(&d.clip, &d.lineage, aligned, timing)
     } else {
         render_clip_lrc(&d.clip, &d.lineage)
     };
@@ -460,6 +544,14 @@ fn apply_lrc_slot(
             SlotOutcome::Instrumental
         }
     }
+}
+
+fn timed_embed_fingerprint(aligned: &AlignedLyrics, timing: LyricsTiming) -> String {
+    let mut source = format!("timed-lyrics/v{TIMED_LYRICS_VERSION}/{timing}\n");
+    for (offset_ms, text) in aligned.sylt_entries_with_timing(timing) {
+        let _ = writeln!(source, "{offset_ms}:{}:{text}", text.len());
+    }
+    content_hash(&source)
 }
 
 /// Resolve a clip's deferred `.lyrics.txt` artifact from `clip.lyrics` (preferred)
@@ -527,6 +619,17 @@ pub fn preview_synced_lrc(
     now_unix: u64,
     enabled: bool,
 ) {
+    preview_synced_lrc_with_timing(desired, manifest, now_unix, enabled, LyricsTiming::Line);
+}
+
+/// Mode-aware variant of [`preview_synced_lrc`].
+pub fn preview_synced_lrc_with_timing(
+    desired: &mut [Desired],
+    manifest: &Manifest,
+    now_unix: u64,
+    enabled: bool,
+    timing: LyricsTiming,
+) {
     for d in desired.iter_mut() {
         let entry = manifest.get(&d.clip.id);
         // Carry forward durable state before adding preview-only placeholders.
@@ -553,11 +656,11 @@ pub fn preview_synced_lrc(
             .iter()
             .find(|artifact| artifact.kind == ArtifactKind::Lrc)
             .is_some_and(|artifact| {
-                needs_fetch(entry, &artifact.path, ArtifactKind::Lrc, now_unix)
+                needs_fetch(entry, &artifact.path, ArtifactKind::Lrc, now_unix, timing)
             });
         if entry.is_some()
             && wants_timed_embed(d)
-            && (timed_embed_needs_fetch(d, entry) || timed_sidecar_needs)
+            && (timed_embed_needs_fetch(d, entry, timing) || timed_sidecar_needs)
         {
             d.embedded_timed_lyrics_hash =
                 content_hash(&format!("timed-lyrics-preview/{}", d.clip.id));
@@ -566,8 +669,8 @@ pub fn preview_synced_lrc(
         // `.lrc` preview.
         if let Some(idx) = d.artifacts.iter().position(|a| a.kind == ArtifactKind::Lrc) {
             let path = d.artifacts[idx].path.clone();
-            if enabled && needs_fetch(entry, &path, ArtifactKind::Lrc, now_unix) {
-                d.artifacts[idx].hash = synced_lrc_source_hash(&d.clip.id);
+            if enabled && needs_fetch(entry, &path, ArtifactKind::Lrc, now_unix, timing) {
+                d.artifacts[idx].hash = synced_lrc_source_hash_with_timing(&d.clip.id, timing);
             } else {
                 match entry.and_then(|e| e.lrc.as_ref()) {
                     Some(slot) => d.artifacts[idx].hash = slot.hash.clone(),
@@ -586,7 +689,7 @@ pub fn preview_synced_lrc(
             .position(|a| a.kind == ArtifactKind::LyricsTxt)
         {
             let path = d.artifacts[idx].path.clone();
-            if enabled && needs_fetch(entry, &path, ArtifactKind::LyricsTxt, now_unix) {
+            if enabled && needs_fetch(entry, &path, ArtifactKind::LyricsTxt, now_unix, timing) {
                 d.artifacts[idx].hash = lyrics_txt_source_hash(&d.clip.id);
             } else {
                 match entry.and_then(|e| e.lyrics_txt.as_ref()) {
@@ -603,6 +706,7 @@ pub fn preview_synced_lrc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::synced_lrc_source_hash;
     use crate::lineage::LineageContext;
     use crate::lyrics::{AlignedLine, AlignedLineWord};
     use crate::manifest::{ArtifactState, SyncedLyricsCheck};
@@ -742,6 +846,8 @@ mod tests {
                     checked_unix: 1_000,
                     empty: false,
                     timed: true,
+                    timed_version: TIMED_LYRICS_VERSION,
+                    timing: Some(LyricsTiming::Line),
                 }),
             ),
         );
@@ -763,6 +869,8 @@ mod tests {
                     checked_unix: 1_000,
                     empty: true,
                     timed: false,
+                    timed_version: TIMED_LYRICS_VERSION,
+                    timing: Some(LyricsTiming::Line),
                 }),
             ),
         );
@@ -792,6 +900,8 @@ mod tests {
                     checked_unix: 1_000,
                     empty: false,
                     timed: false,
+                    timed_version: TIMED_LYRICS_VERSION,
+                    timing: Some(LyricsTiming::Line),
                 }),
             ),
         );
@@ -821,6 +931,8 @@ mod tests {
                     checked_unix: 0, // maximally stale
                     empty: false,
                     timed: true,
+                    timed_version: TIMED_LYRICS_VERSION,
+                    timing: Some(LyricsTiming::Line),
                 }),
             ),
         );
@@ -845,6 +957,8 @@ mod tests {
                     checked_unix: 1_000,
                     empty: false,
                     timed: true,
+                    timed_version: TIMED_LYRICS_VERSION,
+                    timing: Some(LyricsTiming::Line),
                 }),
             ),
         );
@@ -869,6 +983,8 @@ mod tests {
                     checked_unix: 1_000,
                     empty: false,
                     timed: true,
+                    timed_version: TIMED_LYRICS_VERSION,
+                    timing: Some(LyricsTiming::Line),
                 }),
             ),
         );
@@ -893,6 +1009,8 @@ mod tests {
                 empty: false,
                 timed: true,
                 written_slots: vec![(ArtifactKind::Lrc, content_hash(body))],
+                timing: Some(LyricsTiming::Line),
+                timed_embed_hash: None,
             }]
         );
     }
@@ -929,6 +1047,8 @@ mod tests {
                 empty: true,
                 timed: false,
                 written_slots: vec![],
+                timing: Some(LyricsTiming::Line),
+                timed_embed_hash: None,
             }]
         );
     }
@@ -948,6 +1068,8 @@ mod tests {
                 empty: true,
                 timed: false,
                 written_slots: Vec::new(),
+                timing: None,
+                timed_embed_hash: None,
             }]
         );
     }
@@ -973,6 +1095,8 @@ mod tests {
                     checked_unix: 1_000,
                     empty: false,
                     timed: true,
+                    timed_version: TIMED_LYRICS_VERSION,
+                    timing: Some(LyricsTiming::Line),
                 }),
             ),
         );
@@ -1017,6 +1141,8 @@ mod tests {
                     checked_unix: 1_000,
                     empty: false,
                     timed: false,
+                    timed_version: TIMED_LYRICS_VERSION,
+                    timing: Some(LyricsTiming::Line),
                 }),
             ),
         );
@@ -1050,6 +1176,8 @@ mod tests {
                     checked_unix: 1_000,
                     empty: false,
                     timed: true,
+                    timed_version: TIMED_LYRICS_VERSION,
+                    timing: Some(LyricsTiming::Line),
                 }),
             ),
         );
@@ -1068,6 +1196,8 @@ mod tests {
             checked_unix: 1_000,
             empty: false,
             timed: true,
+            timed_version: TIMED_LYRICS_VERSION,
+            timing: Some(LyricsTiming::Line),
         }
     }
 
@@ -1094,7 +1224,13 @@ mod tests {
         let mut d = desired("a", "");
         d.artifacts.clear();
         assert!(!embed_needs_fetch(&d, Some(&e)));
-        assert!(!needs_fetch(Some(&e), "a.lrc", ArtifactKind::Lrc, 2_000));
+        assert!(!needs_fetch(
+            Some(&e),
+            "a.lrc",
+            ArtifactKind::Lrc,
+            2_000,
+            LyricsTiming::Line
+        ));
     }
 
     #[test]
@@ -1116,7 +1252,8 @@ mod tests {
             Some(&e),
             "a.lrc",
             ArtifactKind::Lrc,
-            within_window
+            within_window,
+            LyricsTiming::Line
         ));
     }
 
@@ -1145,7 +1282,11 @@ mod tests {
             .iter()
             .find(|artifact| artifact.kind == ArtifactKind::Lrc)
             .unwrap();
-        assert_eq!(d[0].embedded_timed_lyrics_hash, lrc.hash);
+        assert_eq!(
+            d[0].embedded_timed_lyrics_hash,
+            timed_embed_fingerprint(&one_line_alignment(), LyricsTiming::Line)
+        );
+        assert_ne!(d[0].embedded_timed_lyrics_hash, lrc.hash);
     }
 
     #[test]
@@ -1166,6 +1307,70 @@ mod tests {
             .unwrap()
             .embedded_timed_lyrics_hash = "timed".to_string();
         assert!(synced_lyrics_targets(&d, &manifest, 2_000).is_empty());
+    }
+
+    #[test]
+    fn legacy_mixed_timing_targets_even_with_an_existing_embed_hash() {
+        let mut d = vec![desired("a", "")];
+        d[0].format = AudioFormat::Mp3;
+        let mut legacy = timed_check();
+        legacy.timed_version = 0;
+        legacy.timing = None;
+        let mut entry = entry(slot("a.lrc", "line-body"), Some(legacy));
+        entry.format = AudioFormat::Mp3;
+        entry.embedded_lyrics_hash = "plain".to_owned();
+        entry.embedded_timed_lyrics_hash = "legacy-word-sylt".to_owned();
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry);
+
+        assert!(
+            synced_lyrics_targets_with_timing(&d, &manifest, 2_000, LyricsTiming::Line)
+                .contains("a")
+        );
+
+        let stored = manifest.entries.get_mut("a").unwrap();
+        stored.synced_lyrics = Some(timed_check());
+        assert!(
+            synced_lyrics_targets_with_timing(&d, &manifest, 2_000, LyricsTiming::Line).is_empty()
+        );
+    }
+
+    #[test]
+    fn changing_timing_mode_rewrites_lrc_and_timed_embed() {
+        let mut d = vec![desired("a", "")];
+        d[0].format = AudioFormat::Mp3;
+        let mut entry = entry(slot("a.lrc", "line-body"), Some(timed_check()));
+        entry.format = AudioFormat::Mp3;
+        entry.embedded_lyrics_hash = "plain".to_owned();
+        entry.embedded_timed_lyrics_hash = "line-sylt".to_owned();
+        let mut manifest = Manifest::new();
+        manifest.insert("a", entry);
+
+        assert!(
+            synced_lyrics_targets_with_timing(&d, &manifest, 2_000, LyricsTiming::Word)
+                .contains("a")
+        );
+        let successes = HashMap::from([("a".to_owned(), one_line_alignment())]);
+        let pending =
+            apply_synced_lrc_with_timing(&mut d, &manifest, &successes, LyricsTiming::Word);
+
+        let lrc = d[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ArtifactKind::Lrc)
+            .unwrap();
+        assert!(
+            lrc.content
+                .as_deref()
+                .unwrap()
+                .contains("[00:00.50]<00:00.50>hi <00:00.90>there")
+        );
+        assert_ne!(d[0].embedded_timed_lyrics_hash, "line-sylt");
+        assert_eq!(pending[0].timing, Some(LyricsTiming::Word));
+        assert_eq!(
+            pending[0].timed_embed_hash,
+            Some(d[0].embedded_timed_lyrics_hash.clone())
+        );
     }
 
     #[test]
@@ -1194,10 +1399,49 @@ mod tests {
         manifest.insert("instr", e);
         let mut successes = HashMap::new();
         successes.insert("instr".to_string(), AlignedLyrics::default());
-        apply_synced_lrc(&mut d, &manifest, &successes);
+        let pending = apply_synced_lrc(&mut d, &manifest, &successes);
 
-        assert!(d[0].artifacts.iter().all(|a| a.kind != ArtifactKind::Lrc));
+        let lrc = d[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ArtifactKind::Lrc)
+            .unwrap();
+        assert_eq!(lrc.hash, "H");
+        assert_eq!(lrc.content, None);
         assert_eq!(d[0].embedded_lyrics_hash, "H");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn empty_alignment_does_not_complete_legacy_timing_migration() {
+        let mut d = vec![desired("legacy", "inline lyrics")];
+        d[0].format = AudioFormat::Mp3;
+        let mut legacy = timed_check();
+        legacy.timed_version = 0;
+        legacy.timing = None;
+        let mut entry = entry(slot("legacy.lrc", "old-timed-lrc"), Some(legacy));
+        entry.format = AudioFormat::Mp3;
+        entry.embedded_timed_lyrics_hash = "old-word-sylt".to_owned();
+        let mut manifest = Manifest::new();
+        manifest.insert("legacy", entry);
+        let successes = HashMap::from([("legacy".to_owned(), AlignedLyrics::default())]);
+
+        let pending =
+            apply_synced_lrc_with_timing(&mut d, &manifest, &successes, LyricsTiming::Line);
+
+        let lrc = d[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ArtifactKind::Lrc)
+            .unwrap();
+        assert_eq!(lrc.hash, "old-timed-lrc");
+        assert_eq!(lrc.content, None);
+        assert_eq!(d[0].embedded_timed_lyrics_hash, "old-word-sylt");
+        assert!(pending.is_empty());
+        assert!(
+            synced_lyrics_targets_with_timing(&d, &manifest, 2_000, LyricsTiming::Line)
+                .contains("legacy")
+        );
     }
 
     #[test]
@@ -1408,6 +1652,8 @@ mod tests {
                 empty: false,
                 timed: true,
                 written_slots: vec![(ArtifactKind::LyricsTxt, content_hash("hi there\n"))],
+                timing: None,
+                timed_embed_hash: None,
             }]
         );
     }
@@ -1451,6 +1697,8 @@ mod tests {
                 empty: true,
                 timed: false,
                 written_slots: vec![],
+                timing: None,
+                timed_embed_hash: None,
             }]
         );
     }

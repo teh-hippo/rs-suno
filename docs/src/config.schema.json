@@ -154,6 +154,16 @@
             "null"
           ]
         },
+        "lyrics_timing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LyricsTiming"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "min_newest": {
           "type": [
             "integer",
@@ -413,6 +423,16 @@
             "null"
           ]
         },
+        "lyrics_timing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LyricsTiming"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "min_newest": {
           "type": [
             "integer",
@@ -478,6 +498,21 @@
           ]
         }
       }
+    },
+    "LyricsTiming": {
+      "description": "Granularity used for synced lyric sidecars and supported embedded timing.",
+      "oneOf": [
+        {
+          "description": "One timestamp per lyric line. This is the broadly compatible default.",
+          "type": "string",
+          "const": "line"
+        },
+        {
+          "description": "Per-word timing for enhanced LRC and karaoke-style ID3 `SYLT`.",
+          "type": "string",
+          "const": "word"
+        }
+      ]
     },
     "SourceConfig": {
       "description": "Per-source overridable settings within an account.",
@@ -582,6 +617,16 @@
           "type": [
             "boolean",
             "null"
+          ]
+        },
+        "lyrics_timing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LyricsTiming"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "min_newest": {

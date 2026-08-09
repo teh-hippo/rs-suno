@@ -101,6 +101,7 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
         embed_animated_cover: settings.animated_covers,
         cover_webp: settings.animated_cover_webp,
         embed_synced_lyrics: settings.lrc_sidecar,
+        lyrics_timing: settings.lyrics_timing,
     };
     let started = std::time::Instant::now();
 

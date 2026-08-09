@@ -16,7 +16,7 @@ use std::hash::{Hash, Hasher};
 use crate::lineage::LineageContext;
 use crate::model::Clip;
 use crate::tag::TrackMetadata;
-use crate::vocab::WebpEncodeSettings;
+use crate::vocab::{LyricsTiming, WebpEncodeSettings};
 
 /// A short, stable hex digest of `bytes` (FNV-1a, 64-bit).
 fn digest(bytes: &[u8]) -> String {
@@ -119,6 +119,9 @@ fn write_webp_settings(hasher: &mut fnv::FnvHasher, settings: &WebpEncodeSetting
 /// would move a [`content_hash`]).
 pub const SYNCED_LRC_VERSION: u32 = 3;
 
+/// The mode-aware render version for timed `.lrc` and ID3 `SYLT` output.
+pub const TIMED_LYRICS_VERSION: u32 = 1;
+
 /// A stable per-clip source sentinel for the synced `.lrc` sidecar.
 ///
 /// Suno's forced alignment for a given clip is immutable (the audio and its
@@ -129,7 +132,14 @@ pub const SYNCED_LRC_VERSION: u32 = 3;
 /// version bump rewrites every sidecar. It mirrors how the cover sidecars key on
 /// their source URL rather than the fetched bytes ("the hash tracks the source").
 pub fn synced_lrc_source_hash(clip_id: &str) -> String {
-    content_hash(&format!("synced-lrc/v{SYNCED_LRC_VERSION}/{clip_id}"))
+    synced_lrc_source_hash_with_timing(clip_id, LyricsTiming::Line)
+}
+
+/// A stable per-clip source sentinel for a selected timed-lyrics mode.
+pub fn synced_lrc_source_hash_with_timing(clip_id: &str, timing: LyricsTiming) -> String {
+    content_hash(&format!(
+        "synced-lrc/v{SYNCED_LRC_VERSION}/timed-v{TIMED_LYRICS_VERSION}/{timing}/{clip_id}"
+    ))
 }
 
 /// A stable per-clip source sentinel for the deferred `.lyrics.txt` sidecar.

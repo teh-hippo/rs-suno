@@ -83,6 +83,7 @@ configured `root` is used.
 | `--details-sidecar` | off | Also write a plain-text `.details.txt` sidecar next to each song. |
 | `--lyrics-sidecar` | off | Also write a plain-text `.lyrics.txt` sidecar next to each song. Plain lyrics inside the audio are automatic. |
 | `--lrc-sidecar` | off | Also write a synced `.lrc` sidecar next to each song. MP3 and WAV also get a timed `SYLT` frame when Suno has alignment. |
+| `--lyrics-timing <line\|word>` | `line` | With `--lrc-sidecar` (or configured LRC output), select one timestamp per line, or enhanced per-word LRC plus word-level MP3/WAV `SYLT`. Changing the mode updates existing timed lyrics on the next executing run. |
 | `--video-mp4` | off | Also download the standalone `.mp4` music video beside each song, when available. |
 | `--download-stems` | off | Also mirror each song's already-generated stems into a `<song>.stems/` sub-folder. Download-only: it lists and downloads existing stems and never triggers separation or spends credits. |
 | `--stem-format <wav\|mp3>` | `wav` | Container for downloaded stems. Stems are stored RAW and are never transcoded to FLAC. |
@@ -279,14 +280,21 @@ the clip payload omits lyrics, `fetch` checks Suno's aligned-lyrics endpoint and
 uses its plain text. A temporary lookup failure warns but does not fail the
 audio download.
 
+`--lyrics-timing` opts this standalone download into timed lyrics. It writes an
+adjacent `<audio-base>.lrc`; MP3 and WAV also receive a matching ID3 `SYLT`
+frame. Line mode is the broadly compatible form. Word mode uses enhanced LRC
+word timestamps and karaoke-style `SYLT`. FLAC and ALAC use the sidecar only.
+
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--format <mp3\|flac\|alac\|wav>` | | `flac` | Audio format. |
 | `--output <PATH>` | `-o` | | Explicit output file path, overriding `DEST` and auto-naming. |
+| `--lyrics-timing <line\|word>` | | | Opt into timed lyrics at the selected granularity and write an adjacent `.lrc`. |
 
 ```bash
 suno fetch 3f2a1b4c-aaaa-bbbb-cccc-ddddeeee0001
 suno fetch https://suno.com/song/3f2a1b4c-... -o track.flac
+suno fetch 3f2a1b4c-aaaa-bbbb-cccc-ddddeeee0001 --lyrics-timing word
 ```
 
 ## config

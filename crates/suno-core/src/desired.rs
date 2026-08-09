@@ -6,7 +6,7 @@ use std::path::{Component, Path};
 use crate::extras::{M3u8Entry, render_clip_details, render_m3u8};
 use crate::hash::{
     art_hash, art_url_hash, content_hash, embedded_art_hash, lyrics_txt_source_hash, meta_hash,
-    synced_lrc_source_hash, webp_art_hash,
+    synced_lrc_source_hash_with_timing, webp_art_hash,
 };
 use crate::lineage::LineageContext;
 use crate::manifest::Manifest;
@@ -17,7 +17,9 @@ use crate::naming::{
 use crate::reconcile::{
     AlbumDesired, Desired, DesiredArtifact, DesiredStem, LocalFile, PlaylistDesired,
 };
-use crate::vocab::{ArtifactKind, AudioFormat, SourceMode, StemFormat, WebpEncodeSettings};
+use crate::vocab::{
+    ArtifactKind, AudioFormat, LyricsTiming, SourceMode, StemFormat, WebpEncodeSettings,
+};
 
 /// The synthetic playlist id for the liked feed, rendered as "Liked Songs".
 ///
@@ -34,6 +36,7 @@ pub struct ArtifactToggles {
     pub details: bool,
     pub lyrics: bool,
     pub lrc: bool,
+    pub lyrics_timing: LyricsTiming,
     pub video: bool,
     /// The animated-cover encode settings, folded into the embedded-cover hash
     /// (see `embedded_art_hash`) so a settings change re-embeds existing covers.
@@ -368,7 +371,7 @@ fn clip_artifacts(
             kind: ArtifactKind::Lrc,
             path: sidecar_path(base, ArtifactKind::Lrc),
             source_url: String::new(),
-            hash: synced_lrc_source_hash(&clip.id),
+            hash: synced_lrc_source_hash_with_timing(&clip.id, toggles.lyrics_timing),
             content: None,
         });
     }

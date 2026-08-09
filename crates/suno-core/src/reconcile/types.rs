@@ -33,7 +33,7 @@ pub struct Desired {
     /// the hash of the exact fallback text, otherwise carried forward from the
     /// manifest so a failed lookup never stamps a false success.
     pub embedded_lyrics_hash: String,
-    /// Fingerprint of word-level timed lyrics embedded as ID3 `SYLT`, or empty
+    /// Fingerprint of the selected timed lyrics embedded as ID3 `SYLT`, or empty
     /// when the target format/feature carries no timed frame.
     ///
     /// Separate from [`embedded_lyrics_hash`](Self::embedded_lyrics_hash) so

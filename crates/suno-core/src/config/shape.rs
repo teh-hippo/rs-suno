@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::naming::CharacterSet;
 use crate::pathkey::canonical_path_key;
-use crate::vocab::{AudioFormat, SourceMode, StemFormat, VideoCoverRetention};
+use crate::vocab::{AudioFormat, LyricsTiming, SourceMode, StemFormat, VideoCoverRetention};
 
 use super::label_to_env;
 
@@ -49,6 +49,7 @@ pub struct Settings {
     pub details_sidecar: Option<bool>,
     pub lyrics_sidecar: Option<bool>,
     pub lrc_sidecar: Option<bool>,
+    pub lyrics_timing: Option<LyricsTiming>,
     pub video_mp4: Option<bool>,
     pub download_stems: Option<bool>,
     pub stem_format: Option<StemFormat>,
@@ -84,6 +85,7 @@ const SETTINGS_KEYS: &[&str] = &[
     "details_sidecar",
     "lyrics_sidecar",
     "lrc_sidecar",
+    "lyrics_timing",
     "video_mp4",
     "download_stems",
     "stem_format",
@@ -641,6 +643,7 @@ mod tests {
             details_sidecar = true
             lyrics_sidecar = true
             lrc_sidecar = true
+            lyrics_timing = "word"
             video_mp4 = true
             download_stems = true
             stem_format = "wav"

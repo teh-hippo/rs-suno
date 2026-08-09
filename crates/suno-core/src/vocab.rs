@@ -168,6 +168,41 @@ impl fmt::Display for AudioFormat {
     }
 }
 
+/// Granularity used for synced lyric sidecars and supported embedded timing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum LyricsTiming {
+    /// One timestamp per lyric line. This is the broadly compatible default.
+    #[default]
+    Line,
+    /// Per-word timing for enhanced LRC and karaoke-style ID3 `SYLT`.
+    Word,
+}
+
+impl FromStr for LyricsTiming {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "line" => Ok(Self::Line),
+            "word" => Ok(Self::Word),
+            other => Err(Error::Config(format!(
+                "unknown lyrics timing '{other}'; use 'line' or 'word'"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for LyricsTiming {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Line => f.write_str("line"),
+            Self::Word => f.write_str("word"),
+        }
+    }
+}
+
 /// Container format for a downloaded stem.
 ///
 /// Stems are stored RAW in their native container and are never transcoded, so
