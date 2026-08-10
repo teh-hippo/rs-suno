@@ -182,6 +182,31 @@ fn action_line(action: &Action, failed_ids: &HashSet<&str>) -> String {
         Action::Skip { clip_id } => {
             format!("  skip      {}  already up to date", short_id(clip_id))
         }
+        Action::Unverifiable {
+            owner_id,
+            path,
+            reason,
+        } => mark(
+            owner_id,
+            format!(
+                "verify    {}  {path}  {}",
+                short_id(owner_id),
+                truncate(reason, 80)
+            ),
+        ),
+        Action::VerifyArtifact {
+            kind,
+            path,
+            owner_id,
+            ..
+        } => format!(
+            "  skip      {}  {} verified at {path}",
+            short_id(owner_id),
+            artifact_label(*kind)
+        ),
+        Action::VerifyAudio { clip_id, .. } => {
+            format!("  skip      {}  audio metadata verified", short_id(clip_id))
+        }
         Action::WriteArtifact {
             kind,
             path,
@@ -282,6 +307,7 @@ struct SummaryBuckets {
     deleted: usize,
     sidecars: usize,
     skipped: usize,
+    unverifiable: usize,
     failed: usize,
 }
 
@@ -295,6 +321,7 @@ impl SummaryBuckets {
             deleted: outcome.deleted + outcome.artifacts_deleted,
             sidecars: outcome.artifacts_written,
             skipped: outcome.skipped,
+            unverifiable: outcome.unverifiable.len(),
             failed: outcome.failed(),
         }
     }
@@ -310,6 +337,7 @@ impl SummaryBuckets {
             deleted: plan.deletes() + plan.artifact_deletes() + plan.stem_deletes(),
             sidecars: plan.artifact_writes() + plan.stem_writes(),
             skipped: plan.skips(),
+            unverifiable: plan.unverifiable(),
             failed: 0,
         }
     }
@@ -322,6 +350,7 @@ impl SummaryBuckets {
             + self.deleted
             + self.sidecars
             + self.skipped
+            + self.unverifiable
             + self.failed
     }
 }
@@ -351,13 +380,14 @@ pub fn run_summary(verb_label: &str, account: &str, outcome: &ExecOutcome, secs:
         }
     };
     format!(
-        "{header}\n  downloaded  {:>4}\n  tagged      {:>4}\n  renamed     {:>4}\n  deleted     {:>4}\n  sidecars    {:>4}\n  skipped     {:>4}\n  failed      {:>4}\n  total       {:>4}\nDuration: {secs:.1}s",
+        "{header}\n  downloaded  {:>4}\n  tagged      {:>4}\n  renamed     {:>4}\n  deleted     {:>4}\n  sidecars    {:>4}\n  skipped     {:>4}\n  unverified  {:>4}\n  failed      {:>4}\n  total       {:>4}\nDuration: {secs:.1}s",
         b.downloaded,
         b.tagged,
         b.renamed,
         b.deleted,
         b.sidecars,
         b.skipped,
+        b.unverifiable,
         b.failed,
         b.total()
     )
@@ -372,13 +402,14 @@ pub fn run_summary(verb_label: &str, account: &str, outcome: &ExecOutcome, secs:
 pub fn dry_summary(account: &str, plan: &Plan) -> String {
     let b = SummaryBuckets::from_plan(plan);
     format!(
-        "Dry run: {account} (no changes made)\n  to download {:>4}\n  to tag      {:>4}\n  to rename   {:>4}\n  to delete   {:>4}\n  sidecars    {:>4}\n  up to date  {:>4}\n  total       {:>4}",
+        "Dry run: {account} (no changes made)\n  to download {:>4}\n  to tag      {:>4}\n  to rename   {:>4}\n  to delete   {:>4}\n  sidecars    {:>4}\n  up to date  {:>4}\n  unverified  {:>4}\n  total       {:>4}",
         b.downloaded,
         b.tagged,
         b.renamed,
         b.deleted,
         b.sidecars,
         b.skipped,
+        b.unverifiable,
         b.total()
     )
 }
@@ -694,6 +725,15 @@ mod tests {
                 Action::Rename { .. } => outcome.renamed += 1,
                 Action::Delete { .. } => outcome.deleted += 1,
                 Action::Skip { .. } => outcome.skipped += 1,
+                Action::VerifyArtifact { .. } | Action::VerifyAudio { .. } => {
+                    outcome.skipped += 1;
+                }
+                Action::Unverifiable {
+                    owner_id, reason, ..
+                } => outcome.unverifiable.push(suno_core::Failure {
+                    clip_id: owner_id.clone(),
+                    reason: reason.clone(),
+                }),
                 Action::WriteArtifact { .. } => outcome.artifacts_written += 1,
                 Action::DeleteArtifact { .. } => outcome.artifacts_deleted += 1,
                 Action::WriteStem { .. } => outcome.artifacts_written += 1,

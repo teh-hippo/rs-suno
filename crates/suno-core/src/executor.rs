@@ -47,19 +47,21 @@ use crate::clock::Clock;
 use crate::error::Error;
 use crate::ffmpeg::Ffmpeg;
 use crate::fs::Filesystem;
+use crate::hash::bytes_hash;
 use crate::hash::embedded_art_hash;
 use crate::http::{Http, HttpRequest};
 use crate::lineage::LineageContext;
 use crate::lyrics::AlignedLyrics;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
+use crate::observed::ObservedAudio;
 use crate::pathkey::same_fs_path;
 use crate::reconcile::{Action, Desired, Plan, set_manifest_artifact, set_manifest_stem};
 use crate::tag::{
-    Cover, TrackMetadata, flac_picture_data_budget, retag_mp3_with_timing, retag_wav_with_timing,
-    tag_flac, tag_mp3_with_timing, tag_wav_with_timing,
+    Cover, TrackMetadata, flac_picture_data_budget, retag_flac, retag_mp3_with_timing,
+    retag_wav_with_timing, tag_flac, tag_mp3_with_timing, tag_wav_with_timing,
 };
-use crate::tag_alac::tag_alac;
+use crate::tag_alac::{retag_alac, tag_alac};
 use crate::vocab::{
     ArtifactKind, AudioFormat, LyricsTiming, SourceMode, StemFormat, WebpEncodeSettings,
 };
@@ -167,6 +169,10 @@ pub struct ExecOutcome {
     pub skipped: usize,
     pub artifacts_written: usize,
     pub artifacts_deleted: usize,
+    /// Existing files whose managed state could not be verified safely. These
+    /// are reported separately from attempted action failures because no write
+    /// was attempted.
+    pub unverifiable: Vec<Failure>,
     /// Actions that failed and were skipped (auth, transient-exhausted, or
     /// permanent). The run continued past each one unless it was an auth or
     /// disk-full abort.
@@ -193,6 +199,7 @@ impl ExecOutcome {
         self.skipped += other.skipped;
         self.artifacts_written += other.artifacts_written;
         self.artifacts_deleted += other.artifacts_deleted;
+        self.unverifiable.append(&mut other.unverifiable);
         self.failures.append(&mut other.failures);
         self.fallbacks.append(&mut other.fallbacks);
         if self.status == RunStatus::Completed {
@@ -210,6 +217,7 @@ impl ExecOutcome {
             Effect::Skipped => self.skipped += 1,
             Effect::ArtifactWritten => self.artifacts_written += 1,
             Effect::ArtifactDeleted => self.artifacts_deleted += 1,
+            Effect::Unverifiable(failure) => self.unverifiable.push(failure),
             Effect::AudioFallback {
                 effect, fallback, ..
             } => {
@@ -685,6 +693,7 @@ enum Effect {
     Skipped,
     ArtifactWritten,
     ArtifactDeleted,
+    Unverifiable(Failure),
     AudioFallback {
         effect: AudioEffect,
         fallback: AudioFallback,
@@ -803,6 +812,56 @@ where
             Action::Delete { path, clip_id } => self.delete(manifest, path, clip_id),
             Action::Skip { clip_id } => {
                 self.refresh_preserve(manifest, clip_id);
+                Ok(Effect::Skipped)
+            }
+            Action::Unverifiable {
+                owner_id, reason, ..
+            } => {
+                self.refresh_preserve(manifest, owner_id);
+                Ok(Effect::Unverifiable(Failure {
+                    clip_id: owner_id.clone(),
+                    reason: reason.clone(),
+                }))
+            }
+            Action::VerifyArtifact {
+                kind,
+                path,
+                source_hash,
+                content_hash,
+                owner_id,
+            } => {
+                let state = ArtifactState::verified(path, source_hash, content_hash);
+                if is_album_kind(*kind) {
+                    set_album_artifact(albums, owner_id, *kind, Some(state));
+                } else if let Some(entry) = manifest.entries.get_mut(owner_id) {
+                    set_manifest_artifact(entry, *kind, Some(state));
+                }
+                Ok(Effect::Skipped)
+            }
+            Action::VerifyAudio {
+                clip_id,
+                meta_hash,
+                art_source_hash,
+                art_content_hash,
+                embedded_lyrics_hash,
+                embedded_timed_lyrics_hash,
+            } => {
+                if let Some(entry) = manifest.entries.get_mut(clip_id) {
+                    entry.meta_hash = meta_hash.clone();
+                    match art_content_hash {
+                        Some(content_hash) => {
+                            entry.set_verified_art(art_source_hash, content_hash);
+                        }
+                        None => {
+                            entry.art_hash = art_source_hash.clone();
+                        }
+                    }
+                    entry.embedded_lyrics_hash = embedded_lyrics_hash.clone();
+                    entry.embedded_timed_lyrics_hash = embedded_timed_lyrics_hash.clone();
+                    if let Some(desired) = self.by_id.get(clip_id.as_str()).copied() {
+                        entry.preserve = preserve_for(desired);
+                    }
+                }
                 Ok(Effect::Skipped)
             }
             Action::WriteArtifact {

@@ -430,6 +430,9 @@ pub fn run_exit_code(outcome: &ExecOutcome) -> ExitCode {
     if outcome.status == RunStatus::AuthAborted {
         return ExitCode::Auth;
     }
+    if !outcome.unverifiable.is_empty() {
+        return ExitCode::Partial;
+    }
     if outcome.failures.is_empty() {
         return ExitCode::Ok;
     }
@@ -1254,6 +1257,7 @@ mod tests {
             status: RunStatus,
             want: ExitCode,
         }
+
         for Case {
             label,
             downloaded,
@@ -1314,6 +1318,18 @@ mod tests {
             let o = outcome(downloaded, skipped, failures, status);
             assert_eq!(run_exit_code(&o), want, "{label}");
         }
+    }
+
+    #[test]
+    fn unverifiable_state_is_partial_even_without_other_progress() {
+        let outcome = ExecOutcome {
+            unverifiable: vec![Failure {
+                clip_id: "a".to_owned(),
+                reason: "could not read metadata".to_owned(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(run_exit_code(&outcome), ExitCode::Partial);
     }
 
     #[test]

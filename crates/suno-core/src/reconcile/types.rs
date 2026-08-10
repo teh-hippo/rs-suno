@@ -176,12 +176,22 @@ pub struct PlaylistDesired {
 }
 
 /// The caller's on-disk probe of one manifest path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LocalFile {
     /// Whether the file exists on disk.
     pub exists: bool,
     /// Size of the file in bytes (zero when absent).
     pub size: u64,
+    /// Stable digest of the complete file when the caller observed its bytes.
+    ///
+    /// Audio entries leave this empty because their managed metadata is parsed
+    /// separately without reading the audio payload.
+    pub content_hash: Option<String>,
+    /// Parsed managed audio metadata for an existing audio file.
+    pub audio: Option<crate::ObservedAudio>,
+    /// True when the path exists but its bytes or managed metadata could not be
+    /// read. Reconcile must not interpret this as missing or up to date.
+    pub unreadable: bool,
 }
 
 /// Per-source enumeration status for one selected source.
@@ -227,6 +237,34 @@ pub enum Action {
     Delete { path: String, clip_id: String },
     /// Take no action for a clip; recorded so the plan is a full account.
     Skip { clip_id: String },
+    /// A tracked file exists but its managed state could not be read or
+    /// resolved safely.
+    ///
+    /// This is a report-only action. The executor records a failure without
+    /// writing, deleting, or replacing the file.
+    Unverifiable {
+        owner_id: String,
+        path: String,
+        reason: String,
+    },
+    /// Record that an existing managed artifact's bytes were verified without
+    /// rewriting it.
+    VerifyArtifact {
+        kind: ArtifactKind,
+        path: String,
+        source_hash: String,
+        content_hash: String,
+        owner_id: String,
+    },
+    /// Record verified audio metadata provenance without rewriting the file.
+    VerifyAudio {
+        clip_id: String,
+        meta_hash: String,
+        art_source_hash: String,
+        art_content_hash: Option<String>,
+        embedded_lyrics_hash: String,
+        embedded_timed_lyrics_hash: String,
+    },
     /// Write (or rewrite) an external sidecar artifact for its owning clip.
     ///
     /// Emitted when the manifest lacks the artifact or its stored hash differs
@@ -372,7 +410,17 @@ impl Plan {
 
     /// Number of [`Action::Skip`] actions.
     pub fn skips(&self) -> usize {
-        self.count(|a| matches!(a, Action::Skip { .. }))
+        self.count(|a| {
+            matches!(
+                a,
+                Action::Skip { .. } | Action::VerifyArtifact { .. } | Action::VerifyAudio { .. }
+            )
+        })
+    }
+
+    /// Number of [`Action::Unverifiable`] report-only actions.
+    pub fn unverifiable(&self) -> usize {
+        self.count(|a| matches!(a, Action::Unverifiable { .. }))
     }
 
     /// Number of [`Action::WriteArtifact`] actions.

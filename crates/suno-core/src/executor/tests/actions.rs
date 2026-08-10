@@ -137,7 +137,7 @@ fn retag_rewrites_file_and_updates_hashes() {
     assert_eq!(outcome.retagged, 1);
     let updated = manifest.get("o").unwrap();
     assert_eq!(updated.meta_hash, "new");
-    assert_eq!(updated.art_hash, "new-art");
+    assert_eq!(updated.art_source_hash(), "new-art");
     let written = fs.read_file("o.mp3").unwrap();
     assert_eq!(&written[..3], b"ID3");
     let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
@@ -511,6 +511,10 @@ fn backfill_alignment() -> AlignedLyrics {
     }
 }
 
+fn backfill_hash() -> String {
+    crate::content_hash(&backfill_alignment().plain_text())
+}
+
 /// The synced map (fetch result) for a single clip's alignment.
 fn synced_of(id: &str) -> HashMap<String, AlignedLyrics> {
     HashMap::from([(id.to_owned(), backfill_alignment())])
@@ -549,7 +553,11 @@ fn retag_plan(c: &Clip, path: &str) -> Plan {
 fn present_local(path: &str, size: u64) -> HashMap<String, crate::reconcile::LocalFile> {
     HashMap::from([(
         path.to_owned(),
-        crate::reconcile::LocalFile { exists: true, size },
+        crate::reconcile::LocalFile {
+            exists: true,
+            size,
+            ..Default::default()
+        },
     )])
 }
 
@@ -574,10 +582,15 @@ fn backfill_refetches_and_embeds_uslt_and_sylt() {
     let mut manifest = Manifest::new();
     manifest.insert(
         "bk",
-        backfill_entry("bk.mp3", AudioFormat::Mp3, "L", existing.len() as u64),
+        backfill_entry(
+            "bk.mp3",
+            AudioFormat::Mp3,
+            &backfill_hash(),
+            existing.len() as u64,
+        ),
     );
     let mut d = desired(c.clone(), AudioFormat::Mp3);
-    d.embedded_lyrics_hash = "L".to_owned();
+    d.embedded_lyrics_hash = backfill_hash();
     let opts = ExecOptions {
         embed_synced_lyrics: true,
         ..ExecOptions::default()
@@ -606,7 +619,7 @@ fn backfill_refetches_and_embeds_uslt_and_sylt() {
     assert_eq!(tag.synchronised_lyrics().count(), 1, "SYLT frame embedded");
     assert_eq!(
         manifest.get("bk").unwrap().embedded_lyrics_hash,
-        "L",
+        backfill_hash(),
         "the sentinel is stamped so reconcile settles"
     );
 }
@@ -661,6 +674,55 @@ fn missing_mp3_uslt_backfills_without_any_sidecar() {
 }
 
 #[test]
+fn verify_audio_refreshes_observed_provenance_without_writing() {
+    let c = clip("verified");
+    let bytes = tag_mp3(
+        b"audio",
+        &TrackMetadata::from_clip(&c, &LineageContext::own_root(&c)),
+        None,
+        None,
+    )
+    .unwrap();
+    let fs = MemFs::new().with_file("verified.mp3", bytes.clone());
+    let mut manifest = Manifest::new();
+    manifest.insert(
+        "verified",
+        backfill_entry("verified.mp3", AudioFormat::Mp3, "", bytes.len() as u64),
+    );
+    let desired = desired(c, AudioFormat::Mp3);
+    let plan = Plan {
+        actions: vec![Action::VerifyAudio {
+            clip_id: "verified".to_owned(),
+            meta_hash: "meta".to_owned(),
+            art_source_hash: "art-source".to_owned(),
+            art_content_hash: Some("art-content".to_owned()),
+            embedded_lyrics_hash: "plain".to_owned(),
+            embedded_timed_lyrics_hash: "timed".to_owned(),
+        }],
+    };
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[desired],
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &ExecOptions::default(),
+    );
+
+    assert_eq!(outcome.skipped, 1);
+    assert_eq!(fs.read_file("verified.mp3").unwrap(), bytes);
+    let entry = manifest.get("verified").unwrap();
+    assert_eq!(entry.meta_hash, "meta");
+    assert_eq!(entry.art_source_hash(), "art-source");
+    assert_eq!(entry.art_content_hash(), Some("art-content"));
+    assert_eq!(entry.embedded_lyrics_hash, "plain");
+    assert_eq!(entry.embedded_timed_lyrics_hash, "timed");
+}
+
+#[test]
 fn enabling_lrc_backfills_sylt_into_existing_mp3() {
     let c = clip("timed");
     let alignment = backfill_alignment();
@@ -692,6 +754,7 @@ fn enabling_lrc_backfills_sylt_into_existing_mp3() {
         crate::reconcile::LocalFile {
             exists: true,
             size: existing.len() as u64,
+            ..Default::default()
         },
     )]);
     let plan =
@@ -740,10 +803,15 @@ fn backfill_flac_embeds_vorbis_lyrics() {
     let mut manifest = Manifest::new();
     manifest.insert(
         "bf",
-        backfill_entry("bf.flac", AudioFormat::Flac, "L", existing.len() as u64),
+        backfill_entry(
+            "bf.flac",
+            AudioFormat::Flac,
+            &backfill_hash(),
+            existing.len() as u64,
+        ),
     );
     let mut d = desired(c.clone(), AudioFormat::Flac);
-    d.embedded_lyrics_hash = "L".to_owned();
+    d.embedded_lyrics_hash = backfill_hash();
 
     let outcome = run_with_synced(
         &retag_plan(&c, "bf.flac"),
@@ -765,7 +833,10 @@ fn backfill_flac_embeds_vorbis_lyrics() {
         &[backfill_alignment().plain_text()],
         "Vorbis LYRICS gains the plain aligned text"
     );
-    assert_eq!(manifest.get("bf").unwrap().embedded_lyrics_hash, "L");
+    assert_eq!(
+        manifest.get("bf").unwrap().embedded_lyrics_hash,
+        backfill_hash()
+    );
 }
 
 #[test]
@@ -780,10 +851,15 @@ fn backfill_wav_embeds_uslt_and_sylt() {
     let mut manifest = Manifest::new();
     manifest.insert(
         "bw",
-        backfill_entry("bw.wav", AudioFormat::Wav, "L", existing.len() as u64),
+        backfill_entry(
+            "bw.wav",
+            AudioFormat::Wav,
+            &backfill_hash(),
+            existing.len() as u64,
+        ),
     );
     let mut d = desired(c.clone(), AudioFormat::Wav);
-    d.embedded_lyrics_hash = "L".to_owned();
+    d.embedded_lyrics_hash = backfill_hash();
     let opts = ExecOptions {
         embed_synced_lyrics: true,
         ..ExecOptions::default()
@@ -809,7 +885,10 @@ fn backfill_wav_embeds_uslt_and_sylt() {
         Some(backfill_alignment().plain_text())
     );
     assert_eq!(tag.synchronised_lyrics().count(), 1, "SYLT frame embedded");
-    assert_eq!(manifest.get("bw").unwrap().embedded_lyrics_hash, "L");
+    assert_eq!(
+        manifest.get("bw").unwrap().embedded_lyrics_hash,
+        backfill_hash()
+    );
 }
 
 /// ALAC back-fill: `tag_alac` writes `©lyr` whenever `meta.lyrics` is non-empty,
@@ -849,10 +928,15 @@ fn backfill_alac_embeds_lyrics() {
     let mut manifest = Manifest::new();
     manifest.insert(
         "ba",
-        backfill_entry("ba.m4a", AudioFormat::Alac, "L", existing.len() as u64),
+        backfill_entry(
+            "ba.m4a",
+            AudioFormat::Alac,
+            &backfill_hash(),
+            existing.len() as u64,
+        ),
     );
     let mut d = desired(c.clone(), AudioFormat::Alac);
-    d.embedded_lyrics_hash = "L".to_owned();
+    d.embedded_lyrics_hash = backfill_hash();
 
     let outcome = run_with_synced(
         &retag_plan(&c, "ba.m4a"),
@@ -874,7 +958,10 @@ fn backfill_alac_embeds_lyrics() {
         Some(backfill_alignment().plain_text().as_str()),
         "the ALAC ©lyr atom gains the plain aligned text"
     );
-    assert_eq!(manifest.get("ba").unwrap().embedded_lyrics_hash, "L");
+    assert_eq!(
+        manifest.get("ba").unwrap().embedded_lyrics_hash,
+        backfill_hash()
+    );
 }
 
 #[test]
@@ -889,10 +976,15 @@ fn backfill_then_reconcile_is_stable() {
     let mut manifest = Manifest::new();
     manifest.insert(
         "bs",
-        backfill_entry("bs.mp3", AudioFormat::Mp3, "L", existing.len() as u64),
+        backfill_entry(
+            "bs.mp3",
+            AudioFormat::Mp3,
+            &backfill_hash(),
+            existing.len() as u64,
+        ),
     );
     let mut d = desired(c.clone(), AudioFormat::Mp3);
-    d.embedded_lyrics_hash = "L".to_owned();
+    d.embedded_lyrics_hash = backfill_hash();
 
     run_with_synced(
         &retag_plan(&c, "bs.mp3"),
@@ -905,16 +997,26 @@ fn backfill_then_reconcile_is_stable() {
         &RecordingClock::new(),
         &ExecOptions::default(),
     );
-    assert_eq!(manifest.get("bs").unwrap().embedded_lyrics_hash, "L");
+    assert_eq!(
+        manifest.get("bs").unwrap().embedded_lyrics_hash,
+        backfill_hash()
+    );
 
     // Reconcile the same desired state against the now-stamped manifest.
-    let size = fs.read_file("bs.mp3").unwrap().len() as u64;
-    let plan = crate::reconcile::reconcile(
-        &manifest,
-        std::slice::from_ref(&d),
-        &present_local("bs.mp3", size),
-        &mirror_ok(),
-    );
+    let written = fs.read_file("bs.mp3").unwrap();
+    let size = written.len() as u64;
+    let local = HashMap::from([(
+        "bs".to_owned(),
+        crate::reconcile::LocalFile {
+            exists: true,
+            size,
+            audio: Some(crate::observe_bytes(AudioFormat::Mp3, &written).unwrap()),
+            ..Default::default()
+        },
+    )]);
+    let plan =
+        crate::reconcile::reconcile(&manifest, std::slice::from_ref(&d), &local, &mirror_ok());
+    assert_eq!(plan.downloads(), 0);
     assert_eq!(
         plan.retags(),
         0,
@@ -1018,7 +1120,7 @@ fn reformat_and_retitle_with_stale_embed_backfills() {
     let fs = MemFs::new().with_file("old-gg.flac", b"OLD-FLAC".to_vec());
 
     let mut manifest = Manifest::new();
-    let mut start = backfill_entry("old-gg.flac", AudioFormat::Flac, "L", 8);
+    let mut start = backfill_entry("old-gg.flac", AudioFormat::Flac, &backfill_hash(), 8);
     start.meta_hash = "old".to_owned();
     start.embedded_lyrics_hash = "stale".to_owned();
     manifest.insert("gg", start);
@@ -1026,7 +1128,7 @@ fn reformat_and_retitle_with_stale_embed_backfills() {
     let mut d = desired(c.clone(), AudioFormat::Mp3);
     d.path = "renamed-gg.mp3".to_owned();
     d.meta_hash = "new".to_owned();
-    d.embedded_lyrics_hash = "L".to_owned();
+    d.embedded_lyrics_hash = backfill_hash();
 
     let plan = Plan {
         actions: vec![Action::Reformat {
@@ -1067,7 +1169,11 @@ fn reformat_and_retitle_with_stale_embed_backfills() {
     assert_eq!(tag.synchronised_lyrics().count(), 1);
     let updated = manifest.get("gg").unwrap();
     assert_eq!(updated.meta_hash, "new");
-    assert_eq!(updated.embedded_lyrics_hash, "L", "the sentinel is stamped");
+    assert_eq!(
+        updated.embedded_lyrics_hash,
+        backfill_hash(),
+        "the sentinel is stamped"
+    );
 }
 
 #[test]
@@ -1079,8 +1185,8 @@ fn reformat_on_migrated_clip_refetches_and_reembeds() {
     let fs = MemFs::new().with_file("mig.flac", b"OLD-FLAC".to_vec());
 
     let mut manifest = Manifest::new();
-    let mut migrated = backfill_entry("mig.flac", AudioFormat::Flac, "H", 8);
-    migrated.embedded_lyrics_hash = "H".to_owned(); // already embedded (migrated)
+    let mut migrated = backfill_entry("mig.flac", AudioFormat::Flac, &backfill_hash(), 8);
+    migrated.embedded_lyrics_hash = backfill_hash(); // already embedded (migrated)
     migrated.synced_lyrics = Some(crate::manifest::SyncedLyricsCheck {
         version: crate::hash::SYNCED_LRC_VERSION,
         checked_unix: 1_000,
@@ -1099,7 +1205,7 @@ fn reformat_on_migrated_clip_refetches_and_reembeds() {
         content: None,
     };
     let mut d = desired(c.clone(), AudioFormat::Mp3);
-    d.embedded_lyrics_hash = "H".to_owned();
+    d.embedded_lyrics_hash = backfill_hash();
     d.artifacts = vec![lrc.clone()];
 
     // The reformat re-embed trigger makes the migrated clip a fetch target.
@@ -1147,7 +1253,7 @@ fn reformat_on_migrated_clip_refetches_and_reembeds() {
     assert_eq!(tag.synchronised_lyrics().count(), 1, "SYLT re-embedded");
     assert_eq!(
         manifest.get("mig").unwrap().embedded_lyrics_hash,
-        "H",
+        backfill_hash(),
         "the sentinel is re-stamped, not dropped"
     );
 }

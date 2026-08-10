@@ -548,12 +548,10 @@ impl Assembled {
     fn reconcile_inputs<'a>(
         &'a self,
         manifest: &'a suno_core::Manifest,
-        dest: &'a Path,
         albums: &'a BTreeMap<String, AlbumArt>,
     ) -> execute::ReconcileInputs<'a> {
         execute::ReconcileInputs {
             manifest,
-            dest,
             desired: &self.desired,
             albums_desired: &self.albums_desired,
             albums,
@@ -790,6 +788,7 @@ mod tests {
                     LocalFile {
                         exists: true,
                         size: 100,
+                        ..Default::default()
                     },
                 )
             })

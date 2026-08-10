@@ -42,7 +42,7 @@ fn download_mp3_writes_tagged_file_and_records_manifest() {
     assert_eq!(entry.path, "a.mp3");
     assert_eq!(entry.format, AudioFormat::Mp3);
     assert_eq!(entry.meta_hash, "m");
-    assert_eq!(entry.art_hash, "art");
+    assert_eq!(entry.art_source_hash(), "art");
     assert_eq!(entry.size, written.len() as u64);
     assert!(!entry.preserve);
 }

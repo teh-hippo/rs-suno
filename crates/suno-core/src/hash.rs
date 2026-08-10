@@ -12,6 +12,7 @@
 //! sidecar-only fields such as the animated-cover URL) is excluded.
 
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 
 use crate::lineage::LineageContext;
 use crate::model::Clip;
@@ -25,6 +26,28 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// A stable sentinel over arbitrary bytes.
+///
+/// Unlike [`content_hash`], this accepts binary data and is used for verified
+/// observations of files that were fetched or encoded before being written.
+pub fn bytes_hash(bytes: &[u8]) -> String {
+    digest(bytes)
+}
+
+/// Stream a stable sentinel over arbitrary bytes without materialising them.
+pub fn reader_hash(mut reader: impl Read) -> std::io::Result<String> {
+    let mut hasher = fnv::FnvHasher::default();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.write(&buffer[..read]);
+    }
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
 /// A stable sentinel over an arbitrary generated text artefact.
 ///
 /// Used for playlists, whose `.m3u8` body is generated rather than fetched: the
@@ -33,7 +56,7 @@ fn digest(bytes: &[u8]) -> String {
 /// any change that reaches the file triggers a rewrite. The render is
 /// deterministic, so the hash is stable across runs and platforms.
 pub fn content_hash(text: &str) -> String {
-    digest(text.as_bytes())
+    bytes_hash(text.as_bytes())
 }
 
 /// A sentinel for the clip's embedded tag set.
@@ -399,6 +422,19 @@ mod tests {
             a,
             synced_lrc_source_hash("clip-a"),
             "the `.lyrics.txt` sentinel never collides with the `.lrc` one"
+        );
+    }
+
+    #[test]
+    fn bytes_hash_matches_text_hash_for_the_same_bytes() {
+        assert_eq!(bytes_hash(b"hello"), content_hash("hello"));
+    }
+
+    #[test]
+    fn reader_hash_matches_in_memory_hash() {
+        assert_eq!(
+            reader_hash(std::io::Cursor::new(b"hello")).unwrap(),
+            bytes_hash(b"hello")
         );
     }
 }

@@ -145,6 +145,36 @@ pub fn acquire_lock(dest: &Path) -> Result<LockGuard> {
     }
 }
 
+/// Acquire the run lock only when the destination already exists.
+///
+/// Check and dry-run must not create a missing library root merely to lock it;
+/// an absent root has no concurrent local state to protect.
+pub fn acquire_existing_lock(dest: &Path) -> Result<Option<LockGuard>> {
+    if !dest.exists() {
+        return Ok(None);
+    }
+    let path = dest.join(LOCK_NAME);
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            let _ = writeln!(file, "{}", std::process::id());
+            Ok(Some(LockGuard { path }))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+            "another suno run is active (lock at {}); remove it if no run is in progress",
+            path.display()
+        ),
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ) && !path.exists() =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err).with_context(|| format!("could not create lock {}", path.display())),
+    }
+}
+
 /// Append one line per failed clip to `.suno-failures.log` (id, title, url, error).
 pub fn append_failures(
     dest: &Path,
@@ -322,6 +352,18 @@ mod tests {
         drop(guard);
         assert!(acquire_lock(&dir).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn existing_lock_does_not_create_a_missing_destination() {
+        let dir = Path::new("target").join(format!(
+            "logs-missing-lock-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(acquire_existing_lock(&dir).unwrap().is_none());
+        assert!(!dir.exists());
     }
 
     #[test]

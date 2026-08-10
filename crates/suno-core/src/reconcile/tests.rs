@@ -57,7 +57,11 @@ fn desired(id: &str, path: &str, format: AudioFormat, meta: &str, art: &str) -> 
 }
 
 fn present(size: u64) -> LocalFile {
-    LocalFile { exists: true, size }
+    LocalFile {
+        exists: true,
+        size,
+        ..Default::default()
+    }
 }
 
 fn local_present(id: &str) -> HashMap<String, LocalFile> {

@@ -27,6 +27,47 @@ pub struct ArtifactState {
     pub hash: String,
 }
 
+impl ArtifactState {
+    const VERIFIED_PREFIX: &'static str = "verified:";
+
+    /// Record the desired source identity and the exact bytes committed for it.
+    pub fn verified(
+        path: impl Into<String>,
+        source_hash: impl AsRef<str>,
+        content_hash: impl AsRef<str>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            hash: format!(
+                "{}{}:{}",
+                Self::VERIFIED_PREFIX,
+                source_hash.as_ref(),
+                content_hash.as_ref()
+            ),
+        }
+    }
+
+    /// The source or generated-content hash this state was reconciled from.
+    ///
+    /// Legacy manifests stored this value directly. New entries pair it with a
+    /// verified content hash inside the same field, keeping the flat manifest
+    /// shape backwards compatible.
+    pub fn source_hash(&self) -> &str {
+        self.verified_hashes()
+            .map_or(self.hash.as_str(), |(source, _)| source)
+    }
+
+    /// The exact committed-file hash, when this entry has been verified.
+    pub fn content_hash(&self) -> Option<&str> {
+        self.verified_hashes().map(|(_, content)| content)
+    }
+
+    fn verified_hashes(&self) -> Option<(&str, &str)> {
+        let body = self.hash.strip_prefix(Self::VERIFIED_PREFIX)?;
+        body.split_once(':')
+    }
+}
+
 /// The record that a clip's optional lyric sidecars were resolved this run.
 ///
 /// This marker gates `.lrc` and `.lyrics.txt` refreshes. The independent audio
@@ -124,11 +165,40 @@ pub struct ManifestEntry {
 }
 
 impl ManifestEntry {
-    /// Every per-clip sidecar (and stem) path this entry currently records,
-    /// enumerated in one place so its consumers — the executor's stale-copy
-    /// cleanup, orphan detection, and the local-file stat passes — all agree on
-    /// which paths a clip still owns.
-    pub fn artifact_paths(&self) -> impl Iterator<Item = &str> {
+    const VERIFIED_ART_PREFIX: &'static str = "verified-art:";
+
+    /// The embedded-art source identity, independent of a verified byte hash.
+    pub fn art_source_hash(&self) -> &str {
+        self.verified_art_hashes()
+            .map_or(self.art_hash.as_str(), |(source, _)| source)
+    }
+
+    /// The observed embedded-art byte hash, when one has been verified.
+    ///
+    /// An empty hash explicitly records that the source was resolved but no
+    /// cover could be embedded, which is distinct from a legacy unverified
+    /// entry.
+    pub fn art_content_hash(&self) -> Option<&str> {
+        self.verified_art_hashes().map(|(_, content)| content)
+    }
+
+    /// Record the embedded-art source identity and observed bytes together.
+    pub fn set_verified_art(&mut self, source_hash: &str, content_hash: &str) {
+        self.art_hash = format!(
+            "{}{}:{}",
+            Self::VERIFIED_ART_PREFIX,
+            source_hash,
+            content_hash
+        );
+    }
+
+    fn verified_art_hashes(&self) -> Option<(&str, &str)> {
+        let body = self.art_hash.strip_prefix(Self::VERIFIED_ART_PREFIX)?;
+        body.split_once(':')
+    }
+
+    /// Every non-stem per-clip sidecar path currently recorded.
+    pub fn sidecar_paths(&self) -> impl Iterator<Item = &str> {
         [
             self.cover_jpg.as_ref(),
             self.cover_webp.as_ref(),
@@ -139,8 +209,16 @@ impl ManifestEntry {
         ]
         .into_iter()
         .flatten()
-        .chain(self.stems.values())
         .map(|state| state.path.as_str())
+    }
+
+    /// Every per-clip sidecar (and stem) path this entry currently records,
+    /// enumerated in one place so its consumers — the executor's stale-copy
+    /// cleanup, orphan detection, and the local-file stat passes — all agree on
+    /// which paths a clip still owns.
+    pub fn artifact_paths(&self) -> impl Iterator<Item = &str> {
+        self.sidecar_paths()
+            .chain(self.stems.values().map(|state| state.path.as_str()))
     }
 
     /// The stored state for one per-clip sidecar `kind`, if present. Album and
@@ -320,6 +398,41 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn verified_artifact_state_keeps_source_and_content_hashes() {
+        let state = ArtifactState::verified("cover.jpg", "source", "content");
+        assert_eq!(state.path, "cover.jpg");
+        assert_eq!(state.source_hash(), "source");
+        assert_eq!(state.content_hash(), Some("content"));
+
+        let json = serde_json::to_string(&state).unwrap();
+        let back: ArtifactState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, state);
+    }
+
+    #[test]
+    fn legacy_artifact_hash_remains_a_source_hash() {
+        let state = ArtifactState {
+            path: "cover.jpg".to_owned(),
+            hash: "legacy".to_owned(),
+        };
+        assert_eq!(state.source_hash(), "legacy");
+        assert_eq!(state.content_hash(), None);
+    }
+
+    #[test]
+    fn verified_embedded_art_keeps_source_and_content_hashes() {
+        let mut entry = entry("a.flac", AudioFormat::Flac);
+        entry.set_verified_art("source", "content");
+        assert_eq!(entry.art_source_hash(), "source");
+        assert_eq!(entry.art_content_hash(), Some("content"));
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: ManifestEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.art_source_hash(), "source");
+        assert_eq!(back.art_content_hash(), Some("content"));
     }
 
     #[test]

@@ -37,12 +37,12 @@ fn folder_jpg_write_records_album_state_and_skips_manifest() {
         fs.read_file("creator/album/folder.jpg").unwrap(),
         b"folder-jpg"
     );
+    let state = albums.get("root").unwrap().folder_jpg.as_ref().unwrap();
+    assert_eq!(state.path, "creator/album/folder.jpg");
+    assert_eq!(state.source_hash(), "jh");
     assert_eq!(
-        albums.get("root").unwrap().folder_jpg,
-        Some(ArtifactState {
-            path: "creator/album/folder.jpg".to_owned(),
-            hash: "jh".to_owned(),
-        })
+        state.content_hash(),
+        Some(crate::bytes_hash(b"folder-jpg").as_str())
     );
     assert!(manifest.get("root").is_none());
 }
@@ -82,12 +82,12 @@ fn folder_webp_write_transcodes_and_records_album_state() {
     let written = fs.read_file("creator/album/cover.webp").unwrap();
     assert_ne!(written, b"mp4-bytes");
     assert!(written.starts_with(b"RIFF"));
+    let state = albums.get("root").unwrap().folder_webp.as_ref().unwrap();
+    assert_eq!(state.path, "creator/album/cover.webp");
+    assert_eq!(state.source_hash(), "wh");
     assert_eq!(
-        albums.get("root").unwrap().folder_webp,
-        Some(ArtifactState {
-            path: "creator/album/cover.webp".to_owned(),
-            hash: "wh".to_owned(),
-        })
+        state.content_hash(),
+        Some(crate::bytes_hash(&written).as_str())
     );
 }
 
@@ -127,12 +127,12 @@ fn folder_mp4_write_keeps_the_source_verbatim() {
         fs.read_file("creator/album/cover.mp4").unwrap(),
         b"mp4-bytes"
     );
+    let state = albums.get("root").unwrap().folder_mp4.as_ref().unwrap();
+    assert_eq!(state.path, "creator/album/cover.mp4");
+    assert_eq!(state.source_hash(), "mh");
     assert_eq!(
-        albums.get("root").unwrap().folder_mp4,
-        Some(ArtifactState {
-            path: "creator/album/cover.mp4".to_owned(),
-            hash: "mh".to_owned(),
-        })
+        state.content_hash(),
+        Some(crate::bytes_hash(b"mp4-bytes").as_str())
     );
 }
 
@@ -618,9 +618,11 @@ fn same_path_artifact_rewrite_does_no_remove_and_prunes_nothing() {
     );
     assert_eq!(outcome.artifacts_written, 1);
     assert_eq!(fs.read_file("Album/cover.jpg").unwrap(), b"new");
+    let state = manifest.get("a").unwrap().cover_jpg.as_ref().unwrap();
+    assert_eq!(state.source_hash(), "h2");
     assert_eq!(
-        manifest.get("a").unwrap().cover_jpg.as_ref().unwrap().hash,
-        "h2"
+        state.content_hash(),
+        Some(crate::bytes_hash(b"new").as_str())
     );
     // The live directory is untouched by prune.
     assert!(fs.has_dir("Album"));

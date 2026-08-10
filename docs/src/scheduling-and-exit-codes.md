@@ -13,7 +13,7 @@ correctly.
 | 2 | usage | Unknown command, invalid flag, or missing argument, for example `--allow-account-change` on `check` or `--dry-run`. |
 | 3 | config | Missing or invalid config, unknown account, conflicting flags. |
 | 4 | auth | The token expired or was rejected and could not be refreshed. |
-| 5 | partial | Some clips failed after all retries; others succeeded. |
+| 5 | partial | Some work failed, or managed local/upstream state could not be verified authoritatively. |
 | 6 | transient-exhausted | Every clip failed with transient errors; nothing progressed. |
 | 7 | safety abort | A deletion safety rule triggered, or the token authenticates as a different account than the library is pinned to; no files were changed. |
 | 8 | interrupted | The run received an interrupt; partial progress is preserved. |
@@ -23,8 +23,10 @@ A temporary MP3 fallback caused by unavailable lossless entitlement is a
 successful run, not a partial failure. It emits one warning but exits `0` when
 nothing else failed.
 
-`check --exit-code` is the exception to this table: it exits 1 to signal that
-changes are pending, and 0 when the destination is already up to date.
+`check --exit-code` uses `1` only for an authoritative plan with pending
+changes, and `0` only when the destination is authoritatively up to date. An
+incomplete check keeps the domain exit from the table, such as `5` for
+unverifiable or unresolved state.
 
 ## Running unattended
 

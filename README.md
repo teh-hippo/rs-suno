@@ -52,7 +52,9 @@ suno sync
 suno copy
 ```
 
-Preview any run without touching disk using `suno check` or `--dry-run`.
+Preview any run without modifying the library using `suno check` or
+`--dry-run`. The preview reads managed files and any required upstream metadata
+so its plan matches the corresponding real run.
 
 ## Features
 

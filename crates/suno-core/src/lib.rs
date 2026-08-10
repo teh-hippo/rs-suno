@@ -51,6 +51,7 @@ mod lyrics;
 mod manifest;
 mod model;
 mod naming;
+mod observed;
 mod orphans;
 mod pathkey;
 pub mod reconcile;
@@ -103,8 +104,9 @@ pub use ffmpeg::{Ffmpeg, FfmpegError, FfmpegErrorKind};
 pub use fs::{FileStat, Filesystem, FsError, FsErrorKind};
 pub use graph::{CacheEntry, LineageStore, Node, StoredEdge};
 pub use hash::{
-    SYNCED_LRC_VERSION, TIMED_LYRICS_VERSION, art_hash, art_url_hash, content_hash,
-    lyrics_txt_source_hash, meta_hash, synced_lrc_source_hash, synced_lrc_source_hash_with_timing,
+    SYNCED_LRC_VERSION, TIMED_LYRICS_VERSION, art_hash, art_url_hash, bytes_hash, content_hash,
+    lyrics_txt_source_hash, meta_hash, reader_hash, synced_lrc_source_hash,
+    synced_lrc_source_hash_with_timing,
 };
 pub use http::{Http, HttpRequest, HttpResponse, Method, TransportError};
 pub use identity::{AdoptDecision, Owner, OwnerGate, adopt_decision, owner_gate};
@@ -125,6 +127,12 @@ pub use naming::{
     CharacterSet, DEFAULT_TEMPLATE, NamingConfig, NamingRequest, RenderedName, render_clip_name,
     render_clip_names, sanitise_name, stem_file_path, stems_folder,
 };
+pub use observed::{
+    AudioSource, ComparePolicy, DuplicatePolicy, EmptyPolicy, ForeignEntry, ForeignValue,
+    ManagedField, ManagedTags, ObserveError, ObserveErrorKind, ObservedAudio, ObservedCover,
+    ObservedTimedLyrics, SunoField, TagStatus, TimedLyricsRepresentation, cover_fingerprint,
+    observe, observe_bytes, timed_lyrics_fingerprint,
+};
 pub use orphans::untracked_audio;
 pub use reconcile::{
     Action, AlbumDesired, Desired, DesiredArtifact, DesiredStem, LocalFile, Plan, PlaylistDesired,
@@ -134,14 +142,13 @@ pub use reconcile::{
 pub use roots::{ResolveOpts, resolve_roots};
 pub use synced::{
     PendingCheck, SYNCED_LRC_RECHECK_SECS, apply_synced_lrc, apply_synced_lrc_with_timing,
-    preview_synced_lrc, preview_synced_lrc_with_timing, synced_lyrics_targets,
-    synced_lyrics_targets_with_timing,
+    synced_lyrics_targets, synced_lyrics_targets_with_timing,
 };
 pub use tag::{
-    Cover, TrackMetadata, flac_picture_data_budget, tag_flac, tag_mp3, tag_mp3_with_timing,
-    tag_wav, tag_wav_with_timing,
+    Cover, TrackMetadata, flac_picture_data_budget, retag_flac, tag_flac, tag_mp3,
+    tag_mp3_with_timing, tag_wav, tag_wav_with_timing,
 };
-pub use tag_alac::tag_alac;
+pub use tag_alac::{retag_alac, tag_alac};
 pub use tracks::{LeadResolution, TrackAssignment, assign_track_numbers, resolve_lead_ids};
 pub use vocab::{
     ArtifactKind, AudioFormat, LyricsTiming, SourceMode, StemFormat, VideoCoverRetention,

@@ -256,10 +256,27 @@ pub(super) fn fast_opts() -> ExecOptions {
 pub(super) fn probe_local(manifest: &Manifest, fs: &MemFs) -> HashMap<String, LocalFile> {
     let probe = |path: &str| -> LocalFile {
         match fs.metadata(path) {
-            Some(stat) => LocalFile {
-                exists: stat.exists,
-                size: stat.size,
-            },
+            Some(stat) => {
+                let is_audio = std::path::Path::new(path)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        matches!(
+                            ext.to_ascii_lowercase().as_str(),
+                            "flac" | "mp3" | "wav" | "m4a"
+                        )
+                    });
+                LocalFile {
+                    exists: stat.exists,
+                    size: stat.size,
+                    content_hash: (!is_audio)
+                        .then(|| fs.read_file(path))
+                        .flatten()
+                        .map(|bytes| crate::bytes_hash(&bytes)),
+                    audio: None,
+                    unreadable: false,
+                }
+            }
             None => LocalFile::default(),
         }
     };

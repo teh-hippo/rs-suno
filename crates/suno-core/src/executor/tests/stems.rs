@@ -705,6 +705,7 @@ fn full_stems_mirror_mp3_is_get_only_with_zero_gen_traffic() {
         crate::reconcile::LocalFile {
             exists: true,
             size: 100,
+            ..Default::default()
         },
     )]
     .into_iter()
@@ -799,6 +800,7 @@ fn full_stems_mirror_wav_default_renders_free_wav_and_no_generation() {
         crate::reconcile::LocalFile {
             exists: true,
             size: 100,
+            ..Default::default()
         },
     )]
     .into_iter()
