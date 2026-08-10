@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.1](https://github.com/teh-hippo/rs-suno/compare/v0.41.0...v0.41.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* **sync:** reconcile actual library state ([2f2937d](https://github.com/teh-hippo/rs-suno/commit/2f2937d396d531f83ef9e42a6573f7fe7f1d167d))
+
 ## [0.41.0](https://github.com/teh-hippo/rs-suno/compare/v0.40.6...v0.41.0) (2026-08-09)
 
 
