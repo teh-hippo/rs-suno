@@ -112,16 +112,30 @@ where
                 .map(|s| s.path.clone())
         };
         self.write_verify(&owner_id, &path, &bytes)?;
+        let committed = self.fs.read(&path).map_err(|err| {
+            permanent_fail(
+                &owner_id,
+                format!("could not verify written artifact: {err}"),
+            )
+        })?;
+        let content_hash = bytes_hash(&committed);
+        if content_hash != bytes_hash(&bytes) {
+            return Err(permanent_fail(
+                &owner_id,
+                "written artifact bytes did not match the prepared content",
+            ));
+        }
         self.remove_superseded(&owner_id, old_path.as_deref(), &path, guard, "sidecar")?;
         if is_album_kind(kind) {
             set_album_artifact(
                 albums,
                 &owner_id,
                 kind,
-                Some(ArtifactState {
-                    path: path.to_owned(),
-                    hash: hash.to_owned(),
-                }),
+                Some(ArtifactState::verified(
+                    path.to_owned(),
+                    &hash,
+                    &content_hash,
+                )),
             );
         } else if is_playlist_kind(kind) {
             set_playlist(
@@ -137,10 +151,11 @@ where
             set_manifest_artifact(
                 entry,
                 kind,
-                Some(ArtifactState {
-                    path: path.to_owned(),
-                    hash: hash.to_owned(),
-                }),
+                Some(ArtifactState::verified(
+                    path.to_owned(),
+                    &hash,
+                    &content_hash,
+                )),
             );
         }
         Ok(Effect::ArtifactWritten)
@@ -183,14 +198,18 @@ where
         match self.try_relocate(from, to, guard) {
             Relocate::Renamed => {
                 if let Some(entry) = manifest.entries.get_mut(owner_id) {
-                    set_manifest_artifact(
-                        entry,
-                        kind,
-                        Some(ArtifactState {
+                    let content_hash = entry
+                        .artifact(kind)
+                        .and_then(ArtifactState::content_hash)
+                        .map(str::to_owned);
+                    let state = content_hash.map_or_else(
+                        || ArtifactState {
                             path: to.to_owned(),
                             hash: hash.to_owned(),
-                        }),
+                        },
+                        |content_hash| ArtifactState::verified(to.to_owned(), hash, content_hash),
                     );
+                    set_manifest_artifact(entry, kind, Some(state));
                 }
                 return Ok(Effect::Renamed);
             }

@@ -42,7 +42,12 @@ use crate::album_art::{AlbumArt, PlaylistState};
 use crate::lineage::LineageContext;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
+use crate::observed::{
+    ComparePolicy, DuplicatePolicy, EmptyPolicy, ManagedField, ObservedAudio,
+    TimedLyricsRepresentation,
+};
 use crate::pathkey::{canonical_path_key, same_fs_path};
+use crate::tag::TrackMetadata;
 use crate::vocab::{ArtifactKind, AudioFormat, SourceMode, StemFormat};
 
 mod album;
@@ -105,10 +110,16 @@ pub fn reconcile(
         let audio_deleted = actions[before..]
             .iter()
             .any(|a| matches!(a, Action::Delete { .. }));
+        let audio_unverifiable = actions[before..].iter().any(|action| {
+            matches!(
+                action,
+                Action::Unverifiable { owner_id, .. } if owner_id == &d.clip.id
+            )
+        });
         if audio_deleted {
             co_delete_artifacts(d.clip.id.as_str(), manifest, can_delete, &mut actions);
             co_delete_stems(d.clip.id.as_str(), manifest, can_delete, &mut actions);
-        } else {
+        } else if !audio_unverifiable {
             plan_clip_artifacts(d, manifest, local, can_delete, &mut actions);
             plan_clip_stems(d, manifest, local, can_delete, &mut actions);
         }
@@ -388,20 +399,48 @@ pub(crate) fn set_manifest_stem(
     }
 }
 
-fn needs_write_drift(
-    stored: Option<(&str, &str)>,
+enum WriteDrift {
+    Current,
+    Write,
+    Verify(String),
+}
+
+fn write_drift(
+    stored: Option<(&str, &str, Option<&str>)>,
     want_hash: &str,
     want_path: &str,
+    expected_content_hash: Option<&str>,
     local: &HashMap<String, LocalFile>,
-) -> bool {
+) -> WriteDrift {
     match stored {
-        None => true,
-        Some((stored_hash, stored_path)) => {
-            stored_hash != want_hash
-                || !same_fs_path(stored_path, want_path)
-                || local
-                    .get(stored_path)
-                    .is_some_and(|f| !f.exists || f.size == 0)
+        None => WriteDrift::Write,
+        Some((stored_hash, stored_path, stored_content_hash)) => {
+            if local.get(stored_path).is_some_and(|file| file.unreadable) {
+                return WriteDrift::Write;
+            }
+            if stored_hash != want_hash || !same_fs_path(stored_path, want_path) {
+                return WriteDrift::Write;
+            }
+            let Some(observed) = local.get(stored_path) else {
+                return WriteDrift::Current;
+            };
+            if !observed.exists || observed.size == 0 {
+                return WriteDrift::Write;
+            }
+            let expected = expected_content_hash.or(stored_content_hash);
+            if let Some(actual) = observed.content_hash.as_deref() {
+                if let Some(expected) = expected {
+                    if expected != actual {
+                        return WriteDrift::Write;
+                    }
+                    if stored_content_hash.is_none() {
+                        return WriteDrift::Verify(actual.to_owned());
+                    }
+                } else {
+                    return WriteDrift::Verify(actual.to_owned());
+                }
+            }
+            WriteDrift::Current
         }
     }
 }
@@ -472,44 +511,75 @@ fn plan_clip_artifacts(
         // bytes, new path, old file present) is emitted as a MoveArtifact below,
         // which renames rather than re-fetching (#141).
         let state = entry.and_then(|e| e.artifact(artifact.kind));
-        let needs_write = needs_write_drift(
-            state.map(|state| (state.hash.as_str(), state.path.as_str())),
+        let generated_content_hash = artifact.content.as_deref().map(crate::hash::content_hash);
+        let drift = write_drift(
+            state.map(|state| {
+                (
+                    state.source_hash(),
+                    state.path.as_str(),
+                    state.content_hash(),
+                )
+            }),
             artifact.hash.as_str(),
             artifact.path.as_str(),
+            generated_content_hash.as_deref(),
             local,
         );
-        if needs_write {
-            // Downgrade a pure relocation to a rename: only the path drifted (a
-            // retitle), the bytes are unchanged, the kind is fetched (an inline
-            // rewrite is already free), and the old file is confirmed present, so
-            // move it rather than re-fetch or re-transcode (#141). The executor
-            // falls back to a fetch-and-write if the old file has since vanished.
-            if let Some(state) = state
-                && state.hash == artifact.hash
-                && !same_fs_path(&state.path, &artifact.path)
-                && artifact.content.is_none()
-                && local
-                    .get(&state.path)
-                    .is_some_and(|f| f.exists && f.size > 0)
-            {
-                out.push(Action::MoveArtifact {
-                    kind: artifact.kind,
-                    from: state.path.clone(),
-                    to: artifact.path.clone(),
-                    source_url: artifact.source_url.clone(),
-                    hash: artifact.hash.clone(),
-                    owner_id: owner_id.to_string(),
-                });
-            } else {
-                out.push(Action::WriteArtifact {
-                    kind: artifact.kind,
-                    path: artifact.path.clone(),
-                    source_url: artifact.source_url.clone(),
-                    hash: artifact.hash.clone(),
-                    owner_id: owner_id.to_string(),
-                    content: artifact.content.clone(),
-                });
+        match drift {
+            WriteDrift::Verify(content_hash) => out.push(Action::VerifyArtifact {
+                kind: artifact.kind,
+                path: state
+                    .map(|state| state.path.clone())
+                    .unwrap_or_else(|| artifact.path.clone()),
+                source_hash: artifact.hash.clone(),
+                content_hash,
+                owner_id: owner_id.to_string(),
+            }),
+            WriteDrift::Write => {
+                if matches!(artifact.kind, ArtifactKind::Lrc | ArtifactKind::LyricsTxt)
+                    && artifact.content.is_none()
+                    && artifact.source_url.is_empty()
+                {
+                    out.push(Action::Unverifiable {
+                        owner_id: owner_id.to_string(),
+                        path: artifact.path.clone(),
+                        reason: "lyrics content could not be resolved for repair".to_owned(),
+                    });
+                    continue;
+                }
+                // Downgrade a pure relocation to a rename: only the path drifted (a
+                // retitle), the bytes are unchanged, the kind is fetched (an inline
+                // rewrite is already free), and the old file is confirmed present, so
+                // move it rather than re-fetch or re-transcode (#141). The executor
+                // falls back to a fetch-and-write if the old file has since vanished.
+                if let Some(state) = state
+                    && state.source_hash() == artifact.hash
+                    && !same_fs_path(&state.path, &artifact.path)
+                    && artifact.content.is_none()
+                    && local
+                        .get(&state.path)
+                        .is_some_and(|f| f.exists && f.size > 0)
+                {
+                    out.push(Action::MoveArtifact {
+                        kind: artifact.kind,
+                        from: state.path.clone(),
+                        to: artifact.path.clone(),
+                        source_url: artifact.source_url.clone(),
+                        hash: artifact.hash.clone(),
+                        owner_id: owner_id.to_string(),
+                    });
+                } else {
+                    out.push(Action::WriteArtifact {
+                        kind: artifact.kind,
+                        path: artifact.path.clone(),
+                        source_url: artifact.source_url.clone(),
+                        hash: artifact.hash.clone(),
+                        owner_id: owner_id.to_string(),
+                        content: artifact.content.clone(),
+                    });
+                }
             }
+            WriteDrift::Current => {}
         }
     }
 
@@ -592,7 +662,7 @@ fn plan_clip_artifacts(
                         from: state.path.clone(),
                         to,
                         source_url: String::new(),
-                        hash: state.hash.clone(),
+                        hash: state.source_hash().to_owned(),
                         owner_id: owner_id.to_string(),
                     });
                 }
@@ -1071,15 +1141,24 @@ fn plan_desired(
         return;
     };
 
+    let observed = local.get(clip_id);
     // SYNC-10: a missing or zero-length file is treated as missing and
     // re-downloaded, even when the hashes still match.
-    let missing = local.get(clip_id).is_none_or(|f| !f.exists || f.size == 0);
+    let missing = observed.is_none_or(|f| !f.exists || f.size == 0);
     if missing {
         out.push(Action::Download {
             clip: d.clip.clone(),
             lineage: d.lineage.clone(),
             path: d.path.clone(),
             format: d.format,
+        });
+        return;
+    }
+    if observed.is_some_and(|file| file.unreadable) {
+        out.push(Action::Unverifiable {
+            owner_id: clip_id.to_string(),
+            path: entry.path.clone(),
+            reason: "could not read managed audio metadata".to_owned(),
         });
         return;
     }
@@ -1108,39 +1187,131 @@ fn plan_desired(
             from: entry.path.clone(),
             to: d.path.clone(),
         });
-        // A rename still needs a retag when the metadata or art drifted.
-        if meta_art_or_lyrics_changed(d, entry) {
-            out.push(Action::Retag {
+        match audio_reconcile_state(d, entry, observed.and_then(|file| file.audio.as_ref())) {
+            AudioReconcile::Retag => out.push(Action::Retag {
                 clip: d.clip.clone(),
                 lineage: d.lineage.clone(),
                 path: d.path.clone(),
-            });
+            }),
+            AudioReconcile::Verify(action) => out.push(*action),
+            AudioReconcile::Current => {}
         }
         return;
     }
 
-    if meta_art_or_lyrics_changed(d, entry) {
-        out.push(Action::Retag {
+    match audio_reconcile_state(d, entry, observed.and_then(|file| file.audio.as_ref())) {
+        AudioReconcile::Retag => out.push(Action::Retag {
             clip: d.clip.clone(),
             lineage: d.lineage.clone(),
             path: entry.path.clone(),
-        });
-        return;
+        }),
+        AudioReconcile::Verify(action) => out.push(*action),
+        AudioReconcile::Current => out.push(Action::Skip {
+            clip_id: clip_id.to_string(),
+        }),
     }
-
-    out.push(Action::Skip {
-        clip_id: clip_id.to_string(),
-    });
 }
 
-/// Whether any tag-bearing input differs from the manifest: metadata, cover art,
-/// plain aligned lyrics, or timed ID3 lyrics. Each has its own sentinel, so a
-/// drift in one re-tags without depending on the others.
-fn meta_art_or_lyrics_changed(d: &Desired, entry: &ManifestEntry) -> bool {
-    d.meta_hash != entry.meta_hash
-        || d.art_hash != entry.art_hash
-        || d.embedded_lyrics_hash != entry.embedded_lyrics_hash
-        || d.embedded_timed_lyrics_hash != entry.embedded_timed_lyrics_hash
+enum AudioReconcile {
+    Current,
+    Retag,
+    Verify(Box<Action>),
+}
+
+fn audio_reconcile_state(
+    d: &Desired,
+    entry: &ManifestEntry,
+    observed: Option<&ObservedAudio>,
+) -> AudioReconcile {
+    let Some(observed) = observed else {
+        return if d.meta_hash != entry.meta_hash
+            || d.art_hash != entry.art_source_hash()
+            || d.embedded_lyrics_hash != entry.embedded_lyrics_hash
+            || d.embedded_timed_lyrics_hash != entry.embedded_timed_lyrics_hash
+        {
+            AudioReconcile::Retag
+        } else {
+            AudioReconcile::Current
+        };
+    };
+
+    let meta = TrackMetadata::from_clip(&d.clip, &d.lineage);
+    let desired_tags = crate::ManagedTags::from_track_metadata(&meta);
+    let policy = ComparePolicy::new(EmptyPolicy::EmptyIsAbsent, DuplicatePolicy::Keep);
+    let metadata_changed = observed
+        .managed
+        .differences(&desired_tags, policy)
+        .into_iter()
+        .any(|field| field != ManagedField::Lyrics || !meta.lyrics.trim().is_empty());
+
+    let observed_lyrics = observed.managed.get(ManagedField::Lyrics);
+    let observed_lyrics_hash = observed_lyrics
+        .first()
+        .map_or_else(String::new, |lyrics| crate::content_hash(lyrics));
+    let fallback_lyrics_changed = meta.lyrics.trim().is_empty()
+        && !d.embedded_lyrics_hash.is_empty()
+        && (observed_lyrics.len() != 1 || observed_lyrics_hash != d.embedded_lyrics_hash);
+
+    let observed_timed_hash = observed
+        .timed_lyrics
+        .as_ref()
+        .map(|timed| timed.fingerprint.clone())
+        .unwrap_or_default();
+    let timed_lyrics_changed = !d.embedded_timed_lyrics_hash.is_empty()
+        && observed.timed_lyrics.as_ref().is_none_or(|timed| {
+            timed.representation != TimedLyricsRepresentation::Id3SyltMilliseconds
+                || timed.language != "eng"
+                || !timed.description.is_empty()
+                || timed.fingerprint != d.embedded_timed_lyrics_hash
+        });
+
+    let observed_art_hash = observed
+        .cover
+        .as_ref()
+        .map(|cover| cover.fingerprint.as_str());
+    let art_changed = if d.art_hash.is_empty() {
+        observed_art_hash.is_some()
+    } else if entry.art_source_hash() != d.art_hash {
+        true
+    } else {
+        match (entry.art_content_hash(), observed_art_hash) {
+            (Some(expected), Some(actual)) => expected != actual,
+            (Some(expected), None) => !expected.is_empty(),
+            (None, Some(_) | None) => false,
+        }
+    };
+
+    if metadata_changed || fallback_lyrics_changed || timed_lyrics_changed || art_changed {
+        return AudioReconcile::Retag;
+    }
+
+    let verified_lyrics_hash = if meta.lyrics.trim().is_empty() {
+        observed_lyrics_hash
+    } else {
+        String::new()
+    };
+    let verified_art_content_hash = if d.art_hash.is_empty() {
+        None
+    } else {
+        Some(observed_art_hash.unwrap_or_default().to_owned())
+    };
+    let provenance_changed = entry.meta_hash != d.meta_hash
+        || entry.art_source_hash() != d.art_hash
+        || entry.art_content_hash() != verified_art_content_hash.as_deref()
+        || entry.embedded_lyrics_hash != verified_lyrics_hash
+        || entry.embedded_timed_lyrics_hash != observed_timed_hash;
+    if provenance_changed {
+        AudioReconcile::Verify(Box::new(Action::VerifyAudio {
+            clip_id: d.clip.id.clone(),
+            meta_hash: d.meta_hash.clone(),
+            art_source_hash: d.art_hash.clone(),
+            art_content_hash: verified_art_content_hash,
+            embedded_lyrics_hash: verified_lyrics_hash,
+            embedded_timed_lyrics_hash: observed_timed_hash,
+        }))
+    } else {
+        AudioReconcile::Current
+    }
 }
 
 #[cfg(test)]

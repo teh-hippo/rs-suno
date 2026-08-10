@@ -46,23 +46,39 @@ pub fn plan_album_artifacts(
         .into_iter()
         .flatten()
         {
-            let needs_write = needs_write_drift(
-                stored
-                    .and_then(|a| a.artifact(artifact.kind))
-                    .map(|state| (state.hash.as_str(), state.path.as_str())),
+            let drift = write_drift(
+                stored.and_then(|a| a.artifact(artifact.kind)).map(|state| {
+                    (
+                        state.source_hash(),
+                        state.path.as_str(),
+                        state.content_hash(),
+                    )
+                }),
                 artifact.hash.as_str(),
                 artifact.path.as_str(),
+                None,
                 local,
             );
-            if needs_write {
-                actions.push(Action::WriteArtifact {
+            match drift {
+                WriteDrift::Verify(content_hash) => actions.push(Action::VerifyArtifact {
+                    kind: artifact.kind,
+                    path: stored
+                        .and_then(|album| album.artifact(artifact.kind))
+                        .map(|state| state.path.clone())
+                        .unwrap_or_else(|| artifact.path.clone()),
+                    source_hash: artifact.hash.clone(),
+                    content_hash,
+                    owner_id: d.root_id.clone(),
+                }),
+                WriteDrift::Write => actions.push(Action::WriteArtifact {
                     kind: artifact.kind,
                     path: artifact.path.clone(),
                     source_url: artifact.source_url.clone(),
                     hash: artifact.hash.clone(),
                     owner_id: d.root_id.clone(),
                     content: None,
-                });
+                }),
+                WriteDrift::Current => {}
             }
         }
     }
@@ -123,7 +139,8 @@ fn album_desires_kind(d: &AlbumDesired, kind: ArtifactKind) -> bool {
 fn album_action_key(action: &Action) -> (&str, ArtifactKind) {
     match action {
         Action::WriteArtifact { owner_id, kind, .. }
-        | Action::DeleteArtifact { owner_id, kind, .. } => (owner_id.as_str(), *kind),
+        | Action::DeleteArtifact { owner_id, kind, .. }
+        | Action::VerifyArtifact { owner_id, kind, .. } => (owner_id.as_str(), *kind),
         _ => ("", ArtifactKind::CoverJpg),
     }
 }

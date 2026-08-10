@@ -637,6 +637,7 @@ mod tests {
                     LocalFile {
                         exists: true,
                         size: 100,
+                        ..Default::default()
                     },
                 )
             })

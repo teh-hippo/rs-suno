@@ -505,6 +505,8 @@ fn zero_length_file_downloads_even_when_hashes_match() {
         LocalFile {
             exists: true,
             size: 0,
+            unreadable: true,
+            ..Default::default()
         },
     )]
     .into_iter()
@@ -524,6 +526,7 @@ fn missing_file_downloads_even_when_hashes_match() {
         LocalFile {
             exists: false,
             size: 0,
+            ..Default::default()
         },
     )]
     .into_iter()
@@ -531,6 +534,236 @@ fn missing_file_downloads_even_when_hashes_match() {
     let d = vec![desired("a", "a.flac", AudioFormat::Flac, "m", "art")];
     let plan = reconcile(&manifest, &d, &local, &mirror_ok());
     assert_eq!(plan.downloads(), 1);
+}
+
+#[test]
+fn unreadable_audio_is_reported_without_replacement() {
+    let mut manifest = Manifest::new();
+    let mut stored = entry("old/a.flac", AudioFormat::Flac, "m", "art");
+    stored.details_txt = Some(ArtifactState {
+        path: "old/a.details.txt".to_owned(),
+        hash: content_hash("old"),
+    });
+    manifest.insert("a", stored);
+    let local = HashMap::from([(
+        "a".to_owned(),
+        LocalFile {
+            exists: true,
+            size: 100,
+            content_hash: None,
+            audio: None,
+            unreadable: true,
+        },
+    )]);
+    let mut d = desired("a", "new/a.flac", AudioFormat::Flac, "m", "art");
+    d.artifacts.push(DesiredArtifact {
+        kind: ArtifactKind::DetailsTxt,
+        path: "new/a.details.txt".to_owned(),
+        source_url: String::new(),
+        hash: content_hash("new"),
+        content: Some("new".to_owned()),
+    });
+
+    let plan = reconcile(&manifest, &[d], &local, &mirror_ok());
+    assert_eq!(plan.downloads(), 0);
+    assert_eq!(plan.retags(), 0);
+    assert_eq!(plan.renames(), 0);
+    assert_eq!(plan.artifact_moves(), 0);
+    assert_eq!(plan.artifact_writes(), 0);
+    assert_eq!(plan.unverifiable(), 1);
+}
+
+#[test]
+fn observed_metadata_overrides_a_stale_manifest_hash() {
+    let d = desired("a", "a.flac", AudioFormat::Flac, "new-meta", "");
+    let meta = crate::TrackMetadata::from_clip(&d.clip, &d.lineage);
+    let bytes = crate::tag_flac(&crate::testutil::minimal_flac(), &meta, None).unwrap();
+    let observed = crate::observe_bytes(AudioFormat::Flac, &bytes).unwrap();
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry("a.flac", AudioFormat::Flac, "old-meta", ""));
+    let local = HashMap::from([(
+        "a".to_owned(),
+        LocalFile {
+            exists: true,
+            size: bytes.len() as u64,
+            audio: Some(observed),
+            ..Default::default()
+        },
+    )]);
+
+    let plan = reconcile(&manifest, std::slice::from_ref(&d), &local, &mirror_ok());
+    assert_eq!(plan.retags(), 0);
+    assert!(plan.actions.iter().any(|action| matches!(
+        action,
+        Action::VerifyAudio { clip_id, .. } if clip_id == "a"
+    )));
+}
+
+#[test]
+fn missing_fallback_lyrics_retag_even_when_manifest_claims_they_exist() {
+    let mut d = desired("a", "a.flac", AudioFormat::Flac, "meta", "");
+    d.embedded_lyrics_hash = content_hash("new words");
+    let meta = crate::TrackMetadata::from_clip(&d.clip, &d.lineage);
+    let bytes = crate::tag_flac(&crate::testutil::minimal_flac(), &meta, None).unwrap();
+    let observed = crate::observe_bytes(AudioFormat::Flac, &bytes).unwrap();
+    let mut old = entry("a.flac", AudioFormat::Flac, "meta", "");
+    old.embedded_lyrics_hash = d.embedded_lyrics_hash.clone();
+    let mut manifest = Manifest::new();
+    manifest.insert("a", old);
+    let local = HashMap::from([(
+        "a".to_owned(),
+        LocalFile {
+            exists: true,
+            size: bytes.len() as u64,
+            audio: Some(observed),
+            ..Default::default()
+        },
+    )]);
+
+    let plan = reconcile(&manifest, &[d], &local, &mirror_ok());
+    assert_eq!(plan.retags(), 1);
+}
+
+#[test]
+fn an_actual_managed_field_difference_retags() {
+    let d = desired("a", "a.flac", AudioFormat::Flac, "meta", "");
+    let mut stale = crate::TrackMetadata::from_clip(&d.clip, &d.lineage);
+    stale.title = "Old title".to_owned();
+    let bytes = crate::tag_flac(&crate::testutil::minimal_flac(), &stale, None).unwrap();
+    let observed = crate::observe_bytes(AudioFormat::Flac, &bytes).unwrap();
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry("a.flac", AudioFormat::Flac, "meta", ""));
+    let local = HashMap::from([(
+        "a".to_owned(),
+        LocalFile {
+            exists: true,
+            size: bytes.len() as u64,
+            audio: Some(observed),
+            ..Default::default()
+        },
+    )]);
+
+    let plan = reconcile(&manifest, &[d], &local, &mirror_ok());
+    assert_eq!(plan.retags(), 1);
+}
+
+#[test]
+fn issue_537_retags_only_genuine_lyrics_drift() {
+    let plain = "first line\nsecond line";
+    let plain_hash = content_hash(plain);
+    let timed_hash = crate::timed_lyrics_fingerprint(&[(0, "first line".to_owned())]);
+    let mut manifest = Manifest::new();
+    let mut desired_set = Vec::new();
+    let mut local = HashMap::new();
+
+    for index in 0..37 {
+        let id = format!("same-{index:02}");
+        let mut d = desired(&id, &format!("{id}.flac"), AudioFormat::Flac, "meta", "");
+        d.embedded_lyrics_hash = plain_hash.clone();
+        let mut meta = crate::TrackMetadata::from_clip(&d.clip, &d.lineage);
+        meta.lyrics = plain.to_owned();
+        let bytes = crate::tag_flac(&crate::testutil::minimal_flac(), &meta, None).unwrap();
+        let observed = crate::observe_bytes(AudioFormat::Flac, &bytes).unwrap();
+        let mut stored = entry(&format!("{id}.flac"), AudioFormat::Flac, "meta", "");
+        stored.embedded_lyrics_hash = plain_hash.clone();
+        manifest.insert(id.clone(), stored);
+        local.insert(
+            id,
+            LocalFile {
+                exists: true,
+                size: bytes.len() as u64,
+                audio: Some(observed),
+                ..Default::default()
+            },
+        );
+        desired_set.push(d);
+    }
+
+    let mut missing = desired("missing", "missing.flac", AudioFormat::Flac, "meta", "");
+    missing.embedded_lyrics_hash = plain_hash.clone();
+    let missing_meta = crate::TrackMetadata::from_clip(&missing.clip, &missing.lineage);
+    let missing_bytes =
+        crate::tag_flac(&crate::testutil::minimal_flac(), &missing_meta, None).unwrap();
+    let mut missing_stored = entry("missing.flac", AudioFormat::Flac, "meta", "");
+    missing_stored.embedded_lyrics_hash = plain_hash.clone();
+    manifest.insert("missing", missing_stored);
+    local.insert(
+        "missing".to_owned(),
+        LocalFile {
+            exists: true,
+            size: missing_bytes.len() as u64,
+            audio: Some(crate::observe_bytes(AudioFormat::Flac, &missing_bytes).unwrap()),
+            ..Default::default()
+        },
+    );
+    desired_set.push(missing);
+
+    for index in 0..4 {
+        let id = format!("timed-{index}");
+        let mut d = desired(&id, &format!("{id}.mp3"), AudioFormat::Mp3, "meta", "");
+        d.embedded_lyrics_hash = plain_hash.clone();
+        d.embedded_timed_lyrics_hash = timed_hash.clone();
+        let mut meta = crate::TrackMetadata::from_clip(&d.clip, &d.lineage);
+        meta.lyrics = plain.to_owned();
+        let bytes = crate::tag_mp3(b"audio", &meta, None, None).unwrap();
+        let mut stored = entry(&format!("{id}.mp3"), AudioFormat::Mp3, "meta", "");
+        stored.embedded_lyrics_hash = plain_hash.clone();
+        manifest.insert(id.clone(), stored);
+        local.insert(
+            id,
+            LocalFile {
+                exists: true,
+                size: bytes.len() as u64,
+                audio: Some(crate::observe_bytes(AudioFormat::Mp3, &bytes).unwrap()),
+                ..Default::default()
+            },
+        );
+        desired_set.push(d);
+    }
+
+    let plan = reconcile(&manifest, &desired_set, &local, &mirror_ok());
+    assert_eq!(plan.retags(), 5);
+    assert_eq!(plan.skips(), 37);
+    assert_eq!(plan.unverifiable(), 0);
+}
+
+#[test]
+fn a_verified_absent_cover_converges_without_a_retag_loop() {
+    let d = desired("a", "a.mp3", AudioFormat::Mp3, "meta", "art-source");
+    let meta = crate::TrackMetadata::from_clip(&d.clip, &d.lineage);
+    let bytes = crate::tag_mp3(b"audio", &meta, None, None).unwrap();
+    let observed = crate::observe_bytes(AudioFormat::Mp3, &bytes).unwrap();
+    let local = HashMap::from([(
+        "a".to_owned(),
+        LocalFile {
+            exists: true,
+            size: bytes.len() as u64,
+            audio: Some(observed),
+            ..Default::default()
+        },
+    )]);
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry("a.mp3", AudioFormat::Mp3, "meta", "art-source"));
+
+    let first = reconcile(&manifest, std::slice::from_ref(&d), &local, &mirror_ok());
+    assert_eq!(first.retags(), 0);
+    assert!(first.actions.iter().any(|action| matches!(
+        action,
+        Action::VerifyAudio {
+            art_content_hash: Some(hash),
+            ..
+        } if hash.is_empty()
+    )));
+
+    manifest
+        .entries
+        .get_mut("a")
+        .unwrap()
+        .set_verified_art("art-source", "");
+    let second = reconcile(&manifest, &[d], &local, &mirror_ok());
+    assert_eq!(second.retags(), 0);
+    assert_eq!(second.skips(), 1);
+    assert!(matches!(second.actions[0], Action::Skip { .. }));
 }
 
 #[test]
@@ -554,6 +787,7 @@ fn missing_file_download_wins_over_format_difference() {
         LocalFile {
             exists: false,
             size: 0,
+            ..Default::default()
         },
     )]
     .into_iter()
@@ -604,6 +838,7 @@ fn private_zero_length_file_redownloads() {
         LocalFile {
             exists: true,
             size: 0,
+            ..Default::default()
         },
     )]
     .into_iter()
@@ -662,10 +897,13 @@ fn output_is_deterministic_regardless_of_input_order() {
             Action::Rename { to, .. } => to.as_str(),
             Action::WriteArtifact { owner_id, .. }
             | Action::DeleteArtifact { owner_id, .. }
-            | Action::MoveArtifact { owner_id, .. } => owner_id.as_str(),
+            | Action::MoveArtifact { owner_id, .. }
+            | Action::VerifyArtifact { owner_id, .. }
+            | Action::Unverifiable { owner_id, .. } => owner_id.as_str(),
             Action::WriteStem { clip_id, .. }
             | Action::DeleteStem { clip_id, .. }
-            | Action::MoveStem { clip_id, .. } => clip_id.as_str(),
+            | Action::MoveStem { clip_id, .. }
+            | Action::VerifyAudio { clip_id, .. } => clip_id.as_str(),
         })
         .collect();
     assert_eq!(ids, ["a", "b", "c", "z"]);

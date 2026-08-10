@@ -83,16 +83,19 @@ granularity. FLAC and ALAC carry no timed embed and use the `.lrc` sidecar.
 
 Once plain fallback lyrics are embedded, their manifest fingerprint prevents
 another lookup on an unchanged run. A song that still has no plain lyrics is
-checked on every executing run so later-added words are discovered. `check` and
-`--dry-run` remain no-fetch previews, so they may report a potential lyric
-retag the first time an existing track's lyric state is unknown; an executing
-run settles that marker. Separately, a clip with plain lyrics but no timing is
+checked again on the next run so later-added words are discovered, unless the
+last check found no lyrics at all: that result is trusted for about a fortnight,
+so a known instrumental does not cost a lookup on every run. `check` and
+`--dry-run` resolve lyrics exactly as an executing run does, so their report
+matches what a run would write; they write nothing, so they never settle a
+marker themselves. Separately, a clip with plain lyrics but no timing is
 re-checked occasionally when `lrc_sidecar` is on, so later alignment can upgrade
 the `.lrc` and `SYLT`.
 
 A clip Suno cannot align, such as an **instrumental**, writes no `.lrc` and
 embeds no `SYLT`. If a lookup fails, existing lyrics and sidecars are left
-untouched and the lookup is retried next run. Turning `lrc_sidecar` off writes
+untouched and the lookup is retried next run; `check` and `--dry-run` say so and
+report their counts as a lower bound, rather than guessing at the result. Turning `lrc_sidecar` off writes
 no `.lrc` and adds no new `SYLT`; it does not disable baseline plain lyrics, and
 it leaves existing `.lrc` files and timed frames in place.
 

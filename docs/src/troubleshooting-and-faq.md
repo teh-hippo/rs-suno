@@ -128,8 +128,10 @@ Preview it first with `check` or `--dry-run`, which list the pending deletions.
 ### How do I preview what a run would do?
 
 Use `check` (or add `--dry-run` to `sync`/`copy`). Both report the pending
-changes and touch nothing. `check --exit-code` exits 1 when changes are pending,
-for CI.
+changes without modifying the library. They scan managed files and may make
+read-only upstream requests so the plan matches a real run. `check --exit-code`
+exits 1 when verified changes are pending, 0 when verified up to date, and a
+partial or transient code when it cannot produce an authoritative plan.
 
 ### Can I mirror more than one account?
 

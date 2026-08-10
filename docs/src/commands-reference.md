@@ -8,7 +8,7 @@ suno [OPTIONS] <COMMAND>
 |---|---|
 | [`sync`](#sync) | Mirror your library to a directory, including deletions. |
 | [`copy`](#copy) | Download and update, never delete. |
-| [`check`](#check) | Report what `sync` or `copy` would change, touching nothing. |
+| [`check`](#check) | Authoritatively report what `sync` or `copy` would change without modifying the library. |
 | [`ls`](#ls) | List clips in a readable table. |
 | [`lsjson`](#lsjson) | List clips as newline-delimited JSON. |
 | [`fetch`](#fetch) | Download one clip by ID or URL. |
@@ -140,8 +140,8 @@ suno copy /music/suno-archive
 
 ## check
 
-Report what `sync` or `copy` would do without writing anything. It accepts every
-`sync` flag.
+Report what `sync` or `copy` would do without modifying the library. It accepts
+every `sync` flag.
 
 ```text
 suno check [OPTIONS] [DEST]
@@ -155,7 +155,14 @@ suno check [OPTIONS] [DEST]
 suno check /music/suno --exit-code
 ```
 
-`check` never touches disk, so it is safe to run at any time.
+`check` reads the managed files and may make the same read-only upstream lyric
+or artwork requests that the corresponding run requires. It does not modify the
+managed library or persist refreshed state. It uses the run lock while planning
+when the destination is writable, refuses while an executing run holds that
+lock, and can still inspect a read-only destination. If a managed file or required upstream
+value cannot be verified, `check` reports it as unverified and exits with the
+applicable partial or transient code rather than claiming the library is up to
+date.
 
 ## ls
 
@@ -407,5 +414,6 @@ Dry run: me (no changes made)
   to delete      2
   sidecars       8
   up to date   129
+  unverified     0
   total        155
 ```

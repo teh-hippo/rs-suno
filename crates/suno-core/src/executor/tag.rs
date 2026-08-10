@@ -25,11 +25,8 @@ where
         if format == AudioFormat::Wav {
             let (meta, synced) = self.track_meta(clip, lineage);
             let timed = self.opts.embed_synced_lyrics.then_some(synced).flatten();
-            let (cover, preserve_existing_cover) = if format == AudioFormat::Mp3 {
-                self.resolve_retag_cover(manifest, clip, format).await?
-            } else {
-                (self.resolve_cover(clip, format).await?, false)
-            };
+            let (cover, preserve_existing_cover) =
+                self.resolve_retag_cover(manifest, clip, format).await?;
             let existing = self.fs.read(path).map_err(|err| {
                 permanent_fail(&clip.id, format!("could not read for retag: {err}"))
             })?;
@@ -43,7 +40,8 @@ where
             )
             .map_err(|err| permanent_fail(&clip.id, err.to_string()))?;
             let size = self.write_verify(&clip.id, path, &tagged)?;
-            self.refresh_hashes(manifest, &clip.id, Some(size));
+            let observed = self.observe_committed_audio(&clip.id, path, format)?;
+            self.refresh_hashes(manifest, &clip.id, Some(size), Some(&observed));
             return Ok(Effect::Retagged);
         }
 
@@ -65,15 +63,16 @@ where
                 self.opts.lyrics_timing,
                 preserve_existing_cover,
             ),
-            AudioFormat::Flac => tag_flac(&existing, &meta, cover),
-            AudioFormat::Alac => tag_alac(&existing, &meta, cover),
+            AudioFormat::Flac => retag_flac(&existing, &meta, cover, preserve_existing_cover),
+            AudioFormat::Alac => retag_alac(&existing, &meta, cover, preserve_existing_cover),
             // WAV is rendered before this match, so it never reaches the tag arm.
             #[allow(clippy::unreachable)]
             AudioFormat::Wav => unreachable!("WAV handled above"),
         }
         .map_err(|err| permanent_fail(&clip.id, err.to_string()))?;
         let size = self.write_verify(&clip.id, path, &tagged)?;
-        self.refresh_hashes(manifest, &clip.id, Some(size));
+        let observed = self.observe_committed_audio(&clip.id, path, format)?;
+        self.refresh_hashes(manifest, &clip.id, Some(size), Some(&observed));
         Ok(Effect::Retagged)
     }
 
@@ -97,7 +96,7 @@ where
         }
         let current_art_hash = manifest
             .get(&clip.id)
-            .map(|entry| entry.art_hash.as_str())
+            .map(ManifestEntry::art_source_hash)
             .unwrap_or_default();
         if current_art_hash == desired_art_hash {
             return Ok((None, true));
@@ -131,20 +130,81 @@ where
     }
 
     /// Refresh an existing entry's hashes, protection, and (optionally) size.
-    pub(crate) fn refresh_hashes(&self, manifest: &mut Manifest, clip_id: &str, size: Option<u64>) {
+    pub(crate) fn refresh_hashes(
+        &self,
+        manifest: &mut Manifest,
+        clip_id: &str,
+        size: Option<u64>,
+        observed: Option<&ObservedAudio>,
+    ) {
         let desired = self.by_id.get(clip_id).copied();
         if let Some(entry) = manifest.entries.get_mut(clip_id) {
             if let Some(d) = desired {
                 entry.meta_hash = d.meta_hash.clone();
                 entry.art_hash = d.art_hash.clone();
-                entry.embedded_lyrics_hash = d.embedded_lyrics_hash.clone();
-                entry.embedded_timed_lyrics_hash = d.embedded_timed_lyrics_hash.clone();
                 entry.preserve = preserve_for(d);
+                if let Some(observed) = observed {
+                    self.refresh_entry_from_observation(entry, d, observed);
+                } else {
+                    entry.embedded_lyrics_hash = d.embedded_lyrics_hash.clone();
+                    entry.embedded_timed_lyrics_hash = d.embedded_timed_lyrics_hash.clone();
+                }
             }
             if let Some(size) = size {
                 entry.size = size;
             }
         }
+    }
+
+    pub(crate) fn observe_committed_audio(
+        &self,
+        clip_id: &str,
+        path: &str,
+        format: AudioFormat,
+    ) -> Result<ObservedAudio, Fail> {
+        let bytes = self.fs.read(path).map_err(|err| {
+            permanent_fail(
+                clip_id,
+                format!("could not verify written audio metadata: {err}"),
+            )
+        })?;
+        let observed = crate::observe_bytes(format, &bytes)
+            .map_err(|err| permanent_fail(clip_id, err.to_string()))?;
+        Ok(observed)
+    }
+
+    pub(crate) fn refresh_entry_from_observation(
+        &self,
+        entry: &mut ManifestEntry,
+        desired: &Desired,
+        observed: &ObservedAudio,
+    ) {
+        entry.meta_hash = desired.meta_hash.clone();
+        if desired.art_hash.is_empty() {
+            entry.art_hash.clear();
+        } else {
+            entry.set_verified_art(
+                &desired.art_hash,
+                observed
+                    .cover
+                    .as_ref()
+                    .map_or("", |cover| cover.fingerprint.as_str()),
+            );
+        }
+        entry.embedded_lyrics_hash = if desired.clip.lyrics.trim().is_empty() {
+            observed
+                .lyrics()
+                .map(crate::content_hash)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        entry.embedded_timed_lyrics_hash = observed
+            .timed_lyrics
+            .as_ref()
+            .map(|timed| timed.fingerprint.clone())
+            .unwrap_or_default();
+        entry.preserve = preserve_for(desired);
     }
 
     /// Refresh only an entry's preserve marker from the current desired state.

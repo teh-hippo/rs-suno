@@ -136,6 +136,172 @@ fn write_artifact_skipped_when_hash_matches() {
 }
 
 #[test]
+fn verified_artifact_bytes_drive_rewrite_detection() {
+    let mut manifest = Manifest::new();
+    let mut entry = entry("a.flac", AudioFormat::Flac, "m", "art");
+    entry.details_txt = Some(ArtifactState::verified(
+        "a.details.txt",
+        content_hash("Title: A\n"),
+        content_hash("Title: A\n"),
+    ));
+    manifest.insert("a", entry);
+    let desired = vec![desired_arts(
+        "a",
+        vec![text_art(
+            ArtifactKind::DetailsTxt,
+            "a.details.txt",
+            "Title: A\n",
+        )],
+    )];
+    let mut local = local_present("a");
+    local.insert(
+        "a.details.txt".to_owned(),
+        LocalFile {
+            exists: true,
+            size: 9,
+            content_hash: Some(content_hash("Title: changed\n")),
+            audio: None,
+            unreadable: false,
+        },
+    );
+
+    let plan = reconcile(&manifest, &desired, &local, &mirror_ok());
+    assert_eq!(plan.artifact_writes(), 1);
+}
+
+#[test]
+fn legacy_matching_artifact_is_verified_without_rewrite() {
+    let body = "Title: A\n";
+    let mut manifest = Manifest::new();
+    let mut entry = entry("a.flac", AudioFormat::Flac, "m", "art");
+    entry.details_txt = Some(cover("a.details.txt", &content_hash(body)));
+    manifest.insert("a", entry);
+    let desired = vec![desired_arts(
+        "a",
+        vec![text_art(ArtifactKind::DetailsTxt, "a.details.txt", body)],
+    )];
+    let mut local = local_present("a");
+    local.insert(
+        "a.details.txt".to_owned(),
+        LocalFile {
+            exists: true,
+            size: body.len() as u64,
+            content_hash: Some(content_hash(body)),
+            audio: None,
+            unreadable: false,
+        },
+    );
+
+    let plan = reconcile(&manifest, &desired, &local, &mirror_ok());
+    assert_eq!(plan.artifact_writes(), 0);
+    assert_eq!(plan.unverifiable(), 0);
+    assert!(plan.actions.iter().any(|action| matches!(
+        action,
+        Action::VerifyArtifact {
+            kind: ArtifactKind::DetailsTxt,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn legacy_verification_keeps_the_stored_path_spelling() {
+    let body = "Title: A\n";
+    let mut manifest = Manifest::new();
+    let mut entry = entry("a.flac", AudioFormat::Flac, "m", "art");
+    entry.details_txt = Some(cover("A.details.txt", &content_hash(body)));
+    manifest.insert("a", entry);
+    let desired = vec![desired_arts(
+        "a",
+        vec![text_art(ArtifactKind::DetailsTxt, "a.details.txt", body)],
+    )];
+    let mut local = local_present("a");
+    local.insert(
+        "A.details.txt".to_owned(),
+        LocalFile {
+            exists: true,
+            size: body.len() as u64,
+            content_hash: Some(content_hash(body)),
+            ..Default::default()
+        },
+    );
+
+    let plan = reconcile(&manifest, &desired, &local, &mirror_ok());
+    assert!(plan.actions.iter().any(|action| matches!(
+        action,
+        Action::VerifyArtifact { path, .. } if path == "A.details.txt"
+    )));
+}
+
+#[test]
+fn unreadable_owned_artifact_is_rewritten_from_desired_content() {
+    let mut manifest = Manifest::new();
+    let mut entry = entry("a.flac", AudioFormat::Flac, "m", "art");
+    entry.details_txt = Some(cover("a.details.txt", "old"));
+    manifest.insert("a", entry);
+    let desired = vec![desired_arts(
+        "a",
+        vec![text_art(
+            ArtifactKind::DetailsTxt,
+            "a.details.txt",
+            "Title: A\n",
+        )],
+    )];
+    let mut local = local_present("a");
+    local.insert(
+        "a.details.txt".to_owned(),
+        LocalFile {
+            exists: true,
+            size: 10,
+            content_hash: None,
+            audio: None,
+            unreadable: true,
+        },
+    );
+
+    let plan = reconcile(&manifest, &desired, &local, &mirror_ok());
+    assert_eq!(plan.artifact_writes(), 1);
+    assert_eq!(plan.unverifiable(), 0);
+}
+
+#[test]
+fn unresolved_drifted_lyric_sidecar_is_not_sent_to_an_empty_url() {
+    let body = "[re:rs-suno]\nwords\n";
+    let mut manifest = Manifest::new();
+    let mut entry = entry("a.flac", AudioFormat::Flac, "m", "art");
+    entry.lrc = Some(ArtifactState::verified(
+        "a.lrc",
+        content_hash(body),
+        content_hash(body),
+    ));
+    manifest.insert("a", entry);
+    let desired = vec![desired_arts(
+        "a",
+        vec![DesiredArtifact {
+            kind: ArtifactKind::Lrc,
+            path: "a.lrc".to_owned(),
+            source_url: String::new(),
+            hash: content_hash(body),
+            content: None,
+        }],
+    )];
+    let mut local = local_present("a");
+    local.insert(
+        "a.lrc".to_owned(),
+        LocalFile {
+            exists: true,
+            size: body.len() as u64,
+            content_hash: Some(content_hash("changed")),
+            ..Default::default()
+        },
+    );
+
+    let plan = reconcile(&manifest, &desired, &local, &mirror_ok());
+    assert_eq!(plan.artifact_writes(), 0);
+    assert_eq!(plan.unverifiable(), 1);
+}
+
+#[test]
 fn removed_kind_cover_is_kept_not_deleted() {
     // The clip is kept but no longer desires a cover.jpg (an empty/transient
     // art URL this run). Covers opt out of removed-kind deletion, so the
@@ -556,6 +722,7 @@ fn sidecar_move_downgrades_to_write_when_old_file_absent() {
             LocalFile {
                 exists: false,
                 size: 0,
+                ..Default::default()
             },
         ),
     ]
@@ -989,7 +1156,7 @@ fn write_artifact_emitted_when_path_differs_even_if_hash_matches() {
 }
 
 #[test]
-fn needs_write_drift_applies_hash_path_and_probe_rules() {
+fn write_drift_applies_hash_path_and_probe_rules() {
     let local: HashMap<String, LocalFile> = [
         ("ok".to_string(), present(10)),
         ("missing".to_string(), LocalFile::default()),
@@ -998,26 +1165,97 @@ fn needs_write_drift_applies_hash_path_and_probe_rules() {
     .into_iter()
     .collect();
 
-    assert!(needs_write_drift(None, "h1", "ok", &local));
-    assert!(!needs_write_drift(Some(("h1", "ok")), "h1", "ok", &local));
-    assert!(needs_write_drift(Some(("h0", "ok")), "h1", "ok", &local));
-    assert!(needs_write_drift(
-        Some(("h1", "missing")),
-        "h1",
-        "missing",
-        &local
+    assert!(matches!(
+        write_drift(None, "h1", "ok", None, &local),
+        WriteDrift::Write
     ));
-    assert!(needs_write_drift(
-        Some(("h1", "empty")),
-        "h1",
-        "empty",
-        &local
+    assert!(matches!(
+        write_drift(Some(("h1", "ok", None)), "h1", "ok", None, &local),
+        WriteDrift::Current
     ));
-    assert!(!needs_write_drift(
-        Some(("h1", "unprobed")),
-        "h1",
-        "unprobed",
-        &local
+    assert!(matches!(
+        write_drift(Some(("h0", "ok", None)), "h1", "ok", None, &local),
+        WriteDrift::Write
+    ));
+    assert!(matches!(
+        write_drift(Some(("h1", "missing", None)), "h1", "missing", None, &local),
+        WriteDrift::Write
+    ));
+    assert!(matches!(
+        write_drift(Some(("h1", "empty", None)), "h1", "empty", None, &local),
+        WriteDrift::Write
+    ));
+    assert!(matches!(
+        write_drift(
+            Some(("h1", "unprobed", None)),
+            "h1",
+            "unprobed",
+            None,
+            &local
+        ),
+        WriteDrift::Current
+    ));
+
+    let observed = HashMap::from([(
+        "ok".to_owned(),
+        LocalFile {
+            exists: true,
+            size: 10,
+            content_hash: Some("actual".to_owned()),
+            audio: None,
+            unreadable: false,
+        },
+    )]);
+    assert!(matches!(
+        write_drift(
+            Some(("h1", "ok", Some("expected"))),
+            "h1",
+            "ok",
+            None,
+            &observed
+        ),
+        WriteDrift::Write
+    ));
+    assert!(matches!(
+        write_drift(
+            Some(("h1", "ok", Some("actual"))),
+            "h1",
+            "ok",
+            None,
+            &observed
+        ),
+        WriteDrift::Current
+    ));
+    assert!(matches!(
+        write_drift(
+            Some(("h1", "ok", None)),
+            "h1",
+            "ok",
+            Some("actual"),
+            &observed
+        ),
+        WriteDrift::Verify(hash) if hash == "actual"
+    ));
+
+    let unreadable = HashMap::from([(
+        "ok".to_owned(),
+        LocalFile {
+            exists: true,
+            size: 10,
+            content_hash: None,
+            audio: None,
+            unreadable: true,
+        },
+    )]);
+    assert!(matches!(
+        write_drift(
+            Some(("h1", "ok", Some("actual"))),
+            "h1",
+            "ok",
+            None,
+            &unreadable
+        ),
+        WriteDrift::Write
     ));
 }
 

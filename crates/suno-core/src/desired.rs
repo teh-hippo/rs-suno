@@ -146,7 +146,7 @@ pub fn build_desired(
                     &toggles.webp,
                 ),
                 // Always overwritten at the synced-lyrics resolve seam
-                // (`apply_synced_lrc`/`preview_synced_lrc`) before reconcile; the
+                // (`apply_synced_lrc`, in every run mode) before reconcile; the
                 // empty default only matters for this struct literal itself.
                 embedded_lyrics_hash: String::new(),
                 embedded_timed_lyrics_hash: String::new(),

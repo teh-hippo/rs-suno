@@ -845,3 +845,550 @@ fn wav_audio_samples_preserved_after_tagging() {
         .any(|w| w == WAV_AUDIO_DATA);
     assert!(found, "audio sample bytes not found in tagged WAV");
 }
+
+// --- Surgical retagging (#537) -------------------------------------------
+
+/// Assemble a FLAC from `(block type, body)` pairs plus stand-in audio frames,
+/// stamping the last-block flag on the final block.
+fn flac_from_blocks(blocks: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    let mut out = b"fLaC".to_vec();
+    for (index, (block_type, body)) in blocks.iter().enumerate() {
+        let mut head = *block_type;
+        if index + 1 == blocks.len() {
+            head |= 0x80;
+        }
+        out.push(head);
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        out.extend_from_slice(body);
+    }
+    out.extend_from_slice(FLAC_AUDIO_FRAMES);
+    out
+}
+
+/// The 34-byte STREAMINFO body from [`minimal_flac`].
+fn streaminfo_body() -> Vec<u8> {
+    minimal_flac()[8..42].to_vec()
+}
+
+/// A VORBIS_COMMENT block body holding `vendor` and `entries`, in order.
+fn comment_block(vendor: &str, entries: &[&str]) -> Vec<u8> {
+    let mut out = (vendor.len() as u32).to_le_bytes().to_vec();
+    out.extend_from_slice(vendor.as_bytes());
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for entry in entries {
+        out.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+        out.extend_from_slice(entry.as_bytes());
+    }
+    out
+}
+
+/// A PICTURE block body of the given API type, mime, and data.
+fn picture_block(picture_type: u32, mime: &str, data: &[u8]) -> Vec<u8> {
+    let mut out = picture_type.to_be_bytes().to_vec();
+    out.extend_from_slice(&(mime.len() as u32).to_be_bytes());
+    out.extend_from_slice(mime.as_bytes());
+    for _ in 0..5 {
+        out.extend_from_slice(&0u32.to_be_bytes());
+    }
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
+/// Split a FLAC back into `(block type, body)` pairs. Deliberately independent
+/// of the implementation so the tests check the bytes, not the writer.
+fn flac_blocks(audio: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut blocks = Vec::new();
+    let mut at = 4;
+    loop {
+        let head = audio[at];
+        let len = u32::from_be_bytes([0, audio[at + 1], audio[at + 2], audio[at + 3]]) as usize;
+        blocks.push((head & 0x7f, audio[at + 4..at + 4 + len].to_vec()));
+        at += 4 + len;
+        if head & 0x80 != 0 {
+            break;
+        }
+    }
+    blocks
+}
+
+/// The vendor string and ordered `KEY=value` entries of a FLAC's comments.
+fn flac_comments(audio: &[u8]) -> (String, Vec<String>) {
+    let body = flac_blocks(audio)
+        .into_iter()
+        .find(|(block_type, _)| *block_type == 4)
+        .map(|(_, body)| body)
+        .expect("a VORBIS_COMMENT block");
+    let mut at = 0;
+    let read = |len: usize, at: &mut usize| {
+        let taken = String::from_utf8_lossy(&body[*at..*at + len]).into_owned();
+        *at += len;
+        taken
+    };
+    let vendor_len = u32::from_le_bytes(body[0..4].try_into().unwrap()) as usize;
+    at += 4;
+    let vendor = read(vendor_len, &mut at);
+    let count = u32::from_le_bytes(body[at..at + 4].try_into().unwrap()) as usize;
+    at += 4;
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        let len = u32::from_le_bytes(body[at..at + 4].try_into().unwrap()) as usize;
+        at += 4;
+        entries.push(read(len, &mut at));
+    }
+    (vendor, entries)
+}
+
+/// The `KEY=value` entries a fresh tag of `meta` would write, as a set.
+fn owned_entries(meta: &TrackMetadata) -> Vec<String> {
+    meta.standard_fields()
+        .into_iter()
+        .chain(meta.suno_fields())
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect()
+}
+
+#[test]
+fn flac_retag_returns_original_bytes_when_only_the_order_differs() {
+    // #537: metaflac serialises the comments through a HashMap, so a run that
+    // changed nothing still rewrote every entry in a new order. A retag that
+    // finds the same fields, whatever their order, must not touch the file.
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let mut entries = owned_entries(&meta);
+    entries.reverse();
+    let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
+    let audio = flac_from_blocks(&[
+        (0, streaminfo_body()),
+        (4, comment_block("reference libFLAC 1.4.3 20230623", &refs)),
+        (1, vec![0u8; 16]),
+    ]);
+
+    let retagged = retag_flac(&audio, &meta, None, true).unwrap();
+    assert_eq!(retagged, audio, "an order-only difference is not a change");
+}
+
+#[test]
+fn flac_retag_adding_lyrics_keeps_order_and_every_other_block() {
+    let mut meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    meta.lyrics = String::new();
+    let before = owned_entries(&meta);
+    let refs: Vec<&str> = before.iter().map(String::as_str).collect();
+    let cover = picture_block(3, "image/jpeg", b"\xFF\xD8\xFFcover");
+    let padding = vec![0u8; 24];
+    let audio = flac_from_blocks(&[
+        (0, streaminfo_body()),
+        (4, comment_block("vendor", &refs)),
+        (6, cover.clone()),
+        (1, padding.clone()),
+    ]);
+
+    meta.lyrics = "thunder rolls\nover the plains".to_owned();
+    let retagged = retag_flac(&audio, &meta, None, true).unwrap();
+
+    let (vendor, entries) = flac_comments(&retagged);
+    assert_eq!(vendor, "vendor");
+    assert_eq!(
+        entries[..before.len()],
+        before[..],
+        "the original entries keep their order"
+    );
+    assert_eq!(
+        entries[before.len()],
+        "LYRICS=thunder rolls\nover the plains",
+        "the new field is appended"
+    );
+    let blocks = flac_blocks(&retagged);
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|(block_type, _)| *block_type)
+            .collect::<Vec<_>>(),
+        vec![0, 4, 6, 1],
+        "the block layout is unchanged"
+    );
+    assert_eq!(blocks[0].1, streaminfo_body());
+    assert_eq!(blocks[2].1, cover, "the picture block is byte-identical");
+    assert_eq!(blocks[3].1, padding, "the padding block is byte-identical");
+    assert!(retagged.ends_with(FLAC_AUDIO_FRAMES));
+}
+
+#[test]
+fn flac_retag_preserves_vendor_unknown_comments_and_key_casing() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let audio = flac_from_blocks(&[
+        (0, streaminfo_body()),
+        (
+            4,
+            comment_block(
+                "another tagger 2.1",
+                &[
+                    "MOOD=calm",
+                    "artist=stale",
+                    "REPLAYGAIN_TRACK_GAIN=-3.20 dB",
+                    "ARTIST=duplicate",
+                    "MOOD=also calm",
+                ],
+            ),
+        ),
+    ]);
+
+    let retagged = retag_flac(&audio, &meta, None, true).unwrap();
+    let (vendor, entries) = flac_comments(&retagged);
+
+    assert_eq!(vendor, "another tagger 2.1", "the vendor string survives");
+    assert_eq!(
+        entries[0], "MOOD=calm",
+        "an unknown comment keeps its place"
+    );
+    assert_eq!(
+        entries[1], "artist=alice",
+        "an owned field is rewritten in place, keeping its own casing"
+    );
+    assert_eq!(
+        entries[2], "REPLAYGAIN_TRACK_GAIN=-3.20 dB",
+        "another tool's field is untouched"
+    );
+    assert_eq!(
+        entries[3], "MOOD=also calm",
+        "a duplicate unknown comment survives"
+    );
+    assert!(
+        !entries.iter().any(|entry| entry == "ARTIST=duplicate"),
+        "a duplicate of an owned field is collapsed"
+    );
+    assert!(entries.contains(&"TITLE=Electric Storm".to_owned()));
+}
+
+#[test]
+fn flac_retag_removes_an_owned_field_that_lost_its_value() {
+    let mut meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    meta.style = String::new();
+    let audio = flac_from_blocks(&[
+        (0, streaminfo_body()),
+        (
+            4,
+            comment_block("v", &["SUNO_STYLE=ambient, cinematic", "MOOD=calm"]),
+        ),
+    ]);
+
+    let retagged = retag_flac(&audio, &meta, None, true).unwrap();
+    let (_, entries) = flac_comments(&retagged);
+    assert!(
+        !entries.iter().any(|entry| entry.starts_with("SUNO_STYLE=")),
+        "an owned field with no value is dropped"
+    );
+    assert_eq!(entries[0], "MOOD=calm", "the unknown comment is kept");
+}
+
+#[test]
+fn flac_retag_keeps_lyrics_when_the_run_has_none() {
+    let mut meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    meta.lyrics = String::new();
+    let audio = flac_from_blocks(&[
+        (0, streaminfo_body()),
+        (4, comment_block("v", &["LYRICS=already embedded"])),
+    ]);
+
+    let retagged = retag_flac(&audio, &meta, None, true).unwrap();
+    let (_, entries) = flac_comments(&retagged);
+    assert!(entries.contains(&"LYRICS=already embedded".to_owned()));
+}
+
+#[test]
+fn flac_retag_writes_and_clears_track_numbers() {
+    let mut meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    meta.track = 3;
+    meta.track_total = 12;
+    let audio = flac_from_blocks(&[(0, streaminfo_body()), (4, comment_block("v", &[]))]);
+
+    let numbered = retag_flac(&audio, &meta, None, true).unwrap();
+    let (_, entries) = flac_comments(&numbered);
+    assert!(entries.contains(&"TRACKNUMBER=3".to_owned()));
+    assert!(entries.contains(&"TRACKTOTAL=12".to_owned()));
+
+    meta.track = 0;
+    meta.track_total = 0;
+    let cleared = retag_flac(&numbered, &meta, None, true).unwrap();
+    let (_, entries) = flac_comments(&cleared);
+    assert!(!entries.iter().any(|entry| entry.starts_with("TRACK")));
+}
+
+#[test]
+fn flac_retag_replaces_only_the_front_cover() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let front = picture_block(3, "image/jpeg", b"\xFF\xD8\xFFold-front");
+    let band = picture_block(19, "image/png", b"\x89PNGband-logo");
+    let audio = flac_from_blocks(&[
+        (0, streaminfo_body()),
+        (4, comment_block("v", &["MOOD=calm"])),
+        (6, front),
+        (6, band.clone()),
+    ]);
+
+    let new_cover = b"\xFF\xD8\xFFnew-front".to_vec();
+    let retagged = retag_flac(&audio, &meta, Some(Cover::jpeg(&new_cover)), false).unwrap();
+    let blocks = flac_blocks(&retagged);
+    let pictures: Vec<&Vec<u8>> = blocks
+        .iter()
+        .filter(|(block_type, _)| *block_type == 6)
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(pictures.len(), 2, "the band logo is not dropped");
+    assert_eq!(pictures[0], &picture_block(3, "image/jpeg", &new_cover));
+    assert_eq!(pictures[1], &band, "an unrelated picture is untouched");
+
+    // With no replacement, preserving keeps both and clearing drops only ours.
+    let kept = retag_flac(&retagged, &meta, None, true).unwrap();
+    assert_eq!(kept, retagged, "preserving art is a no-op");
+    let cleared = retag_flac(&retagged, &meta, None, false).unwrap();
+    let remaining: Vec<u8> = flac_blocks(&cleared)
+        .into_iter()
+        .filter(|(block_type, _)| *block_type == 6)
+        .map(|(_, body)| body[3])
+        .collect();
+    assert_eq!(remaining, vec![19], "only the front cover is removed");
+}
+
+#[test]
+fn flac_retag_rejects_an_oversized_cover() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let audio = flac_from_blocks(&[(0, streaminfo_body()), (4, comment_block("v", &[]))]);
+    let too_big = vec![0u8; flac_picture_data_budget("image/webp") + 1];
+    let err = retag_flac(&audio, &meta, Some(Cover::webp(&too_big)), false).unwrap_err();
+    assert!(matches!(err, Error::Tag(_)));
+}
+
+#[test]
+fn flac_retag_errors_rather_than_panics_on_malformed_input() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let cases: Vec<Vec<u8>> = vec![
+        Vec::new(),
+        b"not a flac stream".to_vec(),
+        b"fLaC".to_vec(),
+        // A STREAMINFO header promising 34 bytes that are not there.
+        b"fLaC\x80\x00\x00\x22cut".to_vec(),
+        // A comment block whose entry count runs past the block body.
+        {
+            let mut body = comment_block("v", &["MOOD=calm"]);
+            body[4 + 1..4 + 1 + 4].copy_from_slice(&9u32.to_le_bytes());
+            flac_from_blocks(&[(0, streaminfo_body()), (4, body)])
+        },
+    ];
+    for case in cases {
+        let err = retag_flac(&case, &meta, None, true)
+            .expect_err("malformed input must not tag or panic");
+        assert!(matches!(err, Error::Tag(_)));
+    }
+}
+
+#[test]
+fn flac_retag_accepts_a_file_with_no_comment_block() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let audio = minimal_flac();
+    let retagged = retag_flac(&audio, &meta, None, true).unwrap();
+    let blocks = flac_blocks(&retagged);
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|(block_type, _)| *block_type)
+            .collect::<Vec<_>>(),
+        vec![0, 4],
+        "the comments are inserted after STREAMINFO"
+    );
+    assert!(retagged.ends_with(FLAC_AUDIO_FRAMES));
+    // Reading it back through metaflac proves the block is well formed.
+    let tag = metaflac::Tag::read_from(&mut Cursor::new(&retagged)).unwrap();
+    assert_eq!(
+        tag.get_vorbis("TITLE").map(|v| v.collect::<Vec<_>>()),
+        Some(vec!["Electric Storm"])
+    );
+}
+
+#[test]
+fn flac_retag_settles_after_a_fresh_tag() {
+    // The fresh path writes through metaflac; a retag of its output must find
+    // nothing to change, which is what stops the rewrite loop in #537.
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let fresh = tag_flac(&minimal_flac(), &meta, None).unwrap();
+    let retagged = retag_flac(&fresh, &meta, None, true).unwrap();
+    assert_eq!(retagged, fresh, "a retag of a current file changes nothing");
+}
+
+/// An ID3 tag holding frames this crate does not own, to prove a retag keeps
+/// them: a genre, a rating, a ReplayGain `TXXX`, a French comment, a described
+/// `USLT`, and a `SYLT` in another language.
+fn foreign_id3(audio: &[u8]) -> Vec<u8> {
+    let mut tag = id3::Tag::new();
+    tag.set_genre("Ambient");
+    tag.add_frame(id3::frame::Popularimeter {
+        user: "rater@example.com".to_owned(),
+        rating: 196,
+        counter: 7,
+    });
+    tag.add_frame(ExtendedText {
+        description: "REPLAYGAIN_TRACK_GAIN".to_owned(),
+        value: "-3.20 dB".to_owned(),
+    });
+    tag.add_frame(Comment {
+        lang: "fra".to_owned(),
+        description: String::new(),
+        text: "une note".to_owned(),
+    });
+    tag.add_frame(Lyrics {
+        lang: LANG.to_owned(),
+        description: "translation".to_owned(),
+        text: "a translated line".to_owned(),
+    });
+    let mut cursor = Cursor::new(audio.to_vec());
+    tag.write_to_file(&mut cursor, id3::Version::Id3v24)
+        .unwrap();
+    cursor.into_inner()
+}
+
+#[test]
+fn mp3_retag_preserves_frames_this_crate_does_not_own() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let existing = foreign_id3(b"frames");
+
+    let retagged =
+        retag_mp3_with_timing(&existing, &meta, None, None, LyricsTiming::Line, true).unwrap();
+    let tag = id3::Tag::read_from2(Cursor::new(&retagged)).unwrap();
+
+    assert_eq!(tag.genre(), Some("Ambient"), "an unowned text frame stays");
+    assert_eq!(
+        tag.frames()
+            .find(|frame| frame.id() == "POPM")
+            .and_then(|frame| frame.content().popularimeter())
+            .map(|popm| popm.rating),
+        Some(196),
+        "a rating survives"
+    );
+    assert_eq!(
+        tag.extended_texts()
+            .find(|txxx| txxx.description == "REPLAYGAIN_TRACK_GAIN")
+            .map(|txxx| txxx.value.as_str()),
+        Some("-3.20 dB"),
+        "another tool's TXXX survives"
+    );
+    assert_eq!(
+        tag.comments()
+            .find(|comment| comment.lang == "fra")
+            .map(|comment| comment.text.as_str()),
+        Some("une note"),
+        "a comment in another language survives"
+    );
+    assert_eq!(
+        tag.lyrics()
+            .find(|lyrics| lyrics.description == "translation")
+            .map(|lyrics| lyrics.text.as_str()),
+        Some("a translated line"),
+        "a described USLT survives"
+    );
+    // And this crate's own fields are written.
+    assert_eq!(tag.title(), Some("Electric Storm"));
+    assert_eq!(
+        tag.extended_texts()
+            .find(|txxx| txxx.description == "SUNO_ID")
+            .map(|txxx| txxx.value.as_str()),
+        Some("clip-1234abcd")
+    );
+}
+
+#[test]
+fn mp3_fresh_tagging_still_drops_frames_it_does_not_own() {
+    // The fresh path is a rebuild, not a merge: only lyrics and art carry over.
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let tagged = tag_mp3(&foreign_id3(b"frames"), &meta, None, None).unwrap();
+    let tag = id3::Tag::read_from2(Cursor::new(&tagged)).unwrap();
+    assert_eq!(tag.genre(), None);
+    assert!(tag.frames().all(|frame| frame.id() != "POPM"));
+    assert_eq!(tag.comments().filter(|c| c.lang == "fra").count(), 0);
+    assert_eq!(
+        tag.lyrics().count(),
+        1,
+        "this run's own lyrics replace the whole existing set"
+    );
+}
+
+#[test]
+fn mp3_retag_returns_original_bytes_when_nothing_changed() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let first = tag_mp3(b"frames", &meta, None, None).unwrap();
+    let retagged =
+        retag_mp3_with_timing(&first, &meta, None, None, LyricsTiming::Line, true).unwrap();
+    assert_eq!(retagged, first, "a semantic no-op does not rewrite bytes");
+}
+
+#[test]
+fn mp3_retag_rewrites_when_a_field_changes() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let first = tag_mp3(b"frames", &meta, None, None).unwrap();
+    let mut changed = meta.clone();
+    changed.album = "Storm Series".to_owned();
+    let retagged =
+        retag_mp3_with_timing(&first, &changed, None, None, LyricsTiming::Line, true).unwrap();
+    assert_ne!(retagged, first);
+    let tag = id3::Tag::read_from2(Cursor::new(&retagged)).unwrap();
+    assert_eq!(tag.album(), Some("Storm Series"));
+    assert_eq!(
+        tag.frames().filter(|frame| frame.id() == "TALB").count(),
+        1,
+        "the owned frame is replaced, not stacked"
+    );
+}
+
+#[test]
+fn mp3_retag_clears_an_owned_field_that_lost_its_value() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let first = tag_mp3(b"frames", &meta, None, None).unwrap();
+    let mut cleared = meta.clone();
+    cleared.style = String::new();
+    cleared.album = String::new();
+    let retagged =
+        retag_mp3_with_timing(&first, &cleared, None, None, LyricsTiming::Line, true).unwrap();
+    let tag = id3::Tag::read_from2(Cursor::new(&retagged)).unwrap();
+    assert_eq!(tag.album(), None, "an owned frame with no value is removed");
+    assert!(
+        tag.extended_texts()
+            .all(|txxx| txxx.description != "SUNO_STYLE"),
+        "an owned TXXX with no value is removed"
+    );
+    assert_eq!(tag.title(), Some("Electric Storm"), "the rest is intact");
+}
+
+#[test]
+fn mp3_retag_of_an_untagged_file_falls_back_to_fresh_tagging() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let retagged =
+        retag_mp3_with_timing(b"frames", &meta, None, None, LyricsTiming::Line, true).unwrap();
+    let tag = id3::Tag::read_from2(Cursor::new(&retagged)).unwrap();
+    assert_eq!(tag.title(), Some("Electric Storm"));
+}
+
+#[test]
+fn wav_retag_preserves_foreign_frames_and_no_ops() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let first = tag_wav(&minimal_wav(), &meta, None, None).unwrap();
+    let mut tag = id3::Tag::read_from2(Cursor::new(&first)).unwrap();
+    tag.set_genre("Ambient");
+    let mut cursor = Cursor::new(first.clone());
+    tag.write_to_file(&mut cursor, id3::Version::Id3v24)
+        .unwrap();
+    let with_genre = cursor.into_inner();
+
+    let retagged =
+        retag_wav_with_timing(&with_genre, &meta, None, None, LyricsTiming::Line, true).unwrap();
+    assert_eq!(
+        retagged, with_genre,
+        "a semantic no-op leaves the WAV alone"
+    );
+    let tag = id3::Tag::read_from2(Cursor::new(&retagged)).unwrap();
+    assert_eq!(tag.genre(), Some("Ambient"));
+    assert!(
+        retagged
+            .windows(WAV_AUDIO_DATA.len())
+            .any(|window| window == WAV_AUDIO_DATA),
+        "the audio samples are intact"
+    );
+}

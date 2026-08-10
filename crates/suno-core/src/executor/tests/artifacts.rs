@@ -36,10 +36,11 @@ fn write_artifact_fetches_writes_and_updates_manifest() {
     assert_eq!(fs.read_file("a/cover.jpg").unwrap(), b"jpg-bytes");
     assert_eq!(
         manifest.get("a").unwrap().cover_jpg,
-        Some(ArtifactState {
-            path: "a/cover.jpg".to_owned(),
-            hash: "h1".to_owned(),
-        })
+        Some(ArtifactState::verified(
+            "a/cover.jpg",
+            "h1",
+            crate::bytes_hash(b"jpg-bytes")
+        ))
     );
 }
 
@@ -79,11 +80,82 @@ fn write_text_sidecar_records_slot_with_no_network_fetch() {
     assert_eq!(fs.read_file("a.details.txt").unwrap(), b"Title: A\n");
     assert_eq!(
         manifest.get("a").unwrap().details_txt,
-        Some(ArtifactState {
-            path: "a.details.txt".to_owned(),
-            hash: "dh".to_owned(),
-        })
+        Some(ArtifactState::verified(
+            "a.details.txt",
+            "dh",
+            crate::bytes_hash(b"Title: A\n")
+        ))
     );
+}
+
+#[test]
+fn verify_artifact_updates_manifest_without_writing() {
+    let mut manifest = Manifest::new();
+    let mut entry = entry("a.mp3", AudioFormat::Mp3);
+    entry.details_txt = Some(ArtifactState {
+        path: "a.details.txt".to_owned(),
+        hash: "source".to_owned(),
+    });
+    manifest.insert("a", entry);
+    let fs = MemFs::new().with_file("a.details.txt", b"existing".to_vec());
+    let plan = Plan {
+        actions: vec![Action::VerifyArtifact {
+            kind: ArtifactKind::DetailsTxt,
+            path: "a.details.txt".to_owned(),
+            source_hash: "source".to_owned(),
+            content_hash: "content".to_owned(),
+            owner_id: "a".to_owned(),
+        }],
+    };
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[],
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &ExecOptions::default(),
+    );
+
+    assert_eq!(outcome.skipped, 1);
+    assert_eq!(fs.read_file("a.details.txt").unwrap(), b"existing");
+    let state = manifest.get("a").unwrap().details_txt.as_ref().unwrap();
+    assert_eq!(state.source_hash(), "source");
+    assert_eq!(state.content_hash(), Some("content"));
+}
+
+#[test]
+fn unverifiable_action_records_without_touching_the_file() {
+    let mut manifest = Manifest::new();
+    manifest.insert("a", entry("a.mp3", AudioFormat::Mp3));
+    let mut d = desired(clip("a"), AudioFormat::Mp3);
+    d.modes = vec![SourceMode::Copy];
+    let fs = MemFs::new().with_file("a.mp3", b"existing".to_vec());
+    let plan = Plan {
+        actions: vec![Action::Unverifiable {
+            owner_id: "a".to_owned(),
+            path: "a.mp3".to_owned(),
+            reason: "could not read managed audio metadata".to_owned(),
+        }],
+    };
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d],
+        &ScriptedHttp::new(),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &ExecOptions::default(),
+    );
+
+    assert_eq!(outcome.unverifiable.len(), 1);
+    assert_eq!(outcome.failed(), 0);
+    assert_eq!(fs.read_file("a.mp3").unwrap(), b"existing");
+    assert!(manifest.get("a").unwrap().preserve);
 }
 
 #[test]

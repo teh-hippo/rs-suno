@@ -43,6 +43,7 @@ fn unavailable_lossless_uses_mp3_but_preserves_present_lossless() {
             LocalFile {
                 exists: true,
                 size: 100,
+                ..Default::default()
             },
         ),
         (
@@ -50,6 +51,7 @@ fn unavailable_lossless_uses_mp3_but_preserves_present_lossless() {
             LocalFile {
                 exists: true,
                 size: 80,
+                ..Default::default()
             },
         ),
     ]);
@@ -177,6 +179,7 @@ fn temporary_mp3_manifest_reformats_to_lossless_when_access_returns() {
             LocalFile {
                 exists: true,
                 size: 100,
+                ..Default::default()
             },
         )]),
         &[SourceStatus {

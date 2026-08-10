@@ -221,9 +221,15 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
     {
         eprint_t!("warning: could not write {}: {err}", logs::INDEX_NAME);
     }
-    logs::append_failures(dest, &outcome.failures, &clips_by_id)?;
-    let failed: HashSet<&str> = outcome
+    let mut reported_failures = outcome.failures.clone();
+    reported_failures.extend(outcome.unverifiable.iter().cloned());
+    logs::append_failures(dest, &reported_failures, &clips_by_id)?;
+    let audit_failed: HashSet<&str> = outcome
         .failures
+        .iter()
+        .map(|failure| failure.clip_id.as_str())
+        .collect();
+    let failed: HashSet<&str> = reported_failures
         .iter()
         .map(|f| f.clip_id.as_str())
         .collect();
@@ -231,7 +237,7 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
         .iter()
         .map(|d| (d.path.as_str(), d.clip.id.as_str()))
         .collect();
-    logs::append_audit(dest, &plan, &failed, &rename_owner)?;
+    logs::append_audit(dest, &plan, &audit_failed, &rename_owner)?;
     last_run::write_last_run(dest);
 
     if verbosity >= 1 {
@@ -244,6 +250,13 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
         eprint_t!(
             "warning: {} clip(s) failed after retries\n  See {} for details.",
             outcome.failures.len(),
+            dest.join(".suno-failures.log").display()
+        );
+    }
+    if !outcome.unverifiable.is_empty() && verbosity >= -1 {
+        eprint_t!(
+            "warning: {} managed file(s) could not be verified and were left untouched\n  See {} for details.",
+            outcome.unverifiable.len(),
             dest.join(".suno-failures.log").display()
         );
     }
@@ -367,12 +380,11 @@ async fn describe_run_entitlement(
     }
 }
 
-/// The inputs to [`reconcile_run`]: the loaded manifest and destination plus the
+/// The inputs to [`reconcile_run_with_local`]: the loaded manifest plus the
 /// assembled desired state and the deletion gates. Bundled so both run-mode
 /// tails build one value instead of threading ten positional arguments.
 pub(crate) struct ReconcileInputs<'a> {
     pub manifest: &'a suno_core::Manifest,
-    pub dest: &'a Path,
     pub desired: &'a [suno_core::Desired],
     pub albums_desired: &'a [AlbumDesired],
     pub albums: &'a BTreeMap<String, AlbumArt>,
@@ -383,8 +395,8 @@ pub(crate) struct ReconcileInputs<'a> {
     pub playlists_enumerated: bool,
 }
 
-/// Reconcile `desired` against `manifest` (already loaded), then append the
-/// folder-art and playlist plans.
+/// Reconcile `desired` against `manifest` and a completed local observation,
+/// then append the folder-art and playlist plans.
 ///
 /// Shared by the dry-run and executing paths. The manifest is loaded and the
 /// desired `.lrc` artifacts resolved by the caller *before* this, so reconcile
@@ -406,31 +418,94 @@ pub(crate) struct ReconcileInputs<'a> {
 /// carries the extra `library_authoritative` gate: without an authoritative
 /// Library the folder view is partial, so art is neither rewritten (the caller
 /// passes an empty `albums_desired`) nor deleted.
-pub(crate) async fn reconcile_run(inputs: &ReconcileInputs<'_>) -> suno_core::Plan {
-    let local = stat_manifest(
-        inputs.dest,
-        inputs.manifest,
-        inputs.albums,
-        inputs.playlists,
-    )
-    .await;
+pub(crate) fn reconcile_run_with_local(
+    inputs: &ReconcileInputs<'_>,
+    local: &HashMap<String, LocalFile>,
+) -> suno_core::Plan {
     let can_delete = deletion_allowed(inputs.sources);
     let art_can_delete = can_delete && inputs.library_authoritative;
-    let mut plan = reconcile(inputs.manifest, inputs.desired, &local, inputs.sources);
+    let mut plan = reconcile(inputs.manifest, inputs.desired, local, inputs.sources);
     plan.actions.extend(plan_album_artifacts(
         inputs.albums_desired,
         inputs.albums,
         art_can_delete,
-        &local,
+        local,
     ));
     plan.actions.extend(plan_playlist_artifacts(
         inputs.playlist_desired,
         inputs.playlists,
         can_delete,
         inputs.playlists_enumerated,
-        &local,
+        local,
     ));
     plan
+}
+
+/// A manifest view whose embedded-lyrics sentinels reflect the observed files.
+///
+/// This clone is used only for read-only upstream target selection. It forces a
+/// fetch when the manifest claims lyrics that are absent on disk, and avoids a
+/// fetch when a legacy manifest omitted lyrics that are already present.
+pub(crate) fn observed_resolution_manifest(
+    manifest: &suno_core::Manifest,
+    local: &HashMap<String, LocalFile>,
+) -> suno_core::Manifest {
+    let mut observed = manifest.clone();
+    for (clip_id, entry) in &mut observed.entries {
+        let lyric_artifact_drifted = [entry.lrc.as_ref(), entry.lyrics_txt.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|state| artifact_observation_drifted(state, local));
+        if lyric_artifact_drifted && let Some(check) = entry.synced_lyrics.as_mut() {
+            check.version = 0;
+        }
+
+        let Some(audio) = local.get(clip_id).and_then(|file| file.audio.as_ref()) else {
+            continue;
+        };
+        let lyrics = audio.managed.get(suno_core::ManagedField::Lyrics);
+        let actual_lyrics_hash = if lyrics.len() == 1 {
+            suno_core::content_hash(&lyrics[0])
+        } else {
+            String::new()
+        };
+        entry.embedded_lyrics_hash =
+            observed_resolution_hash(&entry.embedded_lyrics_hash, &actual_lyrics_hash);
+        let actual_timed_hash = audio
+            .timed_lyrics
+            .as_ref()
+            .map(|timed| timed.fingerprint.clone())
+            .unwrap_or_default();
+        entry.embedded_timed_lyrics_hash =
+            observed_resolution_hash(&entry.embedded_timed_lyrics_hash, &actual_timed_hash);
+    }
+    observed
+}
+
+fn artifact_observation_drifted(
+    state: &suno_core::ArtifactState,
+    local: &HashMap<String, LocalFile>,
+) -> bool {
+    let Some(file) = local.get(&state.path) else {
+        return true;
+    };
+    if !file.exists || file.size == 0 || file.unreadable {
+        return true;
+    }
+    match (state.content_hash(), file.content_hash.as_deref()) {
+        (Some(expected), Some(actual)) => expected != actual,
+        (None, Some(_) | None) | (Some(_), None) => true,
+    }
+}
+
+fn observed_resolution_hash(expected: &str, actual: &str) -> String {
+    if actual.is_empty() {
+        String::new()
+    } else if expected.is_empty() || expected == actual {
+        actual.to_owned()
+    } else {
+        String::new()
+    }
 }
 
 /// Stat every manifest path and all tracked artifact paths so reconcile can
@@ -445,19 +520,37 @@ pub(crate) async fn stat_manifest(
     albums: &BTreeMap<String, AlbumArt>,
     playlists: &BTreeMap<String, PlaylistState>,
 ) -> HashMap<String, LocalFile> {
+    #[derive(Clone, Copy)]
+    enum ProbeKind {
+        Audio(suno_core::AudioFormat),
+        Content,
+        Stat,
+    }
+
     // Collect (key, absolute_path) pairs to stat. Audio is keyed by clip_id;
     // everything else is keyed by its stored relative path, deduplicated.
-    let mut to_stat: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut to_stat: Vec<(String, std::path::PathBuf, ProbeKind)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (clip_id, entry) in manifest.iter() {
         // Audio file, keyed by clip_id (may share a path with another clip; stat separately).
-        to_stat.push((clip_id.clone(), dest.join(&entry.path)));
+        to_stat.push((
+            clip_id.clone(),
+            dest.join(&entry.path),
+            ProbeKind::Audio(entry.format),
+        ));
 
-        // Per-clip sidecars and stems, keyed by their stored path.
-        for path in entry.artifact_paths().filter(|p| !p.is_empty()) {
+        // Per-clip sidecars, keyed by their stored path and content-hashed.
+        for path in entry.sidecar_paths().filter(|p| !p.is_empty()) {
             if seen.insert(path.to_owned()) {
-                to_stat.push((path.to_owned(), dest.join(path)));
+                to_stat.push((path.to_owned(), dest.join(path), ProbeKind::Content));
+            }
+        }
+        // Stems are audio payloads. Reconcile only needs presence and size, so
+        // never stream-hash them during the metadata scan.
+        for state in entry.stems.values().filter(|state| !state.path.is_empty()) {
+            if seen.insert(state.path.clone()) {
+                to_stat.push((state.path.clone(), dest.join(&state.path), ProbeKind::Stat));
             }
         }
     }
@@ -473,14 +566,22 @@ pub(crate) async fn stat_manifest(
         .filter(|s| !s.path.is_empty())
         {
             if seen.insert(state.path.clone()) {
-                to_stat.push((state.path.clone(), dest.join(&state.path)));
+                to_stat.push((
+                    state.path.clone(),
+                    dest.join(&state.path),
+                    ProbeKind::Content,
+                ));
             }
         }
     }
 
     for state in playlists.values().filter(|s| !s.path.is_empty()) {
         if seen.insert(state.path.clone()) {
-            to_stat.push((state.path.clone(), dest.join(&state.path)));
+            to_stat.push((
+                state.path.clone(),
+                dest.join(&state.path),
+                ProbeKind::Content,
+            ));
         }
     }
 
@@ -491,18 +592,52 @@ pub(crate) async fn stat_manifest(
     // the serial loop's "last write wins" ordering exactly, so the result is
     // byte-identical even if a clip-id key ever equalled a path key.
     let mut stated: Vec<(usize, String, LocalFile)> = stream::iter(to_stat.into_iter().enumerate())
-        .map(|(idx, (key, path))| async move {
+        .map(|(idx, (key, path, probe_kind))| async move {
             // The closure discards the `metadata` error and has no panic path,
             // and the task is never aborted, so the join cannot fail. Assert it
             // rather than substituting a default: a fabricated `exists: false`
             // would silently misreport a present file as missing.
             #[allow(clippy::expect_used)]
-            let local = tokio::task::spawn_blocking(move || {
-                let meta = std::fs::metadata(&path).ok();
-                LocalFile {
-                    exists: meta.is_some(),
-                    size: meta.map(|m| m.len()).unwrap_or(0),
+            let local = tokio::task::spawn_blocking(move || match std::fs::metadata(&path) {
+                Ok(meta) => {
+                    let (content_hash, audio, unreadable) = match probe_kind {
+                        ProbeKind::Audio(format) => match std::fs::File::open(&path) {
+                            Ok(file) => {
+                                let mut reader = std::io::BufReader::new(file);
+                                match suno_core::observe(format, &mut reader) {
+                                    Ok(audio) => (None, Some(audio), false),
+                                    Err(_) => (None, None, true),
+                                }
+                            }
+                            Err(_) => (None, None, true),
+                        },
+                        ProbeKind::Content => {
+                            match std::fs::File::open(&path)
+                                .map(std::io::BufReader::new)
+                                .and_then(suno_core::reader_hash)
+                            {
+                                Ok(hash) => (Some(hash), None, false),
+                                Err(_) => (None, None, true),
+                            }
+                        }
+                        ProbeKind::Stat => (None, None, false),
+                    };
+                    LocalFile {
+                        exists: true,
+                        size: meta.len(),
+                        content_hash,
+                        audio,
+                        unreadable,
+                    }
                 }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => LocalFile::default(),
+                Err(_) => LocalFile {
+                    exists: true,
+                    size: 0,
+                    content_hash: None,
+                    audio: None,
+                    unreadable: true,
+                },
             })
             .await
             .expect("stat_manifest blocking task panicked");
@@ -520,7 +655,10 @@ pub(crate) async fn stat_manifest(
 
 /// Whether a file extension names one of the audio formats we write.
 fn is_audio_ext(ext: &str) -> bool {
-    matches!(ext.to_ascii_lowercase().as_str(), "flac" | "mp3" | "wav")
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "flac" | "mp3" | "wav" | "m4a"
+    )
 }
 
 /// Walk `dest` recursively for audio files, returning their paths relative to
@@ -597,9 +735,8 @@ mod tests {
             fully_enumerated: false,
         }];
         let manifest = logs::load_manifest(&dir).unwrap();
-        let plan = reconcile_run(&ReconcileInputs {
+        let inputs = ReconcileInputs {
             manifest: &manifest,
-            dest: &dir,
             desired: &[],
             albums_desired: &[],
             albums: &BTreeMap::new(),
@@ -608,8 +745,9 @@ mod tests {
             sources: &sources,
             library_authoritative: false,
             playlists_enumerated: false,
-        })
-        .await;
+        };
+        let local = stat_manifest(&dir, &manifest, &BTreeMap::new(), &BTreeMap::new()).await;
+        let plan = reconcile_run_with_local(&inputs, &local);
         assert!(manifest.is_empty());
         assert!(plan.actions.is_empty());
         assert!(
@@ -674,6 +812,12 @@ mod tests {
         // Sidecar, keyed by its stored path.
         assert!(local["cover.jpg"].exists);
         assert_eq!(local["cover.jpg"].size, 2);
+        assert_eq!(
+            local["cover.jpg"].content_hash.as_deref(),
+            Some(suno_core::bytes_hash(b"xy").as_str())
+        );
+        assert!(!local["cover.jpg"].unreadable);
+        assert_eq!(local["clip-present"].content_hash, None);
         // Three clips plus one sidecar, no phantom keys.
         assert_eq!(local.len(), 4);
 
@@ -718,7 +862,99 @@ mod tests {
         assert_eq!(local.len(), 1);
         assert!(local["collide.key"].exists);
         assert_eq!(local["collide.key"].size, 7);
+        assert_eq!(
+            local["collide.key"].content_hash.as_deref(),
+            Some(suno_core::bytes_hash(b"ddddddd").as_str())
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn observed_resolution_hash_adopts_matches_and_refetches_drift() {
+        assert_eq!(observed_resolution_hash("", "actual"), "actual");
+        assert_eq!(observed_resolution_hash("actual", "actual"), "actual");
+        assert_eq!(observed_resolution_hash("expected", ""), "");
+        assert_eq!(observed_resolution_hash("expected", "changed"), "");
+    }
+
+    #[test]
+    fn drifted_lyric_sidecar_forces_shared_resolution() {
+        let mut manifest = suno_core::Manifest::new();
+        manifest.insert(
+            "a",
+            suno_core::ManifestEntry {
+                lrc: Some(suno_core::ArtifactState::verified(
+                    "a.lrc", "source", "expected",
+                )),
+                synced_lyrics: Some(suno_core::SyncedLyricsCheck {
+                    version: suno_core::SYNCED_LRC_VERSION,
+                    checked_unix: 1,
+                    empty: false,
+                    timed: true,
+                    timed_version: suno_core::TIMED_LYRICS_VERSION,
+                    timing: Some(suno_core::LyricsTiming::Line),
+                }),
+                ..Default::default()
+            },
+        );
+        let local = HashMap::from([(
+            "a.lrc".to_owned(),
+            LocalFile {
+                exists: true,
+                size: 7,
+                content_hash: Some("changed".to_owned()),
+                ..Default::default()
+            },
+        )]);
+
+        let observed = observed_resolution_manifest(&manifest, &local);
+        assert_eq!(
+            observed
+                .get("a")
+                .unwrap()
+                .synced_lyrics
+                .as_ref()
+                .unwrap()
+                .version,
+            0
+        );
+    }
+
+    #[test]
+    fn duplicate_observed_lyrics_force_a_refetch() {
+        let mut tags = suno_core::ManagedTags::new();
+        tags.add(suno_core::ManagedField::Lyrics, "words");
+        tags.add(suno_core::ManagedField::Lyrics, "words");
+        let audio = suno_core::ObservedAudio {
+            format: suno_core::AudioFormat::Flac,
+            status: suno_core::TagStatus::Present,
+            managed: tags,
+            foreign: Vec::new(),
+            cover: None,
+            timed_lyrics: None,
+            entry_count: 2,
+            audio_signature: None,
+        };
+        let mut manifest = suno_core::Manifest::new();
+        manifest.insert(
+            "a",
+            suno_core::ManifestEntry {
+                embedded_lyrics_hash: suno_core::content_hash("words"),
+                ..Default::default()
+            },
+        );
+        let local = HashMap::from([(
+            "a".to_owned(),
+            LocalFile {
+                exists: true,
+                size: 100,
+                audio: Some(audio),
+                ..Default::default()
+            },
+        )]);
+
+        let observed = observed_resolution_manifest(&manifest, &local);
+        assert!(observed.get("a").unwrap().embedded_lyrics_hash.is_empty());
     }
 }

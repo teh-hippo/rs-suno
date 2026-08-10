@@ -10,7 +10,7 @@ use std::io::Cursor;
 
 use id3::TagLike;
 use id3::frame::{
-    Comment, ExtendedText, Lyrics, Picture, PictureType, SynchronisedLyrics,
+    Comment, Content, ExtendedText, Frame, Lyrics, Picture, PictureType, SynchronisedLyrics,
     SynchronisedLyricsType, TimestampFormat,
 };
 
@@ -21,7 +21,16 @@ use crate::lyrics::AlignedLyrics;
 use crate::model::Clip;
 use crate::vocab::LyricsTiming;
 
+mod flac;
+
+pub use flac::retag_flac;
+
 const LANG: &str = "eng";
+
+/// The standard ID3 text frames this crate writes and therefore owns on a
+/// retag. Any other text frame (genre, composer, encoder, and so on) belongs to
+/// the user or another tool and is carried through untouched.
+const OWNED_TEXT_FRAMES: [&str; 7] = ["TIT2", "TPE1", "TALB", "TPE2", "TDRC", "TDRL", "TRCK"];
 
 /// An embedded cover image: its raw bytes paired with its MIME type. The MIME
 /// travels with the bytes so the executor can embed an animated `image/webp`
@@ -231,6 +240,11 @@ pub fn tag_mp3_with_timing(
     tag_id3(audio, meta, cover, synced, timing, false, "ID3 tag")
 }
 
+/// Retag an existing MP3 in place, selecting line- or word-level `SYLT` timing.
+///
+/// Unlike [`tag_mp3_with_timing`], which builds a fresh tag for a newly
+/// downloaded file, this keeps every frame this crate does not own (see
+/// [`retag_id3`]).
 pub(crate) fn retag_mp3_with_timing(
     audio: &[u8],
     meta: &TrackMetadata,
@@ -239,7 +253,7 @@ pub(crate) fn retag_mp3_with_timing(
     timing: LyricsTiming,
     preserve_existing_cover: bool,
 ) -> Result<Vec<u8>> {
-    tag_id3(
+    retag_id3(
         audio,
         meta,
         cover,
@@ -383,6 +397,11 @@ pub fn tag_wav_with_timing(
     tag_id3(audio, meta, cover, synced, timing, false, "WAV ID3 tag")
 }
 
+/// Retag an existing WAV in place, selecting line- or word-level `SYLT` timing.
+///
+/// Unlike [`tag_wav_with_timing`], which builds a fresh tag for a newly
+/// downloaded file, this keeps every frame this crate does not own (see
+/// [`retag_id3`]).
 pub(crate) fn retag_wav_with_timing(
     audio: &[u8],
     meta: &TrackMetadata,
@@ -391,7 +410,7 @@ pub(crate) fn retag_wav_with_timing(
     timing: LyricsTiming,
     preserve_existing_cover: bool,
 ) -> Result<Vec<u8>> {
-    tag_id3(
+    retag_id3(
         audio,
         meta,
         cover,
@@ -405,12 +424,12 @@ pub(crate) fn retag_wav_with_timing(
 /// The shared ID3v2.4 tagging skeleton behind [`tag_mp3`] and [`tag_wav`], which
 /// differ only in the `err_context` used to label a write failure.
 ///
-/// Reads any existing tag, rebuilds the frame set from `meta` (title, artist,
-/// album, recording/release dates, comment, lyrics, and the Suno `TXXX` fields),
-/// embeds `cover` as a front-cover `APIC`, and writes the selected `SYLT` from
-/// `synced`. Because the tag is rebuilt, existing `USLT` lyrics are preserved
-/// when `meta` carries no lyrics text and existing `SYLT` frames are preserved
-/// when `synced` is `None`, so a plain retag never downgrades a timed file.
+/// Builds the frame set from `meta` (title, artist, album, recording/release
+/// dates, comment, lyrics, and the Suno `TXXX` fields), embeds `cover` as a
+/// front-cover `APIC`, and writes the selected `SYLT` from `synced`. Because the
+/// tag is rebuilt from scratch, existing `USLT` lyrics are carried over when
+/// `meta` carries no lyrics text and existing `SYLT` frames are carried over
+/// when `synced` is `None`, so a fresh tag never downgrades a timed file.
 fn tag_id3(
     audio: &[u8],
     meta: &TrackMetadata,
@@ -421,7 +440,178 @@ fn tag_id3(
     err_context: &str,
 ) -> Result<Vec<u8>> {
     let existing = id3::Tag::read_from2(Cursor::new(audio)).ok();
+    let sylt = synced.and_then(|aligned| build_sylt(aligned, timing));
+    let owned = OwnedId3::new(
+        meta,
+        cover.is_some(),
+        sylt.is_some(),
+        preserve_existing_cover,
+    );
+
     let mut tag = id3::Tag::new();
+    if let Some(existing) = &existing {
+        // A fresh tag keeps only what this run cannot supply itself: embedded
+        // lyrics, timed lyrics, and cover art.
+        carry_frames(&mut tag, existing, &owned, Carry::LyricsAndCover);
+    }
+    apply_owned_id3(&mut tag, meta, cover, sylt);
+    write_id3(&tag, audio, err_context)
+}
+
+/// The surgical retag behind [`retag_mp3_with_timing`] and
+/// [`retag_wav_with_timing`].
+///
+/// Starts from the tag already in the file and rewrites only the frames this
+/// crate owns: the standard text frames, the Suno `TXXX` descriptions, the
+/// English unnamed comment and lyrics, the English `SYLT`, and the front-cover
+/// `APIC`. Everything else (`POPM` ratings, ReplayGain `TXXX`, comments and
+/// lyrics in other languages or with their own descriptions, and frames this
+/// crate does not model at all) is carried through untouched.
+///
+/// A file with no readable tag falls back to fresh tagging, and a run that
+/// leaves the tag semantically unchanged returns the original bytes rather than
+/// rewriting them (#537).
+fn retag_id3(
+    audio: &[u8],
+    meta: &TrackMetadata,
+    cover: Option<Cover<'_>>,
+    synced: Option<&AlignedLyrics>,
+    timing: LyricsTiming,
+    preserve_existing_cover: bool,
+    err_context: &str,
+) -> Result<Vec<u8>> {
+    let Ok(existing) = id3::Tag::read_from2(Cursor::new(audio)) else {
+        return tag_id3(
+            audio,
+            meta,
+            cover,
+            synced,
+            timing,
+            preserve_existing_cover,
+            err_context,
+        );
+    };
+    let sylt = synced.and_then(|aligned| build_sylt(aligned, timing));
+    let owned = OwnedId3::new(
+        meta,
+        cover.is_some(),
+        sylt.is_some(),
+        preserve_existing_cover,
+    );
+
+    let mut tag = id3::Tag::new();
+    carry_frames(&mut tag, &existing, &owned, Carry::Unowned);
+    apply_owned_id3(&mut tag, meta, cover, sylt);
+    if tag == existing {
+        return Ok(audio.to_vec());
+    }
+    write_id3(&tag, audio, err_context)
+}
+
+/// Which existing frames a tagging pass carries into the new tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carry {
+    /// Fresh tagging: only lyrics, timed lyrics, and cover art, and only where
+    /// this run has nothing to replace them with.
+    LyricsAndCover,
+    /// Retagging: every frame this crate does not own.
+    Unowned,
+}
+
+/// The frames this run rewrites or clears, so they must not be carried over.
+struct OwnedId3<'m> {
+    meta: &'m TrackMetadata,
+    /// A new `USLT` replaces the owned one; otherwise it is kept.
+    lyrics: bool,
+    /// A new `SYLT` replaces the owned one; otherwise it is kept.
+    sylt: bool,
+    /// The owned front cover is being replaced or deliberately cleared.
+    cover: bool,
+}
+
+impl<'m> OwnedId3<'m> {
+    fn new(
+        meta: &'m TrackMetadata,
+        has_cover: bool,
+        has_sylt: bool,
+        preserve_existing_cover: bool,
+    ) -> Self {
+        Self {
+            meta,
+            lyrics: !meta.lyrics.is_empty(),
+            sylt: has_sylt,
+            cover: has_cover || !preserve_existing_cover,
+        }
+    }
+
+    /// Does this run own (and therefore rewrite or drop) `frame`?
+    fn claims(&self, frame: &Frame) -> bool {
+        match frame.content() {
+            Content::Text(_) => OWNED_TEXT_FRAMES.contains(&frame.id()),
+            Content::ExtendedText(txxx) => self
+                .meta
+                .suno_fields()
+                .iter()
+                .any(|(desc, _)| *desc == txxx.description),
+            Content::Comment(comment) => unnamed_english(&comment.lang, &comment.description),
+            Content::Lyrics(lyrics) => {
+                self.lyrics && unnamed_english(&lyrics.lang, &lyrics.description)
+            }
+            Content::SynchronisedLyrics(sylt) => {
+                self.sylt
+                    && sylt.lang == LANG
+                    && sylt.content_type == SynchronisedLyricsType::Lyrics
+            }
+            Content::Picture(picture) => {
+                self.cover && picture.picture_type == PictureType::CoverFront
+            }
+            _ => false,
+        }
+    }
+
+    /// Does a fresh tag carry `frame` over at all? It keeps the whole set of a
+    /// kind when this run has nothing to replace it with, and none of it
+    /// otherwise, which is how rebuilding the tag from scratch has always
+    /// behaved.
+    fn fresh_carries(&self, frame: &Frame) -> bool {
+        match frame.content() {
+            Content::Lyrics(_) => !self.lyrics,
+            Content::SynchronisedLyrics(_) => !self.sylt,
+            Content::Picture(_) => !self.cover,
+            _ => false,
+        }
+    }
+}
+
+/// A comment or lyrics frame with no description in this crate's language: the
+/// shape it writes, and so the only one it may overwrite.
+fn unnamed_english(lang: &str, description: &str) -> bool {
+    lang == LANG && description.is_empty()
+}
+
+/// Copy the frames `existing` keeps into `tag`, honouring the carry policy.
+fn carry_frames(tag: &mut id3::Tag, existing: &id3::Tag, owned: &OwnedId3<'_>, carry: Carry) {
+    for frame in existing.frames() {
+        let carried = match carry {
+            Carry::LyricsAndCover => owned.fresh_carries(frame),
+            Carry::Unowned => !owned.claims(frame),
+        };
+        if carried {
+            tag.add_frame(frame.clone());
+        }
+    }
+}
+
+/// Write this crate's frames into `tag`, replacing any it already holds.
+///
+/// An owned field with no value is simply not written; the caller has already
+/// dropped the stale frame, which is how a cleared field is removed on a retag.
+fn apply_owned_id3(
+    tag: &mut id3::Tag,
+    meta: &TrackMetadata,
+    cover: Option<Cover<'_>>,
+    sylt: Option<SynchronisedLyrics>,
+) {
     tag.set_title(meta.title.clone());
     tag.set_artist(meta.artist.clone());
     if !meta.album.is_empty() {
@@ -455,11 +645,6 @@ fn tag_id3(
             description: String::new(),
             text: meta.lyrics.clone(),
         });
-    } else if let Some(existing) = &existing {
-        // No new lyrics this run (a plain retag): keep any embedded USLT.
-        for lyrics in existing.lyrics() {
-            tag.add_frame(lyrics.clone());
-        }
     }
     for (desc, value) in meta.suno_fields() {
         if !value.is_empty() {
@@ -476,26 +661,14 @@ fn tag_id3(
             description: String::new(),
             data: cover.bytes.to_vec(),
         });
-    } else if preserve_existing_cover && let Some(existing) = &existing {
-        for picture in existing.pictures() {
-            tag.add_frame(picture.clone());
-        }
     }
-    match synced.and_then(|aligned| build_sylt(aligned, timing)) {
-        Some(sylt) => {
-            tag.add_frame(sylt);
-        }
-        // No new alignment this run: keep any embedded SYLT so a retag never
-        // downgrades a timed file.
-        None => {
-            if let Some(existing) = &existing {
-                for sylt in existing.synchronised_lyrics() {
-                    tag.add_frame(sylt.clone());
-                }
-            }
-        }
+    if let Some(sylt) = sylt {
+        tag.add_frame(sylt);
     }
+}
 
+/// Write `tag` into `audio`, replacing any tag already there.
+fn write_id3(tag: &id3::Tag, audio: &[u8], err_context: &str) -> Result<Vec<u8>> {
     let mut cursor = Cursor::new(audio.to_vec());
     tag.write_to_file(&mut cursor, id3::Version::Id3v24)
         .map_err(|err| Error::Tag(format!("could not write {err_context}: {err}")))?;

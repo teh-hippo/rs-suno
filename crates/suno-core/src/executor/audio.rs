@@ -185,6 +185,7 @@ where
         } = rendered;
         let wrote = if let Some(bytes) = bytes {
             let size = self.write_verify(&clip_id, &path, &bytes)?;
+            let observed = self.observe_committed_audio(&clip_id, &path, format)?;
             if let Some(from) = from_path {
                 // The new file is safely in place; only now drop the old rendering.
                 self.fs.remove(&from).map_err(|err| {
@@ -196,7 +197,11 @@ where
                     )
                 })?;
             }
-            manifest.insert(clip_id.clone(), self.entry(&clip_id, &path, format, size));
+            let mut entry = self.entry(&clip_id, &path, format, size);
+            if let Some(desired) = self.by_id.get(clip_id.as_str()).copied() {
+                self.refresh_entry_from_observation(&mut entry, desired, &observed);
+            }
+            manifest.insert(clip_id.clone(), entry);
             true
         } else {
             false

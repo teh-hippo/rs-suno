@@ -171,7 +171,11 @@ fn manifest_strategy() -> impl Strategy<Value = Manifest> {
 }
 
 fn local_file() -> impl Strategy<Value = LocalFile> {
-    (any::<bool>(), 0u64..4).prop_map(|(exists, size)| LocalFile { exists, size })
+    (any::<bool>(), 0u64..4).prop_map(|(exists, size)| LocalFile {
+        exists,
+        size,
+        ..Default::default()
+    })
 }
 
 // Probe map keyed like the CLI's `probe_local`: clip ids for audio, plus the

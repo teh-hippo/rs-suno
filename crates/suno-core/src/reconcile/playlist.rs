@@ -52,21 +52,29 @@ pub fn plan_playlist_artifacts(
 
     for d in desired {
         let stored_here = stored.get(&d.id);
-        let needs_write = needs_write_drift(
-            stored_here.map(|state| (state.hash.as_str(), state.path.as_str())),
+        let drift = write_drift(
+            stored_here.map(|state| {
+                (
+                    state.hash.as_str(),
+                    state.path.as_str(),
+                    Some(state.hash.as_str()),
+                )
+            }),
             d.hash.as_str(),
             d.path.as_str(),
+            Some(d.hash.as_str()),
             local,
         );
-        if needs_write {
-            actions.push(Action::WriteArtifact {
+        match drift {
+            WriteDrift::Write => actions.push(Action::WriteArtifact {
                 kind: ArtifactKind::Playlist,
                 path: d.path.clone(),
                 source_url: String::new(),
                 hash: d.hash.clone(),
                 owner_id: d.id.clone(),
                 content: Some(d.content.clone()),
-            });
+            }),
+            WriteDrift::Current | WriteDrift::Verify(_) => {}
         }
         // A rename changed the path: remove the old file, under the playlist gate.
         if let Some(state) = stored_here
