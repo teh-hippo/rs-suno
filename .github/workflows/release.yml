@@ -47,7 +47,7 @@ jobs:
     # exactly the dispatch case, so state the condition explicitly: run unless
     # the release leg actually failed.
     if: ${{ !cancelled() && needs.release.result != 'failure' }}
-    uses: docker/github-builder/.github/workflows/build.yml@a492c6d04fd3315f67230809b44d60cc0acd50b3 # v1
+    uses: docker/github-builder/.github/workflows/build.yml@58cb9f5b71b1836d6f690c1e95effdeb9b98cb8a # v1
     permissions:
       contents: read
       id-token: write
@@ -89,7 +89,7 @@ jobs:
 
   container-verify:
     needs: container
-    uses: docker/github-builder/.github/workflows/verify.yml@a492c6d04fd3315f67230809b44d60cc0acd50b3 # v1
+    uses: docker/github-builder/.github/workflows/verify.yml@58cb9f5b71b1836d6f690c1e95effdeb9b98cb8a # v1
     permissions:
       contents: read
       packages: read
