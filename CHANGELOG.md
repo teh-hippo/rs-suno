@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.2](https://github.com/teh-hippo/rs-suno/compare/v0.41.1...v0.41.2) (2026-08-24)
+
+
+### Bug Fixes
+
+* **ci:** limit workflow token permissions ([43c4e94](https://github.com/teh-hippo/rs-suno/commit/43c4e94d90e8ceda7176b44998b5197d611cc39c))
+
 ## [0.41.1](https://github.com/teh-hippo/rs-suno/compare/v0.41.0...v0.41.1) (2026-08-10)
 
 
