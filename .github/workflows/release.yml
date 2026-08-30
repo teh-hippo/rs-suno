@@ -31,7 +31,7 @@ jobs:
     # Tag push only: re-publishing binaries and crates.io for an existing
     # version is not idempotent, so a dispatch skips straight to the container.
     if: ${{ github.event_name == 'push' }}
-    uses: teh-hippo/common-repo-configs/.github/workflows/rust-release.yml@74d034769502f1c91c91c58b524ac912733e5c98  # v3.2.5
+    uses: teh-hippo/common-repo-configs/.github/workflows/rust-release.yml@d71c5d1def95b72227ef165825d3f6d51affa46b  # v3.2.6
     permissions:
       contents: write
       id-token: write
