@@ -730,6 +730,7 @@ mod tests {
                 AreaKind::Playlist {
                     id: "holiday".into(),
                     name: "Holiday".into(),
+                    image_url: String::new(),
                 },
                 SourceMode::Mirror,
                 &["shared", "pl-only"],

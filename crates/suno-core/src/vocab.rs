@@ -65,6 +65,8 @@ pub enum ArtifactKind {
     FolderMp4,
     /// A library-root `.m3u8` playlist (library-scoped, later phase).
     Playlist,
+    /// A static JPEG beside a library-root playlist.
+    PlaylistCoverJpg,
 }
 
 impl ArtifactKind {
@@ -82,7 +84,11 @@ impl ArtifactKind {
             Self::LyricsTxt => ".lyrics.txt",
             Self::Lrc => ".lrc",
             Self::VideoMp4 => ".mp4",
-            Self::FolderJpg | Self::FolderWebp | Self::FolderMp4 | Self::Playlist => {
+            Self::FolderJpg
+            | Self::FolderWebp
+            | Self::FolderMp4
+            | Self::Playlist
+            | Self::PlaylistCoverJpg => {
                 return None;
             }
         })
@@ -131,7 +137,7 @@ impl AudioFormat {
         !matches!(self, Self::Mp3)
     }
 
-    /// Whether an animated WebP can be embedded as this format's front cover.
+    /// Whether an animated WebP front cover and static JPEG fallback can be embedded.
     ///
     /// FLAC, MP3, and WAV embed an `image/webp` picture; ALAC (`mp4ameta` `covr`)
     /// supports only JPEG/PNG/BMP artwork, so it always embeds the static JPEG.

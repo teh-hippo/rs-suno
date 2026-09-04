@@ -126,7 +126,7 @@ pub(crate) async fn enumerate_areas(
         };
         match (&selection.playlists, playlists) {
             (PlaylistPolicy::Explicit(list), Some(pls)) => {
-                let mut to_fetch: Vec<(String, String, SourceMode)> = Vec::new();
+                let mut to_fetch: Vec<(suno_core::Playlist, SourceMode)> = Vec::new();
                 for (value, mode) in list {
                     let playlist = match resolve_playlist(value, &pls) {
                         Ok(playlist) => playlist,
@@ -145,12 +145,11 @@ pub(crate) async fn enumerate_areas(
                             continue;
                         }
                     };
-                    to_fetch.push((playlist.id.clone(), playlist.name.clone(), *mode));
+                    to_fetch.push((playlist.clone(), *mode));
                 }
                 let fetched = stream::iter(to_fetch)
-                    .map(|(id, name, mode)| async move {
-                        list_playlist_area(client, http, &id, &name, mode, narrowed, verbosity)
-                            .await
+                    .map(|(playlist, mode)| async move {
+                        list_playlist_area(client, http, playlist, mode, narrowed, verbosity).await
                     })
                     .buffered(concurrency.max(1) as usize)
                     .collect::<Vec<_>>()
@@ -158,20 +157,18 @@ pub(crate) async fn enumerate_areas(
                 areas.extend(fetched);
             }
             (PlaylistPolicy::All { default, overrides }, Some(pls)) => {
-                let to_fetch: Vec<(String, String, SourceMode)> = pls
+                let to_fetch: Vec<(suno_core::Playlist, SourceMode)> = pls
                     .iter()
                     .map(|playlist| {
                         (
-                            playlist.id.clone(),
-                            playlist.name.clone(),
+                            playlist.clone(),
                             overrides.get(&playlist.id).copied().unwrap_or(*default),
                         )
                     })
                     .collect();
                 let fetched = stream::iter(to_fetch)
-                    .map(|(id, name, mode)| async move {
-                        list_playlist_area(client, http, &id, &name, mode, narrowed, verbosity)
-                            .await
+                    .map(|(playlist, mode)| async move {
+                        list_playlist_area(client, http, playlist, mode, narrowed, verbosity).await
                     })
                     .buffered(concurrency.max(1) as usize)
                     .collect::<Vec<_>>()
@@ -200,21 +197,21 @@ pub(crate) async fn enumerate_areas(
 async fn list_playlist_area(
     client: &SunoClient<TokioClock>,
     http: &ReqwestHttp,
-    id: &str,
-    name: &str,
+    playlist: suno_core::Playlist,
     mode: SourceMode,
     narrowed: bool,
     verbosity: i8,
 ) -> AreaListing {
-    match client.get_playlist_clips(http, id).await {
+    match client.get_playlist_clips(http, &playlist.id).await {
         Ok((raw, complete)) => {
             let raw_len = raw.len();
             let clips: Vec<Clip> = raw.into_iter().filter(is_downloadable).collect();
             let any_filtered = clips.len() < raw_len;
             AreaListing::listed(
                 AreaKind::Playlist {
-                    id: id.to_owned(),
-                    name: name.to_owned(),
+                    id: playlist.id,
+                    name: playlist.name,
+                    image_url: playlist.image_url,
                 },
                 mode,
                 clips,
@@ -226,13 +223,15 @@ async fn list_playlist_area(
         Err(err) => {
             if verbosity >= -1 {
                 eprint_t!(
-                    "warning: playlist '{name}' members failed to list ({err}); suppressing deletion this run"
+                    "warning: playlist '{}' members failed to list ({err}); suppressing deletion this run",
+                    playlist.name
                 );
             }
             AreaListing::failed(
                 AreaKind::Playlist {
-                    id: id.to_owned(),
-                    name: name.to_owned(),
+                    id: playlist.id,
+                    name: playlist.name,
+                    image_url: playlist.image_url,
                 },
                 mode,
             )
@@ -289,21 +288,22 @@ pub(crate) async fn fetch_playlist_desired(
     // Own each playlist's members so the borrowed `PlaylistInput`s stay valid. A
     // playlist whose single page did not return its whole member set (D5) is
     // protected rather than rendered from a truncated page (B2).
-    let mut fetched: Vec<(String, String, Vec<Clip>)> = Vec::new();
+    let mut fetched: Vec<(String, String, String, Vec<Clip>)> = Vec::new();
     let member_results = stream::iter(playlists.iter())
         .map(|playlist| async move {
             (
                 playlist.id.clone(),
                 playlist.name.clone(),
+                playlist.image_url.clone(),
                 client.get_playlist_clips(http, &playlist.id).await,
             )
         })
         .buffered(concurrency.max(1) as usize)
         .collect::<Vec<_>>()
         .await;
-    for (id, name, result) in member_results {
+    for (id, name, image_url, result) in member_results {
         match result {
-            Ok((members, true)) => fetched.push((id, name, members)),
+            Ok((members, true)) => fetched.push((id, name, image_url, members)),
             Ok((_, false)) => {
                 if verbosity >= -1 {
                     eprint_t!(
@@ -333,6 +333,7 @@ pub(crate) async fn fetch_playlist_desired(
             fetched.push((
                 LIKED_PLAYLIST_ID.to_owned(),
                 "Liked Songs".to_owned(),
+                String::new(),
                 liked,
             ));
         }
@@ -354,9 +355,10 @@ pub(crate) async fn fetch_playlist_desired(
 
     let inputs: Vec<PlaylistInput<'_>> = fetched
         .iter()
-        .map(|(id, name, members)| PlaylistInput {
+        .map(|(id, name, image_url, members)| PlaylistInput {
             id: id.as_str(),
             name: name.as_str(),
+            image_url: image_url.as_str(),
             members: members.as_slice(),
         })
         .collect();

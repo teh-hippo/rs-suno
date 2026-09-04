@@ -1,9 +1,9 @@
-//! Playlist `.m3u8` planning: turns the desired playlists into the
+//! Playlist `.m3u8` and cover planning: turns the desired playlists into the
 //! `WriteArtifact`/`DeleteArtifact` set, with the playlist-specific delete gate.
 
 use super::*;
 
-/// Plan the `.m3u8` writes and deletes for this run's playlists.
+/// Plan the `.m3u8` and static-cover writes and deletes for this run's playlists.
 ///
 /// # Writes
 ///
@@ -76,6 +76,53 @@ pub fn plan_playlist_artifacts(
             }),
             WriteDrift::Current | WriteDrift::Verify(_) => {}
         }
+        if let Some(cover) = &d.cover_jpg {
+            let stored_cover = stored_here.and_then(|state| state.cover_jpg.as_ref());
+            match write_drift(
+                stored_cover.map(|state| {
+                    (
+                        state.source_hash(),
+                        state.path.as_str(),
+                        state.content_hash(),
+                    )
+                }),
+                cover.hash.as_str(),
+                cover.path.as_str(),
+                None,
+                local,
+            ) {
+                WriteDrift::Verify(content_hash) => actions.push(Action::VerifyArtifact {
+                    kind: cover.kind,
+                    path: stored_cover
+                        .map(|state| state.path.clone())
+                        .unwrap_or_else(|| cover.path.clone()),
+                    source_hash: cover.hash.clone(),
+                    content_hash,
+                    owner_id: d.id.clone(),
+                }),
+                WriteDrift::Write => actions.push(Action::WriteArtifact {
+                    kind: cover.kind,
+                    path: cover.path.clone(),
+                    source_url: cover.source_url.clone(),
+                    hash: cover.hash.clone(),
+                    owner_id: d.id.clone(),
+                    content: None,
+                }),
+                WriteDrift::Current => {}
+            }
+            if let Some(state) = stored_cover
+                && state.path != cover.path
+                && let Some(action) = delete_playlist_artifact_kind_action(
+                    &d.id,
+                    cover.kind,
+                    &state.path,
+                    can_delete,
+                    list_fully_enumerated,
+                )
+            {
+                actions.push(action);
+            }
+        }
         // A rename changed the path: remove the old file, under the playlist gate.
         if let Some(state) = stored_here
             && state.path != d.path
@@ -93,11 +140,23 @@ pub fn plan_playlist_artifacts(
     // Stale playlists (removed on Suno) are deleted only under the full playlist
     // gate, so a failed or partial listing never removes an existing `.m3u8` (B2).
     for (id, state) in stored {
-        if !desired_ids.contains(id.as_str())
-            && let Some(action) =
+        if !desired_ids.contains(id.as_str()) {
+            if let Some(action) =
                 delete_playlist_artifact_action(id, &state.path, can_delete, list_fully_enumerated)
-        {
-            actions.push(action);
+            {
+                actions.push(action);
+            }
+            if let Some(cover) = &state.cover_jpg
+                && let Some(action) = delete_playlist_artifact_kind_action(
+                    id,
+                    ArtifactKind::PlaylistCoverJpg,
+                    &cover.path,
+                    can_delete,
+                    list_fully_enumerated,
+                )
+            {
+                actions.push(action);
+            }
         }
     }
 
@@ -133,8 +192,24 @@ pub(crate) fn delete_playlist_artifact_action(
     can_delete: bool,
     list_fully_enumerated: bool,
 ) -> Option<Action> {
+    delete_playlist_artifact_kind_action(
+        owner_id,
+        ArtifactKind::Playlist,
+        path,
+        can_delete,
+        list_fully_enumerated,
+    )
+}
+
+fn delete_playlist_artifact_kind_action(
+    owner_id: &str,
+    kind: ArtifactKind,
+    path: &str,
+    can_delete: bool,
+    list_fully_enumerated: bool,
+) -> Option<Action> {
     (delete_gate_open(can_delete, path) && list_fully_enumerated).then(|| Action::DeleteArtifact {
-        kind: ArtifactKind::Playlist,
+        kind,
         path: path.to_string(),
         owner_id: owner_id.to_string(),
     })

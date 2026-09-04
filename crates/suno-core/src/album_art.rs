@@ -1,8 +1,8 @@
 //! Reconciled album and playlist art-file state.
 //!
 //! The sync writes album folder art (`folder.jpg`/`cover.webp`/`cover.mp4`) and
-//! per-playlist `.m3u8` sidecars beside the library, and records what it wrote
-//! here so a later reconcile rewrites only on a genuine content change. These
+//! per-playlist `.m3u8` and `.jpg` sidecars beside the library, and records what
+//! it wrote here so a later reconcile rewrites only on a genuine content change. These
 //! rows live on the durable [`LineageStore`](crate::LineageStore) (its `albums`
 //! and `playlists` maps) but are a concern distinct from the lineage graph, so
 //! the types and their store accessors live in their own module. Kept
@@ -52,7 +52,8 @@ impl AlbumArt {
             | ArtifactKind::LyricsTxt
             | ArtifactKind::Lrc
             | ArtifactKind::VideoMp4
-            | ArtifactKind::Playlist => None,
+            | ArtifactKind::Playlist
+            | ArtifactKind::PlaylistCoverJpg => None,
         }
     }
 
@@ -72,7 +73,8 @@ impl AlbumArt {
             | ArtifactKind::LyricsTxt
             | ArtifactKind::Lrc
             | ArtifactKind::VideoMp4
-            | ArtifactKind::Playlist => {}
+            | ArtifactKind::Playlist
+            | ArtifactKind::PlaylistCoverJpg => {}
         }
     }
 
@@ -83,7 +85,7 @@ impl AlbumArt {
     }
 }
 
-/// The reconciled `.m3u8` state for one playlist.
+/// The reconciled `.m3u8` and optional cover state for one playlist.
 ///
 /// A playlist's body is generated, not fetched, so its change detection is a
 /// single content hash over the full rendered text (name, order, and every
@@ -100,6 +102,9 @@ pub struct PlaylistState {
     pub path: String,
     /// The content hash of the rendered `.m3u8` this row was written from.
     pub hash: String,
+    /// The optional static playlist image beside the `.m3u8`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_jpg: Option<ArtifactState>,
 }
 
 /// Upsert (`Some`) or clear (`None`) one folder-art `kind` for the album rooted
@@ -128,20 +133,56 @@ pub(crate) fn set_album_artifact(
     }
 }
 
-/// Upsert (`Some`) or remove (`None`) the `.m3u8` state for playlist `id`, so a
-/// delete never leaves a dangling row.
-pub(crate) fn set_playlist(
+pub(crate) fn set_playlist_artifact(
     playlists: &mut BTreeMap<String, PlaylistState>,
     id: &str,
-    state: Option<PlaylistState>,
+    kind: ArtifactKind,
+    state: ArtifactState,
+    name: String,
 ) {
-    match state {
-        Some(state) => {
-            playlists.insert(id.to_owned(), state);
+    let playlist = playlists.entry(id.to_owned()).or_default();
+    match kind {
+        ArtifactKind::Playlist => {
+            let hash = state.source_hash().to_owned();
+            playlist.name = name;
+            playlist.path = state.path;
+            playlist.hash = hash;
         }
-        None => {
-            playlists.remove(id);
+        ArtifactKind::PlaylistCoverJpg => playlist.cover_jpg = Some(state),
+        _ => {}
+    }
+}
+
+pub(crate) fn clear_playlist_artifact(
+    playlists: &mut BTreeMap<String, PlaylistState>,
+    id: &str,
+    kind: ArtifactKind,
+    path: &str,
+) {
+    let remove = {
+        let Some(playlist) = playlists.get_mut(id) else {
+            return;
+        };
+        match kind {
+            ArtifactKind::Playlist if playlist.path == path => {
+                playlist.name.clear();
+                playlist.path.clear();
+                playlist.hash.clear();
+            }
+            ArtifactKind::PlaylistCoverJpg
+                if playlist
+                    .cover_jpg
+                    .as_ref()
+                    .is_some_and(|state| state.path == path) =>
+            {
+                playlist.cover_jpg = None;
+            }
+            _ => {}
         }
+        playlist.path.is_empty() && playlist.cover_jpg.is_none()
+    };
+    if remove {
+        playlists.remove(id);
     }
 }
 
@@ -280,6 +321,7 @@ mod tests {
                 name: "Road Trip".to_owned(),
                 path: "Road Trip.m3u8".to_owned(),
                 hash: "abc123".to_owned(),
+                cover_jpg: None,
             },
         );
 
@@ -296,31 +338,5 @@ mod tests {
         let stored = back.playlists.get("pl1").unwrap();
         assert_eq!(stored.name, "Road Trip");
         assert_eq!(stored.hash, "abc123");
-    }
-
-    #[test]
-    fn set_playlist_upserts_then_clears() {
-        let mut store = LineageStore::new();
-        let state = PlaylistState {
-            name: "Mix".to_owned(),
-            path: "Mix.m3u8".to_owned(),
-            hash: "h1".to_owned(),
-        };
-        set_playlist(&mut store.playlists, "pl1", Some(state.clone()));
-        assert_eq!(store.playlists.get("pl1"), Some(&state));
-
-        // A rewrite replaces the row in place.
-        let renamed = PlaylistState {
-            name: "Mix v2".to_owned(),
-            path: "Mix v2.m3u8".to_owned(),
-            hash: "h2".to_owned(),
-        };
-        set_playlist(&mut store.playlists, "pl1", Some(renamed.clone()));
-        assert_eq!(store.playlists.get("pl1"), Some(&renamed));
-
-        // Clearing removes the row so no dangling entry survives a delete.
-        set_playlist(&mut store.playlists, "pl1", None);
-        assert!(!store.playlists.contains_key("pl1"));
-        assert!(store.playlists.is_empty());
     }
 }

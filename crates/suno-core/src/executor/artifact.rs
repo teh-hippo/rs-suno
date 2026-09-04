@@ -105,6 +105,8 @@ where
                 .get(&owner_id)
                 .and_then(|a| a.artifact(kind))
                 .map(|s| s.path.clone())
+        } else if is_playlist_kind(kind) {
+            None
         } else {
             manifest
                 .get(&owner_id)
@@ -125,7 +127,9 @@ where
                 "written artifact bytes did not match the prepared content",
             ));
         }
-        self.remove_superseded(&owner_id, old_path.as_deref(), &path, guard, "sidecar")?;
+        if !is_playlist_kind(kind) {
+            self.remove_superseded(&owner_id, old_path.as_deref(), &path, guard, "sidecar")?;
+        }
         if is_album_kind(kind) {
             set_album_artifact(
                 albums,
@@ -138,14 +142,12 @@ where
                 )),
             );
         } else if is_playlist_kind(kind) {
-            set_playlist(
+            set_playlist_artifact(
                 playlists,
                 &owner_id,
-                Some(PlaylistState {
-                    name: playlist_name_from_path(&path),
-                    path: path.to_owned(),
-                    hash: hash.to_owned(),
-                }),
+                kind,
+                ArtifactState::verified(path.to_owned(), &hash, &content_hash),
+                playlist_name_from_path(&path),
             );
         } else if let Some(entry) = manifest.entries.get_mut(&owner_id) {
             set_manifest_artifact(
@@ -298,6 +300,7 @@ where
             | ArtifactKind::FolderJpg
             | ArtifactKind::FolderMp4
             | ArtifactKind::Playlist
+            | ArtifactKind::PlaylistCoverJpg
             | ArtifactKind::VideoMp4 => Ok(source),
         }
     }
@@ -336,7 +339,7 @@ where
         if is_album_kind(kind) {
             set_album_artifact(albums, owner_id, kind, None);
         } else if is_playlist_kind(kind) {
-            set_playlist(playlists, owner_id, None);
+            clear_playlist_artifact(playlists, owner_id, kind, path);
         } else if let Some(entry) = manifest.entries.get_mut(owner_id) {
             set_manifest_artifact(entry, kind, None);
         }

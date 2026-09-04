@@ -185,10 +185,7 @@ where
         } else {
             entry.set_verified_art(
                 &desired.art_hash,
-                observed
-                    .cover
-                    .as_ref()
-                    .map_or("", |cover| cover.fingerprint.as_str()),
+                &observed.managed_cover_fingerprint().unwrap_or_default(),
             );
         }
         entry.embedded_lyrics_hash = if desired.clip.lyrics.trim().is_empty() {

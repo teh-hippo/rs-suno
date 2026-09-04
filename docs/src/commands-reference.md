@@ -72,8 +72,8 @@ configured `root` is used.
 | `--min-newest <N>` | `1` | Newest clips always kept when a recency filter applies. |
 | `--retries <N>` | `3` | Download retry attempts per clip. |
 | `--concurrency <N>` | `4` | Simultaneous downloads. |
-| `--animated-covers` | off | Embed an animated WebP front cover (instead of the static JPEG) for clips with a video preview. |
-| `--video-cover-retention <neither\|webp\|mp4\|both>` | `neither` | Unified animated-cover control: `webp` embeds the animated WebP cover, `mp4` keeps the raw `cover.mp4` (no transcode), `both` does both. Overrides `--animated-covers`; the standalone music video stays on `--video-mp4`. |
+| `--animated-covers` | off | Embed an animated WebP front cover plus the current static JPEG as a managed fallback for clips with a video preview. |
+| `--video-cover-retention <neither\|webp\|mp4\|both>` | `neither` | Unified animated-cover control: `webp` embeds the animated WebP front cover plus the static JPEG fallback, `mp4` keeps the raw `cover.mp4` (no transcode), `both` does both. Overrides `--animated-covers`; the standalone music video stays on `--video-mp4`. |
 | `--animated-cover-quality <N>` | `90` | Animated WebP quality (`0..100`). The default fits the ~16 MiB FLAC picture cap; ignored with `--animated-cover-lossless`. |
 | `--animated-cover-max-fps <N>` | `24` | Animated WebP frame-rate cap. |
 | `--animated-cover-max-width <PIXELS>` | `640` | Animated WebP width cap (raise for sharper covers at the risk of a JPEG fallback on FLAC). |

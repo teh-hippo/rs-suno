@@ -33,17 +33,19 @@ where
         None
     }
 
-    /// Resolve the cover to embed in `clip`'s audio for `format`.
+    /// Resolve the cover set to embed in `clip`'s audio for `format`.
     ///
     /// When animated covers are enabled, the container can embed WebP
     /// ([`AudioFormat::embeds_animated_cover`]), and the clip has a
     /// `video_cover_url`, this fetches that MP4 preview, transcodes it to a
     /// bounded animated WebP, and — if the result fits the FLAC picture budget —
-    /// embeds it as `image/webp`. It falls back to the static JPEG (exactly what
-    /// a coverless clip embeds today) when the feature is off, the clip has no
-    /// preview, the container is ALAC, the encode overflows the budget, or the
-    /// fetch/transcode fails for any non-systemic reason. A disk-full transcode
-    /// aborts the run, like the audio transcode path.
+    /// embeds it as `image/webp` and also fetches the static JPEG as a managed
+    /// secondary picture. It falls back to the static JPEG alone when the feature
+    /// is off, the clip has no preview, the container is ALAC, the encode
+    /// overflows the budget, or the fetch/transcode fails for any non-systemic
+    /// reason. An advertised static image that cannot be fetched makes the action
+    /// retry later rather than committing animation-only output. A disk-full
+    /// transcode aborts the run, like the audio transcode path.
     pub(crate) async fn resolve_cover(
         &self,
         clip: &Clip,
@@ -55,9 +57,17 @@ where
         {
             match self.animated_cover_webp(clip).await {
                 Ok(webp) if webp.len() <= flac_picture_data_budget("image/webp") => {
+                    let static_fallback = self.fetch_cover(clip).await;
+                    if !clip.cover_candidates().is_empty() && static_fallback.is_none() {
+                        return Err(transient_fail(
+                            &clip.id,
+                            "static cover art was unavailable; retrying later",
+                        ));
+                    }
                     return Ok(Some(EmbedCover {
                         bytes: webp,
                         mime: "image/webp",
+                        static_fallback,
                     }));
                 }
                 // Oversized encode: keep the file valid by embedding the static
@@ -71,9 +81,17 @@ where
                 Err(_) => {}
             }
         }
-        Ok(self.fetch_cover(clip).await.map(|bytes| EmbedCover {
+        let cover = self.fetch_cover(clip).await;
+        if !clip.cover_candidates().is_empty() && cover.is_none() {
+            return Err(transient_fail(
+                &clip.id,
+                "static cover art was unavailable; retrying later",
+            ));
+        }
+        Ok(cover.map(|bytes| EmbedCover {
             bytes,
             mime: "image/jpeg",
+            static_fallback: None,
         }))
     }
 

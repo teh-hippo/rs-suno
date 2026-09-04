@@ -40,7 +40,9 @@ use std::time::Duration;
 use futures_util::lock::Mutex as AsyncMutex;
 use futures_util::stream::{self, StreamExt};
 
-use crate::album_art::{AlbumArt, PlaylistState, set_album_artifact, set_playlist};
+use crate::album_art::{
+    AlbumArt, PlaylistState, clear_playlist_artifact, set_album_artifact, set_playlist_artifact,
+};
 use crate::backoff::{backoff_delay, retry_after};
 use crate::client::SunoClient;
 use crate::clock::Clock;
@@ -96,9 +98,8 @@ pub struct ExecOptions {
     /// How many clips' audio to fetch, transcode, and tag concurrently. Clamped
     /// to at least one, so a zero collapses to sequential rather than stalling.
     pub concurrency: u32,
-    /// Embed a bounded animated WebP as the audio file's front cover (in place of
-    /// the static JPEG) for clips that carry a video preview. Off leaves the
-    /// static JPEG embed unchanged.
+    /// Embed a bounded animated WebP as the audio file's front cover and retain
+    /// the static JPEG as a secondary managed picture. Off embeds only the JPEG.
     pub embed_animated_cover: bool,
     /// Settings used for animated WebP cover transcodes.
     pub cover_webp: WebpEncodeSettings,
@@ -416,6 +417,7 @@ where
     // cleanup so a vacated sidecar/stem is kept only when a *successful* write
     // also targets it (#142). Serial commit order makes this a clean prefix.
     let mut committed: BTreeSet<String> = BTreeSet::new();
+    let mut failed_playlist_writes: HashSet<(ArtifactKind, String)> = HashSet::new();
 
     // Audio (Download/Reformat), fetched-artifact (WriteArtifact with no inline
     // content), and stem (WriteStem) actions all split their work to maintain the
@@ -465,6 +467,13 @@ where
     .buffered(concurrency);
 
     for action in &plan.actions {
+        if let Action::DeleteArtifact { kind, owner_id, .. } = action
+            && is_playlist_kind(*kind)
+            && failed_playlist_writes.contains(&(*kind, owner_id.clone()))
+        {
+            outcome.record(Effect::Skipped);
+            continue;
+        }
         // Prepareable actions pull their pre-fetched bytes (yielded in plan order)
         // and commit them here; every other action applies its own effect. Both the
         // serial commit and the serial apply run in the same serial loop, so all
@@ -531,6 +540,11 @@ where
                 }
             }
             Err(fail) => {
+                if let Action::WriteArtifact { kind, owner_id, .. } = action
+                    && is_playlist_kind(*kind)
+                {
+                    failed_playlist_writes.insert((*kind, owner_id.clone()));
+                }
                 let abort = abort_status(fail.class);
                 outcome.failures.push(Failure {
                     clip_id: fail.clip_id,
@@ -670,6 +684,7 @@ enum Prepared {
 struct EmbedCover {
     bytes: Vec<u8>,
     mime: &'static str,
+    static_fallback: Option<Vec<u8>>,
 }
 
 impl EmbedCover {
@@ -678,6 +693,7 @@ impl EmbedCover {
         Cover {
             bytes: &self.bytes,
             mime: self.mime,
+            static_fallback: self.static_fallback.as_deref(),
         }
     }
 }
@@ -719,7 +735,10 @@ fn is_album_kind(kind: ArtifactKind) -> bool {
 
 /// True for the library-scoped playlist artifact, routed to the playlist store.
 fn is_playlist_kind(kind: ArtifactKind) -> bool {
-    matches!(kind, ArtifactKind::Playlist)
+    matches!(
+        kind,
+        ArtifactKind::Playlist | ArtifactKind::PlaylistCoverJpg
+    )
 }
 
 /// Recover a playlist's display name from its `.m3u8` path's file stem.
@@ -832,6 +851,14 @@ where
                 let state = ArtifactState::verified(path, source_hash, content_hash);
                 if is_album_kind(*kind) {
                     set_album_artifact(albums, owner_id, *kind, Some(state));
+                } else if is_playlist_kind(*kind) {
+                    set_playlist_artifact(
+                        playlists,
+                        owner_id,
+                        *kind,
+                        state,
+                        playlist_name_from_path(path),
+                    );
                 } else if let Some(entry) = manifest.entries.get_mut(owner_id) {
                     set_manifest_artifact(entry, *kind, Some(state));
                 }

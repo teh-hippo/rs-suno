@@ -145,7 +145,7 @@ fn retag_rewrites_file_and_updates_hashes() {
 }
 
 #[test]
-fn retag_preserves_existing_cover_when_refetch_fails_and_art_is_current() {
+fn retag_retries_without_touching_file_when_static_refetch_fails() {
     let c = art_clip("cover-keep");
     let mut d = desired(c.clone(), AudioFormat::Mp3);
     d.meta_hash = "new".to_owned();
@@ -157,12 +157,12 @@ fn retag_preserves_existing_cover_when_refetch_fails_and_art_is_current() {
         None,
     )
     .unwrap();
-    let fs = MemFs::new().with_file("cover-keep.mp3", existing);
+    let fs = MemFs::new().with_file("cover-keep.mp3", existing.clone());
     let mut manifest = Manifest::new();
     let mut start = entry("cover-keep.mp3", AudioFormat::Mp3);
     start.meta_hash = "old".to_owned();
     start.art_hash = d.art_hash.clone();
-    manifest.insert("cover-keep", start);
+    manifest.insert("cover-keep", start.clone());
 
     let outcome = run(
         &retag_plan(&c, "cover-keep.mp3"),
@@ -175,11 +175,10 @@ fn retag_preserves_existing_cover_when_refetch_fails_and_art_is_current() {
         &ExecOptions::default(),
     );
 
-    assert_eq!(outcome.retagged, 1);
-    assert_eq!(outcome.failed(), 0);
-    let written = fs.read_file("cover-keep.mp3").unwrap();
-    let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
-    assert_eq!(tag.pictures().next().unwrap().data, cover);
+    assert_eq!(outcome.retagged, 0);
+    assert_eq!(outcome.failed(), 1);
+    assert_eq!(fs.read_file("cover-keep.mp3").unwrap(), existing);
+    assert_eq!(manifest.get("cover-keep"), Some(&start));
 }
 
 #[test]

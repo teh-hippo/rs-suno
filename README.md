@@ -66,9 +66,10 @@ so its plan matches the corresponding real run.
 - Rich tags: title, artist, album, date, style, model, creator, and remix
   lineage, plus embedded and folder cover art and unsynced lyrics.
 - Lineage albums that group a song with its remixes and edits.
-- Optional animated WebP covers (`--animated-covers`).
+- Optional animated WebP front covers with embedded static JPEG fallbacks
+  (`--animated-covers`).
 - Optional standalone music-video download (`--video-mp4`).
-- M3U8 playlists, including a synthetic "Liked Songs" list.
+- M3U8 playlists with Suno artwork sidecars, including a synthetic "Liked Songs" list.
 - Careful deletion safety: it never deletes on an empty, failed, partial, or
   truncated listing, and aborts a suspicious mass deletion.
 - Incremental and resumable, safe to run from cron or a systemd timer.

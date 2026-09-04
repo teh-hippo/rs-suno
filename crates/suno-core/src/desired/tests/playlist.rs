@@ -15,6 +15,7 @@ fn build_playlist_desired_orders_members_and_marks_absent() {
     let inputs = vec![PlaylistInput {
         id: "pl1",
         name: "Road/Trip",
+        image_url: "https://cdn1.suno.ai/road-trip.jpg",
         members: &members,
     }];
 
@@ -23,6 +24,9 @@ fn build_playlist_desired_orders_members_and_marks_absent() {
     let pl = &out[0];
     assert_eq!(pl.id, "pl1");
     assert_eq!(pl.path, "Road Trip.m3u8");
+    let cover = pl.cover_jpg.as_ref().unwrap();
+    assert_eq!(cover.path, "Road Trip.jpg");
+    assert_eq!(cover.source_url, "https://cdn1.suno.ai/road-trip.jpg");
     assert!(pl.content.starts_with("#EXTM3U\n#PLAYLIST:Road/Trip\n"));
 
     let pos_b = pl.content.find(path_of(&desired, "id-b")).unwrap();
@@ -47,11 +51,13 @@ fn build_playlist_desired_builds_liked_and_multiple_in_order() {
         PlaylistInput {
             id: "pl1",
             name: "First",
+            image_url: "",
             members: &members,
         },
         PlaylistInput {
             id: LIKED_PLAYLIST_ID,
             name: "Liked Songs",
+            image_url: "",
             members: &members,
         },
     ];

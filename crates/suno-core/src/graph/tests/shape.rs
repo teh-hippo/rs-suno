@@ -175,6 +175,7 @@ fn full_store_json_is_stable_across_the_split() {
             name: "Liked".to_owned(),
             path: "Liked.m3u8".to_owned(),
             hash: "pl-h".to_owned(),
+            cover_jpg: None,
         },
     );
     store.pin_owner(Owner {

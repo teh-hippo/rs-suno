@@ -110,7 +110,7 @@ pub struct DesiredStem {
 ///
 /// Carries where the sidecar should live, where to fetch it, and the content or
 /// source change hash that drives rewrite detection against the manifest.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredArtifact {
     /// Which artifact class this is.
     pub kind: ArtifactKind,
@@ -150,8 +150,8 @@ pub struct AlbumDesired {
     pub folder_mp4: Option<DesiredArtifact>,
 }
 
-/// The desired `.m3u8` target for one playlist (a Suno playlist, or the
-/// synthetic liked feed).
+/// The desired `.m3u8` and optional cover for one playlist (a Suno playlist, or
+/// the synthetic liked feed).
 ///
 /// A playlist's body is *generated* from this run's rendered audio paths, not
 /// fetched, so it is reconciled by a single content [`hash`](Self::hash) over
@@ -173,6 +173,8 @@ pub struct PlaylistDesired {
     pub content: String,
     /// The content hash over `content`, driving rewrite detection.
     pub hash: String,
+    /// The playlist's optional static JPEG sidecar.
+    pub cover_jpg: Option<DesiredArtifact>,
 }
 
 /// The caller's on-disk probe of one manifest path.

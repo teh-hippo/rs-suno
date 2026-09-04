@@ -111,7 +111,8 @@ Each download carries cover art:
 
 - **Embedded front cover** inside the audio file, so players that read embedded
   art show it. By default this is a static JPEG; with animated covers enabled it
-  becomes an animated WebP for clips that have a video preview (see below).
+  becomes an animated WebP for clips that have a video preview, with the current
+  static JPEG retained as a secondary managed picture (see below).
 - **A per-song cover** written beside each audio file, sharing the track's name
   with a `.jpg` extension. This is always the static JPEG, so folder-based
   browsers and players without WebP support still show art.
@@ -126,6 +127,14 @@ Suno clips have a short looping video preview. `rs-suno` can turn that into an
 that animates embedded art (Navidrome, for example) plays it. This is opt-in,
 because it costs an extra transcode per clip.
 
+When animation succeeds, `rs-suno` also embeds the current static JPEG as a
+secondary picture. The WebP remains the front cover, so OpenSubsonic servers
+still return it as the track image; the JPEG is an archival and compatibility
+fallback for software that reads additional embedded pictures. If Suno
+advertises a static image but it cannot be fetched, the audio file is not
+written or retagged with animation alone. The run reports a retryable partial
+failure and leaves any existing file untouched.
+
 Enable it per run with `--animated-covers`, `--video-cover-retention webp`, or
 set `video_cover_retention = "webp"` (or `animated_covers = true`) in your
 [config](configuration.md). Clips with no video preview keep the static JPEG, as
@@ -138,7 +147,8 @@ gives the best quality for the size.
 ### The FLAC size cap
 
 A FLAC picture is stored in a metadata block whose length is a 24-bit field, so a
-single embedded picture cannot exceed about 16 MiB. A lossless animated cover is
+single embedded picture cannot exceed about 16 MiB. The static JPEG occupies its
+own picture block and does not reduce that per-block limit. A lossless animated cover is
 far larger than that (a 5 s preview is around 145 MB, and even a lossless 384 px
 encode is around 34 MB), so the FLAC embed must be a **bounded lossy** encode.
 The default is **quality 90 scaled to at most 640 px** (about 11 MiB for a typical
@@ -155,10 +165,11 @@ media server serves the embedded image at full size everywhere, including grids.
 Animation renders only where the client both reads embedded art **and** decodes
 animated WebP: the Navidrome web UI in a modern browser does, while many native
 and mobile Subsonic clients show the first frame only. A player that cannot read
-a WebP embedded cover at all falls back to the `.jpg` per-song cover or
-`folder.jpg`, so a library never loses its static art. The animated cover is
-stored once per track (embedded), so enabling it grows every animated track by
-roughly the encoded cover size.
+a WebP embedded cover at all may use the secondary embedded JPEG, the `.jpg`
+per-song cover, or `folder.jpg`. OpenSubsonic exposes one selected image rather
+than negotiating by client capability, so a client that can decode WebP but does
+not animate it normally shows the WebP's first frame. Enabling animation grows
+each animated track by the encoded WebP plus one static JPEG.
 
 ### Lossless covers
 

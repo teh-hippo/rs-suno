@@ -48,6 +48,7 @@ pub struct ArtifactToggles {
 pub struct PlaylistInput<'a> {
     pub id: &'a str,
     pub name: &'a str,
+    pub image_url: &'a str,
     pub members: &'a [Clip],
 }
 
@@ -441,13 +442,22 @@ pub fn build_playlist_desired(
                 .collect();
             let content = render_m3u8(input.name, &entries);
             let hash = content_hash(&content);
-            let path = format!("{}.m3u8", sanitise_name(input.name));
+            let base = sanitise_name(input.name);
+            let path = format!("{base}.m3u8");
+            let cover_jpg = (!input.image_url.is_empty()).then(|| DesiredArtifact {
+                kind: ArtifactKind::PlaylistCoverJpg,
+                path: format!("{base}.jpg"),
+                source_url: input.image_url.to_owned(),
+                hash: art_url_hash(input.image_url),
+                content: None,
+            });
             PlaylistDesired {
                 id: input.id.to_owned(),
                 name: input.name.to_owned(),
                 path,
                 content,
                 hash,
+                cover_jpg,
             }
         })
         .collect()

@@ -7,6 +7,8 @@ against your mirrored library.
 
 - **One playlist per Suno playlist.** Each of your playlists is written as an
   extended M3U8 file, with its members in the order Suno holds them.
+- **The Suno playlist image.** When Suno exposes `image_url`, a same-basename
+  `.jpg` is written beside the `.m3u8`.
 - **A synthetic "Liked Songs" playlist.** Your liked clips are written as a
   `Liked Songs.m3u8`, in order, even though Suno has no explicit playlist for
   them.
@@ -14,6 +16,11 @@ against your mirrored library.
 Playlist files are written at the root of the destination directory. Each file
 is named after the playlist, made safe for the filesystem, with an `.m3u8`
 extension.
+
+For example, `Neon Nights.m3u8` and `Neon Nights.jpg` form one playlist and
+cover pair. Navidrome 0.63.2 discovers this sidecar natively, so no server API
+credentials or `#EXTALBUMARTURL` directive are required. The synthetic
+`Liked Songs.m3u8` has no image unless Suno later exposes one for that feed.
 
 ## Format
 
@@ -46,9 +53,11 @@ the member's own title. The rest of the playlist stays valid and in order.
   written half-empty. The synthetic "Liked Songs" playlist is likewise only
   written when the liked feed was fully enumerated.
 
-Playlists are regular mirror artefacts: they are rewritten when their name,
-order, or any member's path, title, or duration changes, and kept in step by
-every full `sync` or `copy`.
+Playlists are regular mirror artefacts: their `.m3u8` files are rewritten when
+their name, order, or any member's path, title, or duration changes. A playlist
+image is refreshed when its Suno URL changes or the local `.jpg` is missing.
+A failed image fetch leaves the previous cover untouched. Removing or renaming
+playlist files and covers uses the same fully enumerated deletion gates.
 
 A scoped run (`--liked` or `--playlist`) maintains only the selected areas'
 `.m3u8` files. A liked-only run refreshes `Liked Songs.m3u8`; a playlist-scoped

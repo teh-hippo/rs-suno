@@ -206,7 +206,7 @@ pub fn embedded_art_hash(
 ) -> String {
     if embed_animated && !clip.video_cover_url.is_empty() {
         let mut hasher = fnv::FnvHasher::default();
-        hasher.write(b"webp-embed\0");
+        hasher.write(b"webp-static-embed-v2\0");
         hasher.write(clip.video_cover_url.as_bytes());
         hasher.write_u8(0);
         hasher.write(clip.selected_image_url().unwrap_or("").as_bytes());

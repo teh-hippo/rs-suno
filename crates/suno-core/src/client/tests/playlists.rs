@@ -29,6 +29,7 @@ fn get_playlists_maps_entries_and_skips_missing_ids() {
             id: "pl1".to_owned(),
             name: "Road Trip".to_owned(),
             num_clips: 12,
+            image_url: String::new(),
         }
     );
 }
