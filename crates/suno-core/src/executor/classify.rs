@@ -16,6 +16,9 @@ pub(super) enum Class {
     /// The authenticated account cannot use the requested paid operation.
     /// Audio preparation may recover with a native MP3 fallback.
     Entitlement,
+    /// This clip's rendered lossless asset stayed unavailable after refresh.
+    /// Fall back this clip without disabling lossless for the rest of the run.
+    LosslessRejected,
     /// Retry a bounded number of times, then record and skip.
     Transient,
     /// Record and skip immediately.
@@ -35,7 +38,7 @@ pub(super) fn abort_status(class: Class) -> Option<RunStatus> {
     match class {
         Class::Auth => Some(RunStatus::AuthAborted),
         Class::Disk => Some(RunStatus::DiskFull),
-        Class::Entitlement | Class::Transient | Class::Permanent => None,
+        Class::Entitlement | Class::LosslessRejected | Class::Transient | Class::Permanent => None,
     }
 }
 
@@ -107,6 +110,7 @@ pub(super) struct FetchError {
     pub(super) class: Class,
     reason: String,
     pub(super) retry_after: Option<Duration>,
+    pub(super) rejected: bool,
 }
 
 impl FetchError {
@@ -115,6 +119,16 @@ impl FetchError {
             class: Class::Transient,
             reason: reason.into(),
             retry_after,
+            rejected: false,
+        }
+    }
+
+    fn rejected(status: u16) -> Self {
+        Self {
+            class: Class::Transient,
+            reason: format!("download rejected: status {status}"),
+            retry_after: None,
+            rejected: true,
         }
     }
 
@@ -123,12 +137,21 @@ impl FetchError {
             class: Class::Permanent,
             reason: reason.into(),
             retry_after: None,
+            rejected: false,
         }
     }
 
     pub(super) fn attribute(self, clip_id: &str) -> Fail {
         Fail {
             class: self.class,
+            clip_id: clip_id.to_owned(),
+            reason: self.reason,
+        }
+    }
+
+    pub(super) fn into_lossless_fallback(self, clip_id: &str) -> Fail {
+        Fail {
+            class: Class::LosslessRejected,
             clip_id: clip_id.to_owned(),
             reason: self.reason,
         }
@@ -161,10 +184,7 @@ pub(super) fn classify_response(
             }
             Ok(response.body)
         }
-        401 | 403 => Err(FetchError::transient(
-            format!("download rejected: status {}", response.status),
-            None,
-        )),
+        401 | 403 => Err(FetchError::rejected(response.status)),
         408 => Err(FetchError::transient("request timed out", None)),
         429 => Err(FetchError::transient(
             "rate limited",

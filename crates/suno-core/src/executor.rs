@@ -55,7 +55,6 @@ use crate::lyrics::AlignedLyrics;
 use crate::manifest::{ArtifactState, Manifest, ManifestEntry};
 use crate::model::Clip;
 use crate::observed::ObservedAudio;
-use crate::pathkey::same_fs_path;
 use crate::reconcile::{Action, Desired, Plan, set_manifest_artifact, set_manifest_stem};
 use crate::tag::{
     Cover, TrackMetadata, flac_picture_data_budget, retag_flac, retag_mp3_with_timing,
@@ -1090,22 +1089,37 @@ where
 
     /// GET `url`, retrying transient failures with backoff, verifying size.
     async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, FetchError> {
+        let result = self.fetch_bytes_once(url).await;
+        self.retry_fetch_bytes(url, result).await
+    }
+
+    /// Continue a fetch after its first attempt has already been classified.
+    async fn retry_fetch_bytes(
+        &self,
+        url: &str,
+        mut result: Result<Vec<u8>, FetchError>,
+    ) -> Result<Vec<u8>, FetchError> {
         let mut attempt: u32 = 0;
         loop {
-            let result = self.http.send(HttpRequest::get(url)).await;
-            match classify_response(result) {
+            match result {
                 Ok(body) => return Ok(body),
                 Err(err) => {
                     if matches!(err.class, Class::Transient) && attempt < self.opts.max_retries {
                         let delay = backoff_delay(attempt, err.retry_after);
                         self.clock.sleep(delay).await;
                         attempt += 1;
-                        continue;
+                        result = self.fetch_bytes_once(url).await;
+                    } else {
+                        return Err(err);
                     }
-                    return Err(err);
                 }
             }
         }
+    }
+
+    /// GET `url` once so callers that can refresh an expired URL own the retry.
+    async fn fetch_bytes_once(&self, url: &str) -> Result<Vec<u8>, FetchError> {
+        classify_response(self.http.send(HttpRequest::get(url)).await)
     }
 
     /// Write `bytes` atomically, then confirm the on-disk size (SYNC-13/14).
