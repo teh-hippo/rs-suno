@@ -270,6 +270,281 @@ fn download_flac_renders_transcodes_and_records() {
 }
 
 #[test]
+fn download_flac_refreshes_a_rejected_signed_url() {
+    let (_c, d, action) = download("expired", AudioFormat::Flac);
+    let plan = Plan {
+        actions: vec![action],
+    };
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route_seq(
+            "/wav_file/",
+            vec![
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/expired.wav"}"#),
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/fresh.wav"}"#),
+            ],
+        )
+        .route("/convert_wav/", Reply::status(200))
+        .route("expired.wav", Reply::status(403))
+        .route("fresh.wav", Reply::ok(b"wav".to_vec()));
+    let clock = RecordingClock::new();
+    let mut manifest = Manifest::new();
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d],
+        &http,
+        &fs_new(),
+        &StubFfmpeg::flac(),
+        &clock,
+        &small_poll(),
+    );
+
+    assert_eq!(outcome.downloaded, 1);
+    assert_eq!(outcome.failed(), 0);
+    assert_eq!(http.count("expired.wav"), 1);
+    assert_eq!(http.count("fresh.wav"), 1);
+    assert_eq!(http.count("/convert_wav/"), 1);
+    assert_eq!(http.count("/wav_file/"), 2);
+    assert_eq!(clock.sleeps(), vec![Duration::from_secs(5)]);
+}
+
+#[test]
+fn download_flac_retries_a_rejected_refreshed_url() {
+    let (_c, d, action) = download("retry", AudioFormat::Flac);
+    let plan = Plan {
+        actions: vec![action],
+    };
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route_seq(
+            "/wav_file/",
+            vec![
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/old.wav"}"#),
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/new.wav"}"#),
+            ],
+        )
+        .route("/convert_wav/", Reply::status(200))
+        .route("old.wav", Reply::status(403))
+        .route_seq(
+            "new.wav",
+            vec![Reply::status(403), Reply::ok(b"wav".to_vec())],
+        );
+    let clock = RecordingClock::new();
+    let mut manifest = Manifest::new();
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d],
+        &http,
+        &fs_new(),
+        &StubFfmpeg::flac(),
+        &clock,
+        &small_poll(),
+    );
+
+    assert_eq!(outcome.downloaded, 1);
+    assert_eq!(outcome.failed(), 0);
+    assert_eq!(http.count("old.wav"), 1);
+    assert_eq!(http.count("new.wav"), 2);
+    assert_eq!(http.count("/convert_wav/"), 1);
+    assert_eq!(
+        clock.sleeps(),
+        vec![Duration::from_secs(5), Duration::from_secs(1)]
+    );
+}
+
+#[test]
+fn download_flac_waits_for_the_rejected_url_to_change() {
+    let (_c, d, action) = download("cached", AudioFormat::Flac);
+    let plan = Plan {
+        actions: vec![action],
+    };
+    let stale = r#"{"wav_file_url": "https://cdn1.suno.ai/stale.wav"}"#;
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route_seq(
+            "/wav_file/",
+            vec![
+                Reply::json(stale),
+                Reply::json(stale),
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/fresh.wav"}"#),
+            ],
+        )
+        .route("/convert_wav/", Reply::status(200))
+        .route("stale.wav", Reply::status(403))
+        .route("fresh.wav", Reply::ok(b"wav".to_vec()));
+    let clock = RecordingClock::new();
+    let mut manifest = Manifest::new();
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d],
+        &http,
+        &fs_new(),
+        &StubFfmpeg::flac(),
+        &clock,
+        &small_poll(),
+    );
+
+    assert_eq!(outcome.downloaded, 1);
+    assert_eq!(outcome.failed(), 0);
+    assert_eq!(http.count("stale.wav"), 1);
+    assert_eq!(http.count("fresh.wav"), 1);
+    assert_eq!(http.count("/wav_file/"), 3);
+    assert_eq!(
+        clock.sleeps(),
+        vec![Duration::from_secs(5), Duration::from_secs(5)]
+    );
+}
+
+#[test]
+fn rejected_original_and_fresh_wav_fall_back_only_that_clip_to_mp3() {
+    let (_c1, d1, action1) = download("denied", AudioFormat::Flac);
+    let (_c2, d2, action2) = download("healthy", AudioFormat::Flac);
+    let plan = Plan {
+        actions: vec![action1, action2],
+    };
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route_seq(
+            "/gen/denied/wav_file/",
+            vec![
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/old.wav"}"#),
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/fresh.wav"}"#),
+            ],
+        )
+        .route(
+            "/gen/healthy/wav_file/",
+            Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/healthy.wav"}"#),
+        )
+        .route("/convert_wav/", Reply::status(200))
+        .route("old.wav", Reply::status(403))
+        .route("fresh.wav", Reply::status(403))
+        .route("denied.mp3", Reply::ok(b"mp3".to_vec()))
+        .route("healthy.wav", Reply::ok(b"wav".to_vec()));
+    let fs = MemFs::new();
+    let mut manifest = Manifest::new();
+    let mut opts = small_poll();
+    opts.concurrency = 1;
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d1, d2],
+        &http,
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &opts,
+    );
+
+    assert_eq!(outcome.downloaded, 2);
+    assert!(outcome.failures.is_empty());
+    assert_eq!(outcome.fallbacks.len(), 1);
+    assert!(outcome.fallbacks[0].reason.contains("status 403"));
+    assert!(fs.exists("denied.mp3"));
+    assert!(!fs.exists("denied.flac"));
+    assert_eq!(manifest.get("denied").unwrap().format, AudioFormat::Mp3);
+    assert!(fs.exists("healthy.flac"));
+    assert_eq!(manifest.get("healthy").unwrap().format, AudioFormat::Flac);
+}
+
+#[test]
+fn rejected_lossless_upgrade_preserves_the_existing_mp3() {
+    let c = clip("preserve");
+    let d = desired(c.clone(), AudioFormat::Flac);
+    let plan = Plan {
+        actions: vec![Action::Reformat {
+            clip: c,
+            path: "preserve.flac".to_owned(),
+            from_path: "preserve.mp3".to_owned(),
+            from: AudioFormat::Mp3,
+            to: AudioFormat::Flac,
+        }],
+    };
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route_seq(
+            "/wav_file/",
+            vec![
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/old.wav"}"#),
+                Reply::json(r#"{"wav_file_url": "https://cdn1.suno.ai/fresh.wav"}"#),
+            ],
+        )
+        .route("/convert_wav/", Reply::status(200))
+        .route("old.wav", Reply::status(403))
+        .route("fresh.wav", Reply::status(403));
+    let fs = MemFs::new().with_file("preserve.mp3", b"EXISTING".to_vec());
+    let mut manifest = Manifest::new();
+    let before = entry("preserve.mp3", AudioFormat::Mp3);
+    manifest.insert("preserve", before.clone());
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d],
+        &http,
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &small_poll(),
+    );
+
+    assert!(outcome.failures.is_empty());
+    assert_eq!(outcome.fallbacks.len(), 1);
+    assert_eq!(outcome.skipped, 1);
+    assert_eq!(fs.read_file("preserve.mp3"), Some(b"EXISTING".to_vec()));
+    assert!(!fs.exists("preserve.flac"));
+    assert_eq!(manifest.get("preserve"), Some(&before));
+    assert_eq!(http.count("preserve.mp3"), 0);
+}
+
+#[test]
+fn transient_lossless_upgrade_preserves_the_existing_mp3() {
+    let c = clip("transient");
+    let d = desired(c.clone(), AudioFormat::Flac);
+    let plan = Plan {
+        actions: vec![Action::Reformat {
+            clip: c,
+            path: "transient.flac".to_owned(),
+            from_path: "transient.mp3".to_owned(),
+            from: AudioFormat::Mp3,
+            to: AudioFormat::Flac,
+        }],
+    };
+    let http = ScriptedHttp::new()
+        .with_auth()
+        .route("/wav_file/", Reply::json("{}"))
+        .route("/convert_wav/", Reply::status(200));
+    let fs = MemFs::new().with_file("transient.mp3", b"EXISTING".to_vec());
+    let mut manifest = Manifest::new();
+    let before = entry("transient.mp3", AudioFormat::Mp3);
+    manifest.insert("transient", before.clone());
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d],
+        &http,
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &small_poll(),
+    );
+
+    assert!(outcome.failures.is_empty());
+    assert_eq!(outcome.fallbacks.len(), 1);
+    assert_eq!(outcome.skipped, 1);
+    assert_eq!(fs.read_file("transient.mp3"), Some(b"EXISTING".to_vec()));
+    assert!(!fs.exists("transient.flac"));
+    assert_eq!(manifest.get("transient"), Some(&before));
+}
+
+#[test]
 fn download_flac_requests_render_then_polls_until_ready() {
     let (_c, d, action) = download("c", AudioFormat::Flac);
     let plan = Plan {
@@ -522,6 +797,8 @@ fn entitlement_refusal_keeps_prior_fallback_mp3_as_the_upgrade_baseline() {
     assert_eq!(outcome.fallbacks.len(), 1);
     assert!(fs.exists("upgrade.mp3"));
     assert!(!fs.exists("upgrade.flac"));
+    assert_eq!(fs.read_file("upgrade.mp3"), Some(b"OLD".to_vec()));
+    assert_eq!(http.count("upgrade.mp3"), 0);
     assert_eq!(manifest.get("upgrade").unwrap().format, AudioFormat::Mp3);
     assert_eq!(manifest.get("upgrade").unwrap().path, "upgrade.mp3");
 }

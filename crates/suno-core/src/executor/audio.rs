@@ -40,8 +40,12 @@ where
                 };
                 let (bytes, actual_path, actual_format, fallback) = match result {
                     Ok(bytes) => (Some(bytes), path.clone(), *format, None),
-                    Err(fail) if matches!(fail.class, Class::Entitlement) => {
-                        self.lossless_unavailable.store(true, Ordering::Release);
+                    Err(fail)
+                        if matches!(fail.class, Class::Entitlement | Class::LosslessRejected) =>
+                    {
+                        if matches!(fail.class, Class::Entitlement) {
+                            self.lossless_unavailable.store(true, Ordering::Release);
+                        }
                         let actual_path = audio_path_with_format(path, *format, AudioFormat::Mp3);
                         let bytes = self
                             .produce_audio(client_lock, clip, lineage, AudioFormat::Mp3)
@@ -100,34 +104,37 @@ where
                         None,
                     ),
                     Err(fail)
-                        if matches!(fail.class, Class::Entitlement)
-                            && *from == AudioFormat::Mp3 =>
+                        if *from == AudioFormat::Mp3
+                            && matches!(
+                                fail.class,
+                                Class::Entitlement | Class::LosslessRejected | Class::Transient
+                            ) =>
                     {
-                        self.lossless_unavailable.store(true, Ordering::Release);
-                        let actual_path = audio_path_with_format(path, *to, AudioFormat::Mp3);
-                        let bytes = self
-                            .produce_audio(client_lock, clip, &lineage, AudioFormat::Mp3)
-                            .await?;
-                        let cleanup =
-                            (!same_fs_path(&actual_path, from_path)).then(|| from_path.clone());
+                        if matches!(fail.class, Class::Entitlement) {
+                            self.lossless_unavailable.store(true, Ordering::Release);
+                        }
                         let fallback = AudioFallback {
                             clip_id: clip.id.clone(),
                             requested_path: path.clone(),
-                            actual_path: actual_path.clone(),
-                            format: AudioFormat::Mp3,
+                            actual_path: from_path.clone(),
+                            format: *from,
                             reason: fail.reason,
                         };
                         (
-                            Some(bytes),
-                            actual_path,
-                            AudioFormat::Mp3,
-                            cleanup,
-                            AudioEffect::Reformatted,
+                            None,
+                            from_path.clone(),
+                            *from,
+                            None,
+                            AudioEffect::Skipped,
                             Some(fallback),
                         )
                     }
-                    Err(fail) if matches!(fail.class, Class::Entitlement) => {
-                        self.lossless_unavailable.store(true, Ordering::Release);
+                    Err(fail)
+                        if matches!(fail.class, Class::Entitlement | Class::LosslessRejected) =>
+                    {
+                        if matches!(fail.class, Class::Entitlement) {
+                            self.lossless_unavailable.store(true, Ordering::Release);
+                        }
                         let fallback = AudioFallback {
                             clip_id: clip.id.clone(),
                             requested_path: path.clone(),
@@ -292,13 +299,55 @@ where
         client_lock: &ClientLock<'_, C>,
         clip: &Clip,
     ) -> Result<Vec<u8>, Fail> {
-        let url = match self.resolve_wav_url(client_lock, &clip.id).await? {
+        self.fetch_rendered_wav(client_lock, &clip.id).await
+    }
+
+    /// Resolve and download a rendered WAV, refreshing a rejected signed URL once.
+    pub(crate) async fn fetch_rendered_wav(
+        &self,
+        client_lock: &ClientLock<'_, C>,
+        id: &str,
+    ) -> Result<Vec<u8>, Fail> {
+        let url = match self.resolve_wav_url(client_lock, id).await? {
             Some(url) => url,
-            None => return Err(transient_fail(&clip.id, "WAV render was not ready")),
+            None => return Err(transient_fail(id, "WAV render was not ready")),
         };
-        self.fetch_bytes(&url)
-            .await
-            .map_err(|err| err.attribute(&clip.id))
+        match self.fetch_bytes_once(&url).await {
+            Ok(wav) => Ok(wav),
+            Err(err) if err.rejected => {
+                let refreshed = match self.refresh_wav_url(client_lock, id, &url).await? {
+                    Some(url) => url,
+                    None => return Err(transient_fail(id, "WAV render URL did not refresh")),
+                };
+                match self.fetch_bytes(&refreshed).await {
+                    Err(err) if err.rejected => Err(err.into_lossless_fallback(id)),
+                    result => result.map_err(|err| err.attribute(id)),
+                }
+            }
+            result => self
+                .retry_fetch_bytes(&url, result)
+                .await
+                .map_err(|err| err.attribute(id)),
+        }
+    }
+
+    /// Request a fresh signed WAV URL after the provider rejected the old one.
+    async fn refresh_wav_url(
+        &self,
+        client_lock: &ClientLock<'_, C>,
+        id: &str,
+        rejected_url: &str,
+    ) -> Result<Option<String>, Fail> {
+        self.request_wav_retrying(client_lock, id).await?;
+        for _ in 0..self.opts.wav_poll_attempts {
+            self.clock.sleep(self.opts.wav_poll_interval).await;
+            if let Some(url) = self.wav_url_retrying(client_lock, id).await?
+                && url != rejected_url
+            {
+                return Ok(Some(url));
+            }
+        }
+        Ok(None)
     }
 
     /// Read the WAV URL, requesting a render and polling if it is not ready.

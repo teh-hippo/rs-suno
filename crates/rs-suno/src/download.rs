@@ -21,7 +21,7 @@ pub async fn get_bytes(http: &impl Http, url: &str) -> Result<Vec<u8>> {
         .await
         .map_err(|err| anyhow::anyhow!("request failed: {err}"))?;
     if !(200..=299).contains(&response.status) {
-        bail!("download failed for {url}: status {}", response.status);
+        bail!("download failed: status {}", response.status);
     }
     Ok(response.body)
 }

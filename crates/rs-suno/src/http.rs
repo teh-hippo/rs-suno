@@ -4,26 +4,31 @@ use std::future::Future;
 
 use suno_core::{Http, HttpRequest, HttpResponse, Method, TransportError};
 
-const USER_AGENT: &str = concat!("rs-suno/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!(
+    "rs-suno/",
+    env!("CARGO_PKG_VERSION"),
+    env!("SUNO_VERSION_SUFFIX")
+);
 
-/// Suno-controlled domains this client is allowed to reach. Every request the
-/// tool makes -- the Suno API, Clerk auth, and CDN downloads -- targets one of
-/// these, so confining egress to them turns a hostile API-supplied download URL
-/// (`image_url`, `audio_url`, a redirect, ...) into a rejected request rather
-/// than an SSRF to an internal or link-local address (#246).
+/// Domains this client is allowed to reach. Broad suffix matching is confined
+/// to Suno's own domains; provider storage is admitted only by exact hostname.
+/// This turns a hostile API-supplied download URL (`image_url`, `audio_url`, a
+/// redirect, ...) into a rejected request rather than an SSRF (#246).
 const ALLOWED_HOSTS: [&str; 2] = ["suno.ai", "suno.com"];
+const ALLOWED_EXACT_HOSTS: [&str; 1] = ["suno-data-uploads.s3.amazonaws.com"];
 
-/// Whether `host` is a Suno-controlled host: one of [`ALLOWED_HOSTS`] exactly,
-/// or a subdomain of one. Case- and trailing-dot-insensitive.
+/// Whether `host` is an exact provider host or a Suno domain/subdomain.
+/// Case- and trailing-dot-insensitive.
 fn host_allowed(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
-    ALLOWED_HOSTS.iter().any(|base| {
-        host == *base
-            || host
-                .strip_suffix(base)
-                .and_then(|label| label.strip_suffix('.'))
-                .is_some()
-    })
+    ALLOWED_EXACT_HOSTS.contains(&host.as_str())
+        || ALLOWED_HOSTS.iter().any(|base| {
+            host == *base
+                || host
+                    .strip_suffix(base)
+                    .and_then(|label| label.strip_suffix('.'))
+                    .is_some()
+        })
 }
 
 /// Whether `url` is an `https` request to an allow-listed Suno host. Parsing is
@@ -141,6 +146,21 @@ mod tests {
         assert!(allowed("https://CDN1.SUNO.AI/a.mp3"));
         // A fully-qualified trailing dot resolves to the same host.
         assert!(allowed("https://cdn1.suno.ai./a.mp3"));
+    }
+
+    #[test]
+    fn allows_only_the_exact_suno_s3_bucket() {
+        assert!(allowed(
+            "https://suno-data-uploads.s3.amazonaws.com/render.wav"
+        ));
+        assert!(allowed(
+            "https://SUNO-DATA-UPLOADS.S3.AMAZONAWS.COM./render.wav"
+        ));
+        assert!(!allowed("https://s3.amazonaws.com/render.wav"));
+        assert!(!allowed("https://other-bucket.s3.amazonaws.com/render.wav"));
+        assert!(!allowed(
+            "https://suno-data-uploads.s3.amazonaws.com.evil.com/render.wav"
+        ));
     }
 
     #[test]
