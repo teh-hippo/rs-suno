@@ -14,7 +14,7 @@ use crate::cli::logs;
 pub fn run_version(global: &GlobalArgs) -> Result<ExitCode> {
     println!(
         "suno {} ({})",
-        env!("CARGO_PKG_VERSION"),
+        concat!(env!("CARGO_PKG_VERSION"), env!("SUNO_VERSION_SUFFIX")),
         env!("SUNO_TARGET")
     );
     match logs::config_path(global.config.as_deref()) {

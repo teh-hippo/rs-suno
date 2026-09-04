@@ -39,7 +39,7 @@ pub async fn run_doctor(global: &GlobalArgs) -> Result<ExitCode> {
     writeln!(
         out,
         "suno {} ({})",
-        env!("CARGO_PKG_VERSION"),
+        concat!(env!("CARGO_PKG_VERSION"), env!("SUNO_VERSION_SUFFIX")),
         env!("SUNO_TARGET")
     )
     .ok();
