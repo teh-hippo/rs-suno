@@ -164,7 +164,7 @@ fn int_tolerant(value: &Value, key: &str) -> Option<i64> {
 }
 
 /// Read a CDN URL field, rewriting the unreliable `cdn2` host to `cdn1`.
-fn cdn(value: &Value, key: &str) -> String {
+pub(super) fn cdn(value: &Value, key: &str) -> String {
     let url = string(value, key);
     if url.contains("cdn2.suno.ai") {
         url.replace("cdn2.suno.ai", "cdn1.suno.ai")

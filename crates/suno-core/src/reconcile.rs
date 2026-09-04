@@ -325,7 +325,8 @@ fn removed_kind_delete_eligible(kind: ArtifactKind) -> bool {
         | ArtifactKind::FolderJpg
         | ArtifactKind::FolderWebp
         | ArtifactKind::FolderMp4
-        | ArtifactKind::Playlist => true,
+        | ArtifactKind::Playlist
+        | ArtifactKind::PlaylistCoverJpg => true,
     }
 }
 
@@ -375,7 +376,8 @@ pub(crate) fn set_manifest_artifact(
         ArtifactKind::FolderJpg
         | ArtifactKind::FolderWebp
         | ArtifactKind::FolderMp4
-        | ArtifactKind::Playlist => {}
+        | ArtifactKind::Playlist
+        | ArtifactKind::PlaylistCoverJpg => {}
     }
 }
 
@@ -1265,16 +1267,13 @@ fn audio_reconcile_state(
                 || timed.fingerprint != d.embedded_timed_lyrics_hash
         });
 
-    let observed_art_hash = observed
-        .cover
-        .as_ref()
-        .map(|cover| cover.fingerprint.as_str());
+    let observed_art_hash = observed.managed_cover_fingerprint();
     let art_changed = if d.art_hash.is_empty() {
         observed_art_hash.is_some()
     } else if entry.art_source_hash() != d.art_hash {
         true
     } else {
-        match (entry.art_content_hash(), observed_art_hash) {
+        match (entry.art_content_hash(), observed_art_hash.as_deref()) {
             (Some(expected), Some(actual)) => expected != actual,
             (Some(expected), None) => !expected.is_empty(),
             (None, Some(_) | None) => false,
@@ -1293,7 +1292,7 @@ fn audio_reconcile_state(
     let verified_art_content_hash = if d.art_hash.is_empty() {
         None
     } else {
-        Some(observed_art_hash.unwrap_or_default().to_owned())
+        Some(observed_art_hash.unwrap_or_default())
     };
     let provenance_changed = entry.meta_hash != d.meta_hash
         || entry.art_source_hash() != d.art_hash

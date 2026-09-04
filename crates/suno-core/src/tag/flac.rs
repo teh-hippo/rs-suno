@@ -14,7 +14,10 @@
 use std::borrow::Cow;
 
 use crate::error::{Error, Result};
-use crate::tag::{Cover, FLAC_METADATA_BLOCK_MAX, TrackMetadata, flac_picture_data_budget};
+use crate::tag::{
+    Cover, FLAC_METADATA_BLOCK_MAX, STATIC_FALLBACK_DESCRIPTION, TrackMetadata,
+    flac_picture_data_budget,
+};
 
 /// The FLAC stream marker every file opens with.
 const FLAC_MAGIC: &[u8; 4] = b"fLaC";
@@ -35,6 +38,7 @@ const STREAMINFO_LEN: usize = 34;
 
 /// The `PICTURE` API picture type for a front cover.
 const PICTURE_TYPE_FRONT_COVER: u32 = 3;
+const PICTURE_TYPE_OTHER: u32 = 0;
 
 /// The comment keys this crate writes and therefore owns on a retag. Everything
 /// else in the block belongs to the user (or another tool) and is left alone.
@@ -155,6 +159,14 @@ impl<'a> FlacFile<'a> {
         })
     }
 
+    fn static_fallback_index(&self) -> Option<usize> {
+        self.blocks.iter().position(|block| {
+            block.block_type == BLOCK_PICTURE
+                && picture_type(&block.body) == Some(PICTURE_TYPE_OTHER)
+                && picture_description(&block.body) == Some(STATIC_FALLBACK_DESCRIPTION)
+        })
+    }
+
     /// Where a newly added block belongs: before a trailing `PADDING` block
     /// when there is one, else at the end.
     fn append_index(&self) -> usize {
@@ -169,6 +181,21 @@ impl<'a> FlacFile<'a> {
 fn picture_type(body: &[u8]) -> Option<u32> {
     body.get(0..4)
         .map(|head| u32::from_be_bytes([head[0], head[1], head[2], head[3]]))
+}
+
+fn picture_description(body: &[u8]) -> Option<&str> {
+    let mime_len = usize::try_from(u32::from_be_bytes(body.get(4..8)?.try_into().ok()?)).ok()?;
+    let description_len_at = 8usize.checked_add(mime_len)?;
+    let description_len_end = description_len_at.checked_add(4)?;
+    let description_len = usize::try_from(u32::from_be_bytes(
+        body.get(description_len_at..description_len_end)?
+            .try_into()
+            .ok()?,
+    ))
+    .ok()?;
+    let description_start = description_len_end;
+    let description_end = description_start.checked_add(description_len)?;
+    std::str::from_utf8(body.get(description_start..description_end)?).ok()
 }
 
 /// A `VORBIS_COMMENT` block body, kept as raw bytes so nothing is normalised.
@@ -344,14 +371,17 @@ fn malformed(what: &str) -> Error {
 /// The dimensions, colour depth, and colour count are left at zero, exactly as
 /// `metaflac` writes them on the fresh path, so the two paths agree byte for
 /// byte on the same cover.
-fn picture_body(cover: Cover<'_>) -> Vec<u8> {
+fn picture_body(cover: Cover<'_>, picture_type: u32, description: &str) -> Vec<u8> {
     let mime = cover.mime.as_bytes();
-    let mut out = Vec::with_capacity(mime.len() + cover.bytes.len() + 32);
-    out.extend_from_slice(&PICTURE_TYPE_FRONT_COVER.to_be_bytes());
+    let description = description.as_bytes();
+    let mut out = Vec::with_capacity(mime.len() + description.len() + cover.bytes.len() + 32);
+    out.extend_from_slice(&picture_type.to_be_bytes());
     out.extend_from_slice(&(mime.len() as u32).to_be_bytes());
     out.extend_from_slice(mime);
-    // Empty description, then width, height, depth, and colour count.
-    for _ in 0..5 {
+    out.extend_from_slice(&(description.len() as u32).to_be_bytes());
+    out.extend_from_slice(description);
+    // Width, height, depth, and colour count.
+    for _ in 0..4 {
         out.extend_from_slice(&0u32.to_be_bytes());
     }
     out.extend_from_slice(&(cover.bytes.len() as u32).to_be_bytes());
@@ -449,8 +479,13 @@ fn apply_owned_cover(
     preserve_existing_cover: bool,
 ) -> Result<()> {
     let Some(cover) = cover else {
-        if !preserve_existing_cover && let Some(index) = file.front_cover_index() {
-            file.blocks.remove(index);
+        if !preserve_existing_cover {
+            if let Some(index) = file.front_cover_index() {
+                file.blocks.remove(index);
+            }
+            if let Some(index) = file.static_fallback_index() {
+                file.blocks.remove(index);
+            }
         }
         return Ok(());
     };
@@ -463,16 +498,45 @@ fn apply_owned_cover(
             budget
         )));
     }
-    let block = MetadataBlock {
+    let front = MetadataBlock {
         block_type: BLOCK_PICTURE,
-        body: Cow::Owned(picture_body(cover)),
+        body: Cow::Owned(picture_body(cover, PICTURE_TYPE_FRONT_COVER, "")),
     };
     match file.front_cover_index() {
-        Some(index) => file.blocks[index] = block,
+        Some(index) => file.blocks[index] = front,
         None => {
             let at = file.append_index();
-            file.blocks.insert(at, block);
+            file.blocks.insert(at, front);
         }
+    }
+
+    if let Some(static_fallback) = cover.static_fallback {
+        let fallback = Cover::jpeg(static_fallback);
+        let budget = flac_picture_data_budget(fallback.mime);
+        if fallback.bytes.len() > budget {
+            return Err(Error::Tag(format!(
+                "cover image is {} bytes, over the {}-byte FLAC picture limit",
+                fallback.bytes.len(),
+                budget
+            )));
+        }
+        let block = MetadataBlock {
+            block_type: BLOCK_PICTURE,
+            body: Cow::Owned(picture_body(
+                fallback,
+                PICTURE_TYPE_OTHER,
+                STATIC_FALLBACK_DESCRIPTION,
+            )),
+        };
+        match file.static_fallback_index() {
+            Some(index) => file.blocks[index] = block,
+            None => {
+                let at = file.append_index();
+                file.blocks.insert(at, block);
+            }
+        }
+    } else if let Some(index) = file.static_fallback_index() {
+        file.blocks.remove(index);
     }
     Ok(())
 }

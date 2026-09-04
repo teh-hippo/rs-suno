@@ -26,20 +26,19 @@ mod flac;
 pub use flac::retag_flac;
 
 const LANG: &str = "eng";
+pub(crate) const STATIC_FALLBACK_DESCRIPTION: &str = "rs-suno static fallback";
 
 /// The standard ID3 text frames this crate writes and therefore owns on a
 /// retag. Any other text frame (genre, composer, encoder, and so on) belongs to
 /// the user or another tool and is carried through untouched.
 const OWNED_TEXT_FRAMES: [&str; 7] = ["TIT2", "TPE1", "TALB", "TPE2", "TDRC", "TDRL", "TRCK"];
 
-/// An embedded cover image: its raw bytes paired with its MIME type. The MIME
-/// travels with the bytes so the executor can embed an animated `image/webp`
-/// where the container allows it (FLAC within its size cap, MP3, WAV) or a
-/// static `image/jpeg` otherwise.
+/// An embedded cover image: its raw bytes, MIME type, and optional static JPEG fallback.
 #[derive(Debug, Clone, Copy)]
 pub struct Cover<'a> {
     pub bytes: &'a [u8],
     pub mime: &'a str,
+    pub static_fallback: Option<&'a [u8]>,
 }
 
 impl<'a> Cover<'a> {
@@ -48,6 +47,7 @@ impl<'a> Cover<'a> {
         Self {
             bytes,
             mime: "image/jpeg",
+            static_fallback: None,
         }
     }
 
@@ -56,6 +56,16 @@ impl<'a> Cover<'a> {
         Self {
             bytes,
             mime: "image/webp",
+            static_fallback: None,
+        }
+    }
+
+    /// An animated WebP front cover with a static JPEG fallback.
+    pub fn webp_with_jpeg(bytes: &'a [u8], static_fallback: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            mime: "image/webp",
+            static_fallback: Some(static_fallback),
         }
     }
 }
@@ -286,8 +296,9 @@ fn build_sylt(aligned: &AlignedLyrics, timing: LyricsTiming) -> Option<Synchroni
 
 /// Tag `audio` (a FLAC byte stream) with `meta`, returning the tagged bytes.
 ///
-/// Replaces the Vorbis comments, embeds `cover` as the sole front-cover
-/// `PICTURE` block, and preserves the original `STREAMINFO` and audio frames.
+/// Replaces the Vorbis comments, embeds `cover` as the front-cover `PICTURE`
+/// block, adds its managed static fallback when present, and preserves the
+/// original `STREAMINFO` and audio frames.
 /// Works in memory: the existing metadata blocks are rewritten and the audio
 /// frames are appended unchanged.
 ///
@@ -348,15 +359,21 @@ fn tag_flac_inner(audio: &[u8], meta: &TrackMetadata, cover: Option<Cover<'_>>) 
                 budget
             )));
         }
-        // Exactly one front cover: drop any existing picture before adding ours
-        // (metaflac's add_picture already replaces the same type; this is
-        // explicit so a stale picture of any type cannot linger).
+        // Fresh tagging owns the complete picture set.
         tag.remove_blocks(metaflac::BlockType::Picture);
         tag.add_picture(
             cover.mime,
             metaflac::block::PictureType::CoverFront,
             cover.bytes.to_vec(),
         );
+        if let Some(static_fallback) = cover.static_fallback {
+            let mut picture = metaflac::block::Picture::new();
+            picture.picture_type = metaflac::block::PictureType::Other;
+            picture.mime_type = "image/jpeg".to_owned();
+            picture.description = STATIC_FALLBACK_DESCRIPTION.to_owned();
+            picture.data = static_fallback.to_vec();
+            tag.push_block(metaflac::Block::Picture(picture));
+        }
     }
 
     let audio_frames = metaflac::Tag::skip_metadata(&mut Cursor::new(audio));
@@ -563,7 +580,10 @@ impl<'m> OwnedId3<'m> {
                     && sylt.content_type == SynchronisedLyricsType::Lyrics
             }
             Content::Picture(picture) => {
-                self.cover && picture.picture_type == PictureType::CoverFront
+                self.cover
+                    && (picture.picture_type == PictureType::CoverFront
+                        || (picture.picture_type == PictureType::Other
+                            && picture.description == STATIC_FALLBACK_DESCRIPTION))
             }
             _ => false,
         }
@@ -661,6 +681,14 @@ fn apply_owned_id3(
             description: String::new(),
             data: cover.bytes.to_vec(),
         });
+        if let Some(static_fallback) = cover.static_fallback {
+            tag.add_frame(Picture {
+                mime_type: "image/jpeg".to_owned(),
+                picture_type: PictureType::Other,
+                description: STATIC_FALLBACK_DESCRIPTION.to_owned(),
+                data: static_fallback.to_vec(),
+            });
+        }
     }
     if let Some(sylt) = sylt {
         tag.add_frame(sylt);

@@ -40,7 +40,11 @@ pub struct AreaListing {
 pub enum AreaKind {
     Library,
     Liked,
-    Playlist { id: String, name: String },
+    Playlist {
+        id: String,
+        name: String,
+        image_url: String,
+    },
 }
 
 impl AreaListing {
@@ -82,6 +86,7 @@ impl AreaListing {
             AreaKind::Playlist {
                 id: String::new(),
                 name: String::new(),
+                image_url: String::new(),
             },
             mode,
         )
@@ -196,12 +201,21 @@ pub fn build_scoped_playlist_desired(
     force_copy: bool,
     members_intact: bool,
 ) -> (Vec<PlaylistDesired>, bool) {
-    let mut owned: Vec<(String, String, Vec<Clip>)> = Vec::new();
+    let mut owned: Vec<(String, String, String, Vec<Clip>)> = Vec::new();
     for area in areas {
         match &area.kind {
-            AreaKind::Playlist { id, name } => {
+            AreaKind::Playlist {
+                id,
+                name,
+                image_url,
+            } => {
                 if !id.is_empty() && area_enumerated(area, force_copy) {
-                    owned.push((id.clone(), name.clone(), area.clips.clone()));
+                    owned.push((
+                        id.clone(),
+                        name.clone(),
+                        image_url.clone(),
+                        area.clips.clone(),
+                    ));
                 } else if !id.is_empty() {
                     protected.insert(id.clone());
                 }
@@ -211,6 +225,7 @@ pub fn build_scoped_playlist_desired(
                     owned.push((
                         LIKED_PLAYLIST_ID.to_owned(),
                         "Liked Songs".to_owned(),
+                        String::new(),
                         area.clips.clone(),
                     ));
                 } else {
@@ -220,7 +235,7 @@ pub fn build_scoped_playlist_desired(
             AreaKind::Library => {}
         }
     }
-    let rendered: BTreeSet<&str> = owned.iter().map(|(id, _, _)| id.as_str()).collect();
+    let rendered: BTreeSet<&str> = owned.iter().map(|(id, _, _, _)| id.as_str()).collect();
     // Protect every stored playlist this run is not authoritatively rewriting, so
     // a non-selected playlist's `.m3u8` is never treated as stale.
     for id in store.playlists.keys() {
@@ -230,9 +245,10 @@ pub fn build_scoped_playlist_desired(
     }
     let inputs: Vec<PlaylistInput<'_>> = owned
         .iter()
-        .map(|(id, name, members)| PlaylistInput {
+        .map(|(id, name, image_url, members)| PlaylistInput {
             id: id.as_str(),
             name: name.as_str(),
+            image_url: image_url.as_str(),
             members: members.as_slice(),
         })
         .collect();
@@ -329,6 +345,7 @@ mod tests {
                 AreaKind::Playlist {
                     id: "p".into(),
                     name: "P".into(),
+                    image_url: String::new(),
                 },
                 mode,
                 ids,
@@ -377,6 +394,7 @@ mod tests {
                 AreaKind::Playlist {
                     id: "p".into(),
                     name: "P".into(),
+                    image_url: String::new(),
                 },
                 SourceMode::Mirror,
                 &["pl"],
@@ -389,6 +407,7 @@ mod tests {
             AreaKind::Playlist {
                 id: "p".into(),
                 name: "P".into(),
+                image_url: String::new(),
             },
             SourceMode::Mirror,
             &["pl"],
@@ -414,6 +433,7 @@ mod tests {
             AreaKind::Playlist {
                 id: "p".into(),
                 name: "P".into(),
+                image_url: String::new(),
             },
             mode,
             ids,
@@ -534,6 +554,7 @@ mod tests {
                 kind: AreaKind::Playlist {
                     id: "p".into(),
                     name: "P".into(),
+                    image_url: String::new(),
                 },
                 mode: SourceMode::Mirror,
                 clips: vec![pl],
@@ -556,6 +577,7 @@ mod tests {
                 AreaKind::Playlist {
                     id: "p".into(),
                     name: "P".into(),
+                    image_url: String::new(),
                 },
                 SourceMode::Mirror,
                 &[],
@@ -583,6 +605,7 @@ mod tests {
                 AreaKind::Playlist {
                     id: "p".into(),
                     name: "P".into(),
+                    image_url: String::new(),
                 },
                 SourceMode::Copy,
                 &["c-live"],
@@ -766,6 +789,7 @@ mod tests {
             AreaKind::Playlist {
                 id: id.to_owned(),
                 name: name.to_owned(),
+                image_url: String::new(),
             },
             mode,
             ids,
@@ -856,6 +880,7 @@ mod tests {
             AreaKind::Playlist {
                 id: "holiday".to_owned(),
                 name: "Holiday".to_owned(),
+                image_url: String::new(),
             },
             SourceMode::Copy,
         );

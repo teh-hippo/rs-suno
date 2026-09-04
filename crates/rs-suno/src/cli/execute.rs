@@ -339,10 +339,10 @@ fn is_playlist_action(action: &Action) -> bool {
     matches!(
         action,
         Action::WriteArtifact {
-            kind: ArtifactKind::Playlist,
+            kind: ArtifactKind::Playlist | ArtifactKind::PlaylistCoverJpg,
             ..
         } | Action::DeleteArtifact {
-            kind: ArtifactKind::Playlist,
+            kind: ArtifactKind::Playlist | ArtifactKind::PlaylistCoverJpg,
             ..
         }
     )
@@ -575,13 +575,17 @@ pub(crate) async fn stat_manifest(
         }
     }
 
-    for state in playlists.values().filter(|s| !s.path.is_empty()) {
-        if seen.insert(state.path.clone()) {
-            to_stat.push((
-                state.path.clone(),
-                dest.join(&state.path),
-                ProbeKind::Content,
-            ));
+    for state in playlists.values() {
+        for artifact in [
+            (!state.path.is_empty()).then_some(state.path.as_str()),
+            state.cover_jpg.as_ref().map(|cover| cover.path.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if seen.insert(artifact.to_owned()) {
+                to_stat.push((artifact.to_owned(), dest.join(artifact), ProbeKind::Content));
+            }
         }
     }
 
@@ -703,6 +707,7 @@ mod tests {
             path: "Mix.m3u8".to_owned(),
             content: "#EXTM3U\n#EXTINF:1,Song\nSong.flac\n".to_owned(),
             hash: "old".to_owned(),
+            cover_jpg: None,
         }];
         let fallbacks = vec![suno_core::AudioFallback {
             clip_id: "song".to_owned(),
@@ -932,6 +937,7 @@ mod tests {
             managed: tags,
             foreign: Vec::new(),
             cover: None,
+            static_fallback: None,
             timed_lyrics: None,
             entry_count: 2,
             audio_signature: None,

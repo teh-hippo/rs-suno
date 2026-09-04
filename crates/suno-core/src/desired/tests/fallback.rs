@@ -85,6 +85,7 @@ fn playlist_paths_follow_the_effective_audio_format() {
         path: "Mix.m3u8".to_owned(),
         content: format!("#EXTM3U\n#EXTINF:1,Song\n{old}\n"),
         hash: "old".to_owned(),
+        cover_jpg: None,
     }];
 
     rewrite_playlist_paths(

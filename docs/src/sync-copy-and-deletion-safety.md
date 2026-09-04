@@ -236,6 +236,9 @@ off:
   URL can be transiently absent, so it opts out of removal the same way covers do.
   Turning `video_mp4` off leaves existing `.mp4` videos in place; a video is only
   removed when its whole song leaves every source and the audio is deleted with it.
+- **Playlist image (`<playlist>.jpg`).** Suno's `image_url` is mirrored beside
+  the generated `.m3u8`. A failed or omitted image fetch keeps the prior cover;
+  rename and removal happen only under the fully enumerated playlist delete gate.
 - **Stems (`<song>.stems/`).** When `download_stems` is on, a song's existing stems
   are mirrored into a sibling `.stems` sub-folder, tracked per stem by a stable key
   so individual stems add, rewrite, and remove independently (never a whole-folder

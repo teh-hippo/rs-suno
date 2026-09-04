@@ -35,6 +35,7 @@ pub struct Settings {
     /// deliberately no `--token-command` flag, so it is never read from
     /// `FlagOverrides`; set it in config or the environment.
     pub token_command: Option<String>,
+    /// Embed an animated WebP front cover and a static JPEG fallback.
     pub animated_covers: Option<bool>,
     pub video_cover_retention: Option<VideoCoverRetention>,
     #[cfg_attr(feature = "schema", schemars(range(min = 0, max = 100)))]

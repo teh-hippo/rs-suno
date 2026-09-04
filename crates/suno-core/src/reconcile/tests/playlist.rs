@@ -41,6 +41,7 @@ fn pl_desired(id: &str, name: &str, path: &str, hash: &str) -> PlaylistDesired {
         path: path.to_owned(),
         content: format!("#EXTM3U\n#PLAYLIST:{name}\n<{hash}>\n"),
         hash: hash.to_owned(),
+        cover_jpg: None,
     }
 }
 
@@ -49,7 +50,32 @@ fn pl_state(name: &str, path: &str, hash: &str) -> PlaylistState {
         name: name.to_owned(),
         path: path.to_owned(),
         hash: hash.to_owned(),
+        cover_jpg: None,
     }
+}
+
+fn with_cover(
+    mut desired: PlaylistDesired,
+    path: &str,
+    source_url: &str,
+    hash: &str,
+) -> PlaylistDesired {
+    desired.cover_jpg = Some(DesiredArtifact {
+        kind: ArtifactKind::PlaylistCoverJpg,
+        path: path.to_owned(),
+        source_url: source_url.to_owned(),
+        hash: hash.to_owned(),
+        content: None,
+    });
+    desired
+}
+
+fn with_stored_cover(mut state: PlaylistState, path: &str, hash: &str) -> PlaylistState {
+    state.cover_jpg = Some(ArtifactState {
+        path: path.to_owned(),
+        hash: hash.to_owned(),
+    });
+    state
 }
 
 fn pl_store(entries: &[(&str, PlaylistState)]) -> BTreeMap<String, PlaylistState> {
@@ -57,6 +83,103 @@ fn pl_store(entries: &[(&str, PlaylistState)]) -> BTreeMap<String, PlaylistState
         .iter()
         .map(|(id, state)| ((*id).to_owned(), state.clone()))
         .collect()
+}
+
+#[test]
+fn playlist_cover_write_and_missing_file_repair_are_planned() {
+    let desired = vec![with_cover(
+        pl_desired("pl1", "Road Trip", "Road Trip.m3u8", "m3u-hash"),
+        "Road Trip.jpg",
+        "https://cdn1.suno.ai/road-trip.jpg",
+        "art-hash",
+    )];
+    let actions = plan_playlist_artifacts(&desired, &BTreeMap::new(), true, true, &HashMap::new());
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        Action::WriteArtifact {
+            kind: ArtifactKind::PlaylistCoverJpg,
+            path,
+            source_url,
+            ..
+        } if path == "Road Trip.jpg" && source_url == "https://cdn1.suno.ai/road-trip.jpg"
+    )));
+
+    let stored = pl_store(&[(
+        "pl1",
+        with_stored_cover(
+            pl_state("Road Trip", "Road Trip.m3u8", "m3u-hash"),
+            "Road Trip.jpg",
+            "art-hash",
+        ),
+    )]);
+    let local = HashMap::from([
+        ("Road Trip.m3u8".to_owned(), present(20)),
+        ("Road Trip.jpg".to_owned(), LocalFile::default()),
+    ]);
+    let repair = plan_playlist_artifacts(&desired, &stored, true, true, &local);
+    assert_eq!(
+        repair
+            .iter()
+            .filter(|action| matches!(
+                action,
+                Action::WriteArtifact {
+                    kind: ArtifactKind::PlaylistCoverJpg,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn absent_playlist_image_preserves_a_known_cover() {
+    let desired = vec![pl_desired("pl1", "Mix", "Mix.m3u8", "m3u-hash")];
+    let stored = pl_store(&[(
+        "pl1",
+        with_stored_cover(
+            pl_state("Mix", "Mix.m3u8", "m3u-hash"),
+            "Mix.jpg",
+            "art-hash",
+        ),
+    )]);
+
+    let actions = plan_playlist_artifacts(&desired, &stored, true, true, &HashMap::new());
+    assert!(
+        actions.iter().all(|action| !matches!(
+            action,
+            Action::DeleteArtifact {
+                kind: ArtifactKind::PlaylistCoverJpg,
+                ..
+            }
+        )),
+        "an omitted image URL is treated as unknown, not removal"
+    );
+}
+
+#[test]
+fn stale_playlist_deletes_its_m3u8_and_cover_under_the_full_gate() {
+    let stored = pl_store(&[(
+        "gone",
+        with_stored_cover(
+            pl_state("Gone", "Gone.m3u8", "m3u-hash"),
+            "Gone.jpg",
+            "art-hash",
+        ),
+    )]);
+
+    let actions = plan_playlist_artifacts(&[], &stored, true, true, &HashMap::new());
+    assert!(actions.contains(&Action::DeleteArtifact {
+        kind: ArtifactKind::Playlist,
+        path: "Gone.m3u8".to_owned(),
+        owner_id: "gone".to_owned(),
+    }));
+    assert!(actions.contains(&Action::DeleteArtifact {
+        kind: ArtifactKind::PlaylistCoverJpg,
+        path: "Gone.jpg".to_owned(),
+        owner_id: "gone".to_owned(),
+    }));
+    assert!(plan_playlist_artifacts(&[], &stored, true, false, &HashMap::new()).is_empty());
 }
 
 #[test]

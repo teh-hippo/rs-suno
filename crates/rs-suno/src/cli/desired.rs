@@ -653,6 +653,7 @@ mod tests {
             suno_core::AreaKind::Playlist {
                 id: id.to_owned(),
                 name: name.to_owned(),
+                image_url: String::new(),
             },
             mode,
             vec![member],
@@ -861,6 +862,7 @@ mod tests {
             id: id.to_owned(),
             name: name.to_owned(),
             num_clips: 0,
+            image_url: String::new(),
         }
     }
 

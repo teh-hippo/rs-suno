@@ -234,8 +234,8 @@ pub struct SyncArgs {
     /// Simultaneous downloads (default 4).
     #[arg(long, value_name = "N")]
     pub concurrency: Option<u32>,
-    /// Embed an animated WebP front cover (in place of the static JPEG) for
-    /// clips with a video preview.
+    /// Embed an animated WebP front cover plus a static JPEG fallback for clips
+    /// with a video preview.
     #[arg(long)]
     pub animated_covers: bool,
     /// Animated-cover control: webp embeds it, mp4 keeps the raw cover.mp4, both,

@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::error::{Error, Result};
 use crate::model::{Clip, Playlist};
 
-use super::clip::unwrap_clip;
+use super::clip::{cdn, unwrap_clip};
 use super::map_clip;
 
 /// Parse a `/api/playlist/me` page into playlists, dropping entries with no id.
@@ -41,6 +41,7 @@ fn parse_playlist_item(raw: &Value) -> Option<Playlist> {
         id,
         name,
         num_clips,
+        image_url: cdn(raw, "image_url"),
     })
 }
 
@@ -95,7 +96,12 @@ mod tests {
     fn parse_playlists_reads_fields_and_drops_idless_defaulting_name() {
         let body = serde_json::json!({
             "playlists": [
-                {"id": "p1", "name": "Mix", "num_total_results": 3},
+                {
+                    "id": "p1",
+                    "name": "Mix",
+                    "num_total_results": 3,
+                    "image_url": "https://cdn2.suno.ai/playlist.jpg"
+                },
                 {"id": "", "name": "Ghost"},
                 {"name": "No Id"},
                 {"id": "p2"}
@@ -109,9 +115,11 @@ mod tests {
         assert_eq!(playlists[0].id, "p1");
         assert_eq!(playlists[0].name, "Mix");
         assert_eq!(playlists[0].num_clips, 3);
+        assert_eq!(playlists[0].image_url, "https://cdn1.suno.ai/playlist.jpg");
         assert_eq!(playlists[1].id, "p2");
         assert_eq!(playlists[1].name, "Untitled");
         assert_eq!(playlists[1].num_clips, 0);
+        assert!(playlists[1].image_url.is_empty());
     }
 
     #[test]

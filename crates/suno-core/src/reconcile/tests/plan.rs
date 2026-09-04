@@ -600,6 +600,46 @@ fn observed_metadata_overrides_a_stale_manifest_hash() {
 }
 
 #[test]
+fn missing_managed_static_fallback_retags_an_animated_file() {
+    let mut d = desired("a", "a.flac", AudioFormat::Flac, "meta", "dual-source");
+    d.clip.video_cover_url = "https://cdn1.suno.ai/a.mp4".to_owned();
+    let meta = crate::TrackMetadata::from_clip(&d.clip, &d.lineage);
+    let complete = crate::tag_flac(
+        &crate::testutil::minimal_flac(),
+        &meta,
+        Some(crate::Cover::webp_with_jpeg(b"animated", b"static")),
+    )
+    .unwrap();
+    let verified = crate::observe_bytes(AudioFormat::Flac, &complete)
+        .unwrap()
+        .managed_cover_fingerprint()
+        .unwrap();
+    let missing_fallback = crate::tag_flac(
+        &crate::testutil::minimal_flac(),
+        &meta,
+        Some(crate::Cover::webp(b"animated")),
+    )
+    .unwrap();
+    let observed = crate::observe_bytes(AudioFormat::Flac, &missing_fallback).unwrap();
+    let mut stored = entry("a.flac", AudioFormat::Flac, "meta", "");
+    stored.set_verified_art(&d.art_hash, &verified);
+    let mut manifest = Manifest::new();
+    manifest.insert("a", stored);
+    let local = HashMap::from([(
+        "a".to_owned(),
+        LocalFile {
+            exists: true,
+            size: missing_fallback.len() as u64,
+            audio: Some(observed),
+            ..Default::default()
+        },
+    )]);
+
+    let plan = reconcile(&manifest, &[d], &local, &mirror_ok());
+    assert_eq!(plan.retags(), 1);
+}
+
+#[test]
 fn missing_fallback_lyrics_retag_even_when_manifest_claims_they_exist() {
     let mut d = desired("a", "a.flac", AudioFormat::Flac, "meta", "");
     d.embedded_lyrics_hash = content_hash("new words");

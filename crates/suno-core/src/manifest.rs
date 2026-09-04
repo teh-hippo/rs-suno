@@ -236,7 +236,8 @@ impl ManifestEntry {
             ArtifactKind::FolderJpg
             | ArtifactKind::FolderWebp
             | ArtifactKind::FolderMp4
-            | ArtifactKind::Playlist => None,
+            | ArtifactKind::Playlist
+            | ArtifactKind::PlaylistCoverJpg => None,
         }
     }
 }

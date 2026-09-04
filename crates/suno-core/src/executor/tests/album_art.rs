@@ -280,6 +280,7 @@ fn playlist_write_uses_inline_content_and_records_state() {
             name: "Road Trip".to_owned(),
             path: "Road Trip.m3u8".to_owned(),
             hash: "ph1".to_owned(),
+            cover_jpg: None,
         })
     );
 }
@@ -296,6 +297,7 @@ fn playlist_delete_removes_file_and_clears_state() {
             name: "Old".to_owned(),
             path: "Old.m3u8".to_owned(),
             hash: "ph1".to_owned(),
+            cover_jpg: None,
         },
     );
     let plan = Plan {
@@ -324,6 +326,122 @@ fn playlist_delete_removes_file_and_clears_state() {
     assert!(
         !playlists.contains_key("pl1"),
         "the playlist row is cleared on delete"
+    );
+}
+
+#[test]
+fn playlist_cover_write_records_state_and_rename_is_commit_safe() {
+    let fs = MemFs::new().with_file("Old.jpg", b"old-art".to_vec());
+    let mut manifest = Manifest::new();
+    let mut albums = BTreeMap::new();
+    let mut playlists = BTreeMap::from([(
+        "pl1".to_owned(),
+        PlaylistState {
+            name: "Old".to_owned(),
+            path: "Old.m3u8".to_owned(),
+            hash: "playlist-hash".to_owned(),
+            cover_jpg: Some(ArtifactState {
+                path: "Old.jpg".to_owned(),
+                hash: "old-hash".to_owned(),
+            }),
+        },
+    )]);
+    let plan = Plan {
+        actions: vec![
+            Action::WriteArtifact {
+                kind: ArtifactKind::PlaylistCoverJpg,
+                path: "New.jpg".to_owned(),
+                source_url: "https://cdn1.suno.ai/new.jpg".to_owned(),
+                hash: "new-hash".to_owned(),
+                owner_id: "pl1".to_owned(),
+                content: None,
+            },
+            Action::DeleteArtifact {
+                kind: ArtifactKind::PlaylistCoverJpg,
+                path: "Old.jpg".to_owned(),
+                owner_id: "pl1".to_owned(),
+            },
+        ],
+    };
+
+    let outcome = run_full(
+        &plan,
+        &mut manifest,
+        &mut albums,
+        &mut playlists,
+        &[],
+        &ScriptedHttp::new().route("new.jpg", Reply::ok(b"new-art".to_vec())),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &ExecOptions::default(),
+    );
+
+    assert_eq!(outcome.artifacts_written, 1);
+    assert_eq!(outcome.artifacts_deleted, 1);
+    assert!(!fs.exists("Old.jpg"));
+    assert_eq!(fs.read_file("New.jpg").unwrap(), b"new-art");
+    let state = playlists.get("pl1").unwrap().cover_jpg.as_ref().unwrap();
+    assert_eq!(state.path, "New.jpg");
+    assert_eq!(state.source_hash(), "new-hash");
+}
+
+#[test]
+fn failed_playlist_cover_rename_preserves_the_old_file_and_state() {
+    let fs = MemFs::new().with_file("Old.jpg", b"old-art".to_vec());
+    let mut manifest = Manifest::new();
+    let mut albums = BTreeMap::new();
+    let old_cover = ArtifactState {
+        path: "Old.jpg".to_owned(),
+        hash: "old-hash".to_owned(),
+    };
+    let mut playlists = BTreeMap::from([(
+        "pl1".to_owned(),
+        PlaylistState {
+            name: "Old".to_owned(),
+            path: "Old.m3u8".to_owned(),
+            hash: "playlist-hash".to_owned(),
+            cover_jpg: Some(old_cover.clone()),
+        },
+    )]);
+    let plan = Plan {
+        actions: vec![
+            Action::WriteArtifact {
+                kind: ArtifactKind::PlaylistCoverJpg,
+                path: "New.jpg".to_owned(),
+                source_url: "https://cdn1.suno.ai/new.jpg".to_owned(),
+                hash: "new-hash".to_owned(),
+                owner_id: "pl1".to_owned(),
+                content: None,
+            },
+            Action::DeleteArtifact {
+                kind: ArtifactKind::PlaylistCoverJpg,
+                path: "Old.jpg".to_owned(),
+                owner_id: "pl1".to_owned(),
+            },
+        ],
+    };
+
+    let outcome = run_full(
+        &plan,
+        &mut manifest,
+        &mut albums,
+        &mut playlists,
+        &[],
+        &ScriptedHttp::new().route("new.jpg", Reply::status(404)),
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &ExecOptions::default(),
+    );
+
+    assert_eq!(outcome.failed(), 1);
+    assert_eq!(outcome.artifacts_deleted, 0);
+    assert!(fs.exists("Old.jpg"));
+    assert!(!fs.exists("New.jpg"));
+    assert_eq!(
+        playlists.get("pl1").unwrap().cover_jpg.as_ref(),
+        Some(&old_cover)
     );
 }
 

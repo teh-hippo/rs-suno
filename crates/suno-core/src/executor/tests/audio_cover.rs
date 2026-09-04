@@ -258,7 +258,7 @@ fn flac_render_retries_a_rate_limited_wav_lookup() {
 #[test]
 fn download_embeds_animated_webp_cover_when_enabled() {
     // With animated covers on and a video preview present, the audio embeds
-    // the transcoded WebP (image/webp) as its front cover, not the static JPEG.
+    // the transcoded WebP as its front cover and the static JPEG as a fallback.
     let c = Clip {
         video_cover_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
         ..art_clip("a")
@@ -298,15 +298,70 @@ fn download_embeds_animated_webp_cover_when_enabled() {
     assert_eq!(outcome.failed(), 0);
     let written = fs.read_file("a.mp3").unwrap();
     let tag = id3::Tag::read_from2(std::io::Cursor::new(&written)).unwrap();
-    let pic = tag.pictures().next().expect("embedded cover");
+    let pictures: Vec<_> = tag.pictures().collect();
+    assert_eq!(pictures.len(), 2);
+    let pic = pictures
+        .iter()
+        .find(|picture| picture.picture_type == id3::frame::PictureType::CoverFront)
+        .expect("animated front cover");
     assert_eq!(pic.mime_type, "image/webp");
     assert!(
         pic.data.starts_with(b"RIFF"),
         "the embedded cover is the transcoded WebP"
     );
-    // The MP4 preview was fetched and transcoded; the static JPEG was not needed.
+    let fallback = pictures
+        .iter()
+        .find(|picture| picture.description == crate::tag::STATIC_FALLBACK_DESCRIPTION)
+        .expect("static fallback");
+    assert_eq!(fallback.mime_type, "image/jpeg");
+    assert_eq!(fallback.data, b"static-jpg");
+    // Both sources are fetched once.
     assert_eq!(http.count("a/video.mp4"), 1);
-    assert_eq!(http.count("a/large.jpg"), 0);
+    assert_eq!(http.count("a/large.jpg"), 1);
+}
+
+#[test]
+fn animated_download_retries_when_static_cover_is_unavailable() {
+    let c = Clip {
+        video_cover_url: "https://cdn.suno.ai/a/video.mp4".to_owned(),
+        ..art_clip("a")
+    };
+    let d = desired(c.clone(), AudioFormat::Mp3);
+    let plan = Plan {
+        actions: vec![Action::Download {
+            clip: c.clone(),
+            lineage: LineageContext::own_root(&c),
+            path: d.path.clone(),
+            format: AudioFormat::Mp3,
+        }],
+    };
+    let http = ScriptedHttp::new()
+        .route("a.mp3", Reply::ok(b"mp3-body".to_vec()))
+        .route("a/video.mp4", Reply::ok(b"mp4-bytes".to_vec()))
+        .route("a/large.jpg", Reply::status(404))
+        .route("a/small.jpg", Reply::status(404));
+    let fs = MemFs::new();
+    let opts = ExecOptions {
+        embed_animated_cover: true,
+        ..ExecOptions::default()
+    };
+    let mut manifest = Manifest::new();
+
+    let outcome = run(
+        &plan,
+        &mut manifest,
+        &[d],
+        &http,
+        &fs,
+        &StubFfmpeg::flac(),
+        &RecordingClock::new(),
+        &opts,
+    );
+
+    assert_eq!(outcome.failed(), 1);
+    assert!(outcome.failures[0].reason.contains("static cover art"));
+    assert!(!fs.exists("a.mp3"));
+    assert!(manifest.get("a").is_none());
 }
 
 #[test]

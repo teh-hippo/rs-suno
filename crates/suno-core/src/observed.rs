@@ -32,7 +32,7 @@ use id3::frame::{Content, PictureType, SynchronisedLyricsType, TimestampFormat};
 
 use crate::error::Error;
 use crate::hash::content_hash;
-use crate::tag::TrackMetadata;
+use crate::tag::{STATIC_FALLBACK_DESCRIPTION, TrackMetadata};
 use crate::vocab::AudioFormat;
 
 /// The iTunes reverse-DNS mean the MP4 writer stores its freeform atoms under.
@@ -526,6 +526,8 @@ pub struct ObservedAudio {
     pub foreign: Vec<ForeignEntry>,
     /// The embedded front cover, when there is one.
     pub cover: Option<ObservedCover>,
+    /// The managed static JPEG fallback stored beside an animated front cover.
+    pub static_fallback: Option<ObservedCover>,
     /// The embedded timed lyrics, when there are any.
     pub timed_lyrics: Option<ObservedTimedLyrics>,
     /// How many native metadata entries were seen: one per Vorbis comment
@@ -548,6 +550,7 @@ impl ObservedAudio {
             managed: ManagedTags::new(),
             foreign: Vec::new(),
             cover: None,
+            static_fallback: None,
             timed_lyrics: None,
             entry_count: 0,
             audio_signature: None,
@@ -557,6 +560,18 @@ impl ObservedAudio {
     /// Whether a metadata region was found.
     pub fn is_tagged(&self) -> bool {
         self.status == TagStatus::Present
+    }
+
+    /// The verified fingerprint of the managed cover set.
+    pub fn managed_cover_fingerprint(&self) -> Option<String> {
+        let primary = self.cover.as_ref()?;
+        Some(match self.static_fallback.as_ref() {
+            Some(fallback) => content_hash(&format!(
+                "primary={}\nstatic={}",
+                primary.fingerprint, fallback.fingerprint
+            )),
+            None => primary.fingerprint.clone(),
+        })
     }
 
     /// The first value of a managed field, or `None` when it is absent.
@@ -973,13 +988,19 @@ fn observe_flac<R: AudioSource>(source: &mut R) -> Result<ObservedAudio, Observe
                 observed.status = TagStatus::Present;
                 observed.entry_count += 1;
                 let is_front = picture.picture_type == metaflac::block::PictureType::CoverFront;
+                let cover = ObservedCover {
+                    mime: picture.mime_type.to_lowercase(),
+                    description: picture.description.clone(),
+                    len: picture.data.len(),
+                    fingerprint: cover_fingerprint(&picture.data),
+                };
                 if is_front && observed.cover.is_none() {
-                    observed.cover = Some(ObservedCover {
-                        mime: picture.mime_type.to_lowercase(),
-                        description: picture.description.clone(),
-                        len: picture.data.len(),
-                        fingerprint: cover_fingerprint(&picture.data),
-                    });
+                    observed.cover = Some(cover);
+                } else if picture.picture_type == metaflac::block::PictureType::Other
+                    && picture.description == STATIC_FALLBACK_DESCRIPTION
+                    && observed.static_fallback.is_none()
+                {
+                    observed.static_fallback = Some(cover);
                 } else {
                     observed.foreign.push(ForeignEntry {
                         key: format!("PICTURE:{:?}", picture.picture_type),
@@ -1181,19 +1202,25 @@ fn observe_id3(format: AudioFormat, tag: Option<&id3::Tag>) -> ObservedAudio {
             }),
             Content::Picture(picture) => {
                 let fingerprint = cover_fingerprint(&picture.data);
+                let cover = ObservedCover {
+                    mime: picture.mime_type.to_lowercase(),
+                    description: picture.description.clone(),
+                    len: picture.data.len(),
+                    fingerprint,
+                };
                 if picture.picture_type == PictureType::CoverFront && observed.cover.is_none() {
-                    observed.cover = Some(ObservedCover {
-                        mime: picture.mime_type.to_lowercase(),
-                        description: picture.description.clone(),
-                        len: picture.data.len(),
-                        fingerprint,
-                    });
+                    observed.cover = Some(cover);
+                } else if picture.picture_type == PictureType::Other
+                    && picture.description == STATIC_FALLBACK_DESCRIPTION
+                    && observed.static_fallback.is_none()
+                {
+                    observed.static_fallback = Some(cover);
                 } else {
                     observed.foreign.push(ForeignEntry {
                         key: format!("APIC:{:?}", picture.picture_type),
                         value: ForeignValue::Opaque {
                             len: picture.data.len(),
-                            fingerprint,
+                            fingerprint: cover.fingerprint,
                         },
                     });
                 }

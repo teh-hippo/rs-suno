@@ -209,6 +209,8 @@ pub struct Playlist {
     pub name: String,
     /// The number of clips Suno reports in the playlist.
     pub num_clips: u64,
+    /// The playlist's static cover image, when Suno exposes one.
+    pub image_url: String,
 }
 
 /// The authenticated account's billing snapshot: credits, quota, account

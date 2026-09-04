@@ -669,14 +669,37 @@ fn flac_embeds_webp_cover_and_rejects_oversized() {
     let audio = minimal_flac();
     let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
 
-    // A small animated WebP embeds with the image/webp mime, exactly once.
+    // A small animated WebP embeds as the front cover with a static JPEG fallback.
     let webp = b"RIFF\x00\x00\x00\x00WEBP-small-anim".to_vec();
-    let tagged = tag_flac(&audio, &meta, Some(Cover::webp(&webp))).unwrap();
+    let jpeg = b"\xFF\xD8\xFFstatic-fallback".to_vec();
+    let tagged = tag_flac(&audio, &meta, Some(Cover::webp_with_jpeg(&webp, &jpeg))).unwrap();
     let tag = metaflac::Tag::read_from(&mut Cursor::new(&tagged)).unwrap();
     let pics: Vec<_> = tag.pictures().collect();
-    assert_eq!(pics.len(), 1, "exactly one front cover");
-    assert_eq!(pics[0].mime_type, "image/webp");
-    assert_eq!(pics[0].data, webp);
+    assert_eq!(pics.len(), 2);
+    let front = pics
+        .iter()
+        .find(|picture| picture.picture_type == metaflac::block::PictureType::CoverFront)
+        .unwrap();
+    assert_eq!(front.mime_type, "image/webp");
+    assert_eq!(front.data, webp);
+    let fallback = pics
+        .iter()
+        .find(|picture| picture.description == STATIC_FALLBACK_DESCRIPTION)
+        .unwrap();
+    assert_eq!(fallback.picture_type, metaflac::block::PictureType::Other);
+    assert_eq!(fallback.mime_type, "image/jpeg");
+    assert_eq!(fallback.data, jpeg);
+
+    let observed = crate::observe_bytes(crate::AudioFormat::Flac, &tagged).unwrap();
+    assert_eq!(observed.cover.as_ref().unwrap().mime, "image/webp");
+    assert_eq!(
+        observed.static_fallback.as_ref().unwrap().mime,
+        "image/jpeg"
+    );
+    assert_ne!(
+        observed.managed_cover_fingerprint().as_deref(),
+        Some(observed.cover.as_ref().unwrap().fingerprint.as_str())
+    );
 
     // A cover one byte over the 24-bit FLAC picture budget is refused, never
     // silently truncated into a corrupt file.
@@ -884,10 +907,21 @@ fn comment_block(vendor: &str, entries: &[&str]) -> Vec<u8> {
 
 /// A PICTURE block body of the given API type, mime, and data.
 fn picture_block(picture_type: u32, mime: &str, data: &[u8]) -> Vec<u8> {
+    picture_block_with_description(picture_type, mime, "", data)
+}
+
+fn picture_block_with_description(
+    picture_type: u32,
+    mime: &str,
+    description: &str,
+    data: &[u8],
+) -> Vec<u8> {
     let mut out = picture_type.to_be_bytes().to_vec();
     out.extend_from_slice(&(mime.len() as u32).to_be_bytes());
     out.extend_from_slice(mime.as_bytes());
-    for _ in 0..5 {
+    out.extend_from_slice(&(description.len() as u32).to_be_bytes());
+    out.extend_from_slice(description.as_bytes());
+    for _ in 0..4 {
         out.extend_from_slice(&0u32.to_be_bytes());
     }
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
@@ -1148,6 +1182,56 @@ fn flac_retag_replaces_only_the_front_cover() {
         .map(|(_, body)| body[3])
         .collect();
     assert_eq!(remaining, vec![19], "only the front cover is removed");
+}
+
+#[test]
+fn flac_retag_replaces_managed_static_fallback_and_preserves_foreign_pictures() {
+    let meta = TrackMetadata::from_clip(&full_clip(), &full_lineage());
+    let front = picture_block(3, "image/webp", b"old-webp");
+    let fallback =
+        picture_block_with_description(0, "image/jpeg", STATIC_FALLBACK_DESCRIPTION, b"old-jpeg");
+    let band = picture_block(19, "image/png", b"\x89PNGband-logo");
+    let audio = flac_from_blocks(&[
+        (0, streaminfo_body()),
+        (4, comment_block("v", &[])),
+        (6, front),
+        (6, fallback),
+        (6, band.clone()),
+    ]);
+
+    let retagged = retag_flac(
+        &audio,
+        &meta,
+        Some(Cover::webp_with_jpeg(b"new-webp", b"new-jpeg")),
+        false,
+    )
+    .unwrap();
+    let pictures: Vec<Vec<u8>> = flac_blocks(&retagged)
+        .into_iter()
+        .filter(|(block_type, _)| *block_type == 6)
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(
+        pictures,
+        vec![
+            picture_block(3, "image/webp", b"new-webp"),
+            picture_block_with_description(
+                0,
+                "image/jpeg",
+                STATIC_FALLBACK_DESCRIPTION,
+                b"new-jpeg",
+            ),
+            band.clone(),
+        ]
+    );
+
+    let cleared = retag_flac(&retagged, &meta, None, false).unwrap();
+    let remaining: Vec<Vec<u8>> = flac_blocks(&cleared)
+        .into_iter()
+        .filter(|(block_type, _)| *block_type == 6)
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(remaining, vec![band]);
 }
 
 #[test]

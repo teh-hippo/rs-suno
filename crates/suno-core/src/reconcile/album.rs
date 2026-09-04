@@ -131,7 +131,8 @@ fn album_desires_kind(d: &AlbumDesired, kind: ArtifactKind) -> bool {
         | ArtifactKind::LyricsTxt
         | ArtifactKind::Lrc
         | ArtifactKind::VideoMp4
-        | ArtifactKind::Playlist => false,
+        | ArtifactKind::Playlist
+        | ArtifactKind::PlaylistCoverJpg => false,
     }
 }
 
