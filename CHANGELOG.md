@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.42.0](https://github.com/teh-hippo/rs-suno/compare/v0.41.2...v0.42.0) (2026-09-04)
+
+
+### Features
+
+* preserve static and playlist artwork ([5d813ac](https://github.com/teh-hippo/rs-suno/commit/5d813ac12f872c2441d4b23f91a989ba281903d8))
+
+
+### Bug Fixes
+
+* refresh rejected lossless download URLs ([cae16be](https://github.com/teh-hippo/rs-suno/commit/cae16bedc46e0cca0647a2f9e300386cfd5e0321))
+
 ## [0.41.2](https://github.com/teh-hippo/rs-suno/compare/v0.41.1...v0.41.2) (2026-08-24)
 
 
