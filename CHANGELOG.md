@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.2](https://github.com/teh-hippo/rs-suno/compare/v0.42.1...v0.42.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* keep non-owned tracks as native mp3 ([dd3ce5d](https://github.com/teh-hippo/rs-suno/commit/dd3ce5dfad00a8243d1b7c7004707a87bee6cfb8))
+
 ## [0.42.1](https://github.com/teh-hippo/rs-suno/compare/v0.42.0...v0.42.1) (2026-09-05)
 
 
