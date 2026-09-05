@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use suno_core::{
-    AudioFormat, ClerkAuth, Clock, Cover, Error as CoreError, Ffmpeg, Filesystem, FlagOverrides,
-    LineageContext, LosslessAccess, LyricsTiming, Settings, SunoClient, TrackMetadata,
-    render_clip_lrc, render_synced_lrc_with_timing, tag_alac, tag_flac, tag_mp3,
-    tag_mp3_with_timing, tag_wav, tag_wav_with_timing,
+    AudioFormat, ClerkAuth, Clock, Cover, Ffmpeg, Filesystem, FlagOverrides, LineageContext,
+    LyricsTiming, Settings, SunoClient, TrackMetadata, render_clip_lrc,
+    render_synced_lrc_with_timing, tag_alac, tag_flac, tag_mp3, tag_mp3_with_timing, tag_wav,
+    tag_wav_with_timing,
 };
 
 use crate::cli::account;
@@ -69,13 +69,12 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
 
     let id = parse_clip_id(&args.id);
     let lyrics_timing = args.lyrics_timing.map(Into::into);
-    let configured_format = settings.format;
-    let explicit_file = explicit_file_destination(args.output.as_deref(), args.dest.as_deref());
+    let output_format = settings.format;
     let (root, _) = fetch_destination(
         args.output.as_deref(),
         args.dest.as_deref(),
         &id,
-        configured_format,
+        output_format,
     );
 
     let http = ReqwestHttp::new().context("failed to build the HTTP client")?;
@@ -85,27 +84,6 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     }
     crate::cli::expiry::warn_token_expiry(&label, &auth, global.verbosity());
     let client = SunoClient::new(auth, TokioClock);
-    let lossless_access = if configured_format.requires_wav_render() {
-        match client.get_billing_info(&http).await {
-            Ok(billing) => billing.lossless_access(),
-            Err(_) => LosslessAccess::Unknown,
-        }
-    } else {
-        LosslessAccess::Available
-    };
-    let mut warned = false;
-    let mut output_format = configured_format;
-    if let LosslessAccess::Unavailable(reason) = lossless_access {
-        if explicit_file {
-            eprintln!(
-                "error: lossless output is unavailable ({reason}); an explicit output file cannot be changed to MP3"
-            );
-            return Ok(ExitCode::General);
-        }
-        output_format = AudioFormat::Mp3;
-        warn_fetch_fallback(global.verbosity(), &reason.to_string());
-        warned = true;
-    }
 
     let clip = client
         .get_clip(&http, &id)
@@ -135,25 +113,7 @@ pub async fn run_fetch(global: &GlobalArgs, args: &FetchArgs) -> Result<ExitCode
     let mut wav_url = None;
     if output_format.requires_wav_render() {
         let clock = TokioClock;
-        match ensure_wav_url(&client, &http, &clock, &id).await {
-            Ok(url) => wav_url = Some(url),
-            Err(err) => {
-                let Some(reason) = entitlement_error(&err) else {
-                    return Err(err);
-                };
-                let reason = describe_fetch_entitlement(&client, &http, reason).await;
-                if explicit_file {
-                    eprintln!(
-                        "error: lossless output is unavailable ({reason}); an explicit output file cannot be changed to MP3"
-                    );
-                    return Ok(ExitCode::General);
-                }
-                output_format = AudioFormat::Mp3;
-                if !warned {
-                    warn_fetch_fallback(global.verbosity(), &reason);
-                }
-            }
-        }
+        wav_url = Some(ensure_wav_url(&client, &http, &clock, &id).await?);
     }
     let (_, filename) = fetch_destination(
         args.output.as_deref(),
@@ -277,33 +237,6 @@ fn lrc_output_filename(audio_filename: &str) -> Result<String> {
     Ok(sidecar)
 }
 
-fn entitlement_error(err: &anyhow::Error) -> Option<&str> {
-    err.downcast_ref::<CoreError>().and_then(|err| match err {
-        CoreError::Entitlement(reason) => Some(reason.as_str()),
-        _ => None,
-    })
-}
-
-fn warn_fetch_fallback(verbosity: i8, reason: &str) {
-    if verbosity >= -1 {
-        eprintln!("warning: lossless output is unavailable ({reason}); using native MP3");
-    }
-}
-
-async fn describe_fetch_entitlement(
-    client: &SunoClient<TokioClock>,
-    http: &ReqwestHttp,
-    fallback: &str,
-) -> String {
-    match client.get_billing_info(http).await {
-        Ok(billing) => match billing.lossless_access() {
-            LosslessAccess::Unavailable(reason) => reason.to_string(),
-            LosslessAccess::Available | LosslessAccess::Unknown => fallback.to_owned(),
-        },
-        Err(_) => fallback.to_owned(),
-    }
-}
-
 /// Resolve the output directory and bare file name for a fetch.
 ///
 /// `--output` names the file outright. Otherwise `DEST` is treated as a
@@ -350,10 +283,6 @@ fn looks_like_dir(dest: &Path) -> bool {
         return true;
     }
     dest.extension().is_none()
-}
-
-fn explicit_file_destination(output: Option<&Path>, dest: Option<&Path>) -> bool {
-    output.is_some() || dest.is_some_and(|path| !looks_like_dir(path))
 }
 
 /// Resolve the rendered WAV URL, requesting a render and polling if needed.
@@ -471,24 +400,11 @@ mod tests {
     }
 
     #[test]
-    fn fallback_auto_name_uses_mp3_extension() {
+    fn mp3_auto_name_uses_mp3_extension() {
         let (root, name) =
             fetch_destination(None, Some(Path::new("music")), "abc", AudioFormat::Mp3);
         assert_eq!(root, PathBuf::from("music"));
         assert_eq!(name, "abc.mp3");
-    }
-
-    #[test]
-    fn explicit_file_detection_covers_output_and_file_like_destinations() {
-        assert!(explicit_file_destination(
-            Some(Path::new("track.flac")),
-            None
-        ));
-        assert!(explicit_file_destination(
-            None,
-            Some(Path::new("track.flac"))
-        ));
-        assert!(!explicit_file_destination(None, Some(Path::new("music"))));
     }
 
     #[test]

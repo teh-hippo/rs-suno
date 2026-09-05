@@ -339,9 +339,10 @@ account token:
 | `SUNO_NAMING_TEMPLATE` | `--naming-template` | Supported placeholders: `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, `{root_id8}`, `{track}`, `{track2}`. |
 | `SUNO_CHARACTER_SET` | `--character-set` | `unicode` or `ascii`. |
 
-The configured format remains the long-term target when Suno temporarily
-withholds its lossless WAV render. New work falls back to MP3 for that run, and
-later runs upgrade it without rewriting the configuration.
+The configured format is strict. If Suno withholds its lossless WAV render, new
+lossless work fails rather than falling back to MP3. An existing MP3 awaiting an
+upgrade remains until a verified lossless replacement is written, then it is
+removed.
 
 Per-account variants use the account label upper-cased with hyphens turned into
 underscores, so account `my-lib` reads `SUNO_MY_LIB_TOKEN`,

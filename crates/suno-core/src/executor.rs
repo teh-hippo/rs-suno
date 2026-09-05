@@ -147,17 +147,6 @@ pub struct Failure {
     pub reason: String,
 }
 
-/// One audio action that used a temporary format because lossless entitlement
-/// was unavailable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AudioFallback {
-    pub clip_id: String,
-    pub requested_path: String,
-    pub actual_path: String,
-    pub format: AudioFormat,
-    pub reason: String,
-}
-
 /// The result of applying a [`Plan`]: per-action counts and the failure list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecOutcome {
@@ -177,8 +166,6 @@ pub struct ExecOutcome {
     /// permanent). The run continued past each one unless it was an auth or
     /// disk-full abort.
     pub failures: Vec<Failure>,
-    /// Successful temporary format fallbacks. These are warnings, not failures.
-    pub fallbacks: Vec<AudioFallback>,
     /// How the run ended.
     pub status: RunStatus,
 }
@@ -201,7 +188,6 @@ impl ExecOutcome {
         self.artifacts_deleted += other.artifacts_deleted;
         self.unverifiable.append(&mut other.unverifiable);
         self.failures.append(&mut other.failures);
-        self.fallbacks.append(&mut other.fallbacks);
         if self.status == RunStatus::Completed {
             self.status = other.status;
         }
@@ -218,16 +204,6 @@ impl ExecOutcome {
             Effect::ArtifactWritten => self.artifacts_written += 1,
             Effect::ArtifactDeleted => self.artifacts_deleted += 1,
             Effect::Unverifiable(failure) => self.unverifiable.push(failure),
-            Effect::AudioFallback {
-                effect, fallback, ..
-            } => {
-                match effect {
-                    AudioEffect::Downloaded => self.downloaded += 1,
-                    AudioEffect::Reformatted => self.reformatted += 1,
-                    AudioEffect::Skipped => self.skipped += 1,
-                }
-                self.fallbacks.push(fallback);
-            }
         }
     }
 }
@@ -520,15 +496,7 @@ where
         };
         match result {
             Ok(effect) => {
-                let committed_path = match &effect {
-                    Effect::AudioFallback {
-                        fallback,
-                        wrote: true,
-                        ..
-                    } => Some(fallback.actual_path.clone()),
-                    Effect::AudioFallback { wrote: false, .. } => None,
-                    _ => written_path(action).map(str::to_owned),
-                };
+                let committed_path = written_path(action).map(str::to_owned);
                 outcome.record(effect);
                 // Record this action's destination now that its write succeeded.
                 // A later action vacating a path removes it only when no
@@ -645,8 +613,7 @@ struct RenderedAudio {
     /// or `None` for a plain [`Download`].
     from_path: Option<String>,
     effect: AudioEffect,
-    bytes: Option<Vec<u8>>,
-    fallback: Option<AudioFallback>,
+    bytes: Vec<u8>,
 }
 
 /// A fetched-but-uncommitted artifact result: bytes for one
@@ -709,18 +676,12 @@ enum Effect {
     ArtifactWritten,
     ArtifactDeleted,
     Unverifiable(Failure),
-    AudioFallback {
-        effect: AudioEffect,
-        fallback: AudioFallback,
-        wrote: bool,
-    },
 }
 
 #[derive(Debug, Clone, Copy)]
 enum AudioEffect {
     Downloaded,
     Reformatted,
-    Skipped,
 }
 
 /// Whether an artifact kind is album-scoped folder art (owned by a root id and
@@ -786,8 +747,8 @@ struct Ctx<'a, H, F, G, C> {
     /// reuses the #89 fetch-once path). `FolderWebp` sorts before `FolderMp4`, so
     /// the raw source is always cached before the raw sidecar reads it.
     shared_cover_urls: &'a HashSet<&'a str>,
-    /// Set after the first entitlement refusal so later audio producers use
-    /// native MP3 without attempting another WAV render.
+    /// Set after the first entitlement refusal so later audio producers fail
+    /// quickly without repeating a WAV request the account cannot fulfil.
     lossless_unavailable: &'a AtomicBool,
 }
 

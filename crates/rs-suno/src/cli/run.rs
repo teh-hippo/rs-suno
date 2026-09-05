@@ -15,12 +15,12 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use suno_core::select::{RecencySpec, SelectParams, select};
 use suno_core::{
-    AlbumArt, ArtifactToggles, ClerkAuth, Config, FlagOverrides, LineageContext, LosslessAccess,
-    NamingConfig, NamingScope, OwnerGate, PlaylistState, ResolveOpts, SourceMode, SunoClient,
-    adopt_decision, adoption_enumerated, album_desired, animated_covers_flag_overridden,
-    assign_track_numbers, build_desired, build_modes_by_id, build_scoped_playlist_desired,
-    clip_stems, deletion_allowed, library_authoritative, narrows_downloads, owner_gate,
-    resolve_lead_ids, resolve_roots, source_statuses, union_clips,
+    AlbumArt, ArtifactToggles, ClerkAuth, Config, FlagOverrides, LineageContext, NamingConfig,
+    NamingScope, OwnerGate, PlaylistState, ResolveOpts, SourceMode, SunoClient, adopt_decision,
+    adoption_enumerated, album_desired, animated_covers_flag_overridden, assign_track_numbers,
+    build_desired, build_modes_by_id, build_scoped_playlist_desired, clip_stems, deletion_allowed,
+    library_authoritative, narrows_downloads, owner_gate, resolve_lead_ids, resolve_roots,
+    source_statuses, union_clips,
 };
 
 use crate::cli::account;
@@ -274,7 +274,6 @@ async fn run_one(
         mut store,
         user_id,
         account,
-        lossless_access,
     } = match preflight::preflight(target, config, flags, env, verbosity).await? {
         Ok(pre) => pre,
         Err(code) => return Ok(code),
@@ -320,11 +319,9 @@ async fn run_one(
         http: &http,
         dest,
         account: &account,
-        lossless_access,
         verbosity,
         exit_code,
     };
-    note_lossless_fallback(&settings, lossless_access, verbosity);
 
     // Resolve which areas this run touches and their modes (pure). CLI scope
     // flags win over `[areas]` config; a copy verb or a force-additive run
@@ -495,7 +492,6 @@ struct RunCtx<'a> {
     http: &'a ReqwestHttp,
     dest: &'a Path,
     account: &'a str,
-    lossless_access: LosslessAccess,
     verbosity: i8,
     exit_code: bool,
 }
@@ -510,22 +506,6 @@ struct Preflight {
     store: suno_core::LineageStore,
     user_id: String,
     account: String,
-    lossless_access: LosslessAccess,
-}
-
-fn note_lossless_fallback(
-    settings: &suno_core::EffectiveSettings,
-    access: LosslessAccess,
-    verbosity: i8,
-) {
-    if !settings.format.requires_wav_render() || verbosity < -1 {
-        return;
-    }
-    if let LosslessAccess::Unavailable(reason) = access {
-        eprint_t!(
-            "warning: lossless output is unavailable ({reason}); using MP3 for clips without an existing lossless file and preserving existing lossless files"
-        );
-    }
 }
 
 /// The plan inputs [`assemble`] produces once the run's additivity is known:
@@ -567,7 +547,6 @@ impl Assembled {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::task_output::{capture_task_stderr, flush_task_stderr};
     use std::path::PathBuf;
     use suno_core::{AreaKind, AreaListing, Clip, area_enumerated, area_mode};
 
@@ -576,27 +555,6 @@ mod tests {
         assert_eq!(worse(ExitCode::Ok, ExitCode::Partial), ExitCode::Partial);
         assert_eq!(worse(ExitCode::Safety, ExitCode::Auth), ExitCode::Safety);
         assert_eq!(worse(ExitCode::Ok, ExitCode::Ok), ExitCode::Ok);
-    }
-
-    #[test]
-    fn known_lossless_unavailability_emits_one_account_warning() {
-        let config = Config::from_toml("[accounts.a]\n").unwrap();
-        let mut settings = config
-            .resolve("a", None, &HashMap::new(), &FlagOverrides::default())
-            .unwrap();
-        settings.format = suno_core::AudioFormat::Flac;
-
-        capture_task_stderr();
-        note_lossless_fallback(
-            &settings,
-            LosslessAccess::Unavailable(suno_core::LosslessUnavailableReason::Paused),
-            0,
-        );
-        let lines = flush_task_stderr();
-
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("subscription paused"));
-        assert!(lines[0].contains("using MP3"));
     }
 
     #[test]

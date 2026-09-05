@@ -14,10 +14,10 @@ pub(super) enum Class {
     /// server-side WAV-render budget before failing the same way).
     Disk,
     /// The authenticated account cannot use the requested paid operation.
-    /// Audio preparation may recover with a native MP3 fallback.
+    /// Later lossless actions fail quickly without repeating the request.
     Entitlement,
     /// This clip's rendered lossless asset stayed unavailable after refresh.
-    /// Fall back this clip without disabling lossless for the rest of the run.
+    /// Fail this clip without disabling lossless for the rest of the run.
     LosslessRejected,
     /// Retry a bounded number of times, then record and skip.
     Transient,
@@ -149,7 +149,7 @@ impl FetchError {
         }
     }
 
-    pub(super) fn into_lossless_fallback(self, clip_id: &str) -> Fail {
+    pub(super) fn into_lossless_rejected(self, clip_id: &str) -> Fail {
         Fail {
             class: Class::LosslessRejected,
             clip_id: clip_id.to_owned(),

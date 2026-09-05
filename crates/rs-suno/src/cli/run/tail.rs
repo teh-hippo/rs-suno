@@ -19,7 +19,7 @@ pub(super) async fn dry_run_report(
     let _lock = logs::acquire_existing_lock(ctx.dest)?;
     let manifest = logs::load_manifest(ctx.dest)?;
     let local = execute::stat_manifest(ctx.dest, &manifest, &store.albums, &store.playlists).await;
-    apply_effective_audio_targets(ctx, assembled, &manifest, &local);
+
     let resolution_manifest = execute::observed_resolution_manifest(&manifest, &local);
     let resolved = synced_lyrics::resolve_synced_lyrics(
         &mut assembled.desired,
@@ -90,7 +90,7 @@ pub(super) async fn execute_run(
     let _lock = logs::acquire_lock(dest)?;
     let manifest = logs::load_manifest(dest)?;
     let local = execute::stat_manifest(dest, &manifest, &store.albums, &store.playlists).await;
-    apply_effective_audio_targets(ctx, &mut assembled, &manifest, &local);
+
     let resolution_manifest = execute::observed_resolution_manifest(&manifest, &local);
     // Resolve this run's lyrics before reconcile, through the same path `check`
     // and `--dry-run` use. Missing plain audio metadata is always checked (until
@@ -210,33 +210,4 @@ pub(super) async fn execute_run(
     } else {
         worse(code, ExitCode::Partial)
     })
-}
-
-fn apply_effective_audio_targets(
-    ctx: &RunCtx<'_>,
-    assembled: &mut Assembled,
-    manifest: &suno_core::Manifest,
-    local: &HashMap<String, suno_core::LocalFile>,
-) {
-    if !matches!(ctx.lossless_access, LosslessAccess::Unavailable(_))
-        || !ctx.settings.format.requires_wav_render()
-    {
-        return;
-    }
-    let path_changes = suno_core::apply_lossless_fallback(
-        &mut assembled.desired,
-        manifest,
-        local,
-        ctx.lossless_access,
-        ArtifactToggles {
-            animated_covers: ctx.settings.animated_covers,
-            details: ctx.settings.details_sidecar,
-            lyrics: ctx.settings.lyrics_sidecar,
-            lrc: ctx.settings.lrc_sidecar,
-            lyrics_timing: ctx.settings.lyrics_timing,
-            video: ctx.settings.video_mp4,
-            webp: ctx.settings.animated_cover_webp,
-        },
-    );
-    suno_core::rewrite_playlist_paths(&mut assembled.playlist_desired, &path_changes);
 }

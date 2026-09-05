@@ -1335,22 +1335,6 @@ mod tests {
     }
 
     #[test]
-    fn successful_audio_fallback_keeps_a_clean_exit() {
-        let outcome = ExecOutcome {
-            downloaded: 1,
-            fallbacks: vec![suno_core::AudioFallback {
-                clip_id: "a".to_owned(),
-                requested_path: "a.flac".to_owned(),
-                actual_path: "a.mp3".to_owned(),
-                format: suno_core::AudioFormat::Mp3,
-                reason: "subscription paused".to_owned(),
-            }],
-            ..Default::default()
-        };
-        assert_eq!(run_exit_code(&outcome), ExitCode::Ok);
-    }
-
-    #[test]
     fn exit_code_values_match_spec() {
         assert_eq!(ExitCode::Ok.code(), 0);
         assert_eq!(ExitCode::General.code(), 1);

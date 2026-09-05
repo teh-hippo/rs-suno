@@ -52,6 +52,8 @@ the member's own title. The rest of the playlist stays valid and in order.
   playlist's listing fails, that playlist is skipped for the run rather than
   written half-empty. The synthetic "Liked Songs" playlist is likewise only
   written when the liked feed was fully enumerated.
+- If any audio download or lossless upgrade fails, playlist files and covers are
+  left untouched so they never point at an uncommitted target path.
 
 Playlists are regular mirror artefacts: their `.m3u8` files are rewritten when
 their name, order, or any member's path, title, or duration changes. A playlist
