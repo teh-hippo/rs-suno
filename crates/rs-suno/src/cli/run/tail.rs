@@ -19,6 +19,7 @@ pub(super) async fn dry_run_report(
     let _lock = logs::acquire_existing_lock(ctx.dest)?;
     let manifest = logs::load_manifest(ctx.dest)?;
     let local = execute::stat_manifest(ctx.dest, &manifest, &store.albums, &store.playlists).await;
+    apply_effective_audio_targets(ctx, assembled, &manifest, &local);
 
     let resolution_manifest = execute::observed_resolution_manifest(&manifest, &local);
     let resolved = synced_lyrics::resolve_synced_lyrics(
@@ -90,6 +91,7 @@ pub(super) async fn execute_run(
     let _lock = logs::acquire_lock(dest)?;
     let manifest = logs::load_manifest(dest)?;
     let local = execute::stat_manifest(dest, &manifest, &store.albums, &store.playlists).await;
+    apply_effective_audio_targets(ctx, &mut assembled, &manifest, &local);
 
     let resolution_manifest = execute::observed_resolution_manifest(&manifest, &local);
     // Resolve this run's lyrics before reconcile, through the same path `check`
@@ -210,4 +212,34 @@ pub(super) async fn execute_run(
     } else {
         worse(code, ExitCode::Partial)
     })
+}
+
+fn apply_effective_audio_targets(
+    ctx: &RunCtx<'_>,
+    assembled: &mut Assembled,
+    manifest: &suno_core::Manifest,
+    local: &HashMap<String, suno_core::LocalFile>,
+) {
+    let path_changes = suno_core::apply_non_owned_audio_policy(
+        &mut assembled.desired,
+        manifest,
+        local,
+        ctx.user_id,
+        ArtifactToggles {
+            animated_covers: ctx.settings.animated_covers,
+            details: ctx.settings.details_sidecar,
+            lyrics: ctx.settings.lyrics_sidecar,
+            lrc: ctx.settings.lrc_sidecar,
+            lyrics_timing: ctx.settings.lyrics_timing,
+            video: ctx.settings.video_mp4,
+            webp: ctx.settings.animated_cover_webp,
+        },
+    );
+    if !path_changes.is_empty() && ctx.verbosity >= -1 {
+        eprint_t!(
+            "note: {} non-owned clip(s) use native MP3 because Suno restricts lossless conversion to the owning account",
+            path_changes.len()
+        );
+    }
+    suno_core::rewrite_playlist_paths(&mut assembled.playlist_desired, &path_changes);
 }

@@ -287,6 +287,10 @@ Failures are classified so one bad clip never derails a whole run:
   awaiting an upgrade remains readable until a verified lossless file is
   committed, then the MP3 is removed atomically. The non-zero run retries on the
   next schedule and makes stale credentials visible to monitoring.
+- **Non-owned clip** uses Suno's native MP3 because the WAV conversion endpoint
+  is restricted to the clip's recorded owner. This is deterministic rather than
+  a temporary fallback. Any existing lossless copy is preserved and never
+  downgraded.
 - **Transient failure** (a timeout, a `5xx`, a rate limit) is retried up to
   `--retries` times, then recorded and skipped.
 - **A single clip's failure never aborts the run.** Other clips still download,
