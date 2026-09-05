@@ -88,8 +88,9 @@ pub use config::{
     Settings, SourceConfig, animated_covers_flag_overridden,
 };
 pub use desired::{
-    ArtifactToggles, LIKED_PLAYLIST_ID, NamingScope, PlaylistInput, album_desired, build_desired,
-    build_playlist_desired, clip_stems,
+    ArtifactToggles, LIKED_PLAYLIST_ID, NamingScope, PlaylistInput, album_desired,
+    apply_non_owned_audio_policy, build_desired, build_playlist_desired, clip_stems,
+    rewrite_playlist_paths,
 };
 pub use downloadable::is_downloadable;
 pub use error::{Error, Result};

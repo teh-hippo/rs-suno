@@ -24,6 +24,10 @@ other work progressed or `6` when nothing progressed. An existing MP3 remains
 in place until a verified lossless replacement is committed; a new lossless
 download does not silently create an MP3.
 
+Non-owned clips are different: Suno restricts WAV conversion to the recorded
+owner, so they use native MP3 without failing the run. Existing non-owned
+lossless files are preserved.
+
 `check --exit-code` uses `1` only for an authoritative plan with pending
 changes, and `0` only when the destination is authoritatively up to date. An
 incomplete check keeps the domain exit from the table, such as `5` for

@@ -167,6 +167,15 @@ kept for playback while the upgrade fails and the run returns non-zero. Once a
 verified FLAC or ALAC is committed, the MP3 is removed. A new lossless target
 does not fall back to MP3.
 
+### Why is a playlist track permanently MP3?
+
+Suno restricts WAV conversion to the account recorded as the clip owner. A
+liked, shared, remixed, or covered track can retain another account's `user_id`
+even when its display name looks familiar. `rs-suno` uses native MP3 for those
+non-owned clips and reports a note instead of repeatedly calling an endpoint
+that will always return `403`. If a non-owned lossless file already exists, it
+is kept.
+
 ### Is it safe to run on a schedule?
 
 Yes. Runs are incremental and resumable, an exclusive lock prevents overlap, and

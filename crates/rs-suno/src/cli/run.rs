@@ -319,6 +319,7 @@ async fn run_one(
         http: &http,
         dest,
         account: &account,
+        user_id: &user_id,
         verbosity,
         exit_code,
     };
@@ -492,6 +493,7 @@ struct RunCtx<'a> {
     http: &'a ReqwestHttp,
     dest: &'a Path,
     account: &'a str,
+    user_id: &'a str,
     verbosity: i8,
     exit_code: bool,
 }

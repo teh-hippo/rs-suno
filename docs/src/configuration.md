@@ -339,10 +339,16 @@ account token:
 | `SUNO_NAMING_TEMPLATE` | `--naming-template` | Supported placeholders: `{creator}`, `{handle}`, `{album}`, `{title}`, `{id}`, `{id8}`, `{root_id8}`, `{track}`, `{track2}`. |
 | `SUNO_CHARACTER_SET` | `--character-set` | `unicode` or `ascii`. |
 
-The configured format is strict. If Suno withholds its lossless WAV render, new
-lossless work fails rather than falling back to MP3. An existing MP3 awaiting an
-upgrade remains until a verified lossless replacement is written, then it is
-removed.
+The configured format is strict for clips owned by the authenticated account.
+If Suno withholds an owned clip's lossless WAV render, new lossless work fails
+rather than falling back to MP3. An existing MP3 awaiting an upgrade remains
+until a verified lossless replacement is written, then it is removed.
+
+Suno does not allow an account to request WAV conversion for a clip whose
+recorded `user_id` belongs to another account, including some remixes and covers
+that retain the source account's ownership. Those non-owned clips use Suno's
+native MP3 as their terminal format. An already-downloaded non-owned lossless
+file is preserved and never downgraded.
 
 Per-account variants use the account label upper-cased with hyphens turned into
 underscores, so account `my-lib` reads `SUNO_MY_LIB_TOKEN`,
