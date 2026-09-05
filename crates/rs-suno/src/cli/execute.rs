@@ -14,9 +14,8 @@ use anyhow::Result;
 use futures_util::stream::{self, StreamExt};
 use suno_core::{
     Action, AlbumArt, AlbumDesired, AlignedLyrics, ArtifactKind, Clip, ExecOptions, Filesystem,
-    LocalFile, LosslessAccess, Plan, PlaylistDesired, PlaylistState, Ports, RunStatus,
-    SourceStatus, SunoClient, deletion_allowed, plan_album_artifacts, plan_playlist_artifacts,
-    reconcile,
+    LocalFile, Plan, PlaylistDesired, PlaylistState, Ports, RunStatus, SourceStatus, SunoClient,
+    deletion_allowed, plan_album_artifacts, plan_playlist_artifacts, reconcile,
 };
 
 use crate::cli::desired::{ExitCode, run_exit_code};
@@ -131,12 +130,11 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
         return interrupted(dest, &manifest, store, &fs);
     };
 
-    if outcome.status == RunStatus::Completed {
-        let final_playlists = playlists_after_fallbacks(playlist_desired, &outcome.fallbacks);
+    if playlists_safe_to_update(&outcome) {
         let local = stat_manifest(dest, &manifest, &store.albums, &store.playlists).await;
         let playlist_plan = Plan {
             actions: plan_playlist_artifacts(
-                &final_playlists,
+                playlist_desired,
                 stored_playlists,
                 deletion_allowed(sources),
                 playlists_enumerated,
@@ -260,13 +258,6 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
             dest.join(".suno-failures.log").display()
         );
     }
-    if !outcome.fallbacks.is_empty() && verbosity >= -1 {
-        let reason = describe_run_entitlement(client, http, &outcome.fallbacks[0].reason).await;
-        eprint_t!(
-            "warning: lossless output was refused ({}); used native MP3 where needed and preserved existing lossless files",
-            reason
-        );
-    }
     if verbosity >= -1 {
         eprint_t!(
             "{}",
@@ -280,6 +271,10 @@ pub(crate) async fn execute_plan(inputs: ExecutePlan<'_>) -> Result<ExitCode> {
     }
 
     Ok(run_exit_code(&outcome))
+}
+
+fn playlists_safe_to_update(outcome: &suno_core::ExecOutcome) -> bool {
+    outcome.status == RunStatus::Completed && outcome.failures.is_empty()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -346,38 +341,6 @@ fn is_playlist_action(action: &Action) -> bool {
             ..
         }
     )
-}
-
-fn playlists_after_fallbacks(
-    desired: &[PlaylistDesired],
-    fallbacks: &[suno_core::AudioFallback],
-) -> Vec<PlaylistDesired> {
-    let mut playlists = desired.to_vec();
-    let path_changes = fallbacks
-        .iter()
-        .map(|fallback| {
-            (
-                fallback.requested_path.clone(),
-                fallback.actual_path.clone(),
-            )
-        })
-        .collect();
-    suno_core::rewrite_playlist_paths(&mut playlists, &path_changes);
-    playlists
-}
-
-async fn describe_run_entitlement(
-    client: &SunoClient<TokioClock>,
-    http: &ReqwestHttp,
-    fallback: &str,
-) -> String {
-    match client.get_billing_info(http).await {
-        Ok(billing) => match billing.lossless_access() {
-            LosslessAccess::Unavailable(reason) => reason.to_string(),
-            LosslessAccess::Available | LosslessAccess::Unknown => fallback.to_owned(),
-        },
-        Err(_) => fallback.to_owned(),
-    }
 }
 
 /// The inputs to [`reconcile_run_with_local`]: the loaded manifest plus the
@@ -700,28 +663,15 @@ mod tests {
     use suno_core::SourceMode;
 
     #[test]
-    fn final_playlist_content_uses_reactive_fallback_path() {
-        let desired = vec![PlaylistDesired {
-            id: "pl".to_owned(),
-            name: "Mix".to_owned(),
-            path: "Mix.m3u8".to_owned(),
-            content: "#EXTM3U\n#EXTINF:1,Song\nSong.flac\n".to_owned(),
-            hash: "old".to_owned(),
-            cover_jpg: None,
-        }];
-        let fallbacks = vec![suno_core::AudioFallback {
-            clip_id: "song".to_owned(),
-            requested_path: "Song.flac".to_owned(),
-            actual_path: "Song.mp3".to_owned(),
-            format: suno_core::AudioFormat::Mp3,
-            reason: "subscription paused".to_owned(),
-        }];
-
-        let playlists = playlists_after_fallbacks(&desired, &fallbacks);
-
-        assert!(playlists[0].content.contains("Song.mp3"));
-        assert!(!playlists[0].content.contains("Song.flac"));
-        assert_ne!(playlists[0].hash, "old");
+    fn audio_failure_keeps_playlist_files_untouched() {
+        assert!(playlists_safe_to_update(&suno_core::ExecOutcome::default()));
+        assert!(!playlists_safe_to_update(&suno_core::ExecOutcome {
+            failures: vec![suno_core::Failure {
+                clip_id: "a".to_owned(),
+                reason: "lossless unavailable".to_owned(),
+            }],
+            ..Default::default()
+        }));
     }
 
     #[tokio::test]

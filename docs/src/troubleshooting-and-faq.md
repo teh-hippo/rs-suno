@@ -157,14 +157,15 @@ devices and Apple Music), carrying the same tags and cover. MP3 is smaller and
 widely compatible. WAV is uncompressed and carries full ID3v2.4 metadata,
 including lyrics and embedded art, in a RIFF `id3 ` chunk.
 
-### Why did a lossless run use MP3?
+### Why did a lossless run leave an MP3 in place?
 
 Suno supplies FLAC and ALAC indirectly: `suno` downloads Suno's authenticated
-WAV render, then converts it locally. A paused, inactive, past-due, or
-non-entitled plan cannot request that WAV. In that state `suno` warns once and
-uses Suno's native MP3 for new work instead. It never converts MP3 into a
-lossless container, never replaces an existing lossless file with MP3, and
-automatically upgrades the temporary MP3 after lossless access returns.
+WAV render, then converts it locally. A stale cookie or a paused, inactive,
+past-due, or non-entitled plan cannot request that WAV. `suno` never converts
+MP3 into a lossless container. If an MP3 already exists from an older run, it is
+kept for playback while the upgrade fails and the run returns non-zero. Once a
+verified FLAC or ALAC is committed, the MP3 is removed. A new lossless target
+does not fall back to MP3.
 
 ### Is it safe to run on a schedule?
 

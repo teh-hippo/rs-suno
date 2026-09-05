@@ -402,7 +402,7 @@ fn download_flac_waits_for_the_rejected_url_to_change() {
 }
 
 #[test]
-fn rejected_original_and_fresh_wav_fall_back_only_that_clip_to_mp3() {
+fn rejected_original_and_fresh_wav_fail_only_that_clip() {
     let (_c1, d1, action1) = download("denied", AudioFormat::Flac);
     let (_c2, d2, action2) = download("healthy", AudioFormat::Flac);
     let plan = Plan {
@@ -424,7 +424,6 @@ fn rejected_original_and_fresh_wav_fall_back_only_that_clip_to_mp3() {
         .route("/convert_wav/", Reply::status(200))
         .route("old.wav", Reply::status(403))
         .route("fresh.wav", Reply::status(403))
-        .route("denied.mp3", Reply::ok(b"mp3".to_vec()))
         .route("healthy.wav", Reply::ok(b"wav".to_vec()));
     let fs = MemFs::new();
     let mut manifest = Manifest::new();
@@ -442,13 +441,12 @@ fn rejected_original_and_fresh_wav_fall_back_only_that_clip_to_mp3() {
         &opts,
     );
 
-    assert_eq!(outcome.downloaded, 2);
-    assert!(outcome.failures.is_empty());
-    assert_eq!(outcome.fallbacks.len(), 1);
-    assert!(outcome.fallbacks[0].reason.contains("status 403"));
-    assert!(fs.exists("denied.mp3"));
+    assert_eq!(outcome.downloaded, 1);
+    assert_eq!(outcome.failed(), 1);
+    assert!(outcome.failures[0].reason.contains("status 403"));
+    assert!(!fs.exists("denied.mp3"));
     assert!(!fs.exists("denied.flac"));
-    assert_eq!(manifest.get("denied").unwrap().format, AudioFormat::Mp3);
+    assert!(manifest.get("denied").is_none());
     assert!(fs.exists("healthy.flac"));
     assert_eq!(manifest.get("healthy").unwrap().format, AudioFormat::Flac);
 }
@@ -494,9 +492,8 @@ fn rejected_lossless_upgrade_preserves_the_existing_mp3() {
         &small_poll(),
     );
 
-    assert!(outcome.failures.is_empty());
-    assert_eq!(outcome.fallbacks.len(), 1);
-    assert_eq!(outcome.skipped, 1);
+    assert_eq!(outcome.failed(), 1);
+    assert_eq!(outcome.skipped, 0);
     assert_eq!(fs.read_file("preserve.mp3"), Some(b"EXISTING".to_vec()));
     assert!(!fs.exists("preserve.flac"));
     assert_eq!(manifest.get("preserve"), Some(&before));
@@ -536,9 +533,8 @@ fn transient_lossless_upgrade_preserves_the_existing_mp3() {
         &small_poll(),
     );
 
-    assert!(outcome.failures.is_empty());
-    assert_eq!(outcome.fallbacks.len(), 1);
-    assert_eq!(outcome.skipped, 1);
+    assert_eq!(outcome.failed(), 1);
+    assert_eq!(outcome.skipped, 0);
     assert_eq!(fs.read_file("transient.mp3"), Some(b"EXISTING".to_vec()));
     assert!(!fs.exists("transient.flac"));
     assert_eq!(manifest.get("transient"), Some(&before));
@@ -647,44 +643,23 @@ fn flac_transcode_failure_is_recorded_and_skipped() {
 }
 
 #[test]
-fn entitlement_refusal_falls_back_to_native_mp3_and_is_not_a_failure() {
-    let (_c1, mut d1, a1) = download("e1", AudioFormat::Flac);
-    let (_c2, mut d2, a2) = download("e2", AudioFormat::Flac);
+fn entitlement_refusal_fails_lossless_downloads_and_caches_the_refusal() {
+    let (_c1, d1, a1) = download("e1", AudioFormat::Flac);
+    let (_c2, d2, a2) = download("e2", AudioFormat::Flac);
     let plan = Plan {
         actions: vec![a1, a2],
     };
     let http = ScriptedHttp::new()
         .with_auth()
-        .route("/wav_file/", Reply::status(403))
-        .route("e1.mp3", Reply::ok(b"one".to_vec()))
-        .route("e2.mp3", Reply::ok(b"two".to_vec()));
+        .route("/wav_file/", Reply::status(403));
     let fs = MemFs::new();
     let mut manifest = Manifest::new();
     let mut opts = small_poll();
     opts.concurrency = 1;
-    let alignment = AlignedLyrics {
-        lines: vec![AlignedLine {
-            text: "fallback words".to_owned(),
-            start_s: 0.0,
-            end_s: 1.0,
-            section: String::new(),
-            words: Vec::new(),
-        }],
-        ..Default::default()
-    };
-    let synced = HashMap::from([
-        ("e1".to_string(), alignment.clone()),
-        ("e2".to_string(), alignment),
-    ]);
-    let lyrics_hash = crate::content_hash("fallback words");
-    d1.embedded_lyrics_hash = lyrics_hash.clone();
-    d2.embedded_lyrics_hash = lyrics_hash;
-
-    let outcome = run_with_synced(
+    let outcome = run(
         &plan,
         &mut manifest,
         &[d1, d2],
-        &synced,
         &http,
         &fs,
         &StubFfmpeg::flac(),
@@ -693,30 +668,16 @@ fn entitlement_refusal_falls_back_to_native_mp3_and_is_not_a_failure() {
     );
 
     assert_eq!(outcome.status, RunStatus::Completed);
-    assert!(outcome.failures.is_empty());
-    assert_eq!(outcome.fallbacks.len(), 2);
-    assert!(
-        outcome.fallbacks[0]
-            .reason
-            .contains("entitlement unavailable")
-    );
-    assert_eq!(outcome.downloaded, 2);
-    assert!(fs.exists("e1.mp3"));
-    assert!(fs.exists("e2.mp3"));
+    assert_eq!(outcome.failed(), 2);
+    assert_eq!(outcome.downloaded, 0);
+    assert!(!fs.exists("e1.mp3"));
+    assert!(!fs.exists("e2.mp3"));
     assert!(!fs.exists("e1.flac"));
-    assert_eq!(manifest.get("e1").unwrap().format, AudioFormat::Mp3);
-    assert_eq!(manifest.get("e1").unwrap().path, "e1.mp3");
-    let written = fs.read_file("e1.mp3").unwrap();
-    let tag = id3::Tag::read_from2(std::io::Cursor::new(written)).unwrap();
-    assert_eq!(
-        tag.lyrics().next().map(|frame| frame.text.as_str()),
-        Some("fallback words")
-    );
-    assert_eq!(tag.synchronised_lyrics().count(), 0);
+    assert!(manifest.get("e1").is_none());
     assert_eq!(
         http.count("/wav_file/"),
         2,
-        "the first refusal refreshes once; later clips use the cached fallback"
+        "the first refusal refreshes once; later clips use the cached failure"
     );
 }
 
@@ -752,9 +713,8 @@ fn entitlement_refusal_preserves_an_existing_lossless_reformat_source() {
         &small_poll(),
     );
 
-    assert!(outcome.failures.is_empty());
-    assert_eq!(outcome.fallbacks.len(), 1);
-    assert_eq!(outcome.skipped, 1);
+    assert_eq!(outcome.failed(), 1);
+    assert_eq!(outcome.skipped, 0);
     assert!(fs.exists("keep.flac"));
     assert!(!fs.exists("keep.m4a"));
     assert!(!fs.exists("keep.mp3"));
@@ -762,7 +722,7 @@ fn entitlement_refusal_preserves_an_existing_lossless_reformat_source() {
 }
 
 #[test]
-fn entitlement_refusal_keeps_prior_fallback_mp3_as_the_upgrade_baseline() {
+fn entitlement_refusal_preserves_prior_mp3_until_lossless_upgrade_succeeds() {
     let c = clip("upgrade");
     let d = desired(c.clone(), AudioFormat::Flac);
     let plan = Plan {
@@ -793,8 +753,7 @@ fn entitlement_refusal_keeps_prior_fallback_mp3_as_the_upgrade_baseline() {
         &small_poll(),
     );
 
-    assert!(outcome.failures.is_empty());
-    assert_eq!(outcome.fallbacks.len(), 1);
+    assert_eq!(outcome.failed(), 1);
     assert!(fs.exists("upgrade.mp3"));
     assert!(!fs.exists("upgrade.flac"));
     assert_eq!(fs.read_file("upgrade.mp3"), Some(b"OLD".to_vec()));

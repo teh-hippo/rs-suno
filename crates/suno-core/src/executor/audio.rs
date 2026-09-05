@@ -38,44 +38,29 @@ where
                     self.produce_audio(client_lock, clip, lineage, *format)
                         .await
                 };
-                let (bytes, actual_path, actual_format, fallback) = match result {
-                    Ok(bytes) => (Some(bytes), path.clone(), *format, None),
-                    Err(fail)
-                        if matches!(fail.class, Class::Entitlement | Class::LosslessRejected) =>
-                    {
+                let bytes = match result {
+                    Ok(bytes) => bytes,
+                    Err(fail) => {
                         if matches!(fail.class, Class::Entitlement) {
                             self.lossless_unavailable.store(true, Ordering::Release);
                         }
-                        let actual_path = audio_path_with_format(path, *format, AudioFormat::Mp3);
-                        let bytes = self
-                            .produce_audio(client_lock, clip, lineage, AudioFormat::Mp3)
-                            .await?;
-                        let fallback = AudioFallback {
-                            clip_id: clip.id.clone(),
-                            requested_path: path.clone(),
-                            actual_path: actual_path.clone(),
-                            format: AudioFormat::Mp3,
-                            reason: fail.reason,
-                        };
-                        (Some(bytes), actual_path, AudioFormat::Mp3, Some(fallback))
+                        return Err(fail);
                     }
-                    Err(fail) => return Err(fail),
                 };
                 Ok(RenderedAudio {
                     clip_id: clip.id.clone(),
-                    path: actual_path,
-                    format: actual_format,
+                    path: path.clone(),
+                    format: *format,
                     from_path: None,
                     effect: AudioEffect::Downloaded,
                     bytes,
-                    fallback,
                 })
             }
             Action::Reformat {
                 clip,
                 path,
                 from_path,
-                from,
+                from: _,
                 to,
             } => {
                 // A Reformat action carries no lineage, so recover it from the
@@ -94,73 +79,22 @@ where
                 } else {
                     self.produce_audio(client_lock, clip, &lineage, *to).await
                 };
-                let (bytes, actual_path, actual_format, cleanup, effect, fallback) = match result {
-                    Ok(bytes) => (
-                        Some(bytes),
-                        path.clone(),
-                        *to,
-                        Some(from_path.clone()),
-                        AudioEffect::Reformatted,
-                        None,
-                    ),
-                    Err(fail)
-                        if *from == AudioFormat::Mp3
-                            && matches!(
-                                fail.class,
-                                Class::Entitlement | Class::LosslessRejected | Class::Transient
-                            ) =>
-                    {
+                let bytes = match result {
+                    Ok(bytes) => bytes,
+                    Err(fail) => {
                         if matches!(fail.class, Class::Entitlement) {
                             self.lossless_unavailable.store(true, Ordering::Release);
                         }
-                        let fallback = AudioFallback {
-                            clip_id: clip.id.clone(),
-                            requested_path: path.clone(),
-                            actual_path: from_path.clone(),
-                            format: *from,
-                            reason: fail.reason,
-                        };
-                        (
-                            None,
-                            from_path.clone(),
-                            *from,
-                            None,
-                            AudioEffect::Skipped,
-                            Some(fallback),
-                        )
+                        return Err(fail);
                     }
-                    Err(fail)
-                        if matches!(fail.class, Class::Entitlement | Class::LosslessRejected) =>
-                    {
-                        if matches!(fail.class, Class::Entitlement) {
-                            self.lossless_unavailable.store(true, Ordering::Release);
-                        }
-                        let fallback = AudioFallback {
-                            clip_id: clip.id.clone(),
-                            requested_path: path.clone(),
-                            actual_path: from_path.clone(),
-                            format: *from,
-                            reason: fail.reason,
-                        };
-                        (
-                            None,
-                            from_path.clone(),
-                            *from,
-                            None,
-                            AudioEffect::Skipped,
-                            Some(fallback),
-                        )
-                    }
-                    Err(fail) => return Err(fail),
                 };
                 Ok(RenderedAudio {
                     clip_id: clip.id.clone(),
-                    path: actual_path,
-                    format: actual_format,
-                    from_path: cleanup,
-                    effect,
+                    path: path.clone(),
+                    format: *to,
+                    from_path: Some(from_path.clone()),
+                    effect: AudioEffect::Reformatted,
                     bytes,
-                    fallback,
                 })
             }
             // prepare_audio() is only ever dispatched for audio actions.
@@ -188,44 +122,29 @@ where
             from_path,
             effect,
             bytes,
-            fallback,
         } = rendered;
-        let wrote = if let Some(bytes) = bytes {
-            let size = self.write_verify(&clip_id, &path, &bytes)?;
-            let observed = self.observe_committed_audio(&clip_id, &path, format)?;
-            if let Some(from) = from_path {
-                // The new file is safely in place; only now drop the old rendering.
-                self.fs.remove(&from).map_err(|err| {
-                    disk_or_permanent(
-                        &clip_id,
-                        err.is_out_of_space(),
-                        "disk full: no space left to remove old file",
-                        format!("could not remove old file: {err}"),
-                    )
-                })?;
-            }
-            let mut entry = self.entry(&clip_id, &path, format, size);
-            if let Some(desired) = self.by_id.get(clip_id.as_str()).copied() {
-                self.refresh_entry_from_observation(&mut entry, desired, &observed);
-            }
-            manifest.insert(clip_id.clone(), entry);
-            true
-        } else {
-            false
-        };
-        if let Some(fallback) = fallback {
-            Ok(Effect::AudioFallback {
-                effect,
-                fallback,
-                wrote,
-            })
-        } else {
-            Ok(match effect {
-                AudioEffect::Downloaded => Effect::Downloaded,
-                AudioEffect::Reformatted => Effect::Reformatted,
-                AudioEffect::Skipped => Effect::Skipped,
-            })
+        let size = self.write_verify(&clip_id, &path, &bytes)?;
+        let observed = self.observe_committed_audio(&clip_id, &path, format)?;
+        if let Some(from) = from_path {
+            // The new file is safely in place; only now drop the old rendering.
+            self.fs.remove(&from).map_err(|err| {
+                disk_or_permanent(
+                    &clip_id,
+                    err.is_out_of_space(),
+                    "disk full: no space left to remove old file",
+                    format!("could not remove old file: {err}"),
+                )
+            })?;
         }
+        let mut entry = self.entry(&clip_id, &path, format, size);
+        if let Some(desired) = self.by_id.get(clip_id.as_str()).copied() {
+            self.refresh_entry_from_observation(&mut entry, desired, &observed);
+        }
+        manifest.insert(clip_id, entry);
+        Ok(match effect {
+            AudioEffect::Downloaded => Effect::Downloaded,
+            AudioEffect::Reformatted => Effect::Reformatted,
+        })
     }
 
     /// Download (and transcode/tag) the audio for `clip` in `format`.
@@ -320,7 +239,7 @@ where
                     None => return Err(transient_fail(id, "WAV render URL did not refresh")),
                 };
                 match self.fetch_bytes(&refreshed).await {
-                    Err(err) if err.rejected => Err(err.into_lossless_fallback(id)),
+                    Err(err) if err.rejected => Err(err.into_lossless_rejected(id)),
                     result => result.map_err(|err| err.attribute(id)),
                 }
             }
@@ -402,10 +321,4 @@ where
         })
         .await
     }
-}
-
-fn audio_path_with_format(path: &str, from: AudioFormat, to: AudioFormat) -> String {
-    let suffix = format!(".{}", from.ext());
-    let base = path.strip_suffix(&suffix).unwrap_or(path);
-    format!("{base}.{}", to.ext())
 }

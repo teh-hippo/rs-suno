@@ -19,9 +19,10 @@ correctly.
 | 8 | interrupted | The run received an interrupt; partial progress is preserved. |
 | 9 | disk full | The destination ran out of space; free space and re-run. The library is unchanged for the failing action. |
 
-A temporary MP3 fallback caused by unavailable lossless entitlement is a
-successful run, not a partial failure. It emits one warning but exits `0` when
-nothing else failed.
+If lossless output cannot be fetched, that clip fails and the run exits `5` when
+other work progressed or `6` when nothing progressed. An existing MP3 remains
+in place until a verified lossless replacement is committed; a new lossless
+download does not silently create an MP3.
 
 `check --exit-code` uses `1` only for an authoritative plan with pending
 changes, and `0` only when the destination is authoritatively up to date. An
