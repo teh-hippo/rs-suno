@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.1](https://github.com/teh-hippo/rs-suno/compare/v0.42.0...v0.42.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* enforce configured lossless output ([68837a7](https://github.com/teh-hippo/rs-suno/commit/68837a7a035930f1187cb61f81d334676fd76acc))
+
 ## [0.42.0](https://github.com/teh-hippo/rs-suno/compare/v0.41.2...v0.42.0) (2026-09-04)
 
 
