@@ -1,3 +1,4 @@
 [tools]
 ffmpeg = "latest"
+rust = "latest"
 rust-analyzer = "2026-07-13"
