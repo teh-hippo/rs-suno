@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.3](https://github.com/teh-hippo/rs-suno/compare/v0.42.2...v0.42.3) (2026-09-12)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate reqwest to v0.13.5 ([5af672d](https://github.com/teh-hippo/rs-suno/commit/5af672d2ad52bb75af274b4290733692bf3f6f48))
+
 ## [0.42.2](https://github.com/teh-hippo/rs-suno/compare/v0.42.1...v0.42.2) (2026-09-05)
 
 
