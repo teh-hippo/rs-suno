@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.42.5](https://github.com/teh-hippo/rs-suno/compare/v0.42.4...v0.42.5) (2026-10-22)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate tokio to v1.54.1 [security] ([84db617](https://github.com/teh-hippo/rs-suno/commit/84db617c71142406cd0feba938b38f3672f72d11))
+
+## [0.42.4](https://github.com/teh-hippo/rs-suno/compare/v0.42.3...v0.42.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate rustls to v0.23.46 [security] ([87ba831](https://github.com/teh-hippo/rs-suno/commit/87ba83138a48a8653b67c82b6b24a7916ed9d64c))
+
 ## [0.42.3](https://github.com/teh-hippo/rs-suno/compare/v0.42.2...v0.42.3) (2026-09-12)
 
 
