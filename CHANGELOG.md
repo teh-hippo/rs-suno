@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.6](https://github.com/teh-hippo/rs-suno/compare/v0.42.5...v0.42.6) (2026-11-27)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate anyhow to v1.0.105 ([a0a7173](https://github.com/teh-hippo/rs-suno/commit/a0a717390e4fddf172e56835af80d4ded23cdb09))
+
 ## [0.42.5](https://github.com/teh-hippo/rs-suno/compare/v0.42.4...v0.42.5) (2026-10-22)
 
 
